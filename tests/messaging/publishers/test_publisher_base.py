@@ -361,7 +361,7 @@ def _dedup_publisher(symbols: list[str] | None = None) -> tuple[DummyPublisher, 
     publisher = DummyPublisher(symbols=symbols or ["BTC-USD"])
     publish_mock = AsyncMock()
     publisher._publish_message = publish_mock
-    publisher._ensure_instrument = AsyncMock(return_value="inst-1")
+    publisher._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     return publisher, publish_mock
 
 
@@ -2276,7 +2276,7 @@ async def test_process_candle_tags_source_from_hook() -> None:
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     pub._candle_source_for = lambda _tf: "calculated"
     candle = _candle_update(begin=_candle_minute(10, 0))
@@ -2297,7 +2297,7 @@ async def test_process_candle_marks_elapsed_1m_window_complete() -> None:
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     candle = _candle_update(begin=datetime.now(UTC) - timedelta(seconds=61))
     await pub._process_candle(candle, cast(Any, "kraken"), "1m")
@@ -2316,7 +2316,7 @@ async def test_process_candle_marks_recent_1m_window_incomplete() -> None:
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     candle = _candle_update(begin=datetime.now(UTC) - timedelta(seconds=30))
     await pub._process_candle(candle, cast(Any, "kraken"), "1m")
@@ -2335,7 +2335,7 @@ async def test_publish_synthesized_candle_carries_complete_flag() -> None:
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     synth = CandleUpdate(
         symbol="BTC-USD",
@@ -2437,7 +2437,7 @@ async def test_trade_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) -
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
     pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
 
     async def gen() -> AsyncIterator[Any]:
         yield SimpleNamespace(
@@ -2479,7 +2479,7 @@ async def test_trade_loop_uses_filtered_trade_symbols() -> None:
     pub.running = True
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
     received_symbols: list[str] = []
 
     async def gen() -> AsyncIterator[TradeUpdate]:
@@ -2532,7 +2532,7 @@ async def test_candle_loop_handles_errors(monkeypatch: pytest.MonkeyPatch) -> No
         raise RuntimeError("boom")
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
     await pub._candle_loop(["BTC-USD"], "1m")
 
 
@@ -2747,9 +2747,9 @@ async def test_build_candle_row_materializes_fields() -> None:
         exchange="kraken",
         open_at=datetime(2024, 1, 1, tzinfo=UTC),
     )
-    row = pub._build_candle_row(candle, "inst-pub-1")
+    row = pub._build_candle_row(candle, "00000000-0000-4000-8000-0000000f0001")
     assert row["public_id"] == "candle-pub-id"
-    assert row["instrument_public_id"] == "inst-pub-1"
+    assert row["instrument_public_id"] == "00000000-0000-4000-8000-0000000f0001"
     assert row["open"] == pytest.approx(100.0)
     assert row["high"] == pytest.approx(110.0)
     assert row["low"] == pytest.approx(90.0)
@@ -2761,7 +2761,9 @@ async def test_build_candle_row_materializes_fields() -> None:
     assert row["sequence_id"] == 5
     assert "price_basis" in row
     assert row["price_basis"] is None
-    labelled = pub._build_candle_row(candle, "inst-pub-1", price_basis="quote_mid")
+    labelled = pub._build_candle_row(
+        candle, "00000000-0000-4000-8000-0000000f0001", price_basis="quote_mid"
+    )
     assert labelled["price_basis"] == "quote_mid"
 
 
@@ -2790,7 +2792,7 @@ async def test_flush_candle_batch_upserts_rows() -> None:
     batch = [
         {
             "public_id": "c1",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "open_at": datetime(2024, 1, 1, tzinfo=UTC),
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "timeframe": "1m",
@@ -3020,7 +3022,7 @@ async def test_tick_loop_processes_message(monkeypatch: pytest.MonkeyPatch) -> N
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
     pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
 
     async def gen() -> AsyncIterator[Any]:
         yield _ticker_update()
@@ -3149,7 +3151,7 @@ async def test_flush_candle_batch_logs_errors() -> None:
     batch = [
         {
             "public_id": "c1",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "open_at": datetime(2024, 1, 1, tzinfo=UTC),
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "timeframe": "1m",
@@ -3268,7 +3270,7 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
     pub.running = True
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(
-        ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
+        ensure_instrument=AsyncMock(return_value=(1, "00000000-0000-4000-8000-0000000f0001")),
         upsert_candles=AsyncMock(),
     )
     pub._exchange_client = SimpleNamespace()
@@ -3288,7 +3290,7 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
         pub.running = False
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
     await pub._candle_loop(["BTC-USD"], "1m")
     pub.msg_publisher.send.assert_awaited_once()
     pub._ensure_instrument.assert_awaited()
@@ -3371,7 +3373,7 @@ def test_build_candle_row_null_coalesces_optional_fields() -> None:
         exchange="kraken",
         open_at=datetime.now(UTC),
     )
-    row = pub._build_candle_row(candle, "inst-pub-1")
+    row = pub._build_candle_row(candle, "00000000-0000-4000-8000-0000000f0001")
     assert row["vwap"] == pytest.approx(50.0)
     assert row["trades"] == 0
 
@@ -3389,7 +3391,7 @@ async def test_flush_tick_batch_upserts_rows() -> None:
     batch = [
         {
             "public_id": "t1",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "bid": 100.0,
             "ask": 101.0,
@@ -3417,7 +3419,7 @@ async def test_flush_trade_batch_upserts_rows() -> None:
     batch = [
         {
             "public_id": "tr1",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
             "price": 100.0,
@@ -3581,7 +3583,7 @@ async def test_candle_loop_breaks_when_stopped() -> None:
     pub.running = True
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(
-        ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
+        ensure_instrument=AsyncMock(return_value=(1, "00000000-0000-4000-8000-0000000f0001")),
         upsert_candles=AsyncMock(),
     )
     pub._exchange_client = SimpleNamespace()
@@ -3601,7 +3603,7 @@ async def test_candle_loop_breaks_when_stopped() -> None:
         pub.running = False
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
     await pub._candle_loop(["BTC-USD"], "1m")
 
 
@@ -3617,7 +3619,7 @@ async def test_candle_loop_stops_when_running_false() -> None:
     pub.running = False
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(
-        ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")),
+        ensure_instrument=AsyncMock(return_value=(1, "00000000-0000-4000-8000-0000000f0001")),
         upsert_candles=AsyncMock(),
     )
     pub._exchange_client = SimpleNamespace()
@@ -3636,7 +3638,7 @@ async def test_candle_loop_stops_when_running_false() -> None:
         )
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
     await pub._candle_loop(["BTC-USD"], "1m")
     pub.msg_publisher.send.assert_not_awaited()
 
@@ -3950,7 +3952,9 @@ class TestPublisherDedup:
         Then: The redelivery builds a persistence row while the published state is retained.
         """
         publisher, publish_mock = _dedup_publisher()
-        publisher._ensure_instrument = AsyncMock(side_effect=[None, "inst-1"])
+        publisher._ensure_instrument = AsyncMock(
+            side_effect=[None, "00000000-0000-4000-8000-0000000f0002"]
+        )
         trade = _trade_update(trade_id="trade-1")
 
         first_row = await publisher._process_trade(trade, ExchangeEnum.KRAKEN)
@@ -3974,7 +3978,9 @@ class TestPublisherDedup:
         Then: A persistence row is built without publishing the trade a second time.
         """
         publisher, publish_mock = _dedup_publisher()
-        publisher._ensure_instrument = AsyncMock(side_effect=[None, "inst-1"])
+        publisher._ensure_instrument = AsyncMock(
+            side_effect=[None, "00000000-0000-4000-8000-0000000f0002"]
+        )
         trade = _trade_update(trade_id="trade-1")
 
         first_row = await publisher._process_trade(trade, ExchangeEnum.KRAKEN)
@@ -3994,7 +4000,7 @@ class TestPublisherDedup:
         Then: It is neither republished nor admitted as a second persistence row.
         """
         publisher, publish_mock = _dedup_publisher()
-        ensure_mock = AsyncMock(return_value="inst-1")
+        ensure_mock = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
         publisher._ensure_instrument = ensure_mock
         trade = _trade_update(trade_id="trade-1")
         publisher._exchange_client = TradeSequenceClient([trade, trade])
@@ -4045,7 +4051,7 @@ class TestPublisherDedup:
         Then: The trade is not republished but its second row reaches the writer queue.
         """
         publisher, publish_mock = _dedup_publisher()
-        ensure_mock = AsyncMock(return_value="inst-1")
+        ensure_mock = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
         publisher._ensure_instrument = ensure_mock
         trade = _trade_update(trade_id="trade-1")
         publisher._exchange_client = TradeSequenceClient([trade, trade])
@@ -4559,7 +4565,7 @@ class TestFeedPublisherCoverage:
             async for item in generator():
                 yield item
 
-        ensure_instrument_mock = AsyncMock(return_value="inst-pub-1")
+        ensure_instrument_mock = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
         publisher_any._ensure_instrument = ensure_instrument_mock
         publisher_any._exchange_client = cast(
             Any,
@@ -4633,7 +4639,9 @@ class TestFeedPublisherCoverage:
         publish_mock = AsyncMock()
         publisher_any._publish_message = publish_mock
         publisher_any.repository = SimpleNamespace(upsert_ticks=AsyncMock())
-        publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+        publisher_any._ensure_instrument = AsyncMock(
+            return_value="00000000-0000-4000-8000-0000000f0001"
+        )
 
         async def generator() -> AsyncIterator[TickerUpdate]:
             yield TickerUpdate(
@@ -4685,7 +4693,9 @@ class TestFeedPublisherCoverage:
         publish_mock = AsyncMock()
         publisher_any._publish_message = publish_mock
         publisher_any.repository = SimpleNamespace(upsert_trades=AsyncMock())
-        publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+        publisher_any._ensure_instrument = AsyncMock(
+            return_value="00000000-0000-4000-8000-0000000f0001"
+        )
 
         async def generator() -> AsyncIterator[TradeUpdate]:
             yield TradeUpdate(
@@ -4929,7 +4939,9 @@ async def test_flush_candle_batch_integrity_error_fallback(
     publisher.repository = SimpleNamespace(
         upsert_candles=AsyncMock(side_effect=upsert_candles_side_effect)
     )
-    row = publisher._build_candle_row(_build_bar_message("EUR-USD"), "inst-pub-1")
+    row = publisher._build_candle_row(
+        _build_bar_message("EUR-USD"), "00000000-0000-4000-8000-0000000f0001"
+    )
     await publisher._flush_candle_batch([row])
     assert call_count == 2
 
@@ -5024,7 +5036,9 @@ class TestFeedPublisherCandleLoop:
             published_messages.append((topic, message))
 
         publisher_any._publish_message = publish_stub
-        publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+        publisher_any._ensure_instrument = AsyncMock(
+            return_value="00000000-0000-4000-8000-0000000f0001"
+        )
         publisher_any.repository = SimpleNamespace(
             upsert_candles=AsyncMock(), get_canonical_candle_public_id=AsyncMock(return_value=None)
         )
@@ -5101,7 +5115,9 @@ class TestFeedPublisherCandleLoop:
             published_topics.append(topic)
 
         publisher_any._publish_message = publish_stub
-        publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+        publisher_any._ensure_instrument = AsyncMock(
+            return_value="00000000-0000-4000-8000-0000000f0001"
+        )
         task = asyncio.create_task(publisher_any._candle_loop(["BTC-USD"], "1m"))
         await asyncio.sleep(0.05)
         publisher.running = False
@@ -5138,7 +5154,9 @@ class TestFeedPublisherCandleLoop:
         publisher.running = True
         publisher_any = cast(Any, publisher)
         publisher_any._exchange_client = mock_exchange_client
-        publisher_any._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+        publisher_any._ensure_instrument = AsyncMock(
+            return_value="00000000-0000-4000-8000-0000000f0001"
+        )
         await publisher_any._candle_loop(["BTC-USD"], "1m")
 
 
@@ -5307,8 +5325,8 @@ async def test_resolve_candle_public_id_cache_hit() -> None:
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     ts = datetime(2026, 1, 1, tzinfo=UTC)
-    pub._candle_id_cache[("inst-pub-1", "1m")] = (ts, "existing-uuid")
-    result = pub._resolve_candle_public_id("inst-pub-1", "1m", ts)
+    pub._candle_id_cache[("00000000-0000-4000-8000-0000000f0001", "1m")] = (ts, "existing-uuid")
+    result = pub._resolve_candle_public_id("00000000-0000-4000-8000-0000000f0001", "1m", ts)
     assert result == "existing-uuid"
 
 
@@ -5323,10 +5341,10 @@ async def test_resolve_candle_public_id_different_open_at_generates_new() -> Non
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     ts_old = datetime(2026, 1, 1, tzinfo=UTC)
     ts_new = datetime(2026, 1, 1, 0, 1, tzinfo=UTC)
-    pub._candle_id_cache[("inst-pub-1", "1m")] = (ts_old, "existing-uuid")
-    result = pub._resolve_candle_public_id("inst-pub-1", "1m", ts_new)
+    pub._candle_id_cache[("00000000-0000-4000-8000-0000000f0001", "1m")] = (ts_old, "existing-uuid")
+    result = pub._resolve_candle_public_id("00000000-0000-4000-8000-0000000f0001", "1m", ts_new)
     assert result != "existing-uuid"
-    assert pub._candle_id_cache[("inst-pub-1", "1m")][0] == ts_new
+    assert pub._candle_id_cache[("00000000-0000-4000-8000-0000000f0001", "1m")][0] == ts_new
 
 
 @pytest.mark.asyncio
@@ -5380,7 +5398,9 @@ async def test_ensure_instrument_returns_none_for_unsplittable_symbol(
     Then: None is returned.
     """
     pub: Any = DummyPublisher(symbols=["INVALID"])
-    pub.repository = SimpleNamespace(ensure_instrument=AsyncMock(return_value=(1, "inst-pub-1")))
+    pub.repository = SimpleNamespace(
+        ensure_instrument=AsyncMock(return_value=(1, "00000000-0000-4000-8000-0000000f0001"))
+    )
     result = await pub._ensure_instrument("INVALID")
     assert result is None
 
@@ -5526,7 +5546,7 @@ async def test_flush_tick_batch_logs_errors() -> None:
         upsert_ticks=AsyncMock(side_effect=RuntimeError("db fail")),
     )
     tick_msg = _build_tick_message("BTC-USD")
-    row = pub._build_tick_row(tick_msg, "inst-pub-1")
+    row = pub._build_tick_row(tick_msg, "00000000-0000-4000-8000-0000000f0001")
     await pub._flush_tick_batch([row])
     assert pub._flush_errors["tick"] == 1
 
@@ -5545,7 +5565,7 @@ async def test_flush_trade_batch_logs_errors() -> None:
         SimpleNamespace(upsert_trades=AsyncMock(side_effect=RuntimeError("db fail"))),
     )
     trade_msg = _build_trade_message("BTC-USD")
-    row = pub._build_trade_row(trade_msg, "inst-pub-1")
+    row = pub._build_trade_row(trade_msg, "00000000-0000-4000-8000-0000000f0001")
     assert row is not None
     with pytest.raises(RuntimeError, match="db fail"):
         await pub._flush_trade_batch([row])
@@ -5573,7 +5593,7 @@ async def test_build_trade_row_handles_null_trade_id() -> None:
         volume=1.0,
         side="buy",
     )
-    row = publisher._build_trade_row(trade_msg, "inst-pub-1")
+    row = publisher._build_trade_row(trade_msg, "00000000-0000-4000-8000-0000000f0001")
     assert row is not None
     assert row["trade_id"] is None
 
@@ -5601,7 +5621,7 @@ async def test_build_trade_row_persists_when_no_trade_id() -> None:
         volume=1.0,
         side="buy",
     )
-    row = publisher._build_trade_row(trade_msg, "inst-pub-1")
+    row = publisher._build_trade_row(trade_msg, "00000000-0000-4000-8000-0000000f0001")
     assert row is not None
     assert row["trade_id"] is None
     await publisher._flush_trade_batch([row])
@@ -5713,7 +5733,7 @@ async def test_tick_loop_publishes_and_saves(monkeypatch: pytest.MonkeyPatch) ->
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
     pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
 
     async def gen() -> AsyncIterator[Any]:
         yield _ticker_update()
@@ -5742,7 +5762,7 @@ async def test_trade_loop_publishes_and_enqueues_for_writer(
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
     pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
 
     async def gen() -> AsyncIterator[Any]:
         yield SimpleNamespace(
@@ -5835,7 +5855,7 @@ async def test_candle_loop_cancelled_error_propagates_without_flush() -> None:
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(upsert_candles=AsyncMock())
     pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
 
     async def publish_cancel(topic: str, msg: Any) -> None:
         raise asyncio.CancelledError()
@@ -5876,7 +5896,7 @@ async def test_tick_loop_does_not_flush_directly() -> None:
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
     pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
     pub._batch_max_age_s = 0.01
 
     async def gen() -> AsyncIterator[Any]:
@@ -5905,7 +5925,7 @@ async def test_tick_loop_enqueues_every_tick_for_writer() -> None:
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
     pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
 
     async def gen() -> AsyncIterator[Any]:
         for i in range(3):
@@ -5960,7 +5980,7 @@ async def test_tick_loop_cancelled_error() -> None:
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(upsert_ticks=AsyncMock())
     pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
 
     call_count = 0
 
@@ -6033,7 +6053,7 @@ async def test_trade_loop_cancelled_error_propagates_without_flush() -> None:
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace(upsert_trades=AsyncMock())
     pub._exchange_client = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-pub-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0001")
 
     call_count = 0
 
@@ -6093,7 +6113,7 @@ async def test_flush_candle_batch_row_by_row_integrity_error() -> None:
     batch = [
         {
             "public_id": "c1",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "open_at": datetime(2024, 1, 1, tzinfo=UTC),
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "timeframe": "1m",
@@ -6109,7 +6129,7 @@ async def test_flush_candle_batch_row_by_row_integrity_error() -> None:
         },
         {
             "public_id": "c2",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "open_at": datetime(2024, 1, 2, tzinfo=UTC),
             "timestamp": datetime(2024, 1, 2, tzinfo=UTC),
             "timeframe": "1m",
@@ -6151,7 +6171,7 @@ async def test_flush_candle_batch_row_by_row_generic_exception() -> None:
     batch = [
         {
             "public_id": "c1",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "open_at": datetime(2024, 1, 1, tzinfo=UTC),
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "timeframe": "1m",
@@ -6167,7 +6187,7 @@ async def test_flush_candle_batch_row_by_row_generic_exception() -> None:
         },
         {
             "public_id": "c2",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "open_at": datetime(2024, 1, 2, tzinfo=UTC),
             "timestamp": datetime(2024, 1, 2, tzinfo=UTC),
             "timeframe": "1m",
@@ -6227,7 +6247,7 @@ def _publisher_candle_row(public_id: str, sequence_id: int = 0) -> CandleUpsertR
     timestamp = datetime(2024, 1, 1, tzinfo=UTC)
     return {
         "public_id": public_id,
-        "instrument_public_id": "inst-1",
+        "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
         "open_at": timestamp,
         "timestamp": timestamp,
         "timeframe": "1m",
@@ -6247,7 +6267,7 @@ def _publisher_tick_row(public_id: str) -> TickUpsertRow:
     """Build a typed tick upsert row for publisher flush tests."""
     return {
         "public_id": public_id,
-        "instrument_public_id": "inst-1",
+        "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
         "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
         "bid": 100.0,
         "ask": 101.0,
@@ -6262,7 +6282,7 @@ def _publisher_trade_row(public_id: str) -> TradeUpsertRow:
     """Build a typed trade upsert row for publisher flush tests."""
     return {
         "public_id": public_id,
-        "instrument_public_id": "inst-1",
+        "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
         "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
         "executed_at": datetime(2024, 1, 1, tzinfo=UTC),
         "price": 100.0,
@@ -8415,7 +8435,7 @@ class TestFlushBatchRaisesSessionLostOnDisconnect:
         batch = [
             {
                 "public_id": "t1",
-                "instrument_public_id": "inst-1",
+                "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
                 "trade_id": "x",
                 "price": 1.0,
                 "size": 1.0,
@@ -8444,7 +8464,7 @@ class TestFlushBatchRaisesSessionLostOnDisconnect:
         batch = [
             {
                 "public_id": "tk1",
-                "instrument_public_id": "inst-1",
+                "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
                 "price": 1.0,
                 "size": 1.0,
                 "side": "buy",
@@ -8471,7 +8491,7 @@ class TestFlushBatchRaisesSessionLostOnDisconnect:
         batch = [
             {
                 "public_id": "c1",
-                "instrument_public_id": "inst-1",
+                "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
                 "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                 "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                 "timeframe": "1m",
@@ -8505,7 +8525,7 @@ class TestFlushBatchRaisesSessionLostOnDisconnect:
         batch = [
             {
                 "public_id": "t1",
-                "instrument_public_id": "inst-1",
+                "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
                 "trade_id": "x",
                 "price": 1.0,
                 "size": 1.0,
@@ -8568,7 +8588,7 @@ class TestWriterLoopRetriesOnSessionLost:
         await pub._trade_write_queue.put(
             {
                 "public_id": "t1",
-                "instrument_public_id": "inst-1",
+                "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
                 "trade_id": "x",
                 "price": 1.0,
                 "size": 1.0,
@@ -8644,7 +8664,7 @@ class TestWriterLoopRetriesOnSessionLost:
         await pub._candle_write_queue.put(
             {
                 "public_id": "c1",
-                "instrument_public_id": "inst-1",
+                "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
                 "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                 "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                 "timeframe": "1m",
@@ -8696,7 +8716,7 @@ class TestWriterLoopRetriesOnSessionLost:
         await pub._trade_write_queue.put(
             {
                 "public_id": "t1",
-                "instrument_public_id": "inst-1",
+                "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
                 "trade_id": "x",
                 "price": 1.0,
                 "size": 1.0,
@@ -8773,7 +8793,7 @@ async def test_candle_writer_loop_exits_when_shutdown_during_recovery(
     await pub._candle_write_queue.put(
         {
             "public_id": "c1",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "open_at": datetime(2024, 1, 1, tzinfo=UTC),
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "timeframe": "1m",
@@ -9703,7 +9723,7 @@ async def test_candle_flush_loop_propagates_cancellation(
 
 
 def _finalized_row(
-    *, ipid: str = "inst-1", open_at: datetime, complete: bool = False
+    *, ipid: str = "00000000-0000-4000-8000-0000000f0002", open_at: datetime, complete: bool = False
 ) -> CandleUpsertRow:
     """Build a candle row for native-finalizer wiring tests."""
     return CandleUpsertRow(
@@ -9982,7 +10002,9 @@ def test_enqueue_finalized_candles_forgets_evicted_write_sequence() -> None:
 
     pub._should_persist_row = _allow_persist
     first = _finalized_row(open_at=_candle_minute(10, 0), complete=True)
-    second = _finalized_row(ipid="inst-2", open_at=_candle_minute(10, 1), complete=True)
+    second = _finalized_row(
+        ipid="00000000-0000-4000-8000-0000000f0003", open_at=_candle_minute(10, 1), complete=True
+    )
     pub._enqueue_finalized_candles([("BTC-USD", first)], ExchangeEnum.KRAKEN, "kraken")
     first_tracking = pub._candle_write_sequence_by_row_id[id(first)]
     assert first_tracking.row is first
@@ -10020,7 +10042,9 @@ def test_evicted_correction_write_cleans_all_dependent_repairs() -> None:
     correction = _finalized_row(open_at=minute, complete=True)
     pub._enqueue_finalized_candles([("BTC-USD", correction)], ExchangeEnum.KRAKEN, "kraken")
     assert len(pub._pending_candle_repairs) == 2
-    replacement = _finalized_row(ipid="inst-2", open_at=_candle_minute(10, 8), complete=True)
+    replacement = _finalized_row(
+        ipid="00000000-0000-4000-8000-0000000f0003", open_at=_candle_minute(10, 8), complete=True
+    )
     with patch("snapper.messaging.publishers.base.logger.warning") as warning:
         pub._enqueue_finalized_candles([("ETH-USD", replacement)], ExchangeEnum.KRAKEN, "kraken")
     abandoned = [
@@ -10542,7 +10566,7 @@ async def test_stop_candle_pipeline_drains_committed_repairs_and_logs_abandoned(
     pub.repository = SimpleNamespace(
         get_candles=AsyncMock(return_value=[_persisted_candle_row(open_at=minute)])
     )
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
 
     def _allow_persist(_kind: str, _exchange: object, _symbol: str) -> bool:
@@ -10587,7 +10611,7 @@ async def test_candle_loop_publishes_synthesized_higher_timeframe() -> None:
     pub.running = True
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     pub._should_persist_row = lambda *_a, **_k: False
     pub._candle_aggregator = CandleAggregator(["5m"])
@@ -10620,7 +10644,7 @@ async def test_candle_loop_without_aggregator_publishes_no_higher_tf() -> None:
     pub.running = True
     pub.msg_publisher = AsyncMock()
     pub.repository = SimpleNamespace()
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     pub._should_persist_row = lambda *_a, **_k: False
     feed = [
@@ -10977,7 +11001,7 @@ async def test_publish_synthesized_candle_persists_with_synthesized_provenance()
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     synth = CandleUpdate(
         symbol="BTC-USD",
@@ -11004,7 +11028,7 @@ async def test_publish_synthesized_candle_persists_with_synthesized_provenance()
     assert row["complete"] is False
     assert row["timeframe"] == "1h"
     assert row["open_at"] == _candle_minute(10, 0)
-    assert row["instrument_public_id"] == "inst-1"
+    assert row["instrument_public_id"] == "00000000-0000-4000-8000-0000000f0002"
 
 
 @pytest.mark.asyncio
@@ -11019,7 +11043,7 @@ async def test_publish_synthesized_candle_does_not_bump_candle_watermark() -> No
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     pub._last_candle_msg_at = 0.0
     synth = _candle_update(begin=_candle_minute(10, 0))
@@ -11037,7 +11061,7 @@ async def test_publish_synthesized_candle_skips_persist_when_policy_off() -> Non
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     pub._should_persist_row = lambda *_a, **_k: False
     synth = _candle_update(begin=_candle_minute(10, 0))
@@ -11057,7 +11081,7 @@ async def test_publish_synthesized_candle_reemits_with_stable_public_id() -> Non
     """
     pub: Any = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     synth = _candle_update(begin=_candle_minute(10, 0))
     await pub._publish_synthesized_candle(synth, cast(Any, "kraken"), "1h")
@@ -11079,7 +11103,7 @@ async def test_publish_synthesized_candle_forgets_evicted_write_sequence() -> No
     pub = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
     pub._candle_write_queue = asyncio.Queue(maxsize=1)
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     tracked = _finalized_row(open_at=_candle_minute(10, 0), complete=True)
     pub._assign_candle_write_sequence(tracked)
@@ -11719,7 +11743,7 @@ async def _enqueued_ack_repair(
     for timeframe in timeframes:
         pub._candle_aggregator._closed_window[("BTC-USD", timeframe)] = int(minute.timestamp())
     pub._should_persist_row = Mock(return_value=True)
-    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._ensure_instrument = AsyncMock(return_value="00000000-0000-4000-8000-0000000f0002")
     pub._publish_message = AsyncMock()
     pub.repository = SimpleNamespace(
         get_candles=AsyncMock(

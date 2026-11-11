@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snapper.core.candle_identity import deterministic_candle_public_id
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.repository import SQLAlchemyRepository
@@ -24,6 +25,7 @@ from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CandleVersionRow
 
 _OPEN = datetime(2026, 1, 10, 12, tzinfo=UTC)
+_LEGACY_ID = "0197ffff-0000-7000-8000-00000000c0de"
 _AUTHOR = datetime(2026, 7, 1, tzinfo=UTC)
 
 
@@ -111,7 +113,9 @@ async def test_native_trades_correct_zero_and_preserve_bitemporal_history_and_id
     Then: The zero is closed at the native acquisition time, the native row keeps its
         public ID, an earlier as-of cut still reads the zero and the replay is a no-op.
     """
-    await repository.upsert_candles([_zero()])
+    zero = _zero()
+    zero["public_id"] = _LEGACY_ID
+    await repository.upsert_candles([zero])
     before = await _snapshot(repository)
     native = _native()
     original = native.copy()
@@ -123,7 +127,13 @@ async def test_native_trades_correct_zero_and_preserve_bitemporal_history_and_id
     after = await _snapshot(repository)
     assert len(after) == 2
     assert after[0] == before[0] | {"known_to": _AUTHOR}
-    assert after[1]["public_id"] == before[0]["public_id"] == changed[0]["public_id"]
+    assert after[1]["public_id"] == before[0]["public_id"] == changed[0]["public_id"] == _LEGACY_ID
+    assert (
+        deterministic_candle_public_id(
+            native["instrument_public_id"], native["timeframe"], native["open_at"]
+        )
+        != _LEGACY_ID
+    )
     assert all(after[1][field] == value for field, value in native.items())
     assert after[1]["known_to"] == KNOWN_TO_MAX
     horizon = _AUTHOR - timedelta(minutes=1)

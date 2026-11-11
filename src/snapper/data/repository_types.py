@@ -381,6 +381,15 @@ class CandleRow(TypedDict):
     sequence_id: int
 
 
+class CandleIdentityRow(TypedDict):
+    """Natural key and public id of one active candle version."""
+
+    instrument_public_id: str
+    timeframe: str
+    open_at: datetime
+    public_id: str
+
+
 @dataclass(frozen=True, slots=True)
 class CandleWindowQuery:
     """One active-native-symbol candle read with a required positive row cap."""

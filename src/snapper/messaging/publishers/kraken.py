@@ -41,7 +41,6 @@ from time import monotonic
 from typing import Any
 from typing import Final
 from typing import cast
-from uuid import uuid7
 
 from loguru import logger
 from sqlalchemy.exc import DBAPIError
@@ -49,6 +48,7 @@ from sqlalchemy.exc import DBAPIError
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.candle_identity import deterministic_candle_public_id
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 from snapper.core.types import ExchangeEnum
@@ -478,13 +478,20 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._identity_counters: dict[str, int] = {}
         self._identity_samples: deque[JsonObject] = deque(maxlen=_IDENTITY_SAMPLE_SIZE)
         self._identity_last_read_ms: float | None = None
+        self._identity_cutover: datetime | None = None
 
     async def _resolve_live_candle_public_id(
         self, instrument_public_id: str, timeframe: str, open_at: datetime, native_symbol: str
     ) -> str:
         """Adopt committed identities or reserve one bounded UUID before publication.
 
-        Pending reservations and the newest cached key answer first. A key
+        A key outside the persistence policy is answered from the per-key
+        cache, which never reads storage. A persisted key opening at or after
+        ``candle_identity_deterministic_from`` is answered with its
+        deterministic id at once, before the identity gate: every writer has
+        minted that id since before the cutover, so there is nothing to read.
+        The cutover read here is remembered for the heartbeat. For any other
+        key, pending reservations and the newest cached key answer first. A key
         they do not settle is answered from a window identity snapshot when
         one covers it (:meth:`_window_identity_snapshot`), and otherwise by
         the fenced per-key lookup.
@@ -503,6 +510,11 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         """
         if not self._should_persist_row("candles", self._get_data_exchange(), native_symbol):
             return self._resolve_candle_public_id(instrument_public_id, timeframe, open_at)
+        cutover = self.settings.candle_identity_deterministic_from
+        self._identity_cutover = cutover
+        if cutover is not None and open_at >= cutover:
+            self._bump_identity_counter("deterministic_answers")
+            return deterministic_candle_public_id(instrument_public_id, timeframe, open_at)
         async with self._candle_identity_gate:
             key = (instrument_public_id, timeframe, open_at)
             self._prune_identity_state_on_cadence()
@@ -833,12 +845,17 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             reserved from snapshots with their natural keys. A reserved identity
             is not yet proof of publication or persistence; the published-equals-
             stored check compares it with storage once the key is persisted.
+            ``deterministic_from`` is the cutover this process's resolver read
+            at its latest persisted resolution, so a rollout or rollback can
+            confirm that every publisher received it.
         """
         counters: JsonObject = {}
         for name, count in sorted(self._identity_counters.items()):
             counters[name] = count
         reserved: list[JsonValue] = list(self._identity_samples)
+        cutover = self._identity_cutover
         return {
+            "deterministic_from": None if cutover is None else cutover.isoformat(),
             "counters": counters,
             "last_read_ms": self._identity_last_read_ms,
             "snapshots": len(self._identity_snapshots),
@@ -870,7 +887,8 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             key: Full natural key whose first event is about to be emitted.
 
         Returns:
-            New UUID7 retained until a durable matching commit acknowledgement.
+            The key's deterministic id, retained until a durable matching
+            commit acknowledgement.
 
         Raises:
             RuntimeError: When the finite writer-derived reservation bound is full.
@@ -878,7 +896,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         capacity = self._candle_write_queue.maxsize + self._candle_batch_max_rows
         if capacity <= 0 or len(self._pending_candle_identities) >= capacity:
             raise RuntimeError("unresolved candle identities exhaust bounded writer capacity")
-        public_id = str(uuid7())
+        public_id = deterministic_candle_public_id(*key)
         self._pending_candle_identities[key] = public_id
         return public_id
 
