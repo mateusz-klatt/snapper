@@ -584,6 +584,76 @@ def test_every_other_witness_refusal_refuses_the_seal(witness_refusal: WitnessRe
     assert spot_anchor_bootstrap_refusals(observation) == ("venue_fill_not_ingested",)
 
 
+def test_an_omitted_witness_outcome_refuses() -> None:
+    """A witness outcome that was never supplied is no proof.
+
+    Given: The baseline observation, otherwise sealable, whose witness builder
+        outcome is left at its default.
+    When: The refusals are computed.
+    Then: Exactly ``venue_fill_not_ingested`` is returned.
+    """
+    observation = replace(_BASELINE, witness_refusals=None)
+    assert spot_anchor_bootstrap_refusals(observation) == ("venue_fill_not_ingested",)
+
+
+def test_an_unproven_owned_commission_cannot_seal_by_omitting_the_witness_outcome() -> None:
+    """An owned fee of an order without a witnessed fill needs the builder's proof.
+
+    Given: The valid ``O1`` observation plus a resolved owned Order ``O2`` with an
+        older ``O2`` COMMISSION row, no ``O2`` totals and no witnessed ``O2``
+        fill, and no witness builder outcome supplied. The MARKET_FX bijection
+        is unchanged, because ``O2`` has no fill on the page.
+    When: The refusals are computed and the anchor is built.
+    Then: ``venue_fill_not_ingested`` refuses and nothing is sealed, because only
+        the builder proves owned commissions.
+    """
+    observation = replace(
+        _with_rows(_item(98, "USD", "99.98", operation_type="COMMISSION", order_id="O2")),
+        ownership=_population(owned=frozenset({"O1", "O2"})),
+        witness_refusals=None,
+    )
+    assert spot_anchor_bootstrap_refusals(observation) == ("venue_fill_not_ingested",)
+    with pytest.raises(SpotAnchorNotCertifiableError):
+        build_spot_anchor(observation)
+
+
+@pytest.mark.parametrize(
+    "reserved_1, reserved_2",
+    [
+        pytest.param({"BTC": Decimal("0"), "USD": Decimal("0")}, {}, id="second_read_empty"),
+        pytest.param(
+            {"BTC": Decimal("0"), "USD": Decimal("0")},
+            {"BTC": Decimal("0")},
+            id="second_read_partial",
+        ),
+        pytest.param({}, {"BTC": Decimal("0"), "USD": Decimal("0")}, id="first_read_empty"),
+        pytest.param(
+            {"USD": Decimal("0")},
+            {"BTC": Decimal("0"), "USD": Decimal("0")},
+            id="first_read_partial",
+        ),
+    ],
+)
+def test_a_reservation_map_missing_a_balance_currency_refuses(
+    reserved_1: dict[str, Decimal], reserved_2: dict[str, Decimal]
+) -> None:
+    """Each read must report a reservation figure for every balance currency.
+
+    Given: The baseline observation, whose two balance reads each hold BTC and
+        USD, with one read's reservation map empty or missing a currency and
+        every reported figure zero.
+    When: The refusals are computed.
+    Then: Exactly ``venue_reserved_funds_present`` is returned, because a missing
+        figure cannot prove that currency holds no reservation.
+
+    Args:
+        reserved_1: The first read's reservation map.
+        reserved_2: The second read's reservation map.
+    """
+    observation = replace(_BASELINE, balances_reserved=reserved_1, balances_reserved_2=reserved_2)
+    assert spot_anchor_bootstrap_refusals(observation) == ("venue_reserved_funds_present",)
+
+
 def test_a_null_order_commission_refuses_as_manual() -> None:
     """A COMMISSION row without an order id refuses at bootstrap too.
 

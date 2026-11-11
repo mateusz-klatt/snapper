@@ -25,7 +25,6 @@ from uuid import uuid7
 import pytest
 from sqlalchemy import delete
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.portfolio.spot_anchor_ownership import own_submit_unresolved
@@ -612,14 +611,42 @@ async def test_postgresql_reads_open_one_repeatable_read_only_transaction(
     assert population["commands"] == ()
 
 
-@pytest.mark.skipif(
-    make_url(_configured_url()).get_backend_name() != "postgresql",
-    reason="the snapshot witness needs a configured PostgreSQL database",
-)
-async def test_postgresql_population_reads_one_snapshot(
+async def test_sqlite_reads_open_one_explicit_database_transaction(
+    private_sqlite: _Scope,
+) -> None:
+    """On SQLite an explicit ``BEGIN`` precedes the three reads.
+
+    Given: A SQLite repository and a recording session.
+    When: The population is read.
+    Then: One transaction scope is opened and its first statement is a plain
+        ``BEGIN``, followed by the three reads, because the driver's legacy
+        transaction control issues none before a ``SELECT``.
+    """
+    session = AsyncMock(begin=MagicMock(return_value=AsyncMock()))
+    session.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+    repository = private_sqlite.repository
+    with patch.object(repository, "session") as session_context:
+        session_context.return_value.__aenter__.return_value = session
+        session_context.return_value.__aexit__.return_value = None
+        population = await repository.get_spot_anchor_owned_order_population(
+            private_sqlite.wallet, "walutomat", "live"
+        )
+    statement = session.execute.await_args_list[0].args[0]
+    assert str(statement) == "BEGIN"
+    assert session.execute.await_count == 4
+    session.begin.assert_called_once_with()
+    assert population["owned_order_ids"] == frozenset()
+
+
+async def test_the_population_reads_one_snapshot(
     configured: _Scope, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A command committed between the Order and command reads stays invisible.
+
+    Runs on the configured database: the isolated SQLite copy by default, and
+    the PostgreSQL witness when ``DB_URL`` names one. On SQLite it proves the
+    explicit ``BEGIN``: without it each ``SELECT`` reads its own cut, and the
+    later command read would see the new command.
 
     Given: A resolved Walutomat Order ``WA-1`` with a filled command, and a
         dispatched in-scope command committed by another connection after the

@@ -172,7 +172,8 @@ class SpotAnchorObservation:
     defaults to its fail-closed value, so an observation that omits one can never
     seal. ``balances_reserved`` is the first balance read's reserved funds and
     ``balances_reserved_2`` the second read's, ``None`` when that read did not
-    report a reservation for every currency. ``ownership`` is the owned-order
+    report a reservation for every currency; each map must hold a figure for
+    every currency of its read's balances. ``ownership`` is the owned-order
     population, read after the history and watermark captures; ``None`` means it
     was not read and refuses as ``own_submit_unresolved``.
     ``ownership_guarantee_version`` is the recorded venue order-id guarantee's
@@ -181,6 +182,8 @@ class SpotAnchorObservation:
     PAYIN, PAYOUT, TRANSFER or DIRECT_FX. ``witness_refusals`` are the owned
     witness builder's refusals, every one of which the module turns into a seal
     refusal, so an unproven witness map can never seal by an empty map alone.
+    ``None`` means the builder's outcome was not supplied and refuses as
+    ``venue_fill_not_ingested``; only an evaluated, empty tuple is proof.
     """
 
     public_id: str
@@ -221,7 +224,7 @@ class SpotAnchorObservation:
     ownership: SpotOwnedOrderPopulation | None = None
     ownership_guarantee_version: str | None = None
     external_only_operations_initiated: bool = True
-    witness_refusals: tuple[WitnessRefusal, ...] = ()
+    witness_refusals: tuple[WitnessRefusal, ...] | None = None
 
 
 class SpotAnchorNotCertifiableError(Exception):
@@ -359,15 +362,20 @@ def _reserved_funds_present(observation: SpotAnchorObservation) -> bool:
     """Return whether either balance read shows, or cannot exclude, reserved funds.
 
     A reservation is checked on both reads, so a manual order opened between
-    them cannot survive; a second read that did not report every currency's
-    reservation cannot prove there is none.
+    them cannot survive. Each read must report a reservation figure for every
+    currency it reports a balance for: a read that leaves a currency out, or a
+    second read with no reservation figures at all, cannot prove that currency
+    holds none.
     """
+    first = observation.balances_reserved
     second = observation.balances_reserved_2
     if second is None:
         return True
-    return any(reserved != 0 for reserved in observation.balances_reserved.values()) or any(
-        reserved != 0 for reserved in second.values()
-    )
+    if not set(observation.balances_1) <= set(first) or not set(observation.balances_2) <= set(
+        second
+    ):
+        return True
+    return any(reserved != 0 for reserved in (*first.values(), *second.values()))
 
 
 def _venue_history_balance_chain_mismatch(
@@ -461,8 +469,10 @@ def _ownership_refusals(
     or below the tip. The witness builder's refusal map is total: a decoded
     order id that is not its Order's id in ``S`` surfaces as
     ``execution_order_id_foreign``, and every other witness refusal, including
-    an unproven owned commission, as ``venue_fill_not_ingested``. The seal
-    therefore never depends on an empty witness map failing some later check.
+    an unproven owned commission, as ``venue_fill_not_ingested``. An outcome
+    that was never supplied refuses ``venue_fill_not_ingested`` too, because
+    only the builder proves owned commissions. The seal therefore never depends
+    on an empty witness map failing some later check.
 
     Args:
         observation: The gathered bootstrap evidence.
@@ -480,10 +490,11 @@ def _ownership_refusals(
     )
     if not witness_bijection_holds(observation.execution_witnesses, owned_ids):
         refusals.add("venue_fill_not_ingested")
-    witness_refusals = set(observation.witness_refusals)
-    if "execution_order_id_foreign" in witness_refusals:
+    supplied = observation.witness_refusals
+    reported = set(() if supplied is None else supplied)
+    if "execution_order_id_foreign" in reported:
         refusals.add("execution_order_id_foreign")
-    if witness_refusals - {"execution_order_id_foreign"}:
+    if supplied is None or reported - {"execution_order_id_foreign"}:
         refusals.add("venue_fill_not_ingested")
     return refusals
 

@@ -27937,17 +27937,23 @@ class SQLAlchemyRepository(Repository):
         """Read the anchor bootstrap's owned-order population in one snapshot.
 
         See the abstract declaration. The three reads run inside one explicit
-        transaction, opened ``REPEATABLE READ, READ ONLY`` on PostgreSQL, so the
-        Orders, the Instrument versions, and the commands describe one database
-        cut. The rows are projected inside the session and classified by the
-        pure population builder. Alias UUID spellings of the wallet are
-        canonicalized before filtering; a malformed wallet identity raises
-        ``ValueError`` like the other reconciliation reads.
+        database transaction, so the Orders, the Instrument versions, and the
+        commands describe one database cut. On PostgreSQL it is opened
+        ``REPEATABLE READ, READ ONLY``. On SQLite the driver's legacy
+        transaction control issues no ``BEGIN`` before a ``SELECT``, so each
+        read would see its own cut; an explicit deferred ``BEGIN`` makes the
+        first read take the snapshot that the later reads share. The rows are
+        projected inside the session and classified by the pure population
+        builder. Alias UUID spellings of the wallet are canonicalized before
+        filtering; a malformed wallet identity raises ``ValueError`` like the
+        other reconciliation reads.
         """
         wallet_public_id = _canonicalize_reconciliation_wallet_public_id(wallet_public_id)
         async with self.session() as s, s.begin():
             if self.dialect_name == "postgresql":
                 await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+            else:
+                await s.execute(text("BEGIN"))
             order_rows = await self._spot_owned_order_source_rows(s, wallet_public_id, mode)
             instrument_versions = await self._spot_owned_instrument_versions(
                 s, wallet_public_id, mode
