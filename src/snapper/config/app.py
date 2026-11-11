@@ -36,10 +36,14 @@ Example:
     per-wallet executor startup.
 """
 
+from datetime import datetime
 from typing import Any
+
+from loguru import logger
 
 from snapper.application.services.settings import SettingsService
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.core.candle_identity import parse_candle_identity_cutover
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ProcessAutostartProfileEnum
 from snapper.infrastructure.security.kdf import AUTH_TOKEN_SIGNING_PURPOSE
@@ -75,6 +79,7 @@ class AppSettings:
         """
         self._bootstrap = bootstrap_settings
         self._settings_service = settings_service
+        self._warned_identity_cutovers: set[str] = set()
 
     @property
     def db_url(self) -> str:
@@ -748,6 +753,36 @@ class AppSettings:
             every key on its own.
         """
         return self._get_db_setting("candle_identity_window_snapshot", True)
+
+    @property
+    def candle_identity_deterministic_from(self) -> datetime | None:
+        """Return the cutover from which the live spot path computes candle ids.
+
+        Every writer gives a new candle key its deterministic id
+        (:func:`~snapper.core.candle_identity.deterministic_candle_public_id`).
+        From this instant on, the Kraken spot publisher answers a key whose
+        opening is at or after it with that id directly, with no fence, window
+        snapshot, reservation or database read. Set it only once every
+        candle-writing runtime runs code that mints deterministic ids, and only
+        to a later instant; moving it earlier is unsafe. Empty (default) keeps
+        today's resolution for every key. A malformed value is ignored with one
+        warning per distinct value, so a typo keeps today's resolution.
+
+        Returns:
+            The cutover as an aware UTC datetime, or ``None`` when unset or
+            malformed.
+        """
+        raw = self._get_db_setting("candle_identity_deterministic_from", "")
+        try:
+            return parse_candle_identity_cutover(raw)
+        except ValueError as error:
+            text = str(raw)
+            if text not in self._warned_identity_cutovers:
+                self._warned_identity_cutovers.add(text)
+                logger.warning(
+                    "candle_identity_deterministic_from={!r} is ignored: {}", text, error
+                )
+            return None
 
     @property
     def persist_intermediate_candles(self) -> bool:
