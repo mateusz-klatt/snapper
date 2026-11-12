@@ -1754,7 +1754,7 @@ class RestoreResult:
     Attributes:
         files_processed: Number of CSV files read.
         rows_inserted: Number of rows inserted into DB.
-        rows_skipped: Number of rows skipped (already exist).
+        rows_skipped: Number of exact archive identities already present.
         skipped_known_to_differs: Candle rows skipped because the database
             already stores their version with another ``known_to``.
     """

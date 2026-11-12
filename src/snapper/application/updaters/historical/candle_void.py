@@ -36,6 +36,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Final
 from typing import cast
+from uuid import UUID
 from uuid import uuid7
 
 from snapper.application.updaters.historical import candle_repair
@@ -651,6 +652,84 @@ def _preparation_hook(directory: Path, run: JsonObject) -> Callable[[datetime], 
     return on_prepared
 
 
+def _run_binding(context: VoidContext, run_id: str, voted_digest: str) -> JsonObject:
+    """Bind every run artifact to its database, source and original vote.
+
+    Args:
+        context: Bound target database and source identity.
+        run_id: Identity of this execution.
+        voted_digest: Digest of the approved dry run.
+
+    Returns:
+        Fields repeated without changes in the intent, preparation and conclusion.
+    """
+    return {
+        "schema": SCHEMA,
+        "operation": OPERATION,
+        "database": context.database,
+        "code_revision": context.code_revision,
+        "run_id": run_id,
+        "voted_digest": voted_digest,
+    }
+
+
+def _check_run_binding(document: JsonObject, run: JsonObject) -> None:
+    """Refuse an artifact belonging to a different target, source or run.
+
+    Args:
+        document: Persisted run artifact.
+        run: Expected bound identity.
+
+    Raises:
+        VoidRefusedError: When a required identity field differs or is absent.
+    """
+    if any(document.get(name) != value for name, value in run.items()):
+        raise VoidRefusedError("the run artifact does not match the target database or run")
+
+
+def _recovery_request(
+    context: VoidContext, intent: JsonObject
+) -> tuple[JsonObject, list[CandleVersionKey]]:
+    """Validate the original intent before taking a fence or recording a conclusion.
+
+    Args:
+        context: Selected target and source identity.
+        intent: Original execution intent.
+
+    Returns:
+        The verified identity and its nonempty, unique physical-version keys.
+
+    Raises:
+        VoidRefusedError: For malformed identity, a foreign target or invalid keys.
+    """
+    run_id = intent.get("run_id")
+    digest = intent.get("voted_digest")
+    if not isinstance(run_id, str) or not isinstance(digest, str):
+        raise VoidRefusedError("the run intent has no valid identity")
+    try:
+        UUID(run_id)
+    except ValueError:
+        raise VoidRefusedError("the run intent has no valid identity") from None
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise VoidRefusedError("the run intent has no valid vote digest")
+    run = _run_binding(context, run_id, digest)
+    _check_run_binding(intent, run)
+    raw_keys = intent.get("keys")
+    if not isinstance(raw_keys, list) or not raw_keys:
+        raise VoidRefusedError("the run intent has no version keys")
+    try:
+        keys = [
+            key_from_json(cast(Mapping[str, JsonValue], item))
+            for item in raw_keys
+            if isinstance(item, dict)
+        ]
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise VoidRefusedError("the run intent has invalid version keys") from None
+    if len(keys) != len(raw_keys) or len(set(keys)) != len(keys):
+        raise VoidRefusedError("the run intent has invalid version keys")
+    return run, keys
+
+
 async def write_void(
     context: VoidContext, request: VoidRequest, binding: VoteBinding
 ) -> VoidOutcome:
@@ -674,7 +753,7 @@ async def write_void(
     if canonical_json(plan.approval) != voted_approval or plan.preview != voted_preview:
         raise VoidRefusedError("the rebuilt plan differs from the voted one")
     directory = request.output_dir
-    run: JsonObject = {"run_id": str(uuid7()), "voted_digest": binding.expect_digest}
+    run = _run_binding(context, str(uuid7()), binding.expect_digest)
     write_exclusive(
         directory / INTENT_FILE,
         canonical_json({**run, "keys": [key_json(key) for key in plan.keys]}),
@@ -751,8 +830,17 @@ def _read_document(path: Path) -> JsonObject:
 
     Returns:
         The document.
+
+    Raises:
+        VoidRefusedError: When the artifact cannot be read as a JSON object.
     """
-    return cast(JsonObject, json.loads(path.read_bytes()))
+    try:
+        document = json.loads(path.read_bytes())
+    except (OSError, ValueError):
+        raise VoidRefusedError("the run artifact cannot be read") from None
+    if not isinstance(document, dict):
+        raise VoidRefusedError("the run artifact is not a JSON object")
+    return cast(JsonObject, document)
 
 
 async def reconcile_void(context: VoidContext, directory: Path) -> VoidOutcome:
@@ -767,24 +855,28 @@ async def reconcile_void(context: VoidContext, directory: Path) -> VoidOutcome:
         taken. A run already concluded reports its first conclusion.
     """
     intent = _read_document(directory / INTENT_FILE)
-    run: JsonObject = {"run_id": intent["run_id"], "voted_digest": intent["voted_digest"]}
-    keys = [
-        key_from_json(cast(Mapping[str, JsonValue], item))
-        for item in cast(list[JsonValue], intent["keys"])
-    ]
+    run, keys = _recovery_request(context, intent)
     concluded: list[VoidOutcome] = []
 
     def decide(readings: dict[CandleVersionKey, CandleVersionReading]) -> None:
         existing = directory / RECONCILIATION_FILE
         if existing.exists():
             previous = _read_document(existing)
+            _check_run_binding(previous, run)
+            if previous.get("status") not in {
+                "not_applied",
+                "reconciled_applied",
+                "inconsistent",
+            }:
+                raise VoidRefusedError("the prior conclusion has an invalid status")
             concluded.append(VoidOutcome(status=str(previous["status"]), record=previous))
             return
         prepared = directory / PREPARED_FILE
+        preparation = _read_document(prepared) if prepared.exists() else None
+        if preparation is not None:
+            _check_run_binding(preparation, run)
         void_at = (
-            datetime.fromisoformat(str(_read_document(prepared)["void_at"]))
-            if prepared.exists()
-            else None
+            None if preparation is None else datetime.fromisoformat(str(preparation["void_at"]))
         )
         status = conclude(readings, void_at)
         document: JsonObject = {
@@ -802,6 +894,8 @@ async def reconcile_void(context: VoidContext, directory: Path) -> VoidOutcome:
         attempt += 1
         try:
             await context.repository.observe_candle_void(keys, decide)
+        except VoidRefusedError:
+            raise
         except Exception as error:
             if classify_failure(error) in _RETRYABLE_BEFORE_PREPARE and attempt < LOCK_ATTEMPTS:
                 await context.sleep(LOCK_BACKOFF_SECONDS[attempt - 1])

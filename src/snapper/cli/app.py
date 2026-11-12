@@ -2508,7 +2508,8 @@ def restore_data(
     typer.echo(f"Restoring {table} from {len(paths)} file(s) (source={source})...")
     result = restorer.restore(table=table, paths=paths, source=source)
     typer.echo(
-        f"Done: {result.rows_inserted} inserted, {result.rows_skipped} skipped "
+        f"Done: {result.rows_inserted} inserted, {result.rows_skipped} exact duplicates skipped, "
+        f"{result.skipped_known_to_differs} skipped with different known_to "
         f"({result.files_processed} files)"
     )
     repo.dispose()

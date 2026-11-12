@@ -128,6 +128,7 @@ from sqlalchemy import literal
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import text
+from sqlalchemy import true
 from sqlalchemy import tuple_
 from sqlalchemy import update
 from sqlalchemy import values as sql_values
@@ -9664,7 +9665,7 @@ class Repository(ABC):
     async def get_candle_void_references(
         self, instrument_public_ids: Sequence[str]
     ) -> CandleVoidReferences:
-        """Count the FX artifacts and shadow candles that name some instruments.
+        """Count FX references and shadow candles in one statement snapshot.
 
         Args:
             instrument_public_ids: Instruments to count references to.
@@ -38345,7 +38346,7 @@ class SQLAlchemyRepository(Repository):
     async def get_candle_void_references(
         self, instrument_public_ids: Sequence[str]
     ) -> CandleVoidReferences:
-        """Count the FX artifacts and shadow candles that name some instruments.
+        """Count FX references and shadow candles in one statement snapshot.
 
         Args:
             instrument_public_ids: Instruments to count references to.
@@ -38354,63 +38355,62 @@ class SQLAlchemyRepository(Repository):
             Active and historical counts, which the void does not change.
         """
         ids = list(dict.fromkeys(instrument_public_ids))
-        election = FxConversionElection.selected_source_instrument_public_id.in_(ids)
-        proof = FxConversionProof.source_instrument_public_id.in_(ids)
-        async with self.session() as session:
-            elections_all = await self._count_where(session, FxConversionElection, election)
-            elections_active = await self._count_where(
-                session,
-                FxConversionElection,
-                election,
-                FxConversionElection.known_to == KNOWN_TO_MAX,
+        elections = (
+            select(
+                func.count().label("total"),
+                func.count().filter(FxConversionElection.known_to == KNOWN_TO_MAX).label("active"),
             )
-            proofs_all = await self._count_where(session, FxConversionProof, proof)
-            proofs_active = await self._count_where(
-                session, FxConversionProof, proof, FxConversionProof.known_to == KNOWN_TO_MAX
-            )
-            shadow = (
-                await session.execute(
-                    select(
-                        ShadowCandle.instrument_public_id,
-                        ShadowCandle.timeframe,
-                        ShadowCandle.source,
-                        func.count(),
-                    )
-                    .where(
-                        ShadowCandle.instrument_public_id.in_(ids),
-                        ShadowCandle.known_to == KNOWN_TO_MAX,
-                    )
-                    .group_by(
-                        ShadowCandle.instrument_public_id,
-                        ShadowCandle.timeframe,
-                        ShadowCandle.source,
-                    )
-                )
-            ).all()
-        return CandleVoidReferences(
-            elections_active=elections_active,
-            elections_historical=elections_all - elections_active,
-            proofs_active=proofs_active,
-            proofs_historical=proofs_all - proofs_active,
-            shadow_candles={f"{row[0]}|{row[1]}|{row[2]}": int(row[3]) for row in shadow},
+            .where(FxConversionElection.selected_source_instrument_public_id.in_(ids))
+            .subquery()
         )
-
-    @staticmethod
-    async def _count_where(
-        session: AsyncSession, model: type[Base], *conditions: ColumnElement[bool]
-    ) -> int:
-        """Count the rows of one model that satisfy every condition.
-
-        Args:
-            session: Open session.
-            model: Model to count.
-            *conditions: Filters.
-
-        Returns:
-            The row count.
-        """
-        statement = select(func.count()).select_from(model).where(*conditions)
-        return int((await session.execute(statement)).scalar_one())
+        proofs = (
+            select(
+                func.count().label("total"),
+                func.count().filter(FxConversionProof.known_to == KNOWN_TO_MAX).label("active"),
+            )
+            .where(FxConversionProof.source_instrument_public_id.in_(ids))
+            .subquery()
+        )
+        shadow = (
+            select(
+                ShadowCandle.instrument_public_id,
+                ShadowCandle.timeframe,
+                ShadowCandle.source,
+                func.count().label("shadow_count"),
+            )
+            .where(
+                ShadowCandle.instrument_public_id.in_(ids),
+                ShadowCandle.known_to == KNOWN_TO_MAX,
+            )
+            .group_by(
+                ShadowCandle.instrument_public_id,
+                ShadowCandle.timeframe,
+                ShadowCandle.source,
+            )
+            .subquery()
+        )
+        statement = select(
+            elections.c.total,
+            elections.c.active,
+            proofs.c.total,
+            proofs.c.active,
+            shadow.c.instrument_public_id,
+            shadow.c.timeframe,
+            shadow.c.source,
+            shadow.c.shadow_count,
+        ).select_from(elections.join(proofs, true()).outerjoin(shadow, true()))
+        async with self.session() as session:
+            rows = (await session.execute(statement)).all()
+        first = rows[0]
+        return CandleVoidReferences(
+            elections_active=int(first[1]),
+            elections_historical=int(first[0]) - int(first[1]),
+            proofs_active=int(first[3]),
+            proofs_historical=int(first[2]) - int(first[3]),
+            shadow_candles={
+                f"{row[4]}|{row[5]}|{row[6]}": int(row[7]) for row in rows if row[4] is not None
+            },
+        )
 
     async def void_candle_versions(self, request: CandleVoidRequest) -> CandleVoidResult:
         """Close exactly a voted set of active candles at one database instant.

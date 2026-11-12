@@ -87,7 +87,7 @@ def _parser() -> argparse.ArgumentParser:
         prog="snapper void-candles",
         description=(
             "Void every active candle of retired Kraken instruments at one database instant. "
-            "Without --confirm nothing is written."
+            "Without --confirm no candle is changed."
         ),
         allow_abbrev=False,
     )
@@ -137,8 +137,8 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     """
     try:
         namespace = _parser().parse_args(list(argv))
-    except _UsageError as error:
-        refuse(f"refused: {error}")
+    except _UsageError:
+        refuse("refused: invalid arguments; use --help for the accepted options")
     values = cast(dict[str, object], vars(namespace))
     return _Arguments(
         instruments=tuple(cast(list[str], values["instrument"])),
@@ -164,7 +164,7 @@ def _evidence(values: Sequence[str]) -> tuple[EvidenceFile, ...]:
     for value in values:
         match = _EVIDENCE.fullmatch(value)
         if match is None:
-            refuse(f"refused: --evidence must be name=path, got {value!r}")
+            refuse("refused: --evidence must be name=path")
         files.append(EvidenceFile(name=match.group(1), path=Path(match.group(2))))
     return tuple(files)
 
@@ -291,7 +291,7 @@ async def _execute(
             typer.echo(f"digest: {plan.digest}")
             typer.echo(json.dumps(plan.summary, indent=2, sort_keys=True))
             typer.echo(
-                f"DRY RUN: nothing was written; files are in {request.output_dir}. To write, "
+                f"DRY RUN: no candle was changed; files are in {request.output_dir}. To write, "
                 "vote on the digest and rerun with --confirm --voted-preview <dir> "
                 "--expect-digest <digest> and the same --instrument and --evidence"
             )

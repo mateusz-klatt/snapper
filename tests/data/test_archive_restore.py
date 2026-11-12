@@ -1088,11 +1088,11 @@ def test_round_trip_purge_restore_candle_audit(tmp_path: Path) -> None:
 
 
 def test_cli_restore(tmp_path: Path) -> None:
-    """CLI restore command dispatches to ArchiveRestorer.
+    """CLI restore distinguishes exact duplicates from versions with a changed known_to.
 
-    Given: Mocked ArchiveRestorer,
-    When: CLI invoked with --table ticks --file path,
-    Then: ArchiveRestorer.restore is called.
+    Given: A restorer that skipped versions with a different stored known_to,
+    When: The candle restore command returns its summary,
+    Then: The operator sees both skipped counts and the restorer is called once.
     """
     csv_path = tmp_path / "test.csv"
     csv_path.write_text(
@@ -1103,7 +1103,8 @@ def test_cli_restore(tmp_path: Path) -> None:
     mock_restorer.restore.return_value = RestoreResult(
         files_processed=1,
         rows_inserted=5,
-        rows_skipped=0,
+        rows_skipped=3,
+        skipped_known_to_differs=2,
     )
     with (
         patch("snapper.cli.app.BootstrapSettingsLoader") as mock_bootstrap,
@@ -1114,10 +1115,12 @@ def test_cli_restore(tmp_path: Path) -> None:
         mock_repo_cls.return_value = MagicMock()
         result = runner.invoke(
             app,
-            ["restore", "--table", "ticks", "--file", str(csv_path)],
+            ["restore", "--table", "candles", "--file", str(csv_path)],
         )
     assert result.exit_code == 0
     assert "5 inserted" in result.output
+    assert "3 exact duplicates skipped" in result.output
+    assert "2 skipped with different known_to" in result.output
     mock_restorer.restore.assert_called_once()
 
 

@@ -18,8 +18,10 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy import update
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import Result
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
+from sqlalchemy.sql.base import Executable
 
 from snapper.application.portfolio.pnl_timeline_service import _PlaneCoverage
 from snapper.application.portfolio.pnl_timeline_service import _preferred_fx_plane
@@ -401,6 +403,60 @@ async def test_references_count_fx_artifacts_and_shadow_candles(
     assert (references.elections_active, references.elections_historical) == (1, 1)
     assert (references.proofs_active, references.proofs_historical) == (1, 1)
     assert references.shadow_candles == {f"{_KRAKEN}|1m|calculated": 2}
+
+
+async def test_reference_counts_exclude_every_artifact_for_an_empty_scope(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """An empty requested cohort stays empty even when reference tables contain data."""
+    await _seed_catalog(repo)
+    await _add(repo, _election(_KRAKEN), _proof(_KRAKEN), _shadow(_KRAKEN, "calculated"))
+
+    references = await repo.get_candle_void_references([])
+
+    assert (references.elections_active, references.elections_historical) == (0, 0)
+    assert (references.proofs_active, references.proofs_historical) == (0, 0)
+    assert references.shadow_candles == {}
+
+
+@pytest.mark.parametrize("include_fx", [False, True])
+async def test_shadow_groups_do_not_multiply_fx_reference_counts(
+    repo: SQLAlchemyRepository, include_fx: bool
+) -> None:
+    """Several shadow groups preserve exact FX totals, including zero FX references."""
+    await _seed_catalog(repo)
+    rows: list[Base] = [
+        _shadow(_KRAKEN, "calculated"),
+        _shadow(_KRAKEN, "calculated", minutes=1),
+        _shadow(_KRAKEN, "synthesized", minutes=2),
+        _shadow(_POLYGON, "calculated"),
+        _shadow(_OTHER, "calculated"),
+        _election(_OTHER),
+        _proof(_OTHER),
+    ]
+    if include_fx:
+        rows.extend(
+            [
+                _election(_KRAKEN),
+                _election(_KRAKEN, known_to=_CLOSED_AT),
+                _election(_POLYGON),
+                _proof(_KRAKEN),
+                _proof(_KRAKEN, known_to=_CLOSED_AT),
+                _proof(_POLYGON),
+            ]
+        )
+    await _add(repo, *rows)
+
+    references = await repo.get_candle_void_references([_KRAKEN, _POLYGON, _KRAKEN])
+
+    expected = (2, 1) if include_fx else (0, 0)
+    assert (references.elections_active, references.elections_historical) == expected
+    assert (references.proofs_active, references.proofs_historical) == expected
+    assert references.shadow_candles == {
+        f"{_KRAKEN}|1m|calculated": 2,
+        f"{_KRAKEN}|1m|synthesized": 1,
+        f"{_POLYGON}|1m|calculated": 1,
+    }
 
 
 def _election(instrument: str, *, known_to: datetime = KNOWN_TO_MAX) -> FxConversionElection:
@@ -967,3 +1023,38 @@ def test_restore_fence_refuses_an_unknown_dialect() -> None:
         _fenced_repo("mysql")._begin_sync_candle_fence(session)
 
     session.execute.assert_not_called()
+
+
+async def test_reference_counts_keep_one_snapshot_across_a_concurrent_fx_insert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second session cannot make historical counts negative between count reads."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'references.db'}"
+    reader = SQLAlchemyRepository(url)
+    writer = SQLAlchemyRepository(url)
+    interleaved: list[bool] = []
+    execute = AsyncSession.execute
+
+    async def insert_after_first_reference_read(
+        session: AsyncSession, statement: Executable
+    ) -> Result[tuple[object, ...]]:
+        """Commit real concurrent artifacts after the first reference result is buffered."""
+        result = await execute(session, statement)
+        if not interleaved and "fx_conversion_elections" in str(statement):
+            interleaved.append(True)
+            await _add(writer, _election(_KRAKEN), _proof(_KRAKEN))
+        return cast(Result[tuple[object, ...]], result)
+
+    try:
+        await reader.create_all()
+        await _seed_catalog(reader)
+        monkeypatch.setattr(AsyncSession, "execute", insert_after_first_reference_read)
+        references = await reader.get_candle_void_references((_KRAKEN,))
+        assert interleaved == [True]
+        assert references.elections_active == 0
+        assert references.elections_historical == 0
+        assert references.proofs_active == 0
+        assert references.proofs_historical == 0
+    finally:
+        await reader.engine.dispose()
+        await writer.engine.dispose()

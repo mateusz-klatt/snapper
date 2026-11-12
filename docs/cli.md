@@ -462,6 +462,58 @@ cancelled. A write that stops before its end exits `1`.
 Each correction chunk takes `SHARE ROW EXCLUSIVE` on `candles`, so live candle
 writers wait up to one second per chunk: run writes in quiet hours.
 
+### `void-candles`
+
+Preview a guarded closure of the active candle versions of retired Kraken
+instruments, across every timeframe. The default dry run reads the database and
+writes `preview.csv`, `summary.json` and `approval.json` to a new or empty local
+directory. It does not change candles. The preview contains their full version
+keys and original values; the digest to approve is the sha256 of `approval.json`.
+
+```bash
+snapper void-candles --instrument <retired-instrument-id> \
+    --evidence writer_cessation=<reviewed-evidence-file> --output-dir <dry-run-dir>
+```
+
+| Option | Meaning |
+| ------ | ------- |
+| `--instrument` | Instrument public id; repeat for each member of the approved cohort. |
+| `--evidence` | `name=path` of a reviewed evidence file; repeat for additional files. `writer_cessation` is required and names must be unique. |
+| `--output-dir` | New or empty directory for this run's files. Required for preview and confirmed execution. |
+| `--confirm` | Close the approved versions; requires both approval options below. |
+| `--voted-preview` | Directory of the approved dry run. |
+| `--expect-digest` | sha256 of that dry run's `approval.json`. |
+| `--reconcile` | Directory of an earlier execution whose outcome needs reconciliation. Takes no other option. |
+
+Review writer cessation, catalog-writer exclusion and the cache/export
+dispositions before approving a digest. Evidence-file hashes bind the reviewed
+documents; hashing does not establish those external conditions. Targets must
+be Kraken instruments without active aliases or market-data/trading capability,
+and their newest active candle must be at least 60 minutes old. The summary
+reports FX references and shadow candles from one database statement snapshot.
+
+After the separate approval, repeat the same instruments and evidence with a
+new `--output-dir`, adding `--confirm --voted-preview <dry-run-dir>
+--expect-digest <approved-digest>`. Execution binds the database and source,
+checks the saved approval/preview, rebuilds the plan and refuses any difference.
+Under the shared candle writer fence it rechecks the exact cohort and catalog,
+records the database closure instant in `prepared.json`, then closes exactly
+those versions at that instant. Original values and earlier knowledge horizons
+remain available; stored FX elections and proofs are not rewritten.
+
+If the commit acknowledgement is lost, use only `snapper void-candles
+--reconcile <execution-dir>`. Reconciliation validates the saved database,
+source, run and approval identities, observes the original keys under the same
+fence, and records its conclusion without closing any candle. A concluded run
+cannot subsequently prepare another write. Only `acknowledged` and
+`reconciled_applied` are successful execution outcomes; other outcomes exit 1.
+Keep every run artifact for review instead of replaying an uncertain write.
+
+Candle archive restore shares the writer fence and never changes the stored
+`known_to` of an existing version. Its summary reports exact duplicate skips
+separately from `skipped_known_to_differs`, so an old active archive copy cannot
+silently re-activate a version already closed in the database.
+
 ### `annulment`
 
 Host-side execution-ledger correction commands use the configured `DB_URL`.
