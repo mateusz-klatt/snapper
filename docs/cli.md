@@ -534,6 +534,21 @@ leave the index behind in an invalid state. Remove it with
 `DROP INDEX CONCURRENTLY IF EXISTS ix_epc_plan_known_to` and run the upgrade
 again.
 
+Migration `0068` stores the 14 timestamps of `trade_commands`,
+`venue_events` and `trade_projection_checkpoints` as `timestamp with time
+zone`, which the ORM already declares. Earlier databases hold them as
+`timestamp without time zone`, which compares correctly only in a session
+whose time zone is UTC. The migration reads every stored value as the UTC
+instant it already is and rewrites no table. Stop the stack with
+`docker compose stop` before running it, in either direction, and start it
+again afterwards. Running processes keep prepared statements over these
+tables that the conversion makes stale, and their transactions would fail.
+On PostgreSQL the migration locks the three tables until it commits. Each
+lock wait gives up after 5 seconds, and each statement after 30 seconds; the
+transaction then rolls back completely and can be run again. Afterwards
+`psql` shows these columns in the session's time zone with an explicit
+offset, so filter them with `+00` literals or after `SET TimeZone = 'UTC'`.
+
 ### `db-downgrade`
 
 Rolls back Alembic migrations.
