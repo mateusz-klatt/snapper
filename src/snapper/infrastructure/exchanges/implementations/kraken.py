@@ -31,6 +31,7 @@ import json
 import math
 import threading
 import time
+from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from datetime import UTC
@@ -52,6 +53,7 @@ from loguru import logger
 from pydantic import ValidationError
 
 from snapper.config.settings import get_settings
+from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import TradeSideEnum
@@ -62,7 +64,6 @@ from snapper.infrastructure.exchanges._subscription_health import label_to_inter
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges._subscription_request import canonicalise_parameters
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
-from snapper.infrastructure.exchanges._trade_candle_builder import enqueue_or_drop_oldest_candle
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_candle_list
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_execution
 from snapper.infrastructure.exchanges.adapters.kraken import parse_kraken_instrument
@@ -118,6 +119,11 @@ from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscrib
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscriptionAckSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscribeParamsSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscriptionAckSchema
+from snapper.infrastructure.exchanges.trade_candle_stream import LostBars
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreak
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreakReason
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleItem
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleMark
 from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
 from snapper.infrastructure.symbols.functions import is_kraken_bitnomial_product
@@ -754,11 +760,22 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._trade_built_candle_builder: TradeCandleBuilder = TradeCandleBuilder(
             interval_seconds=60
         )
-        self._trade_built_candle_queue: asyncio.Queue[CandleUpdate] = asyncio.Queue(
-            maxsize=_TICK_QUEUE_MAX_SIZE
+        self._trade_built_candle_queue: asyncio.Queue[CandleUpdate | TradeCandleMark] = (
+            asyncio.Queue(maxsize=_TICK_QUEUE_MAX_SIZE)
         )
         self._trade_built_candle_aggregator_task: asyncio.Task[None] | None = None
         self._trade_built_candles_enabled: bool = False
+        self._trade_candle_generation: int = 0
+        self._trade_candle_marked_through: datetime | None = None
+        self._trade_candle_popped_through: datetime | None = None
+        self._trade_candle_overflow: LostBars | None = None
+        self._trade_candle_pending_break: TradeCandleBreak | None = None
+        self._trade_candle_reset_listener: Callable[[TradeCandleBreak], None] | None = None
+        self._trade_candle_last_tick_at: datetime | None = None
+        self._trade_candle_overflows: int = 0
+        self._trade_candle_discards: int = 0
+        self._trade_candle_lost_bars: int = 0
+        self._trade_candle_producer_restarts: int = 0
         self._execution_queue: asyncio.Queue[ExecutionUpdate] = asyncio.Queue(
             maxsize=_QUEUE_MAX_SIZE
         )
@@ -898,7 +915,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         client = self._ws_client
         if not client:
             return
-        self.reset_trade_candle_epoch()
+        self._reset_trade_candle_epoch_for_feed_break()
         was_connected = self._ws_connected
         try:
             async with asyncio.timeout(self._WS_CLOSE_TIMEOUT_SECONDS):
@@ -911,7 +928,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             await force_close_ws_client(client)
         finally:
             if self._ws_client is client:
-                self.reset_trade_candle_epoch()
+                self._reset_trade_candle_epoch_for_feed_break()
                 self._ws_client = None
                 self._ws_connected = False
                 if was_connected:
@@ -1032,11 +1049,198 @@ class KrakenExchangeClient(ExchangeClientBase):
         )
         return parse_closed_candles(payload, request)
 
-    def reset_trade_candle_epoch(self) -> None:
-        """Withhold unknown history until a new live trade is actually received."""
+    def reset_trade_candle_epoch(self) -> TradeCandleBreak:
+        """Withhold unknown history until a new live trade is actually received.
+
+        Replaces the builder and empties the queue, as a feed break requires,
+        and starts a new generation of the trade-built stream.
+
+        Returns:
+            The break: the drained bars, the arming floor taken before the
+            builder is replaced, and the new generation.
+        """
+        brk = self._take_trade_candle_break(TradeCandleBreakReason.RESET, builder_kept=False)
         self._trade_built_candle_builder = TradeCandleBuilder(interval_seconds=60)
+        return brk
+
+    def set_trade_candle_reset_listener(
+        self, listener: Callable[[TradeCandleBreak], None] | None
+    ) -> None:
+        """Register the consumer that handles the client's own resets synchronously.
+
+        The live consumer then invalidates its completion and synthesis state at
+        the instant of the reset, before any other task can emit from it, in
+        either completion mode.
+
+        Args:
+            listener: Called with the break of every client-detected reset that
+                lost evidence, or ``None`` to deliver those breaks in-band.
+        """
+        self._trade_candle_reset_listener = listener
+
+    def _reset_trade_candle_epoch_for_feed_break(self) -> None:
+        """Reset the epoch for a feed break the client detected on its own socket.
+
+        No publisher hook sees these resets. The registered listener therefore
+        receives the break synchronously; without one, the break is delivered
+        in-band, and the stream yields it before any item of the new generation.
+        Breaks not yet delivered in-band are combined into one.
+
+        A reset before the stream has observed anything, such as the first
+        connection at startup, loses nothing and is not delivered: the consumer
+        already waits for its first mark, and the restart seed of its
+        aggregator must survive.
+        """
+        observed = (
+            self._trade_built_candle_builder.update_count > 0
+            or self._trade_candle_popped_through is not None
+        )
+        brk = self.reset_trade_candle_epoch()
+        if not observed:
+            return
+        listener = self._trade_candle_reset_listener
+        if listener is not None:
+            listener(brk)
+            return
+        pending = self._trade_candle_pending_break
+        self._trade_candle_pending_break = brk if pending is None else pending.followed_by(brk)
+
+    def _take_pending_trade_candle_break(self) -> TradeCandleBreak | None:
+        """Take the break of a client-detected reset that is not yet delivered.
+
+        Returns:
+            The pending break, or ``None``.
+        """
+        pending = self._trade_candle_pending_break
+        self._trade_candle_pending_break = None
+        return pending
+
+    def _next_trade_candle_break(self) -> TradeCandleBreak | None:
+        """Return the break to deliver before the next dequeue, if any.
+
+        Returns:
+            A client-detected reset first, then a break for refused items, or
+            ``None`` when the stream has no break to deliver.
+        """
+        pending = self._take_pending_trade_candle_break()
+        if pending is not None or self._trade_candle_overflow is None:
+            return pending
+        return self._take_trade_candle_break(TradeCandleBreakReason.OVERFLOW, builder_kept=True)
+
+    def discard_trade_candle_backlog(self) -> TradeCandleBreak:
+        """Discard the queued backlog of a lagging consumer, keeping the builder.
+
+        The socket was fine, so the builder and its in-progress minutes stay.
+
+        Returns:
+            The break: the drained bars, the arming floor and the new generation.
+        """
+        self._trade_candle_discards += 1
+        return self._take_trade_candle_break(TradeCandleBreakReason.LAG, builder_kept=True)
+
+    def _take_trade_candle_break(
+        self, reason: TradeCandleBreakReason, *, builder_kept: bool
+    ) -> TradeCandleBreak:
+        """Drain the queue into one break and start a new generation.
+
+        Args:
+            reason: Why the stream breaks.
+            builder_kept: Whether the builder survives the break.
+
+        Returns:
+            The break, counting the drained bars together with any bars the
+            queue refused since its last overflow.
+        """
+        lost = self._trade_candle_overflow or LostBars()
         while not self._trade_built_candle_queue.empty():
-            self._trade_built_candle_queue.get_nowait()
+            lost.add_item(self._trade_built_candle_queue.get_nowait())
+        self._trade_candle_overflow = None
+        self._trade_candle_marked_through = None
+        self._trade_candle_generation += 1
+        self._trade_candle_lost_bars += lost.count
+        return TradeCandleBreak(
+            reason=reason,
+            generation=self._trade_candle_generation,
+            lost_bars=lost.count,
+            lost_from=lost.oldest,
+            lost_through=lost.newest,
+            builder_kept=builder_kept,
+            arm_after=self._trade_candle_popped_through,
+        )
+
+    def trade_candle_generation(self) -> int:
+        """Return the current generation of the trade-built stream.
+
+        Returns:
+            The generation, which every break increments.
+        """
+        return self._trade_candle_generation
+
+    def trade_candle_queue_depth(self) -> int:
+        """Return the number of items waiting in the trade-built queue.
+
+        Returns:
+            Queued bars and marks.
+        """
+        return self._trade_built_candle_queue.qsize()
+
+    def trade_candle_producer_alive(self) -> bool:
+        """Return whether the trade-built producer task is running.
+
+        Returns:
+            True while a producer task exists and has not finished.
+        """
+        task = self._trade_built_candle_aggregator_task
+        return task is not None and not task.done()
+
+    def trade_candle_last_tick_age(self, now: datetime) -> float | None:
+        """Return the age of the producer's last completed tick.
+
+        Args:
+            now: Current UTC wall clock.
+
+        Returns:
+            Seconds since the last completed tick, or ``None`` before the first.
+        """
+        last = self._trade_candle_last_tick_at
+        return None if last is None else round((now - last).total_seconds(), 3)
+
+    def trade_candle_producer_health(self, now: datetime) -> JsonObject:
+        """Return the trade-built producer's health for the heartbeat.
+
+        Args:
+            now: Current UTC wall clock.
+
+        Returns:
+            Whether the producer task is alive, its restarts, the age of its last
+            completed tick, and the overflow, discard and lost-bar counters.
+        """
+        return {
+            "producer_alive": self.trade_candle_producer_alive(),
+            "producer_restarts": self._trade_candle_producer_restarts,
+            "last_tick_age_s": self.trade_candle_last_tick_age(now),
+            "overflows": self._trade_candle_overflows,
+            "discards": self._trade_candle_discards,
+            "lost_bars": self._trade_candle_lost_bars,
+        }
+
+    def ensure_trade_candle_producer(self) -> bool:
+        """Restart a producer task that has stopped without being cancelled.
+
+        Returns:
+            Whether a new producer task was started.
+        """
+        task = self._trade_built_candle_aggregator_task
+        if not self._trade_built_candles_enabled or task is None or not task.done():
+            return False
+        if task.cancelled():
+            return False
+        logger.error("trade-built candle producer stopped ({!r}); restarting it", task.exception())
+        self._trade_candle_producer_restarts += 1
+        self._trade_built_candle_aggregator_task = asyncio.create_task(
+            self._trade_built_candle_aggregator()
+        )
+        return True
 
     def _fold_observed_trade_candle(self, trade: TradeUpdate) -> None:
         """Fence a new generation by receipt time before folding any event time.
@@ -2402,6 +2606,50 @@ class KrakenExchangeClient(ExchangeClientBase):
                 f"Kraken spot trade-built candles only support 1m "
                 f"(synthesized from trades). Got {timeframe!r}."
             )
+        async with contextlib.aclosing(self._trade_built_items()) as items:
+            async for item in items:
+                if isinstance(item, CandleUpdate):
+                    yield item
+                elif isinstance(item, TradeCandleBreak):
+                    logger.warning(
+                        "trade-built candle stream break ({}): {} bars lost from {} to {}",
+                        item.reason.value,
+                        item.lost_bars,
+                        item.lost_from,
+                        item.lost_through,
+                    )
+
+    def subscribe_trade_built_stream(self, symbols: list[str]) -> AsyncIterator[TradeCandleItem]:
+        """Stream trade-built 1m bars together with their marks and breaks.
+
+        The live candle consumer in trade-built mode reads this stream: a mark
+        is the in-band boundary its completion follows, and a break replaces
+        items the queue lost. Only one of this stream and
+        :meth:`subscribe_trade_built_candles` runs at a time.
+
+        Args:
+            symbols: Native symbols (advisory; see
+                :meth:`subscribe_trade_built_candles`).
+
+        Returns:
+            AsyncIterator yielding bars, marks and breaks in queue order.
+        """
+        del symbols
+        return self._trade_built_items()
+
+    async def _trade_built_items(self) -> AsyncGenerator[TradeCandleItem]:
+        """Yield the trade-built queue's items, turning an overflow into a break.
+
+        Starts the background producer on first call and cancels it cleanly on
+        iterator close, so a publisher shutdown does not leak the task.
+
+        Yields:
+            Bars and marks in queue order; before the next dequeue, a break the
+            client detected on its own socket, then a break for items the queue
+            refused. A reset detected while this iterator waits for an item is
+            yielded before that item, which already belongs to the new
+            generation because the reset emptied the queue.
+        """
         self._trade_built_candles_enabled = True
         if (
             self._trade_built_candle_aggregator_task is None
@@ -2412,13 +2660,19 @@ class KrakenExchangeClient(ExchangeClientBase):
             )
         try:
             while True:
+                brk = self._next_trade_candle_break()
+                if brk is not None:
+                    yield brk
+                    continue
                 try:
-                    candle = await asyncio.wait_for(
-                        self._trade_built_candle_queue.get(), timeout=0.1
-                    )
-                    yield candle
+                    item = await asyncio.wait_for(self._trade_built_candle_queue.get(), timeout=0.1)
                 except TimeoutError:
                     await asyncio.sleep(0.01)
+                    continue
+                pending = self._take_pending_trade_candle_break()
+                if pending is not None:
+                    yield pending
+                yield item
         finally:
             self._trade_built_candles_enabled = False
             task = self._trade_built_candle_aggregator_task
@@ -2445,16 +2699,79 @@ class KrakenExchangeClient(ExchangeClientBase):
         while True:
             await asyncio.sleep(1.0)
             try:
-                cutoff = datetime.now(UTC) - timedelta(
-                    seconds=self.settings.trade_built_finalize_grace_seconds
-                )
-                for candle in self._trade_built_candle_builder.pop_completed(cutoff):
-                    enqueue_or_drop_oldest_candle(self._trade_built_candle_queue, candle, "Candle")
+                self._produce_trade_candle_tick(datetime.now(UTC))
             except Exception:
                 logger.exception(
                     "trade-built candle aggregator tick failed; continuing so a "
                     "transient fault does not silently stall Spot candle production"
                 )
+
+    def _produce_trade_candle_tick(self, now: datetime) -> None:
+        """Pop every completed minute and enqueue it behind its certifying marks.
+
+        Before each minute group that advances the boundary, a mark certifies
+        every earlier minute; after the last group, a mark certifies the tick's
+        own boundary. A group for an older minute is a correction or a late
+        first emission, and gets no mark. A tick that raises enqueues nothing and
+        leaves the popped boundary where it was.
+
+        Args:
+            now: UTC wall clock of the tick, read once.
+        """
+        cutoff = now - timedelta(seconds=self.settings.trade_built_finalize_grace_seconds)
+        through = cutoff.replace(second=0, microsecond=0)
+        bars = self._trade_built_candle_builder.pop_completed(cutoff)
+        self._trade_candle_last_tick_at = now
+        for bar in bars:
+            marked = self._trade_candle_marked_through
+            if marked is None or bar.interval_begin > marked:
+                self._put_trade_candle_mark(bar.interval_begin, now)
+            bar.acquired_at = now
+            self._put_trade_candle_item(bar)
+        marked = self._trade_candle_marked_through
+        if marked is None or through > marked:
+            self._put_trade_candle_mark(through, now)
+        popped = self._trade_candle_popped_through
+        self._trade_candle_popped_through = through if popped is None else max(popped, through)
+
+    def _put_trade_candle_mark(self, through: datetime, now: datetime) -> None:
+        """Enqueue one mark of the current generation.
+
+        Args:
+            through: Boundary the mark certifies.
+            now: UTC wall clock of the producer tick.
+        """
+        self._put_trade_candle_item(
+            TradeCandleMark(
+                through=through, generation=self._trade_candle_generation, produced_at=now
+            )
+        )
+        self._trade_candle_marked_through = through
+
+    def _put_trade_candle_item(self, item: CandleUpdate | TradeCandleMark) -> None:
+        """Enqueue an item, refusing instead of evicting when the queue is full.
+
+        After the first refusal every item is refused, and counted, until the
+        consumer has turned the overflow into a break. A queued bar is never
+        evicted.
+
+        Args:
+            item: Bar or mark to enqueue.
+        """
+        overflow = self._trade_candle_overflow
+        if overflow is not None:
+            overflow.add_item(item)
+            return
+        try:
+            self._trade_built_candle_queue.put_nowait(item)
+        except asyncio.QueueFull:
+            self._trade_candle_overflows += 1
+            lost = LostBars()
+            lost.add_item(item)
+            self._trade_candle_overflow = lost
+            logger.warning(
+                "trade-built candle queue full: refusing items until the consumer takes a break"
+            )
 
     def _expand_spot_symbols(
         self, symbols: list[str], *, channel_label: str, wildcard_note: str
@@ -3468,7 +3785,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             BaseException: Whatever ``start()`` or the subscription replay
                 raised, re-raised after teardown.
         """
-        self.reset_trade_candle_epoch()
+        self._reset_trade_candle_epoch_for_feed_break()
         client = SpotWSClient(
             key=self.api_key or "",
             secret=self.api_secret or "",

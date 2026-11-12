@@ -643,6 +643,73 @@ class TestAppSettingsTradingProperties:
         assert _value("7") == 7
         assert _value(-4) == 0
 
+    def test_spot_completion_follows_consumer_defaults_true_and_coerces(self) -> None:
+        """Verify the Spot completion mode defaults on and reads a rollback value.
+
+        Given a service with the setting absent, boolean, textual and numeric,
+        When accessing settings.spot_completion_follows_consumer,
+        Then it defaults to True and reads every spelling of a switch.
+
+        Returns:
+            None.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        default = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert default.spot_completion_follows_consumer is True
+
+        def _value(raw: object) -> bool:
+            """Read the completion mode for one raw service value.
+
+            Args:
+                raw: Raw settings-service value.
+
+            Returns:
+                Parsed completion mode.
+            """
+            settings = AppSettings(
+                bootstrap,
+                settings_service=MockSettingsService({"spot_completion_follows_consumer": raw}),
+            )
+            return settings.spot_completion_follows_consumer
+
+        assert _value(False) is False
+        assert _value(" False ") is False
+        assert _value("on") is True
+        assert _value(0) is False
+
+    def test_trade_built_max_consumer_lag_seconds_defaults_off_and_clamps(self) -> None:
+        """Verify the consumer lag bound defaults to disabled and parses seconds.
+
+        Given a service with the setting absent, numeric, string, and negative,
+        When accessing settings.trade_built_max_consumer_lag_seconds,
+        Then it defaults to zero and clamps negative values to zero.
+
+        Returns:
+            None.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        default = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert default.trade_built_max_consumer_lag_seconds == 0
+
+        def _value(raw: object) -> int:
+            """Read the lag bound for one raw service value.
+
+            Args:
+                raw: Raw settings-service value.
+
+            Returns:
+                Parsed non-negative bound.
+            """
+            settings = AppSettings(
+                bootstrap,
+                settings_service=MockSettingsService({"trade_built_max_consumer_lag_seconds": raw}),
+            )
+            return settings.trade_built_max_consumer_lag_seconds
+
+        assert _value(300) == 300
+        assert _value("120") == 120
+        assert _value(-5) == 0
+
     def test_candle_single_source_defaults_false_and_reads_value(self) -> None:
         """Verify candle_single_source defaults to False and reads the DB value.
 

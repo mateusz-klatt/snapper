@@ -11,9 +11,11 @@ from collections.abc import ItemsView
 from collections.abc import Iterator
 from collections.abc import KeysView
 from collections.abc import ValuesView
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
@@ -27,6 +29,7 @@ from unittest.mock import patch
 import pytest
 import zmq
 from loguru import logger
+from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +38,10 @@ from snapper.application.process_manager.launcher import _TOTAL_RESET_UPTIME_S
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import HealthStatusEnum
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Candle
 from snapper.data.repository import Repository
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import ShadowCandleUpsertRow
@@ -45,6 +51,9 @@ from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.contracts import TradeUpdate
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreak
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreakReason
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleMark
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_observability import EGRESS_SNAPSHOT_TOPIC
@@ -54,11 +63,14 @@ from snapper.infrastructure.network.egress_pool import reset_egress_pool
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
+from snapper.messaging.publishers import base as base_module
 from snapper.messaging.publishers.base import _CANDLE_FLUSH_INTERVAL_S
 from snapper.messaging.publishers.base import _DARK_FEED_EXIT_CEILING_S
 from snapper.messaging.publishers.base import _FEED_HEALTH_FLUSH_INTERVAL_S
 from snapper.messaging.publishers.base import _NATIVE_FINALIZE_INTERVAL_S
+from snapper.messaging.publishers.base import _SWEEP_YIELD_EVERY
 from snapper.messaging.publishers.base import _TRADE_ID_LRU_MAX_PER_SYMBOL
+from snapper.messaging.publishers.base import CompletionClock
 from snapper.messaging.publishers.base import FeedDarkTooLongError
 from snapper.messaging.publishers.base import MarketDataPublisherService
 from snapper.messaging.publishers.base import VenueFeedHealth
@@ -84,6 +96,7 @@ from snapper.messaging.publishers.candle_aggregator import CandleAggregator
 from snapper.messaging.publishers.candle_aggregator import LateCandleDrop
 from snapper.messaging.publishers.candle_aggregator import SeededIncompleteWindow
 from snapper.messaging.publishers.kraken import KrakenMarketDataPublisher
+from snapper.messaging.publishers.minute_completion import MinuteCompletionEmitter
 from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
 from snapper.messaging.publishers.native_candle_finalizer import window_seconds
 from snapper.messaging.schemas.data import CandleData
@@ -3284,6 +3297,7 @@ async def test_candle_loop_processes_message(monkeypatch: pytest.MonkeyPatch) ->
             volume=10.0,
             trades=5,
             interval_begin=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            acquired_at=None,
         )
         pub.running = False
 
@@ -5354,6 +5368,7 @@ async def test_candle_loop_skips_publish_when_ensure_instrument_returns_none() -
             volume=10.0,
             trades=5,
             interval_begin=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            acquired_at=None,
         )
         pub.running = False
 
@@ -5853,6 +5868,7 @@ async def test_candle_loop_cancelled_error_propagates_without_flush() -> None:
             volume=10.0,
             trades=5,
             interval_begin=datetime(2026, 1, 1, 0, 0, tzinfo=UTC),
+            acquired_at=None,
         )
 
     pub._exchange_client.subscribe_candles = lambda symbols, timeframe: gen()
@@ -12518,3 +12534,1125 @@ async def test_the_two_flush_loops_keep_separate_cadences(
     assert slept == [_NATIVE_FINALIZE_INTERVAL_S, _CANDLE_FLUSH_INTERVAL_S]
     assert 0.1 * window_seconds("1m") >= _NATIVE_FINALIZE_INTERVAL_S
     assert 0.1 * window_seconds("5m") >= _CANDLE_FLUSH_INTERVAL_S
+
+
+_MARK_THROUGH = datetime(2026, 11, 11, 15, 3, tzinfo=UTC)
+_MARK_PRODUCED = datetime(2026, 11, 11, 15, 3, 12, tzinfo=UTC)
+
+
+def _completion_mark(generation: int = 0, through: datetime = _MARK_THROUGH) -> TradeCandleMark:
+    """Build a completion mark of the trade-built stream.
+
+    Args:
+        generation: Producer generation of the mark.
+        through: Boundary the mark certifies.
+
+    Returns:
+        The mark, produced twelve seconds after its boundary.
+    """
+    return TradeCandleMark(
+        through=through, generation=generation, produced_at=through + timedelta(seconds=12)
+    )
+
+
+def _stream_break(
+    reason: TradeCandleBreakReason = TradeCandleBreakReason.OVERFLOW,
+    arm_after: datetime | None = _MARK_THROUGH,
+) -> TradeCandleBreak:
+    """Build a break of the trade-built stream.
+
+    Args:
+        reason: Why the stream broke.
+        arm_after: The producer's popped boundary at the break.
+
+    Returns:
+        A break that lost two bars of one minute.
+    """
+    return TradeCandleBreak(
+        reason=reason,
+        generation=1,
+        lost_bars=2,
+        lost_from=_MARK_THROUGH - timedelta(minutes=1),
+        lost_through=_MARK_THROUGH - timedelta(minutes=1),
+        builder_kept=True,
+        arm_after=arm_after,
+    )
+
+
+class ConsumerDrivenPublisher(DummyPublisher):
+    """Publisher stub whose completion follows its consumer's marks."""
+
+    def __init__(self, symbols: list[str]) -> None:
+        """Initialize the stub with completion following the consumer.
+
+        Args:
+            symbols: Native symbols for the publisher.
+        """
+        super().__init__(symbols)
+        self.follows = True
+        self.generation = 0
+        self.lag_bound = 0
+        self.discard: TradeCandleBreak | None = None
+        self.discards = 0
+
+    def _completion_follows_consumer(self) -> bool:
+        """Return the stub's mode.
+
+        Returns:
+            Whether completion follows the consumer.
+        """
+        return self.follows
+
+    def _current_trade_candle_generation(self) -> int | None:
+        """Return the stub's stream generation.
+
+        Returns:
+            The current generation.
+        """
+        return self.generation
+
+    def _max_consumer_lag_seconds(self) -> int:
+        """Return the stub's lag bound.
+
+        Returns:
+            The bound in seconds.
+        """
+        return self.lag_bound
+
+    def _discard_trade_candle_backlog(self) -> TradeCandleBreak | None:
+        """Count a discard and return the configured break.
+
+        Returns:
+            The configured break, or ``None``.
+        """
+        self.discards += 1
+        return self.discard
+
+
+def _consumer_driven() -> Any:
+    """Build a running consumer-driven publisher with publication stubbed out.
+
+    Returns:
+        The publisher, with its instrument resolution and ZMQ publish mocked.
+    """
+    pub: Any = ConsumerDrivenPublisher(symbols=["BTC-USD"])
+    pub.running = True
+    pub._ensure_instrument = AsyncMock(return_value="inst-1")
+    pub._publish_message = AsyncMock()
+    return pub
+
+
+class TestBaseCompletionHooks:
+    """The base publisher's completion follows the wall clock and adds nothing."""
+
+    def test_base_hooks_are_inert(self) -> None:
+        """A publisher without a trade-built stream keeps today's behaviour.
+
+        Given the base publisher,
+        When its completion hooks are read and called,
+        Then completion follows the wall clock, no generation, discard, bound or
+            health exists, and the producer and catchup hooks do nothing.
+        """
+        pub = DummyPublisher(symbols=["BTC-USD"])
+
+        pub._supervise_candle_producer()
+        pub._request_candle_catchup()
+
+        assert pub._completion_follows_consumer() is False
+        assert pub._current_trade_candle_generation() is None
+        assert pub._discard_trade_candle_backlog() is None
+        assert pub._max_consumer_lag_seconds() == 0
+        assert pub._trade_candle_health() == {}
+        assert pub._venue_feed_health().meta == {}
+
+    @pytest.mark.asyncio
+    async def test_a_mark_is_ignored_on_the_wall_clock(self) -> None:
+        """Marks do not move a wall-clock publisher, and are not counted as stale.
+
+        Given a base publisher with an aggregator,
+        When a mark is handled,
+        Then nothing is certified and the state stays on the wall clock.
+        """
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub._candle_aggregator = MagicMock(spec=CandleAggregator)
+
+        await pub._advance_completion(_completion_mark(), ExchangeEnum.KRAKEN)
+
+        pub._candle_aggregator.certify.assert_not_called()
+        assert pub._completion_clock is CompletionClock.WALL
+        assert pub._stale_trade_candle_marks == 0
+
+    def test_the_venue_health_carries_trade_candle_health(self) -> None:
+        """A venue's stream health reaches the heartbeat under its own key.
+
+        Given a publisher whose stream reports health,
+        When the venue health is read,
+        Then it carries that health under ``trade_candles``.
+        """
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub._trade_candle_health = lambda: {"state": "progress"}
+
+        assert pub._venue_feed_health().meta == {"trade_candles": {"state": "progress"}}
+
+
+class TestCompletionMode:
+    """Synchronizing the completion state and the aggregator's authoring."""
+
+    def test_the_mode_switches_in_both_directions(self) -> None:
+        """A switch to the marks waits; a switch to the wall clock is immediate.
+
+        Given a consumer-driven publisher with an aggregator,
+        When the mode is synchronized, the state progresses, and the mode is
+            switched off and on again,
+        Then the state goes from the wall clock to waiting, keeps its progress,
+            returns to the wall clock without a boundary, then waits again, and
+            the aggregator authors exactly while completion follows the consumer.
+        """
+        pub = _consumer_driven()
+        pub._candle_aggregator = CandleAggregator(["5m"])
+
+        assert pub._sync_completion_mode() is True
+        assert pub._completion_clock is CompletionClock.WAITING
+        assert pub._candle_aggregator.authoring is True
+        pub._completion_clock = CompletionClock.PROGRESS
+        pub._completion_through = _MARK_THROUGH
+        assert pub._sync_completion_mode() is True
+        assert pub._completion_clock is CompletionClock.PROGRESS
+        pub.follows = False
+        assert pub._sync_completion_mode() is False
+        assert (pub._completion_clock, pub._completion_through) == (CompletionClock.WALL, None)
+        assert pub._candle_aggregator.authoring is False
+        pub.follows = True
+        pub._sync_completion_mode()
+        assert pub._completion_clock is CompletionClock.WAITING
+
+    @pytest.mark.asyncio
+    async def test_the_wall_clock_sweep_and_flush_stand_still_while_marks_drive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Neither wall-clock process gets ahead of the queue.
+
+        Given a consumer-driven publisher with an emitter and a forward-filling
+            aggregator,
+        When the minute sweep runs and one flush tick passes,
+        Then the producer is supervised, no wall-clock flat bar is asked for,
+            and the aggregator is not flushed.
+        """
+        pub = _consumer_driven()
+        pub._minute_emitter = MagicMock(spec=MinuteCompletionEmitter)
+        pub._supervise_candle_producer = MagicMock()
+        aggregator = MagicMock(spec=CandleAggregator)
+        pub._candle_aggregator = aggregator
+
+        await pub._sweep_completed_minute(ExchangeEnum.KRAKEN, "1m")
+
+        pub._supervise_candle_producer.assert_called_once()
+        pub._minute_emitter.due_flat_bars.assert_not_called()
+        ticks: list[float] = []
+
+        async def _stop_after_tick(seconds: float) -> None:
+            """Let one flush tick run, then stop the loop.
+
+            Args:
+                seconds: Requested sleep length.
+            """
+            ticks.append(seconds)
+            pub.running = len(ticks) < 2
+
+        monkeypatch.setattr(base_module.asyncio, "sleep", _stop_after_tick)
+        await pub._candle_flush_loop(ExchangeEnum.KRAKEN)
+        aggregator.flush.assert_not_called()
+
+
+class TestAdvanceCompletion:
+    """Handling a completion mark: certify, sweep, seal and fill, then record."""
+
+    @pytest.mark.asyncio
+    async def test_a_mark_of_another_generation_is_ignored_and_counted(self) -> None:
+        """Nothing from an old generation moves the completion state.
+
+        Given a consumer-driven publisher whose stream is in generation 1,
+        When a mark of generation 0 is handled,
+        Then nothing is certified, the state still waits, and one stale mark is
+            counted.
+        """
+        pub = _consumer_driven()
+        pub.generation = 1
+        pub._candle_aggregator = MagicMock(spec=CandleAggregator)
+
+        await pub._advance_completion(_completion_mark(0), ExchangeEnum.KRAKEN)
+
+        pub._candle_aggregator.certify.assert_not_called()
+        assert pub._completion_clock is CompletionClock.WAITING
+        assert pub._stale_trade_candle_marks == 1
+
+    @pytest.mark.asyncio
+    async def test_a_current_mark_progresses_without_an_emitter_or_aggregator(self) -> None:
+        """Sealing follows the marks even with minute completion off.
+
+        Given a consumer-driven publisher without emitter and aggregator,
+        When a current mark is handled,
+        Then the state progresses to the mark's boundary.
+        """
+        pub = _consumer_driven()
+
+        await pub._advance_completion(_completion_mark(), ExchangeEnum.KRAKEN)
+
+        assert (pub._completion_clock, pub._completion_through) == (
+            CompletionClock.PROGRESS,
+            _MARK_THROUGH,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_mark_certifies_sweeps_minute_by_minute_then_seals(self) -> None:
+        """Each minute's flat bars are published before the inline seal.
+
+        Given an emitter that owes one flat bar for each of two minutes, and an
+            aggregator whose seal at the mark emits one window,
+        When a current mark is handled,
+        Then the mark certifies first, both flat bars and the window are
+            published in that order, and the state progresses.
+        """
+        pub = _consumer_driven()
+        flat = [_candle_update(begin=_MARK_THROUGH - timedelta(minutes=n)) for n in (2, 1)]
+        emitter = MagicMock(spec=MinuteCompletionEmitter)
+        emitter.next_flat_minute.side_effect = [(0, [flat[0]]), (60, [flat[1]]), None]
+        pub._minute_emitter = emitter
+        window = _candle_update(begin=_MARK_THROUGH - timedelta(minutes=5))
+        aggregator = MagicMock(spec=CandleAggregator)
+        aggregator.fold.return_value = []
+        aggregator.flush_through.return_value = [("5m", window)]
+        aggregator.pop_late_drops.return_value = []
+        aggregator.pop_seeded_incomplete_windows.return_value = []
+        pub._candle_aggregator = aggregator
+        mark = _completion_mark()
+
+        await pub._advance_completion(mark, ExchangeEnum.KRAKEN)
+
+        aggregator.certify.assert_called_once_with(mark.through, mark.produced_at)
+        aggregator.flush_through.assert_called_once_with(mark.through, mark.produced_at)
+        emitter.next_flat_minute.assert_called_with(
+            mark.through.timestamp(), acquired_at=mark.produced_at
+        )
+        published = [call.args[1].open_at for call in pub._publish_message.await_args_list]
+        assert published == [flat[0].interval_begin, flat[1].interval_begin, window.interval_begin]
+        assert pub._completion_clock is CompletionClock.PROGRESS
+
+    @pytest.mark.asyncio
+    async def test_a_break_during_the_sweep_stops_it_and_commits_nothing(self) -> None:
+        """A sweep in progress when the stream breaks stops before its next minute.
+
+        Given an emitter owing a flat bar for each of two minutes,
+        When the stream's generation advances while the first minute publishes,
+        Then the second minute is never considered, nothing is sealed, and the
+            state does not progress.
+        """
+        pub = _consumer_driven()
+        emitter = MagicMock(spec=MinuteCompletionEmitter)
+        emitter.next_flat_minute.side_effect = [
+            (0, [_candle_update(begin=_MARK_THROUGH - timedelta(minutes=2))]),
+            (60, [_candle_update(begin=_MARK_THROUGH - timedelta(minutes=1))]),
+        ]
+        pub._minute_emitter = emitter
+        aggregator = MagicMock(spec=CandleAggregator)
+        aggregator.fold.return_value = []
+        aggregator.pop_late_drops.return_value = []
+        aggregator.pop_seeded_incomplete_windows.return_value = []
+        pub._candle_aggregator = aggregator
+
+        async def _break_while_publishing(*_args: object) -> None:
+            """Advance the stream's generation during the publication.
+
+            Args:
+                *_args: Ignored publication arguments.
+            """
+            pub.generation = 1
+
+        pub._publish_message = AsyncMock(side_effect=_break_while_publishing)
+
+        await pub._advance_completion(_completion_mark(), ExchangeEnum.KRAKEN)
+
+        assert emitter.next_flat_minute.call_count == 1
+        aggregator.flush_through.assert_not_called()
+        assert pub._completion_clock is CompletionClock.WAITING
+
+    @pytest.mark.asyncio
+    async def test_a_switch_during_the_seal_commits_no_progress(self) -> None:
+        """Progress is recorded only if the mark is still current after its seal.
+
+        Given an aggregator whose seal at the mark emits one window,
+        When the mode switches to the wall clock while that window publishes,
+        Then the state is the wall clock, not progress.
+        """
+        pub = _consumer_driven()
+        aggregator = MagicMock(spec=CandleAggregator)
+        aggregator.flush_through.return_value = [
+            ("5m", _candle_update(begin=_MARK_THROUGH - timedelta(minutes=5)))
+        ]
+        aggregator.pop_late_drops.return_value = []
+        aggregator.pop_seeded_incomplete_windows.return_value = []
+        pub._candle_aggregator = aggregator
+
+        async def _switch_while_publishing(*_args: object) -> None:
+            """Switch completion to the wall clock during the publication.
+
+            Args:
+                *_args: Ignored publication arguments.
+            """
+            pub.follows = False
+
+        pub._publish_message = AsyncMock(side_effect=_switch_while_publishing)
+
+        await pub._advance_completion(_completion_mark(), ExchangeEnum.KRAKEN)
+
+        assert pub._completion_clock is CompletionClock.WALL
+        assert pub._completion_through is None
+
+    @pytest.mark.asyncio
+    async def test_a_long_minute_yields_to_the_loop_between_bars(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A large sweep minute does not monopolise the event loop.
+
+        Given an emitter owing one minute with as many flat bars as the yield
+            interval,
+        When a current mark is handled,
+        Then the sweep yields to the loop once.
+        """
+        pub = _consumer_driven()
+        bars = [
+            _candle_update(begin=_MARK_THROUGH - timedelta(minutes=1), symbol=f"S{n}-EUR")
+            for n in range(_SWEEP_YIELD_EVERY)
+        ]
+        emitter = MagicMock(spec=MinuteCompletionEmitter)
+        emitter.next_flat_minute.side_effect = [(0, bars), None]
+        pub._minute_emitter = emitter
+        yields: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def _record_sleep(seconds: float) -> None:
+            """Record a yield to the loop.
+
+            Args:
+                seconds: Requested sleep length.
+            """
+            yields.append(seconds)
+            await real_sleep(0)
+
+        monkeypatch.setattr(base_module.asyncio, "sleep", _record_sleep)
+
+        await pub._advance_completion(_completion_mark(), ExchangeEnum.KRAKEN)
+
+        assert yields == [0]
+
+
+class TestTradeCandleBreakHandling:
+    """The discard path for an overflow or a lag discard."""
+
+    @pytest.mark.asyncio
+    async def test_a_break_item_suspends_waits_arms_and_asks_for_catchup(self) -> None:
+        """No window spanning the lost minutes is published as complete.
+
+        Given a progressing consumer-driven publisher with an aggregator and an
+            emitter,
+        When a break arrives on the stream,
+        Then the aggregator is suspended, the emitter's trade break is armed at
+            the popped boundary, the state waits, catchup is requested and one
+            warning is logged.
+        """
+        pub = _consumer_driven()
+        pub._completion_clock = CompletionClock.PROGRESS
+        pub._completion_through = _MARK_THROUGH
+        pub._candle_aggregator = MagicMock(spec=CandleAggregator)
+        pub._minute_emitter = MagicMock(spec=MinuteCompletionEmitter)
+        pub._request_candle_catchup = MagicMock()
+        warnings: list[str] = []
+        sink = logger.add(lambda message: warnings.append(str(message)), level="WARNING")
+        try:
+            handled = await pub._handle_candle_stream_item(
+                _stream_break(), ExchangeEnum.KRAKEN, "kraken", "1m"
+            )
+        finally:
+            logger.remove(sink)
+
+        assert handled is True
+        pub._candle_aggregator.suspend_across_feed_break.assert_called_once()
+        pub._minute_emitter.mark_trade_break.assert_called_once_with(
+            arm_after=int(_MARK_THROUGH.timestamp())
+        )
+        assert (pub._completion_clock, pub._completion_through) == (CompletionClock.WAITING, None)
+        pub._request_candle_catchup.assert_called_once()
+        assert any("reason=overflow" in line for line in warnings)
+
+    def test_a_break_on_the_wall_clock_keeps_the_wall_clock(self) -> None:
+        """The emitter forgets its closes in both modes; the state only outside the wall clock.
+
+        Given a wall-clock publisher with an emitter,
+        When a break without an arming floor is noted,
+        Then the state stays on the wall clock and the emitter's floor is left
+            unchanged.
+        """
+        pub: Any = DummyPublisher(symbols=["BTC-USD"])
+        pub._minute_emitter = MagicMock(spec=MinuteCompletionEmitter)
+
+        pub._note_trade_candle_break(_stream_break(arm_after=None))
+
+        assert pub._completion_clock is CompletionClock.WALL
+        pub._minute_emitter.mark_trade_break.assert_called_once_with(arm_after=None)
+
+    def test_a_break_without_an_emitter_only_moves_the_state(self) -> None:
+        """Minute completion off: the break still resets the completion state.
+
+        Given a progressing publisher without an emitter,
+        When a break is noted,
+        Then the state waits.
+        """
+        pub = _consumer_driven()
+        pub._completion_clock = CompletionClock.PROGRESS
+
+        pub._note_trade_candle_break(_stream_break())
+
+        assert pub._completion_clock is CompletionClock.WAITING
+
+
+class TestConsumerLagBound:
+    """A2: a bound on the consumer's lag discards the backlog."""
+
+    def test_the_lag_is_recorded_and_its_maximum_restarts_per_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The heartbeat sees the latest lag and the maximum since its last tick.
+
+        Given items consumed 30 s and then 5 s after their acquisition, and one
+            from a clock that stepped back,
+        When the lag figures are taken twice,
+        Then the first read reports the latest lag and the 30 s maximum, a
+            negative lag reads as zero, and the second read has no maximum.
+        """
+        pub = _consumer_driven()
+        now = datetime(2026, 11, 11, 16, 0, tzinfo=UTC)
+        monkeypatch.setattr(base_module, "wall_clock", now.timestamp)
+
+        pub._check_consumer_lag(None)
+        pub._check_consumer_lag(now - timedelta(seconds=30))
+        pub._check_consumer_lag(now - timedelta(seconds=5))
+        assert pub._take_consumer_lag() == {"consumer_lag_s": 5.0, "consumer_lag_max_s": 30.0}
+        pub._check_consumer_lag(now + timedelta(seconds=3))
+        assert pub._take_consumer_lag() == {"consumer_lag_s": 0.0, "consumer_lag_max_s": 0.0}
+        assert pub._take_consumer_lag() == {"consumer_lag_s": 0.0, "consumer_lag_max_s": None}
+        assert pub.discards == 0
+
+    def test_a_lag_beyond_the_bound_discards_and_runs_the_discard_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Beyond a positive bound the backlog is discarded; within it nothing happens.
+
+        Given a bound of 300 s,
+        When items 300 s and 301 s old are consumed, and then the discard finds
+            an empty queue,
+        Then only the older item discards, the discard path runs once, and an
+            empty queue runs no discard path.
+        """
+        pub = _consumer_driven()
+        pub.lag_bound = 300
+        pub.discard = _stream_break(TradeCandleBreakReason.LAG)
+        pub._handle_trade_candle_break = MagicMock()
+        now = datetime(2026, 11, 11, 16, 0, tzinfo=UTC)
+        monkeypatch.setattr(base_module, "wall_clock", now.timestamp)
+
+        pub._check_consumer_lag(now - timedelta(seconds=300))
+        assert pub.discards == 0
+        pub._check_consumer_lag(now - timedelta(seconds=301))
+        pub._handle_trade_candle_break.assert_called_once_with(pub.discard)
+        pub.discard = None
+        pub._check_consumer_lag(now - timedelta(seconds=301))
+        assert pub.discards == 2
+        pub._handle_trade_candle_break.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_bar_and_a_mark_are_checked_before_they_are_handled(self) -> None:
+        """The bound applies to both item kinds, in either completion mode.
+
+        Given a consumer-driven publisher,
+        When a mark and a bar are handled,
+        Then the lag is checked at the mark's production and the bar's
+            acquisition.
+        """
+        pub = _consumer_driven()
+        checked: list[datetime | None] = []
+        pub._check_consumer_lag = checked.append
+        bar = replace(_candle_update(begin=_MARK_THROUGH), acquired_at=_MARK_PRODUCED)
+        mark = _completion_mark()
+
+        await pub._handle_candle_stream_item(mark, ExchangeEnum.KRAKEN, "kraken", "1m")
+        await pub._handle_candle_stream_item(bar, ExchangeEnum.KRAKEN, "kraken", "1m")
+
+        assert checked == [mark.produced_at, _MARK_PRODUCED]
+
+
+class TestAcquisitionAuthorship:
+    """Rows and messages are authored when their evidence became final."""
+
+    @pytest.mark.asyncio
+    async def test_a_bar_with_an_acquisition_is_authored_by_it(self) -> None:
+        """A delayed bar does not supersede a newer version by its processing time.
+
+        Given a 1m bar acquired at 15:03:12,
+        When it is processed later,
+        Then its message and row carry 15:03:12 as their timestamp.
+        """
+        pub = _consumer_driven()
+        bar = replace(_candle_update(begin=_MARK_THROUGH), acquired_at=_MARK_PRODUCED)
+
+        row = await pub._process_candle(bar, cast(Any, "kraken"), "1m")
+
+        assert row is not None
+        assert row["timestamp"] == _MARK_PRODUCED
+        assert pub._publish_message.await_args.args[1].timestamp == _MARK_PRODUCED
+
+    @pytest.mark.asyncio
+    async def test_a_window_with_an_author_is_published_under_it(self) -> None:
+        """The author fixed at emission survives every later await.
+
+        Given a synthesized window authored at 15:03:12,
+        When it is published,
+        Then its message carries that author.
+        """
+        pub = _consumer_driven()
+        window = replace(
+            _candle_update(begin=_MARK_THROUGH - timedelta(minutes=5)),
+            interval=300,
+            acquired_at=_MARK_PRODUCED,
+        )
+
+        await pub._publish_synthesized_candle(window, cast(Any, "kraken"), "5m")
+
+        assert pub._publish_message.await_args.args[1].timestamp == _MARK_PRODUCED
+
+    @pytest.mark.asyncio
+    async def test_a_repair_is_authored_at_its_derivation_only_while_marks_drive(self) -> None:
+        """A repair never takes a live certification, and keeps processing time otherwise.
+
+        Given a derived repair window,
+        When it is repaired with completion following the consumer, and again on
+            the wall clock,
+        Then the first is published with the derivation time as its author and
+            the second without one.
+        """
+        pub = _consumer_driven()
+        window = replace(_candle_update(begin=_MARK_THROUGH), interval=300)
+        pub._derive_repaired_synthesized_candle = AsyncMock(return_value=window)
+        published: list[CandleUpdate] = []
+
+        async def _record(candle: CandleUpdate, *_args: object) -> int:
+            """Record the published repair.
+
+            Args:
+                candle: Repair window being published.
+                *_args: Ignored publication arguments.
+
+            Returns:
+                A queued writer sequence.
+            """
+            published.append(candle)
+            return 1
+
+        pub._publish_synthesized_candle = _record
+        key = _CandleRepairKey("BTC-USD", "5m", _MARK_THROUGH)
+        before = datetime.now(UTC)
+
+        assert await pub._repair_candle_key(key, ExchangeEnum.KRAKEN) is True
+        after = datetime.now(UTC)
+        pub.follows = False
+        assert await pub._repair_candle_key(key, ExchangeEnum.KRAKEN) is True
+
+        derived = published[0].acquired_at
+        assert derived is not None
+        assert before <= derived <= after
+        assert published[1].acquired_at is None
+
+    @pytest.mark.asyncio
+    async def test_a_historical_repair_row_is_authored_at_its_derivation(self) -> None:
+        """The quiet historical path uses the derivation author too.
+
+        Given a historical repair window authored at its derivation,
+        When it is committed,
+        Then its row carries that author as its timestamp.
+        """
+        pub = _consumer_driven()
+        persisted: list[list[CandleUpsertRow]] = []
+
+        async def _persist(rows: list[CandleUpsertRow]) -> None:
+            """Record the committed rows.
+
+            Args:
+                rows: Rows committed by the historical path.
+            """
+            persisted.append(rows)
+
+        pub._persist_historical_candle_rows = _persist
+        window = replace(
+            _candle_update(begin=_MARK_THROUGH), interval=300, acquired_at=_MARK_PRODUCED
+        )
+
+        assert await pub._commit_historical_candle_repair(window, ExchangeEnum.KRAKEN, "5m")
+
+        assert persisted[0][0]["timestamp"] == _MARK_PRODUCED
+
+
+async def _active_candles(repo: SQLAlchemyRepository) -> list[tuple[str, str, datetime, float]]:
+    """Read every active candle version.
+
+    Args:
+        repo: Repository under test.
+
+    Returns:
+        Timeframe, source, author and close of each active row, by opening.
+    """
+    async with repo.session() as session:
+        result = await session.execute(
+            select(Candle.timeframe, Candle.source, Candle.timestamp, Candle.close)
+            .where(Candle.known_to == KNOWN_TO_MAX)
+            .order_by(Candle.open_at, Candle.timeframe)
+        )
+        return [
+            (timeframe, source, author.replace(tzinfo=UTC), close)
+            for timeframe, source, author, close in result.all()
+        ]
+
+
+_WINDOW = datetime(2026, 11, 11, 15, 5, tzinfo=UTC)
+"""Opening of the 5m window the repository authorship tests write."""
+
+
+def _stored_row(*, timeframe: str, source: str, author: datetime, close: float) -> CandleUpsertRow:
+    """Build a stored candle row of the reference instrument and window.
+
+    Args:
+        timeframe: Candle timeframe.
+        source: Row provenance.
+        author: Row author.
+        close: Row close.
+
+    Returns:
+        A complete candle row opening at the reference window.
+    """
+    return {
+        "instrument_public_id": "inst-1",
+        "open_at": _WINDOW,
+        "timestamp": author,
+        "timeframe": timeframe,
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "volume": 1.0,
+        "vwap": close,
+        "trades": 1,
+        "source": source,
+        "complete": True,
+        "price_basis": "last",
+        "session_id": "session-author",
+        "sequence_id": 1,
+    }
+
+
+class TestAuthorshipAgainstTheRepository:
+    """The live writer's guard keeps a strictly later author, whatever arrives later."""
+
+    @pytest.mark.asyncio
+    async def test_a_delayed_bar_does_not_supersede_a_later_native_row(
+        self, tmp_path: Path
+    ) -> None:
+        """A bar processed late is authored when its evidence became final.
+
+        Given a native row authored 30 minutes after a calculated bar's
+            acquisition,
+        When the delayed calculated bar is processed and written,
+        Then the native row stays active.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'authors.db'}")
+        await repo.create_all()
+        try:
+            native_at = _MARK_PRODUCED + timedelta(minutes=30)
+            await repo.upsert_candles(
+                [_stored_row(timeframe="1m", source="native", author=native_at, close=10.0)]
+            )
+            pub = _consumer_driven()
+            pub._candle_source_for = lambda _tf: "calculated"
+            bar = replace(_candle_update(begin=_WINDOW, close=9.0), acquired_at=_MARK_PRODUCED)
+            row = await pub._process_candle(bar, cast(Any, "kraken"), "1m")
+            assert row is not None
+
+            await repo.upsert_candles([row])
+
+            assert await _active_candles(repo) == [("1m", "native", native_at, 10.0)]
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("repair_first", [True, False])
+    async def test_a_repair_beats_a_window_certified_before_it_in_both_orders(
+        self, tmp_path: Path, repair_first: bool
+    ) -> None:
+        """A window keeps its certification as author, so a later repair wins.
+
+        Given a window certified at C whose closing bar was acquired at A, and a
+            repair authored at R with C < R < A,
+        When the live window and the repair are written in either order,
+        Then the window is authored at C, never at A, and the repair stays.
+
+        Args:
+            tmp_path: Pytest temporary directory.
+            repair_first: Whether the repair is written first.
+        """
+        certified = _WINDOW + timedelta(minutes=5, seconds=12)
+        repaired = certified + timedelta(seconds=30)
+        closing = certified + timedelta(minutes=2)
+        aggregator = CandleAggregator(["5m"], live_epoch=_WINDOW - timedelta(minutes=10))
+        aggregator.authoring = True
+        for minute in range(5):
+            begin = _WINDOW + timedelta(minutes=minute)
+            acquired = begin + timedelta(minutes=1, seconds=12)
+            aggregator.fold(replace(_candle_update(begin=begin), acquired_at=acquired))
+        aggregator.certify(_WINDOW + timedelta(minutes=5), certified)
+        aggregator.fold(
+            replace(
+                _candle_update(begin=_WINDOW + timedelta(minutes=5)),
+                acquired_at=closing - timedelta(minutes=1),
+            )
+        )
+        emitted = aggregator.fold(
+            replace(_candle_update(begin=_WINDOW + timedelta(minutes=6)), acquired_at=closing)
+        )
+        window = emitted[0][1]
+        assert window.acquired_at == certified
+        live = _stored_row(timeframe="5m", source="synthesized", author=certified, close=100.0)
+        repair = _stored_row(timeframe="5m", source="synthesized", author=repaired, close=101.0)
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'repair.db'}")
+        await repo.create_all()
+        try:
+            for row in [repair, live] if repair_first else [live, repair]:
+                await repo.upsert_candles([row])
+
+            assert await _active_candles(repo) == [("5m", "synthesized", repaired, 101.0)]
+        finally:
+            await repo.engine.dispose()
+
+
+class TestRuntimeModeSwitch:
+    """Only the candle loop moves the completion state."""
+
+    @pytest.mark.asyncio
+    async def test_a_wall_sweep_finishes_in_the_mode_it_started_in(self) -> None:
+        """A flush tick during a wall-clock sweep neither switches nor flushes.
+
+        Given a wall-clock publisher whose sweep owes two flat bars, and whose
+            setting switches to following the consumer while the first is
+            published, with a flush tick in between,
+        When the sweep runs,
+        Then the tick reports nothing due, both flat bars fold with authoring
+            off on the wall clock, and only the candle loop's next sweep moves
+            the state to waiting.
+        """
+        pub = _consumer_driven()
+        pub.follows = False
+        emitter = MagicMock(spec=MinuteCompletionEmitter)
+        flats = [
+            _candle_update(begin=_MARK_THROUGH, symbol=symbol) for symbol in ("A-EUR", "B-EUR")
+        ]
+        emitter.due_flat_bars.return_value = flats
+        pub._minute_emitter = emitter
+        aggregator = MagicMock(spec=CandleAggregator)
+        authoring: list[bool] = []
+
+        def _fold(_candle: CandleUpdate) -> list[tuple[str, CandleUpdate]]:
+            """Record the authoring flag at each fold.
+
+            Args:
+                _candle: Folded flat bar.
+
+            Returns:
+                No closed window.
+            """
+            authoring.append(aggregator.authoring)
+            return []
+
+        aggregator.fold.side_effect = _fold
+        aggregator.pop_late_drops.return_value = []
+        aggregator.pop_seeded_incomplete_windows.return_value = []
+        pub._candle_aggregator = aggregator
+        due: list[bool] = []
+
+        async def _switch_and_tick(*_args: object) -> None:
+            """Switch the setting and run a flush tick's check mid-publication.
+
+            Args:
+                *_args: Ignored publication arguments.
+            """
+            pub.follows = True
+            due.append(pub._wall_clock_flush_due())
+
+        pub._publish_message = AsyncMock(side_effect=_switch_and_tick)
+
+        await pub._sweep_completed_minute(ExchangeEnum.KRAKEN, "1m")
+
+        assert authoring == [False, False]
+        assert due == [False, False]
+        assert pub._completion_clock is CompletionClock.WALL
+        await pub._sweep_completed_minute(ExchangeEnum.KRAKEN, "1m")
+        assert pub._completion_clock is CompletionClock.WAITING
+        assert aggregator.authoring is True
+
+    def test_a_flush_is_due_only_on_the_wall_clock(self) -> None:
+        """The tick flushes while the state and the setting both say wall clock.
+
+        Given a wall-clock publisher, then one waiting for marks,
+        When the tick asks whether a flush is due,
+        Then only the wall-clock state with the setting off is due.
+        """
+        pub = _consumer_driven()
+        pub.follows = False
+        assert pub._wall_clock_flush_due() is True
+        pub._completion_clock = CompletionClock.WAITING
+        assert pub._wall_clock_flush_due() is False
+
+
+async def _assert_repair_survives(tmp_path: Path, window: CandleData, repaired: datetime) -> None:
+    """Write a published window after a stored, later repair, and check the repair stays.
+
+    Args:
+        tmp_path: Pytest temporary directory.
+        window: Published live window message.
+        repaired: Author of the stored repair, later than the window's author.
+    """
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'emission.db'}")
+    await repo.create_all()
+    try:
+        repair = _stored_row(timeframe="5m", source="synthesized", author=repaired, close=101.0)
+        repair["open_at"] = window.open_at
+        live = _stored_row(
+            timeframe="5m", source="synthesized", author=window.timestamp, close=100.0
+        )
+        live["open_at"] = window.open_at
+        await repo.upsert_candles([repair])
+        await repo.upsert_candles([live])
+
+        assert await _active_candles(repo) == [("5m", "synthesized", repaired, 101.0)]
+    finally:
+        await repo.engine.dispose()
+
+
+def _five_minutes(aggregator: CandleAggregator, start: datetime, symbol: str = "BTC-USD") -> None:
+    """Fold five traded minutes of the window opening at ``start``, each acquired after its end.
+
+    Args:
+        aggregator: Aggregator under test.
+        start: Opening of the 5m window.
+        symbol: Native symbol of the bars.
+    """
+    for minute in range(5):
+        begin = start + timedelta(minutes=minute)
+        acquired = begin + timedelta(minutes=1, seconds=12)
+        bar = _candle_update(begin=begin, symbol=symbol)
+        aggregator.fold(replace(bar, acquired_at=acquired))
+
+
+class TestResetBetweenEmissionAndPublication:
+    """An emitted window keeps its author through a reset before its publication."""
+
+    @staticmethod
+    def _windows(pub: Any) -> list[CandleData]:
+        """Return the published 5m messages.
+
+        Args:
+            pub: Publisher under test.
+
+        Returns:
+            The 5m candle messages, in publication order.
+        """
+        return [
+            call.args[1]
+            for call in pub._publish_message.await_args_list
+            if call.args[1].timeframe == "5m"
+        ]
+
+    @staticmethod
+    def _reset_on(pub: Any, timeframe: str, opened: datetime) -> None:
+        """Reset the stream once, while the first matching message is being published.
+
+        Args:
+            pub: Publisher under test.
+            timeframe: Timeframe of the message that triggers the reset.
+            opened: Opening of that message.
+        """
+        fired: list[CandleData] = []
+
+        async def _publish(_topic: str, message: CandleData) -> None:
+            """Break the stream when the first trigger message is published.
+
+            Args:
+                _topic: Ignored topic.
+                message: Published message.
+            """
+            if not fired and message.timeframe == timeframe and message.open_at == opened:
+                fired.append(message)
+                pub._suspend_candle_synthesis_across_break()
+                pub.generation += 1
+
+        pub._publish_message = AsyncMock(side_effect=_publish)
+
+    @pytest.mark.asyncio
+    async def test_the_real_bar_fold_path(self, tmp_path: Path) -> None:
+        """A window closed by a real bar is published under its certification.
+
+        Given a window certified at its mark, then a real bar that closes it,
+        When the stream resets while that bar's own 1m message is published,
+        Then the window is published under its certification and loses to a
+            later repair.
+
+        Args:
+            tmp_path: Pytest temporary directory.
+        """
+        pub = _consumer_driven()
+        pub._sync_completion_mode()
+        aggregator = CandleAggregator(["5m"], live_epoch=_WINDOW - timedelta(minutes=10))
+        pub._candle_aggregator = aggregator
+        pub._sync_completion_mode()
+        _five_minutes(aggregator, _WINDOW)
+        certified = _WINDOW + timedelta(minutes=5, seconds=12)
+        aggregator.certify(_WINDOW + timedelta(minutes=5), certified)
+        aggregator.fold(
+            replace(
+                _candle_update(begin=_WINDOW + timedelta(minutes=5)),
+                acquired_at=certified + timedelta(minutes=1),
+            )
+        )
+        closing = _WINDOW + timedelta(minutes=6)
+        self._reset_on(pub, "1m", closing)
+
+        await pub._handle_candle_stream_item(
+            replace(_candle_update(begin=closing), acquired_at=certified + timedelta(minutes=2)),
+            ExchangeEnum.KRAKEN,
+            "kraken",
+            "1m",
+        )
+
+        windows = self._windows(pub)
+        assert [w.timestamp for w in windows] == [certified]
+        await _assert_repair_survives(tmp_path, windows[0], certified + timedelta(seconds=30))
+
+    @pytest.mark.asyncio
+    async def test_the_flat_bar_fold_path(self, tmp_path: Path) -> None:
+        """A window closed by a swept flat bar is published under its certification.
+
+        Given a window of five traded minutes and a mark whose sweep folds flat
+            bars for the next two minutes,
+        When the stream resets while the closing flat bar's 1m message is
+            published,
+        Then the window is published under the mark's certification and loses
+            to a later repair.
+
+        Args:
+            tmp_path: Pytest temporary directory.
+        """
+        pub = _consumer_driven()
+        aggregator = CandleAggregator(["5m"], live_epoch=_WINDOW - timedelta(minutes=10))
+        pub._candle_aggregator = aggregator
+        _five_minutes(aggregator, _WINDOW)
+        mark = _completion_mark(through=_WINDOW + timedelta(minutes=7))
+        flat = [
+            replace(
+                _candle_update(begin=_WINDOW + timedelta(minutes=n), volume=0.0, trades=0),
+                acquired_at=mark.produced_at,
+            )
+            for n in (5, 6)
+        ]
+        emitter = MagicMock(spec=MinuteCompletionEmitter)
+        emitter.next_flat_minute.side_effect = [(0, [flat[0]]), (60, [flat[1]]), None]
+        pub._minute_emitter = emitter
+        self._reset_on(pub, "1m", flat[1].interval_begin)
+
+        await pub._advance_completion(mark, ExchangeEnum.KRAKEN)
+
+        windows = self._windows(pub)
+        assert [w.timestamp for w in windows] == [mark.produced_at]
+        assert pub._completion_clock is not CompletionClock.PROGRESS
+        await _assert_repair_survives(tmp_path, windows[0], mark.produced_at + timedelta(seconds=1))
+
+    @pytest.mark.asyncio
+    async def test_the_inline_flush_path(self, tmp_path: Path) -> None:
+        """A window sealed by the inline flush keeps its author after a reset.
+
+        Given the same window of two symbols, each with its last minute still
+            held, a forward-filling aggregator, and a mark that seals both inline,
+        When the stream resets while the first sealed window is published,
+        Then the other symbol's window is still published under its fixed
+            author and loses to a later repair. The flush walks symbols in no
+            fixed order, so neither symbol is assumed to come first.
+
+        Args:
+            tmp_path: Pytest temporary directory.
+        """
+        pub = _consumer_driven()
+        aggregator = CandleAggregator(
+            ["5m"], live_epoch=_WINDOW - timedelta(minutes=10), forward_fill=True
+        )
+        pub._candle_aggregator = aggregator
+        _five_minutes(aggregator, _WINDOW)
+        _five_minutes(aggregator, _WINDOW, "ETH-USD")
+        mark = _completion_mark(through=_WINDOW + timedelta(minutes=5))
+        self._reset_on(pub, "5m", _WINDOW)
+
+        await pub._advance_completion(mark, ExchangeEnum.KRAKEN)
+
+        windows = self._windows(pub)
+        assert sorted((w.instrument, w.open_at, w.timestamp) for w in windows) == [
+            ("BTC-USD", _WINDOW, mark.produced_at),
+            ("ETH-USD", _WINDOW, mark.produced_at),
+        ]
+        assert pub._completion_clock is not CompletionClock.PROGRESS
+        await _assert_repair_survives(tmp_path, windows[1], mark.produced_at + timedelta(seconds=1))
+
+
+class TestEqualAuthors:
+    """An equal author replaces its predecessor, as before."""
+
+    @pytest.mark.asyncio
+    async def test_an_equal_author_replaces_and_closes_at_the_same_instant(
+        self, tmp_path: Path
+    ) -> None:
+        """Two versions of one key authored at the same instant: the later write wins.
+
+        Given a stored row authored at T,
+        When another row of the same key authored at T is written,
+        Then the new row is active and the predecessor closed at T.
+
+        Args:
+            tmp_path: Pytest temporary directory.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'equal.db'}")
+        await repo.create_all()
+        try:
+            author = _MARK_PRODUCED
+            await repo.upsert_candles(
+                [_stored_row(timeframe="1m", source="calculated", author=author, close=10.0)]
+            )
+            await repo.upsert_candles(
+                [_stored_row(timeframe="1m", source="calculated", author=author, close=11.0)]
+            )
+
+            assert await _active_candles(repo) == [("1m", "calculated", author, 11.0)]
+            async with repo.session() as session:
+                closed = (
+                    (
+                        await session.execute(
+                            select(Candle.known_to).where(Candle.known_to != KNOWN_TO_MAX)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            assert [value.replace(tzinfo=UTC) for value in closed] == [author]
+        finally:
+            await repo.engine.dispose()

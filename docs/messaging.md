@@ -1196,6 +1196,52 @@ Key properties:
     flush grace past the sweep settle, so higher-TF bars publish about 20 s later
     and now include their final minute, which the default 5 s seal could drop as
     late.
+- **Completion that follows the consumer (Kraken spot, `trade_built`)** — the
+    trade-built producer puts completion marks into the same FIFO queue as its
+    bars. Before each minute group that advances its boundary, a mark certifies
+    every earlier minute; after each tick, a mark certifies the tick's own
+    boundary. With `spot_completion_follows_consumer` on (the default), the
+    candle loop handles a mark completely before it takes the next item:
+    - it certifies every higher-timeframe window whose end the mark newly
+      reaches;
+    - it sweeps every minute the mark certifies, one minute at a time;
+    - it seals and forward-fills inline at the mark's boundary, with no grace;
+    - only then does it record its progress.
+
+    The wall-clock sweep and the periodic flush tick do nothing in this mode,
+    so neither gets ahead of a queued real bar.
+
+    The state is `wall`, `waiting` or `progress`. `waiting` moves nothing; it
+    is the state at startup and after every break, until a mark of the current
+    generation is handled. A mark of an older generation is ignored and
+    counted as stale.
+
+    The minute-completion witness keeps 130 minutes, so a consumer up to about
+    two hours behind still asserts the minutes it sweeps. Older minutes are
+    passed over in one step and counted as `skipped_unswept`.
+
+    The trade-built queue refuses an item instead of evicting a queued bar. The
+    next read turns the refusals into a break with the lost minute range and a
+    new generation. An overflow, a lag discard
+    (`trade_built_max_consumer_lag_seconds`, default off) or a reconnect then:
+    - suspends the aggregator, so no window spanning the lost minutes is
+      published as complete;
+    - forgets every carried close;
+    - arms a floor below which a real bar no longer arms a close;
+    - asks the native catchup to reconcile.
+
+    A row's `timestamp`, its author, is the time its evidence became final:
+    - a 1m bar's acquisition by the producer;
+    - a flat bar's certifying mark;
+    - for a window, the later of its certification and its newest constituent;
+    - a repair's derivation.
+
+    A delayed row therefore never supersedes a version authored strictly later,
+    such as a native catchup row or a repair. The heartbeat carries the stream's
+    `state`, `completed_through`, `generation`, `queue_depth`, `stale_marks`,
+    `consumer_lag_s`, `consumer_lag_max_s` and the producer's health under
+    `meta.venue.trade_candles`. Switching the setting off returns to the wall
+    clock and to processing-time window authors from the next call.
 - **Native-feed replacement (kraken spot)** — kraken spot is the one venue with a
     native higher-TF OHLC feed; synthesizing those timeframes from 1m REPLACES it
     (a deliberate one-mechanism choice — the rolled-up VWAP/trades approximate the

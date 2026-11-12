@@ -524,6 +524,13 @@ class CandleUpdate:
     and ``trades=0`` — it reports a genuine tick-mean price and no size at all —
     so a reader testing only the volume and trade count would read the entire
     walutomat corpus as flat no-trade bars.
+
+    ``acquired_at`` is the UTC wall clock at which the producing component
+    completed the bar's evidence: the Kraken spot trade-built producer's tick, a
+    flat bar's certifying mark, or a live window's certification. It becomes the
+    author time of the published message and the stored row, so a delayed bar
+    cannot supersede a version authored after its evidence was final. ``None``
+    means "now, at processing", as for every other source.
     """
 
     symbol: str
@@ -537,6 +544,7 @@ class CandleUpdate:
     interval_begin: datetime
     interval: int
     complete: bool = True
+    acquired_at: datetime | None = None
 
 
 @dataclass

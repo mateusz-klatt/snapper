@@ -800,6 +800,46 @@ class AppSettings:
         return "native"
 
     @property
+    def spot_completion_follows_consumer(self) -> bool:
+        """Return whether Kraken Spot completion follows its candle consumer.
+
+        In ``trade_built`` mode, ``True`` (default) makes the minute-completion
+        sweep and the higher-timeframe seal and forward fill follow the
+        completion marks that the trade-built producer puts into the candle
+        queue, instead of the wall clock, so neither runs ahead of a lagging
+        consumer. Live windows are then authored at the time their evidence
+        became final. ``False`` restores the wall-clock sweep, the wall-clock
+        flush and processing-time window authors from the next call, without
+        a restart.
+
+        Returns:
+            ``True`` (default) to follow the consumer; ``False`` to follow the
+            wall clock.
+        """
+        raw = self._get_db_setting("spot_completion_follows_consumer", True)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in ("true", "1", "yes", "on")
+        return bool(raw)
+
+    @property
+    def trade_built_max_consumer_lag_seconds(self) -> int:
+        """Return the bound on the Kraken Spot trade-built candle consumer's lag.
+
+        When positive, a bar or completion mark that the consumer takes more
+        than this many seconds after its acquisition discards the queued
+        backlog: the trade candle builder is kept, the lost minutes are
+        reported, and the native catchup is asked to reconcile them. ``0``
+        (default) never discards. Read live.
+
+        Returns:
+            Non-negative seconds; ``0`` disables the bound.
+        """
+        raw = self._get_db_setting("trade_built_max_consumer_lag_seconds", 0)
+        return max(0, int(raw))
+
+    @property
     def trade_built_finalize_grace_seconds(self) -> int:
         """Return wall-clock grace before trade-built 1m buckets finalize.
 
