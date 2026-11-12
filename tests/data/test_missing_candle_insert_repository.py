@@ -1122,6 +1122,61 @@ async def test_batch_identities_cancellation_at_transaction_exit_propagates(
 
 
 @pytest.mark.asyncio
+async def test_batch_identities_cancelled_while_holding_the_sqlite_writer_release_it(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A window read cancelled after its fence releases the real SQLite writer lock.
+
+    Given: A window read that has taken the real SQLite writer reservation and is
+        stopped right after its fence, and a second writer waiting for that lock.
+    When: The read is cancelled.
+    Then: The read raises the cancellation, and the waiting writer commits well
+        within the 30 s busy timeout, which only a released lock allows.
+    """
+    fence = SQLAlchemyRepository._prepare_live_candle_write
+    fenced = asyncio.Event()
+    hold = asyncio.Event()
+
+    async def fence_then_hold(
+        repo: SQLAlchemyRepository, session: AsyncSession, rows: list[CandleUpsertRow]
+    ) -> list[CandleUpsertRow]:
+        """Take the real writer fence, then wait while holding it.
+
+        Args:
+            repo: Repository under test.
+            session: The read's own transaction.
+            rows: Rows the fence filters.
+
+        Returns:
+            The fenced rows, once released.
+        """
+        prepared = await fence(repo, session, rows)
+        fenced.set()
+        await hold.wait()
+        return prepared
+
+    monkeypatch.setattr(SQLAlchemyRepository, "_prepare_live_candle_write", fence_then_hold)
+    read = asyncio.create_task(
+        repository.get_canonical_candle_public_ids([_INSTRUMENT], "1m", _OPEN)
+    )
+    await asyncio.wait_for(fenced.wait(), timeout=5.0)
+    monkeypatch.undo()
+    writer = asyncio.create_task(repository.insert_missing_candles([_row()]))
+    await asyncio.sleep(0.2)
+    assert not writer.done()
+
+    read.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await read
+    inserted = await asyncio.wait_for(writer, timeout=5.0)
+
+    assert len(inserted) == 1
+    assert await repository.get_canonical_candle_public_ids([_INSTRUMENT], "1m", _OPEN) == {
+        _INSTRUMENT: inserted[0]["public_id"]
+    }
+
+
+@pytest.mark.asyncio
 async def test_batch_identities_retain_caller_transaction_ownership(
     repository: SQLAlchemyRepository,
 ) -> None:

@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 
 from snapper.config.app import AppSettings
+from snapper.core.candle_identity import deterministic_candle_public_id
 from snapper.core.types import ExchangeEnum
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
@@ -45,6 +46,8 @@ from snapper.messaging.publishers.kraken_candle_catchup import repair_read_start
 from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
 from snapper.messaging.publishers.native_candle_finalizer import is_complete_historical_minute
 
+INSTRUMENT_ID = "00000000-0000-4000-8000-0000000c0001"
+OTHER_INSTRUMENT_ID = "00000000-0000-4000-8000-0000000c0002"
 NOW = datetime(2026, 10, 28, 21, 35, 30, tzinfo=UTC)
 START = NOW.replace(minute=25, second=0)
 
@@ -84,7 +87,7 @@ class _Fixture:
         """Keep durable rows separate from committed repair notifications."""
         self.running = True
         self.symbols = ["BTC-USD"]
-        self.resolve = AsyncMock(return_value="instrument")
+        self.resolve = AsyncMock(return_value=INSTRUMENT_ID)
         self.client = MagicMock(spec=KrakenExchangeClient)
         self.client.get_closed_1m_candles = AsyncMock(return_value=[_candle()])
         self.repository = MagicMock(spec=Repository)
@@ -519,6 +522,7 @@ def _publisher() -> KrakenMarketDataPublisher:
     settings.candle_minute_completion = False
     settings.trade_built_finalize_grace_seconds = 12
     settings.candle_identity_window_snapshot = False
+    settings.candle_identity_deterministic_from = None
     publisher.settings = settings
     return publisher
 
@@ -706,7 +710,7 @@ async def test_attempt_that_read_a_corrected_minute_cannot_clear_its_revised_rep
         request stays pending as a new object, ready to derive again.
     """
     publisher = _publisher()
-    publisher._ensure_instrument = AsyncMock(return_value="instrument")
+    publisher._ensure_instrument = AsyncMock(return_value=INSTRUMENT_ID)
     publisher._publish_message = AsyncMock()
     publisher._candle_aggregator = CandleAggregator(["5m"])
     key = _CandleRepairKey("BTC-USD", "5m", START)
@@ -742,7 +746,7 @@ async def test_historical_repair_commits_without_publishing_and_waits_for_ack() 
     Then: Pending work survives until ACK and no live message or queue row appears.
     """
     publisher = _publisher()
-    publisher._ensure_instrument = AsyncMock(return_value="instrument")
+    publisher._ensure_instrument = AsyncMock(return_value=INSTRUMENT_ID)
     publisher._publish_message = AsyncMock()
     publisher._candle_aggregator = CandleAggregator(["5m"])
     key = _CandleRepairKey("BTC-USD", "5m", START)
@@ -786,7 +790,7 @@ async def test_historical_commit_keeps_pending_on_uncertainty_or_new_generation(
     Then: Its pending dependency remains and no live market event is sent.
     """
     publisher = _publisher()
-    publisher._ensure_instrument = AsyncMock(return_value="instrument")
+    publisher._ensure_instrument = AsyncMock(return_value=INSTRUMENT_ID)
     publisher._publish_message = AsyncMock()
     publisher._candle_aggregator = CandleAggregator(["5m"])
     key = _CandleRepairKey("BTC-USD", "5m", START)
@@ -1085,7 +1089,7 @@ async def test_historical_commit_does_not_consume_live_topic_sequences(
     Then: The next real live event receives the immediately following sequence.
     """
     publisher = _publisher()
-    publisher._ensure_instrument = AsyncMock(return_value="instrument")
+    publisher._ensure_instrument = AsyncMock(return_value=INSTRUMENT_ID)
     repository = MagicMock(spec=Repository)
     publisher.repository = repository
     topic = publisher._build_data_topic("BTC-USD", "candles", timeframe="5m")
@@ -1198,7 +1202,7 @@ async def test_historical_reread_refuses_changed_business_fields_and_keeps_pendi
     publisher = _publisher()
     publisher._candle_aggregator = CandleAggregator(["5m"])
     rows = [_row(i) for i in range(25, 30)]
-    publisher._ensure_instrument = AsyncMock(return_value="instrument")
+    publisher._ensure_instrument = AsyncMock(return_value=INSTRUMENT_ID)
     assert len(complete_repair_windows(rows, START, START.replace(minute=30), ["5m"])) == 1
     key = _CandleRepairKey("BTC-USD", "5m", START)
     minutes = frozenset(row["open_at"] for row in rows)
@@ -1350,7 +1354,7 @@ def _identity_publisher() -> tuple[KrakenMarketDataPublisher, MagicMock]:
 async def _resolve_test_identity(publisher: KrakenMarketDataPublisher, offset: int = 0) -> str:
     """Exercise the actual gated resolver on one fixed test-only natural key."""
     return await publisher._resolve_live_candle_public_id(
-        "instrument", "1m", START + timedelta(minutes=offset), "BTC-USD"
+        INSTRUMENT_ID, "1m", START + timedelta(minutes=offset), "BTC-USD"
     )
 
 
@@ -1366,7 +1370,7 @@ def _native_identity_row(publisher: KrakenMarketDataPublisher) -> CandleUpsertRo
         lambda: NOW,
     )
     worker = KrakenCandleCatchup(fixture.repository, fixture.client, callbacks)
-    return worker._row(_candle(), "instrument", NOW)
+    return worker._row(_candle(), INSTRUMENT_ID, NOW)
 
 
 @pytest.mark.asyncio
@@ -1394,7 +1398,7 @@ async def test_identity_selection_serializes_native_commit_but_not_rest_acquisit
     client.get_closed_1m_candles = AsyncMock(side_effect=fetch)
     callbacks = CatchupCallbacks(
         lambda: ["BTC-USD"],
-        AsyncMock(return_value="instrument"),
+        AsyncMock(return_value=INSTRUMENT_ID),
         AsyncMock(),
         lambda: True,
         publisher._tracker,
@@ -1537,7 +1541,7 @@ async def test_acknowledged_and_older_canonical_ids_preserve_the_latest_cache_bo
     second = await _resolve_test_identity(publisher, 1)
     repository.get_canonical_candle_public_id.return_value = first
     assert await _resolve_test_identity(publisher) == first
-    assert publisher._candle_id_cache[("instrument", "1m")] == (
+    assert publisher._candle_id_cache[(INSTRUMENT_ID, "1m")] == (
         START + timedelta(minutes=1),
         second,
     )
@@ -1601,7 +1605,7 @@ def _snapshot_publisher(
     """
     publisher, repository = _identity_publisher()
     publisher.settings.candle_identity_window_snapshot = True
-    publisher._instrument_cache = {"BTC-USD": "instrument", "ETH-USD": "other-instrument"}
+    publisher._instrument_cache = {"BTC-USD": INSTRUMENT_ID, "ETH-USD": OTHER_INSTRUMENT_ID}
     repository.get_canonical_candle_public_ids = AsyncMock(return_value=dict(identities or {}))
     return publisher, repository
 
@@ -1609,7 +1613,7 @@ def _snapshot_publisher(
 async def _resolve_other_identity(publisher: KrakenMarketDataPublisher) -> str:
     """Resolve the second roster instrument at the shared test opening."""
     return await publisher._resolve_live_candle_public_id(
-        "other-instrument", "1m", START, "ETH-USD"
+        OTHER_INSTRUMENT_ID, "1m", START, "ETH-USD"
     )
 
 
@@ -1638,14 +1642,14 @@ async def test_window_snapshot_answers_a_whole_window_with_one_read(
     Then: One batch read answers both, the stored ID is adopted, the other key
         reserves a new ID, and no per-key lookup runs.
     """
-    publisher, repository = _snapshot_publisher({"other-instrument": "stored-id"})
+    publisher, repository = _snapshot_publisher({OTHER_INSTRUMENT_ID: "stored-id"})
     reserved = await _resolve_test_identity(publisher)
     assert await _resolve_other_identity(publisher) == "stored-id"
     repository.get_canonical_candle_public_ids.assert_awaited_once_with(
-        ["instrument", "other-instrument"], "1m", START
+        [INSTRUMENT_ID, OTHER_INSTRUMENT_ID], "1m", START
     )
     repository.get_canonical_candle_public_id.assert_not_awaited()
-    assert publisher._identity_snapshots[("1m", START)].identities["instrument"] == reserved
+    assert publisher._identity_snapshots[("1m", START)].identities[INSTRUMENT_ID] == reserved
     assert publisher._identity_counters == {"snapshot_answers": 2, "snapshot_reads": 1}
 
 
@@ -1680,7 +1684,7 @@ async def test_an_expired_snapshot_is_read_again(monotonic_clock: _MonotonicCloc
     publisher, repository = _snapshot_publisher()
     await _resolve_test_identity(publisher)
     _acknowledge_and_advance(publisher)
-    repository.get_canonical_candle_public_ids.return_value = {"instrument": "committed-id"}
+    repository.get_canonical_candle_public_ids.return_value = {INSTRUMENT_ID: "committed-id"}
     monotonic_clock.now += 2.5
     assert await _resolve_test_identity(publisher) == "committed-id"
     assert repository.get_canonical_candle_public_ids.await_count == 2
@@ -1706,7 +1710,7 @@ async def test_a_read_that_outlasts_the_bound_installs_nothing(
     repository.get_canonical_candle_public_ids.side_effect = _slow_read
     await _resolve_test_identity(publisher)
     assert publisher._identity_snapshots == {}
-    repository.get_canonical_candle_public_id.assert_awaited_once_with("instrument", "1m", START)
+    repository.get_canonical_candle_public_id.assert_awaited_once_with(INSTRUMENT_ID, "1m", START)
     assert publisher._identity_counters["per_key_lookups.read_expired"] == 1
     assert publisher._identity_counters["snapshot_reads_expired"] == 1
 
@@ -1723,10 +1727,10 @@ async def test_a_key_pending_at_the_read_is_excluded_from_its_snapshot(
     Then: The snapshot excludes it and the per-key lookup adopts the commit.
     """
     publisher, repository = _snapshot_publisher()
-    key = ("instrument", "1m", START)
+    key = (INSTRUMENT_ID, "1m", START)
     publisher._pending_candle_identities[key] = "pending-id"
     await _resolve_other_identity(publisher)
-    assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({"instrument"})
+    assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({INSTRUMENT_ID})
     assert await _resolve_test_identity(publisher) == "pending-id"
     _acknowledge_and_advance(publisher)
     repository.get_canonical_candle_public_id.return_value = "pending-id"
@@ -1749,17 +1753,17 @@ async def test_a_cached_identity_without_reservation_is_excluded_until_acknowled
         committed identity, and an acknowledgement re-admits it to later reads.
     """
     publisher, repository = _snapshot_publisher()
-    publisher._candle_id_cache[("instrument", "1m")] = (START, "cached-id")
+    publisher._candle_id_cache[(INSTRUMENT_ID, "1m")] = (START, "cached-id")
     assert await _resolve_test_identity(publisher) == "cached-id"
     await _resolve_other_identity(publisher)
-    assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({"instrument"})
+    assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({INSTRUMENT_ID})
     publisher._candle_id_cache.clear()
     repository.get_canonical_candle_public_id.return_value = "cached-id"
     assert await _resolve_test_identity(publisher) == "cached-id"
-    repository.get_canonical_candle_public_id.assert_awaited_once_with("instrument", "1m", START)
+    repository.get_canonical_candle_public_id.assert_awaited_once_with(INSTRUMENT_ID, "1m", START)
     publisher._mark_candle_writes_committed([_committed_row(publisher, "cached-id")])
     assert publisher._unacknowledged_live_identities == {
-        ("1m", START): {"other-instrument": monotonic_clock.now}
+        ("1m", START): {OTHER_INSTRUMENT_ID: monotonic_clock.now}
     }
 
 
@@ -1786,12 +1790,12 @@ async def test_a_row_queued_before_the_read_is_excluded_from_its_snapshot(
         lookup, while a queued row of another window excludes nothing here.
     """
     publisher, repository = _snapshot_publisher()
-    publisher._assign_candle_write_sequence(_queued_row(publisher, "instrument", "queued-id"))
-    later = _queued_row(publisher, "other-instrument", "later-id")
+    publisher._assign_candle_write_sequence(_queued_row(publisher, INSTRUMENT_ID, "queued-id"))
+    later = _queued_row(publisher, OTHER_INSTRUMENT_ID, "later-id")
     later["open_at"] = START + timedelta(minutes=1)
     publisher._assign_candle_write_sequence(later)
     await _resolve_other_identity(publisher)
-    assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({"instrument"})
+    assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({INSTRUMENT_ID})
     repository.get_canonical_candle_public_id.return_value = "queued-id"
     assert await _resolve_test_identity(publisher) == "queued-id"
     assert publisher._identity_counters["per_key_lookups.excluded_unacknowledged"] == 1
@@ -1811,12 +1815,12 @@ async def test_a_row_queued_during_the_read_joins_its_exclusions(
 
     async def _read_while_queueing(*_args: object) -> dict[str, str]:
         """Queue a live row for the window while the read is in flight."""
-        publisher._assign_candle_write_sequence(_queued_row(publisher, "instrument", "queued-id"))
+        publisher._assign_candle_write_sequence(_queued_row(publisher, INSTRUMENT_ID, "queued-id"))
         return {}
 
     repository.get_canonical_candle_public_ids.side_effect = _read_while_queueing
     await _resolve_other_identity(publisher)
-    assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({"instrument"})
+    assert publisher._identity_snapshots[("1m", START)].excluded == frozenset({INSTRUMENT_ID})
     assert publisher._identity_snapshot_builds == {}
 
 
@@ -1831,17 +1835,19 @@ async def test_a_row_queued_after_installation_excludes_unless_it_carries_the_sn
         for a different identity of the stored instrument.
     Then: Only the rows whose identity differs from the snapshot's exclude.
     """
-    publisher, _repository = _snapshot_publisher({"other-instrument": "stored-id"})
+    publisher, _repository = _snapshot_publisher({OTHER_INSTRUMENT_ID: "stored-id"})
     await _resolve_other_identity(publisher)
     snapshot = publisher._identity_snapshots[("1m", START)]
-    publisher._assign_candle_write_sequence(_queued_row(publisher, "other-instrument", "stored-id"))
-    assert snapshot.excluded == frozenset()
-    publisher._assign_candle_write_sequence(_queued_row(publisher, "instrument", "queued-id"))
-    assert snapshot.excluded == frozenset({"instrument"})
     publisher._assign_candle_write_sequence(
-        _queued_row(publisher, "other-instrument", "different-id")
+        _queued_row(publisher, OTHER_INSTRUMENT_ID, "stored-id")
     )
-    assert snapshot.excluded == frozenset({"instrument", "other-instrument"})
+    assert snapshot.excluded == frozenset()
+    publisher._assign_candle_write_sequence(_queued_row(publisher, INSTRUMENT_ID, "queued-id"))
+    assert snapshot.excluded == frozenset({INSTRUMENT_ID})
+    publisher._assign_candle_write_sequence(
+        _queued_row(publisher, OTHER_INSTRUMENT_ID, "different-id")
+    )
+    assert snapshot.excluded == frozenset({INSTRUMENT_ID, OTHER_INSTRUMENT_ID})
 
 
 @pytest.mark.asyncio
@@ -1859,16 +1865,16 @@ async def test_a_commit_after_installation_never_yields_a_second_identity(
     """
     publisher, repository = _snapshot_publisher()
     await _resolve_other_identity(publisher)
-    publisher._candle_id_cache[("instrument", "1m")] = (START, "cached-id")
+    publisher._candle_id_cache[(INSTRUMENT_ID, "1m")] = (START, "cached-id")
     assert await _resolve_test_identity(publisher) == "cached-id"
-    row = _queued_row(publisher, "instrument", "cached-id")
+    row = _queued_row(publisher, INSTRUMENT_ID, "cached-id")
     publisher._assign_candle_write_sequence(row)
     publisher._mark_candle_writes_committed([row])
     publisher._candle_id_cache.clear()
     repository.get_canonical_candle_public_id.return_value = "cached-id"
     assert await _resolve_test_identity(publisher) == "cached-id"
-    assert ("instrument", "1m", START) not in publisher._pending_candle_identities
-    repository.get_canonical_candle_public_id.assert_awaited_once_with("instrument", "1m", START)
+    assert (INSTRUMENT_ID, "1m", START) not in publisher._pending_candle_identities
+    repository.get_canonical_candle_public_id.assert_awaited_once_with(INSTRUMENT_ID, "1m", START)
 
 
 @pytest.mark.asyncio
@@ -1888,9 +1894,9 @@ async def test_a_row_admitted_after_a_policy_flip_is_excluded(
     publisher._should_persist_row = MagicMock(return_value=True)
     await _resolve_other_identity(publisher)
     snapshot = publisher._identity_snapshots[("1m", START)]
-    assert "instrument" not in snapshot.excluded
-    publisher._assign_candle_write_sequence(_queued_row(publisher, "instrument", unpersisted))
-    assert "instrument" in snapshot.excluded
+    assert INSTRUMENT_ID not in snapshot.excluded
+    publisher._assign_candle_write_sequence(_queued_row(publisher, INSTRUMENT_ID, unpersisted))
+    assert INSTRUMENT_ID in snapshot.excluded
 
 
 @pytest.mark.asyncio
@@ -1937,7 +1943,7 @@ async def test_identity_state_is_pruned_without_a_successful_read(
     monotonic_clock.now += 1801.0
     await _resolve_test_identity(publisher, 1)
     assert publisher._unacknowledged_live_identities == {
-        ("1m", START + timedelta(minutes=1)): {"instrument": monotonic_clock.now}
+        ("1m", START + timedelta(minutes=1)): {INSTRUMENT_ID: monotonic_clock.now}
     }
     assert set(publisher._identity_read_failures) <= {("1m", START + timedelta(minutes=1))}
 
@@ -2025,7 +2031,7 @@ async def test_an_unacknowledged_key_is_released_after_its_age_bound(
     monotonic_clock.now += 1801.0
     await _resolve_test_identity(publisher, 1)
     assert publisher._unacknowledged_live_identities == {
-        ("1m", START + timedelta(minutes=1)): {"instrument": monotonic_clock.now}
+        ("1m", START + timedelta(minutes=1)): {INSTRUMENT_ID: monotonic_clock.now}
     }
 
 
@@ -2040,10 +2046,12 @@ async def test_a_long_burst_reads_once_per_occupied_lifetime(
     Then: Two reads answer all six keys, and no per-key lookup runs.
     """
     publisher, repository = _snapshot_publisher()
-    publisher._instrument_cache = {f"S{index}-USD": f"instrument-{index}" for index in range(6)}
+    publisher._instrument_cache = {
+        f"S{index}-USD": f"00000000-0000-4000-8000-0000000c01{index:02d}" for index in range(6)
+    }
     for index in range(6):
         await publisher._resolve_live_candle_public_id(
-            f"instrument-{index}", "1m", START, f"S{index}-USD"
+            f"00000000-0000-4000-8000-0000000c01{index:02d}", "1m", START, f"S{index}-USD"
         )
         monotonic_clock.now += 0.5
     assert repository.get_canonical_candle_public_ids.await_count == 2
@@ -2163,7 +2171,9 @@ async def test_keys_outside_the_snapshot_take_the_per_key_lookup(
         makes no window read at all.
     """
     publisher, repository = _snapshot_publisher()
-    await publisher._resolve_live_candle_public_id("new-instrument", "1m", START, "SOL-USD")
+    await publisher._resolve_live_candle_public_id(
+        "00000000-0000-4000-8000-0000000c0003", "1m", START, "SOL-USD"
+    )
     assert publisher._identity_counters["per_key_lookups.not_covered"] == 1
     empty, empty_repository = _snapshot_publisher()
     empty._instrument_cache = {}
@@ -2233,13 +2243,14 @@ async def test_the_heartbeat_carries_the_identity_ledger_and_reserved_sample(
     reserved = await _resolve_test_identity(publisher)
     ledger = publisher._venue_feed_health().meta["candle_identity"]
     assert ledger == {
+        "deterministic_from": None,
         "counters": {"snapshot_answers": 1, "snapshot_reads": 1},
         "last_read_ms": 0.0,
         "snapshots": 1,
         "unacknowledged_keys": 1,
         "reserved_sample": [
             {
-                "instrument_public_id": "instrument",
+                "instrument_public_id": INSTRUMENT_ID,
                 "timeframe": "1m",
                 "open_at": START.isoformat(),
                 "public_id": reserved,
@@ -2460,7 +2471,10 @@ async def test_quiet_retirement_deduplicates_only_affected_pending_keys_and_rech
     async def canonical(*args: object) -> str:
         key = cast(tuple[str, str, datetime], args)
         expected = publisher._pending_candle_identities[key]
-        affected = {("instrument", "1m", START), ("instrument", "1m", START + timedelta(minutes=1))}
+        affected = {
+            (INSTRUMENT_ID, "1m", START),
+            (INSTRUMENT_ID, "1m", START + timedelta(minutes=1)),
+        }
         for other in affected - {key}:
             publisher._pending_candle_identities.pop(other)
         return expected
@@ -2471,7 +2485,7 @@ async def test_quiet_retirement_deduplicates_only_affected_pending_keys_and_rech
         await publisher._retire_acknowledged_candle_identities(rows)
     assert repository.get_canonical_candle_public_id.await_count == 1
     assert set(publisher._pending_candle_identities) == {
-        ("instrument", "1m", START + timedelta(minutes=2))
+        (INSTRUMENT_ID, "1m", START + timedelta(minutes=2))
     }
 
 
@@ -3187,3 +3201,171 @@ async def test_other_database_errors_and_post_commit_lock_timeouts_stay_errors(
     with pytest.raises(DBAPIError):
         await publisher._insert_catchup_candle_rows([row])
     assert not publisher._candle_identity_gate.locked()
+
+
+@pytest.mark.asyncio
+async def test_keys_at_or_after_the_cutover_are_answered_without_any_read() -> None:
+    """From the cutover on, a key's deterministic id is computed, not looked up.
+
+    Given: A cutover at the test opening, a repository that fails on any call, and the
+        identity gate held by another task.
+    When: A persisted key and a key outside the persistence policy at the cutover are
+        resolved.
+    Then: Both get their deterministic ids at once without the gate, only the persisted
+        key counts as a deterministic answer, and no reservation, unacknowledged key,
+        snapshot or lookup appears.
+    """
+    publisher, repository = _identity_publisher()
+    publisher.settings.candle_identity_deterministic_from = START
+    repository.get_canonical_candle_public_id = AsyncMock(side_effect=AssertionError("read"))
+    repository.get_canonical_candle_public_ids = AsyncMock(side_effect=AssertionError("read"))
+    persisted = deterministic_candle_public_id(INSTRUMENT_ID, "1m", START)
+    unpersisted = deterministic_candle_public_id(OTHER_INSTRUMENT_ID, "5m", START)
+
+    async with publisher._candle_identity_gate:
+        with patch.object(publisher, "_should_persist_row", return_value=False):
+            other = await asyncio.wait_for(
+                publisher._resolve_live_candle_public_id(
+                    OTHER_INSTRUMENT_ID, "5m", START, "ETH-USD"
+                ),
+                timeout=1.0,
+            )
+        resolved = await asyncio.wait_for(_resolve_test_identity(publisher), timeout=1.0)
+
+    assert (resolved, other) == (persisted, unpersisted)
+    assert publisher._identity_counters == {"deterministic_answers": 1}
+    assert publisher._pending_candle_identities == {}
+    assert publisher._unacknowledged_live_identities == {}
+    assert publisher._identity_snapshots == {}
+
+
+@pytest.mark.asyncio
+async def test_keys_before_the_cutover_keep_todays_resolution() -> None:
+    """A key opening before the cutover is resolved exactly as before.
+
+    Given: A cutover one minute after the test opening and no stored identity.
+    When: The key at the test opening is resolved.
+    Then: The per-key lookup runs, the key reserves its deterministic id, and no
+        deterministic answer is counted.
+    """
+    publisher, repository = _identity_publisher()
+    publisher.settings.candle_identity_deterministic_from = START + timedelta(minutes=1)
+
+    resolved = await _resolve_test_identity(publisher)
+
+    repository.get_canonical_candle_public_id.assert_awaited_once_with(INSTRUMENT_ID, "1m", START)
+    assert resolved == deterministic_candle_public_id(INSTRUMENT_ID, "1m", START)
+    assert publisher._pending_candle_identities == {(INSTRUMENT_ID, "1m", START): resolved}
+    assert "deterministic_answers" not in publisher._identity_counters
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("timeframe", "opening"),
+    [
+        ("1h", START.replace(minute=0)),
+        ("1m", START - timedelta(hours=3)),
+    ],
+    ids=["window-open-across-the-cutover", "old-frame-after-a-reconnect"],
+)
+async def test_keys_opening_before_the_cutover_still_take_a_lookup(
+    timeframe: str, opening: datetime
+) -> None:
+    """A key that opened before the cutover is looked up even after the cutover.
+
+    Given: A cutover at the test opening, a one-hour window that opened before it,
+        and an old one-minute frame such as a reconnect can deliver.
+    When: Each key is resolved after the cutover.
+    Then: The per-key lookup answers it and no deterministic answer is counted.
+    """
+    publisher, repository = _identity_publisher()
+    publisher.settings.candle_identity_deterministic_from = START
+
+    await publisher._resolve_live_candle_public_id(INSTRUMENT_ID, timeframe, opening, "BTC-USD")
+
+    repository.get_canonical_candle_public_id.assert_awaited_once_with(
+        INSTRUMENT_ID, timeframe, opening
+    )
+    assert "deterministic_answers" not in publisher._identity_counters
+
+
+@pytest.mark.asyncio
+async def test_the_heartbeat_reports_the_cutover_the_resolver_used() -> None:
+    """Each publisher shows the cutover its resolver actually read.
+
+    Given: A publisher whose settings name a cutover, before and after one persisted
+        resolution.
+    When: The venue feed health is read each time.
+    Then: The ledger reports no cutover before the resolution and the cutover in ISO
+        form after it.
+    """
+    publisher, _repository = _identity_publisher()
+    publisher.settings.candle_identity_deterministic_from = START
+    before = publisher._venue_feed_health().meta["candle_identity"]
+
+    await _resolve_test_identity(publisher)
+    after = publisher._venue_feed_health().meta["candle_identity"]
+
+    assert isinstance(before, dict)
+    assert isinstance(after, dict)
+    assert before["deterministic_from"] is None
+    assert after["deterministic_from"] == START.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_two_publishers_publish_the_id_that_storage_keeps_after_the_cutover(
+    tmp_path: Path,
+) -> None:
+    """Two processes agree with storage on a post-cutover key without reading each other.
+
+    Given: Two publishers sharing one real SQLite database, with a cutover at the test
+        opening.
+    When: Both resolve the same key, the first writes it through the writer's upsert,
+        and the second writes a revised version of it.
+    Then: Both published the key's deterministic id, and the stored active version
+        carries exactly that id.
+    """
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'shared.db'}")
+    await repository.create_all()
+    try:
+        first, second = _publisher(), _publisher()
+        for publisher in (first, second):
+            publisher.repository = repository
+            publisher.settings.candle_identity_deterministic_from = START
+        published = [
+            await publisher._resolve_live_candle_public_id(INSTRUMENT_ID, "1m", START, "BTC-USD")
+            for publisher in (first, second)
+        ]
+        row: CandleUpsertRow = {
+            "instrument_public_id": INSTRUMENT_ID,
+            "open_at": START,
+            "timestamp": START + timedelta(minutes=1, seconds=12),
+            "timeframe": "1m",
+            "open": 10.0,
+            "high": 12.0,
+            "low": 9.0,
+            "close": 11.0,
+            "volume": 3.0,
+            "vwap": 10.75,
+            "trades": 7,
+            "source": "calculated",
+            "complete": True,
+            "session_id": "00000000-0000-4000-8000-0000000c0009",
+            "sequence_id": 1,
+            "public_id": published[0],
+        }
+        await repository.upsert_candles([row])
+        revised = row | {
+            "close": 11.5,
+            "timestamp": START + timedelta(minutes=1, seconds=20),
+            "sequence_id": 2,
+            "public_id": published[1],
+        }
+        await repository.upsert_candles([revised])
+
+        stored = await repository.get_canonical_candle_public_id(INSTRUMENT_ID, "1m", START)
+    finally:
+        await repository.engine.dispose()
+
+    assert published == [deterministic_candle_public_id(INSTRUMENT_ID, "1m", START)] * 2
+    assert stored == published[0]
