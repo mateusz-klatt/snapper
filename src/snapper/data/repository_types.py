@@ -635,16 +635,110 @@ class SpotOwnedOrderLineageFact(TypedDict):
     fact: SpotOwnedOrderLineageFactKind
 
 
+class SpotCommandVersionRow(TypedDict):
+    """One version, open or closed, of a never-submitted candidate command.
+
+    ``open_ended`` says whether the version's knowledge interval was never
+    closed; the repository computes it, because only the repository compares
+    with the sentinel. The candidate lists every version so that the
+    never-submitted document binds the command's whole history.
+    """
+
+    row_id: int
+    status: str
+    exchange_order_id: str | None
+    acked_at: datetime | None
+    open_ended: bool
+
+
+class SpotNeverSubmittedEventRow(TypedDict):
+    """One venue event linked to a never-submitted candidate command, from any scope.
+
+    An event is linked when its client order id or venue client id equals the
+    command's client order id, or its command public id equals the command's
+    public id. ``received_at`` is printed for review and never hashed.
+    """
+
+    id: int
+    event_type: str
+    command_public_id: str | None
+    client_order_id: str | None
+    exchange_order_id: str | None
+    status: str | None
+    error: str | None
+    received_at: datetime
+
+
+class SpotNeverSubmittedAudit(TypedDict):
+    """Review context of a never-submitted candidate, read from its sentinel-tip version.
+
+    The gate never reads it and the never-submitted document never contains
+    it; it exists so that a reviewer can check the command's timing and order
+    parameters against the proof, and so that a refusal can be diagnosed.
+    """
+
+    created_at: datetime
+    dispatched_at: datetime | None
+    terminal_at: datetime | None
+    attempt_count: int
+    last_error: str | None
+    instrument: str
+    side: str
+    order_type: str
+    quantity: float
+    price: float | None
+
+
+class SpotNeverSubmittedCandidate(TypedDict):
+    """The facts a reviewed never-submitted exclusion rests on, from one snapshot.
+
+    ``versions`` holds every version of the command's public id sorted by row
+    id, ``venue_events`` every linked venue event sorted by id, and
+    ``order_row_count`` the number of ``orders`` rows of any version, wallet or
+    mode that carry the command's client order id.
+    """
+
+    versions: tuple[SpotCommandVersionRow, ...]
+    venue_events: tuple[SpotNeverSubmittedEventRow, ...]
+    order_row_count: int
+    audit: SpotNeverSubmittedAudit
+
+
 class SpotOwnedSubmitCommandRow(TypedDict):
     """One in-scope sentinel-tip ``create`` or ``submit`` trade command.
 
     ``status`` is the stored text, verbatim, so a value outside the closed
-    status enum reaches the gate and refuses there.
+    status enum reaches the gate and refuses there. ``row_id`` is the physical
+    id of this sentinel-tip version. ``candidate`` carries the facts of a
+    ``failed`` or ``rejected`` command without a venue order id or an
+    acknowledgement, and is ``None`` for every other command.
     """
 
     public_id: str
     status: str
     exchange_order_id: str | None
+    row_id: int
+    command_type: str
+    client_order_id: str
+    venue_client_id: str
+    wallet_public_id: str
+    mode: str
+    exchange: str
+    acked_at: datetime | None
+    candidate: SpotNeverSubmittedCandidate | None
+
+
+class SpotSubmitCommandRead(TypedDict):
+    """The in-scope command read of one owned-population snapshot.
+
+    ``retired_public_ids`` lists, sorted, the public ids that have a version
+    matching the scope but no open-ended version matching it: a command whose
+    history was closed without a successor in scope, which the sentinel-tip
+    read would otherwise drop silently.
+    """
+
+    commands: tuple[SpotOwnedSubmitCommandRow, ...]
+    retired_public_ids: tuple[str, ...]
 
 
 class SpotOwnedOrderPopulation(TypedDict):
@@ -661,7 +755,11 @@ class SpotOwnedOrderPopulation(TypedDict):
     Order is excluded from ``S``, yet it still refuses the gate, because every
     sentinel-tip Order without a venue order id is unresolved. ``commands``
     lists the in-scope ``create`` and ``submit`` commands. Commands never
-    filter or assign Order ownership.
+    filter or assign Order ownership. ``excluded_command_public_ids`` and
+    ``excluded_client_order_ids`` name the commands that a reviewed
+    never-submitted exclusion settles, and ``retired_command_public_ids`` the
+    in-scope commands without an open-ended version in scope, each of which
+    refuses the gate.
     """
 
     owned_order_ids: frozenset[str]
@@ -670,6 +768,9 @@ class SpotOwnedOrderPopulation(TypedDict):
     blocked_order_ids: frozenset[str]
     other_exchange_unidentified_orders: tuple[str, ...]
     commands: tuple[SpotOwnedSubmitCommandRow, ...]
+    excluded_command_public_ids: frozenset[str]
+    excluded_client_order_ids: frozenset[str]
+    retired_command_public_ids: tuple[str, ...]
 
 
 class PnlTimelineExecutionRow(TypedDict):

@@ -43,8 +43,20 @@ _POPULATION: SpotOwnedOrderPopulation = {
             "public_id": "00000000-0000-7000-8000-000000000701",
             "status": "filled",
             "exchange_order_id": "O1",
+            "row_id": 1,
+            "command_type": "create",
+            "client_order_id": "00000000-0000-7000-8000-000000000801",
+            "venue_client_id": "00000000-0000-7000-8000-000000000801",
+            "wallet_public_id": "00000000-0000-7000-8000-000000000101",
+            "mode": "live",
+            "exchange": "walutomat",
+            "acked_at": None,
+            "candidate": None,
         },
     ),
+    "excluded_command_public_ids": frozenset(),
+    "excluded_client_order_ids": frozenset(),
+    "retired_command_public_ids": (),
 }
 
 

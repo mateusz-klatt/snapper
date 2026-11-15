@@ -142,14 +142,14 @@ def test_venue_history_tip_from_raw_normalizes_markers() -> None:
 
     When: The tip is normalized,
     Then: Each item's MARKET_FX marker and API attribution project faithfully,
-        the operation type, order id, and correcting-entry flag are carried
-        verbatim, and the descending page order is preserved.
+        the operation type, order id, correcting-entry flag and submit id are
+        carried verbatim, and the descending page order is preserved.
     """
     tip = VenueAccountHistoryTip(
         item_id=100,
         reached_genesis=True,
         items=(
-            _item(100, "MARKET_FX", "6", "EUR", balance_after="106"),
+            replace(_item(100, "MARKET_FX", "6", "EUR", balance_after="106"), submit_id="S-100"),
             _item(99, "COMMISSION", "-0.02", "EUR", ordered_by="API/key"),
             _item(98, "MARKET_FX", "5", "EUR", ordered_by="GUI/user@example.com"),
             replace(_item(97, "PAYIN", "50", "EUR", order_id=None), correcting_entry=True),
@@ -166,7 +166,9 @@ def test_venue_history_tip_from_raw_normalizes_markers() -> None:
         operation_type="MARKET_FX",
         order_id="O1",
         correcting_entry=False,
+        submit_id="S-100",
     )
+    assert normalized.page[1].submit_id is None
     assert normalized.page[1].is_market_fx is False
     assert normalized.page[1].operation_type == "COMMISSION"
     assert normalized.page[2].is_api_attributed is False

@@ -27,6 +27,8 @@ from sqlalchemy import delete
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snapper.application.portfolio.never_submitted_commands import never_submitted_digest
+from snapper.application.portfolio.spot_anchor_ownership import never_submitted_document
 from snapper.application.portfolio.spot_anchor_ownership import own_submit_unresolved
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.types import TradeCommandStatusEnum
@@ -34,7 +36,10 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Instrument
 from snapper.data.models import Order
 from snapper.data.models import TradeCommand
+from snapper.data.models import VenueEvent
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import SpotOwnedOrderPopulation
+from snapper.data.repository_types import SpotOwnedSubmitCommandRow
 
 _T0 = datetime(2026, 11, 1, 8, 0, tzinfo=UTC)
 _CLOSED_AT = _T0 + timedelta(hours=1)
@@ -104,6 +109,20 @@ class _CommandOverrides(_VersionOverrides, total=False):
 
     exchange: str
     command_type: str
+    client_order_id: str
+    venue_client_id: str
+    acked_at: datetime
+
+
+class _EventOverrides(TypedDict, total=False):
+    """Optional venue event fields a test event may override."""
+
+    wallet_public_id: str
+    mode: str
+    client_order_id: str
+    venue_client_id: str
+    command_public_id: str
+    exchange_order_id: str
 
 
 def _order(
@@ -151,14 +170,14 @@ def _command(
         "wallet_public_id": scope.wallet,
         "timestamp": _T0,
         "known_to": KNOWN_TO_MAX,
+        "client_order_id": _new_id(),
+        "venue_client_id": _new_id(),
         **overrides,
     }
     return TradeCommand(
         shard_key=f"{fields['exchange']}.EUR-PLN.{fields['mode']}",
         instrument="EUR-PLN",
         strategy_id="ownership-test",
-        client_order_id=_new_id(),
-        venue_client_id=_new_id(),
         side="buy",
         order_type="market",
         quantity=1.0,
@@ -171,7 +190,32 @@ def _command(
     )
 
 
-async def _persist(scope: _Scope, *rows: Instrument | Order | TradeCommand) -> None:
+def _venue_event(
+    scope: _Scope, event_type: str, **overrides: Unpack[_EventOverrides]
+) -> VenueEvent:
+    """Build one venue event owned by the test's session id."""
+    fields: dict[str, object] = {
+        "wallet_public_id": scope.wallet,
+        "mode": "live",
+        **overrides,
+    }
+    return VenueEvent(
+        event_type=event_type,
+        shard_key="walutomat.EUR-PLN.live",
+        exchange="walutomat",
+        instrument="EUR-PLN",
+        status="failed",
+        error="live trading interlocked",
+        received_at=_T0,
+        session_id=scope.session_id,
+        sequence_id=1,
+        timestamp=_T0,
+        known_to=KNOWN_TO_MAX,
+        **fields,
+    )
+
+
+async def _persist(scope: _Scope, *rows: Instrument | Order | TradeCommand | VenueEvent) -> None:
     """Commit the given rows in one session."""
     async with scope.repository.session() as s:
         s.add_all(rows)
@@ -204,7 +248,7 @@ async def configured() -> AsyncIterator[_Scope]:
         yield scope
     finally:
         async with scope.repository.session() as s:
-            for model in (TradeCommand, Order, Instrument):
+            for model in (TradeCommand, Order, Instrument, VenueEvent):
                 await s.execute(delete(model).where(model.session_id == scope.session_id))
             await s.commit()
         await scope.repository.engine.dispose()
@@ -584,7 +628,8 @@ async def test_postgresql_reads_open_one_repeatable_read_only_transaction(
     Given: A repository whose dialect reports PostgreSQL and a recording session.
     When: The population is read.
     Then: One explicit transaction is opened and its first statement sets
-        ``REPEATABLE READ, READ ONLY``, followed by the three reads.
+        ``REPEATABLE READ, READ ONLY``, followed by the four reads of a scope
+        without never-submitted candidates.
     """
     session = AsyncMock(begin=MagicMock(return_value=AsyncMock()))
     session.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[])))
@@ -605,7 +650,7 @@ async def test_postgresql_reads_open_one_repeatable_read_only_transaction(
         )
     statement = session.execute.await_args_list[0].args[0]
     assert str(statement) == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
-    assert session.execute.await_count == 4
+    assert session.execute.await_count == 5
     session.begin.assert_called_once_with()
     assert population["owned_order_ids"] == frozenset()
     assert population["commands"] == ()
@@ -619,8 +664,9 @@ async def test_sqlite_reads_open_one_explicit_database_transaction(
     Given: A SQLite repository and a recording session.
     When: The population is read.
     Then: One transaction scope is opened and its first statement is a plain
-        ``BEGIN``, followed by the three reads, because the driver's legacy
-        transaction control issues none before a ``SELECT``.
+        ``BEGIN``, followed by the four reads of a scope without never-submitted
+        candidates, because the driver's legacy transaction control issues none
+        before a ``SELECT``.
     """
     session = AsyncMock(begin=MagicMock(return_value=AsyncMock()))
     session.execute = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[])))
@@ -633,7 +679,7 @@ async def test_sqlite_reads_open_one_explicit_database_transaction(
         )
     statement = session.execute.await_args_list[0].args[0]
     assert str(statement) == "BEGIN"
-    assert session.execute.await_count == 4
+    assert session.execute.await_count == 5
     session.begin.assert_called_once_with()
     assert population["owned_order_ids"] == frozenset()
 
@@ -678,3 +724,263 @@ async def test_the_population_reads_one_snapshot(
     assert (await _read(configured))[1] is False
     monkeypatch.undo()
     assert (await _read(configured))[1] is True
+
+
+def _candidate_history(scope: _Scope, public_id: str, client_order_id: str) -> list[TradeCommand]:
+    """Build a create that was dispatched and then failed before the venue, in three versions."""
+    common: _CommandOverrides = {
+        "public_id": public_id,
+        "command_type": "create",
+        "client_order_id": client_order_id,
+        "venue_client_id": client_order_id,
+    }
+    return [
+        _command(scope, "created", None, known_to=_T0 + timedelta(seconds=1), **common),
+        _command(
+            scope,
+            "dispatched",
+            None,
+            timestamp=_T0 + timedelta(seconds=1),
+            known_to=_T0 + timedelta(seconds=2),
+            **common,
+        ),
+        _command(scope, "failed", None, timestamp=_T0 + timedelta(seconds=2), **common),
+    ]
+
+
+async def _population(scope: _Scope) -> SpotOwnedOrderPopulation:
+    """Read the Walutomat population of the test wallet."""
+    return await scope.repository.get_spot_anchor_owned_order_population(
+        scope.wallet, "walutomat", "live"
+    )
+
+
+def _only_command(population: SpotOwnedOrderPopulation) -> SpotOwnedSubmitCommandRow:
+    """Return the population's single in-scope command."""
+    assert len(population["commands"]) == 1
+    return population["commands"][0]
+
+
+async def test_a_never_submitted_candidate_carries_its_whole_facts(configured: _Scope) -> None:
+    """A failed create without a venue id reads its history, linked events, Orders and audit.
+
+    Given: A create in three versions (created, dispatched, failed), venue events
+        linked by client order id in another wallet and mode, by venue client id
+        alone and by command public id alone, an unrelated event, and an Order
+        of another wallet carrying the client order id.
+    When: The population is read.
+    Then: The candidate lists every version with its open-ended flag, exactly the
+        three linked events in id order, one Order, and the tip's audit context.
+    """
+    public_id = _new_id()
+    client_order_id = _new_id()
+    history = _candidate_history(configured, public_id, client_order_id)
+    by_client_id = _venue_event(
+        configured,
+        "order_interlock_blocked",
+        client_order_id=client_order_id,
+        wallet_public_id=configured.other_wallet,
+        mode="paper",
+    )
+    by_venue_client_id = _venue_event(configured, "order_rejected", venue_client_id=client_order_id)
+    by_command_id = _venue_event(configured, "order_rejected", command_public_id=public_id)
+    unrelated = _venue_event(configured, "order_rejected", client_order_id=_new_id())
+    instrument = _instrument(configured, "walutomat")
+    other_wallet_order = _order(
+        configured, instrument.public_id, "WA-9", wallet_public_id=configured.other_wallet
+    )
+    other_wallet_order.client_order_id = client_order_id
+    await _persist(
+        configured,
+        *history,
+        by_client_id,
+        by_venue_client_id,
+        by_command_id,
+        unrelated,
+        instrument,
+        other_wallet_order,
+    )
+    command = _only_command(await _population(configured))
+    candidate = command["candidate"]
+    assert candidate is not None
+    assert command["row_id"] == history[2].id
+    assert command["client_order_id"] == client_order_id
+    assert command["venue_client_id"] == client_order_id
+    assert command["acked_at"] is None
+    assert [
+        (version["row_id"], version["status"], version["open_ended"])
+        for version in candidate["versions"]
+    ] == [
+        (history[0].id, "created", False),
+        (history[1].id, "dispatched", False),
+        (history[2].id, "failed", True),
+    ]
+    assert [event["id"] for event in candidate["venue_events"]] == sorted(
+        [by_client_id.id, by_venue_client_id.id, by_command_id.id]
+    )
+    assert candidate["venue_events"][-1]["received_at"] == _T0
+    assert candidate["order_row_count"] == 1
+    assert candidate["audit"]["instrument"] == "EUR-PLN"
+    assert candidate["audit"]["created_at"] == _T0
+    assert candidate["audit"]["quantity"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "status, exchange_order_id, acked, client_order_id",
+    [
+        pytest.param("filled", "WA-1", False, None, id="settled_status"),
+        pytest.param("failed", "WA-1", False, None, id="venue_id"),
+        pytest.param("rejected", None, True, None, id="acknowledged"),
+        pytest.param("rejected", None, False, "  ", id="blank_client_id"),
+    ],
+)
+async def test_only_never_submitted_candidates_carry_facts(
+    configured: _Scope,
+    status: str,
+    exchange_order_id: str | None,
+    acked: bool,
+    client_order_id: str | None,
+) -> None:
+    """A command that cannot be never-submitted gets no candidate read.
+
+    Given: One in-scope command that is settled, carries a venue id, was
+        acknowledged, or has a blank client order id.
+    When: The population is read.
+    Then: Its candidate is ``None``.
+
+    Args:
+        configured: The test scope.
+        status: The command's status.
+        exchange_order_id: Its venue order id.
+        acked: Whether it carries an acknowledgement time.
+        client_order_id: Its client order id, or ``None`` for a fresh one.
+    """
+    overrides: _CommandOverrides = {}
+    if acked:
+        overrides["acked_at"] = _T0
+    if client_order_id is not None:
+        overrides["client_order_id"] = client_order_id
+    await _persist(configured, _command(configured, status, exchange_order_id, **overrides))
+    assert _only_command(await _population(configured))["candidate"] is None
+
+
+async def test_retired_commands_are_found_within_the_scope(configured: _Scope) -> None:
+    """A command without an open-ended version in scope is retired and refuses.
+
+    Given: A fully closed in-scope history; a closed in-scope version whose
+        open-ended successor moved to Kraken; a closed version with an open
+        in-scope successor; and a closed history of another wallet.
+    When: The population is read.
+    Then: Exactly the first two public ids are retired, sorted, and the gate
+        refuses.
+    """
+    closed_at: _VersionOverrides = {"known_to": _CLOSED_AT}
+    fully_closed = _new_id()
+    moved = _new_id()
+    still_open = _new_id()
+    other_wallet = _new_id()
+    await _persist(
+        configured,
+        _command(configured, "dispatched", None, public_id=fully_closed, **closed_at),
+        _command(configured, "dispatched", None, public_id=moved, **closed_at),
+        _command(
+            configured,
+            "dispatched",
+            None,
+            public_id=moved,
+            exchange="kraken",
+            timestamp=_CLOSED_AT,
+        ),
+        _command(configured, "dispatched", None, public_id=still_open, **closed_at),
+        _command(configured, "filled", "WA-1", public_id=still_open, timestamp=_CLOSED_AT),
+        _command(
+            configured,
+            "dispatched",
+            None,
+            public_id=other_wallet,
+            wallet_public_id=configured.other_wallet,
+            **closed_at,
+        ),
+    )
+    population = await _population(configured)
+    assert population["retired_command_public_ids"] == tuple(sorted([fully_closed, moved]))
+    assert own_submit_unresolved(population) is True
+
+
+async def test_a_pinned_candidate_is_excluded_until_its_facts_change(configured: _Scope) -> None:
+    """The exclusion settles the exact reviewed facts and nothing that differs.
+
+    Given: The interlock-failed create with its one event, no Order and no other
+        command, and its document digest pinned.
+    When: The population is read, a late event is linked, and it is read again.
+    Then: The first read excludes it and the gate passes; the second excludes
+        nothing and the gate refuses.
+    """
+    public_id = _new_id()
+    client_order_id = _new_id()
+    await _persist(
+        configured,
+        *_candidate_history(configured, public_id, client_order_id),
+        _venue_event(configured, "order_interlock_blocked", client_order_id=client_order_id),
+    )
+    document = never_submitted_document(_only_command(await _population(configured)))
+    assert document is not None
+    pinned = frozenset({never_submitted_digest(document)})
+    with patch("snapper.data.repository.NEVER_SUBMITTED_COMMAND_DIGESTS", pinned):
+        before = await _population(configured)
+        await _persist(
+            configured,
+            _venue_event(configured, "order_accepted", client_order_id=client_order_id),
+        )
+        after = await _population(configured)
+    assert before["excluded_command_public_ids"] == frozenset({public_id})
+    assert before["excluded_client_order_ids"] == frozenset({client_order_id})
+    assert own_submit_unresolved(before) is False
+    assert after["excluded_command_public_ids"] == frozenset()
+    assert own_submit_unresolved(after) is True
+
+
+async def test_the_candidate_facts_share_the_population_snapshot(
+    configured: _Scope, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An event committed after the snapshot opened stays out of the candidate.
+
+    Runs on the configured database: the isolated SQLite copy by default, and
+    the PostgreSQL witness when ``DB_URL`` names one.
+
+    Given: The interlock-failed create with its one event, and a second linked
+        event committed by another connection after the population's Instrument
+        read.
+    When: The population is read, then read again.
+    Then: The first read's candidate holds one event, and the second holds two.
+    """
+    public_id = _new_id()
+    client_order_id = _new_id()
+    await _persist(
+        configured,
+        *_candidate_history(configured, public_id, client_order_id),
+        _venue_event(configured, "order_interlock_blocked", client_order_id=client_order_id),
+    )
+    original = SQLAlchemyRepository._spot_owned_instrument_versions
+
+    async def versions_then_commit(
+        s: AsyncSession, wallet_public_id: str, mode: str
+    ) -> dict[str, frozenset[str]]:
+        """Read the versions, then commit a linked event from another session."""
+        versions = await original(s, wallet_public_id, mode)
+        await _persist(
+            configured,
+            _venue_event(configured, "order_accepted", command_public_id=public_id),
+        )
+        return versions
+
+    monkeypatch.setattr(
+        configured.repository, "_spot_owned_instrument_versions", versions_then_commit
+    )
+    first = _only_command(await _population(configured))["candidate"]
+    monkeypatch.undo()
+    second = _only_command(await _population(configured))["candidate"]
+    assert first is not None
+    assert second is not None
+    assert len(first["venue_events"]) == 1
+    assert len(second["venue_events"]) == 2

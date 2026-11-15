@@ -348,10 +348,18 @@ persistence is best effort after the venue accepts, an unresolved-submit gate
 settles each create or submit command only through a terminal status whose
 venue order id lies in `S`; anything else — a command without a venue order id,
 an Order of the wallet and mode without one (on any exchange), a live status, a
-status outside the closed set — refuses
-`own_submit_unresolved` before any row is classified, so an own order whose
-acceptance is not yet persisted can never pass as external. Then a correcting
-entry refuses; a row of an order in `S` must be MARKET_FX, witnessed by a
+status outside the closed set, an in-scope command left without a current
+version in scope — refuses `own_submit_unresolved` before any row is classified,
+so an own order whose acceptance is not yet persisted can never pass as
+external. The one exception is a reviewed never-submitted exclusion
+(`never_submitted_commands.py`): a `failed` or `rejected` command whose whole
+history stayed before acknowledgement, with exactly one pre-venue or refusal
+event, no venue order id and no Order, is settled only when the SHA-256 digest
+of its exact snapshot facts is pinned in code after a human review. The facts
+are rebuilt on every evaluation, so any later version, event or Order voids the
+exclusion, and no status text or generic rejection event proves anything by
+itself. A seal-page row whose `submitId` names an excluded command refuses
+`never_submitted_command_on_venue`. Then a correcting entry refuses; a row of an order in `S` must be MARKET_FX, witnessed by a
 committed execution, or COMMISSION, proven against that order's venue totals and
 witnessed fills; MARKET_FX or COMMISSION without an order id refuses as manual
 and unattributed; a row with an order id outside `S` is external, and so are
@@ -365,7 +373,9 @@ This classification exists only at the cut: after it, the anchored certificate
 still refuses any activity Snapper does not own. Owned and external rows alike
 rest on two venue premises — order ids are never reused across the account's
 instruments, and every order placed through the API carries its order id in the
-history — recorded in the reviewed `walutomat_order_ownership_artifact.py`. It
+history — and an excluded venue refusal on a third: a create the venue answers
+with HTTP 4xx or `success=false` leaves no order. All three are recorded in the
+reviewed `walutomat_order_ownership_artifact.py`. It
 ships unrecorded, so every Walutomat seal refuses
 `venue_ownership_guarantee_unrecorded` until a reviewed change records the
 venue's answer. Without order-finality seals, an owned order's economics that

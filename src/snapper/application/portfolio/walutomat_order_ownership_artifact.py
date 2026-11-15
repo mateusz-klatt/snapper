@@ -7,8 +7,11 @@ account's instruments, and every order placed through the API carries its order
 id in the account history. Completeness of ``S`` comes from those premises
 combined with local proofs — the frozen sentinel-tip Order population read after
 the capture, and the strict unresolved-submit gate, which keeps an own order
-whose best-effort persistence has not happened yet unresolved. The venue can
-attest only to its own premises, never to the local database contents.
+whose best-effort persistence has not happened yet unresolved. A third premise,
+that a create the venue answers with HTTP 4xx or ``success=false`` leaves no
+order, is what lets a reviewed never-submitted exclusion settle a command the
+venue refused. The venue can attest only to its own premises, never to the
+local database contents.
 
 This module records the reviewed source of each venue premise as a frozen
 artifact with a content-addressed version, in the manner of the documentary
@@ -31,26 +34,32 @@ WALUTOMAT_ORDER_ID_NON_REUSE_PREMISE: Final = (
 """The first venue premise: an order id names one order for the whole account."""
 
 WALUTOMAT_ORDER_ID_IN_HISTORY_PREMISE: Final = (
-    "Every order placed through the Walutomat API carries its order id on its "
-    "account-history rows."
+    "Every order placed through the Walutomat API carries its order id on its account-history rows."
 )
 """The second venue premise: no API order can appear in history without its id."""
+
+WALUTOMAT_CREATE_REFUSAL_LEAVES_NO_ORDER_PREMISE: Final = (
+    "A create that Walutomat answers with HTTP 4xx or with success=false leaves no order."
+)
+"""The third venue premise: a refused create can never surface later as an order."""
 
 
 @dataclass(frozen=True)
 class WalutomatOrderOwnershipGuarantee:
     """One immutable review of the venue premises the ownership contract needs.
 
-    ``order_id_non_reuse_source`` and ``order_id_in_history_source`` name where
-    each premise was established (documentation URL or support reference);
-    ``reviewed_at`` and ``revision`` identify the review. The premise statements
-    themselves are module constants bound into the version digest.
+    ``order_id_non_reuse_source``, ``order_id_in_history_source`` and
+    ``create_refusal_source`` name where each premise was established
+    (documentation URL or support reference); ``reviewed_at`` and ``revision``
+    identify the review. The premise statements themselves are module constants
+    bound into the version digest.
     """
 
     revision: str
     reviewed_at: datetime
     order_id_non_reuse_source: str
     order_id_in_history_source: str
+    create_refusal_source: str
 
 
 WALUTOMAT_ORDER_OWNERSHIP_GUARANTEE: WalutomatOrderOwnershipGuarantee | None = None
@@ -60,7 +69,7 @@ WALUTOMAT_ORDER_OWNERSHIP_GUARANTEE: WalutomatOrderOwnershipGuarantee | None = N
 def canonical_walutomat_order_ownership_guarantee_content(
     guarantee: WalutomatOrderOwnershipGuarantee,
 ) -> str:
-    """Serialize every reviewed field and both premises into canonical JSON.
+    """Serialize every reviewed field and all three premises into canonical JSON.
 
     Args:
         guarantee: The reviewed venue premises and their sources.
@@ -69,6 +78,8 @@ def canonical_walutomat_order_ownership_guarantee_content(
         Stable JSON suitable for a content-addressed version digest.
     """
     payload: dict[str, str] = {
+        "create_refusal_premise": WALUTOMAT_CREATE_REFUSAL_LEAVES_NO_ORDER_PREMISE,
+        "create_refusal_source": guarantee.create_refusal_source,
         "order_id_in_history_premise": WALUTOMAT_ORDER_ID_IN_HISTORY_PREMISE,
         "order_id_in_history_source": guarantee.order_id_in_history_source,
         "order_id_non_reuse_premise": WALUTOMAT_ORDER_ID_NON_REUSE_PREMISE,
