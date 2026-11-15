@@ -58,6 +58,7 @@ class _ShadowSettings:
         self.spot_completion_follows_consumer = False
         self.trade_built_max_consumer_lag_seconds = 0
         self.trade_built_finalize_grace_seconds = 12
+        self.candle_identity_deterministic_from = None
 
 
 class _ShadowRepository:

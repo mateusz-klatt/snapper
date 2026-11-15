@@ -462,6 +462,41 @@ cancelled. A write that stops before its end exits `1`.
 Each correction chunk takes `SHARE ROW EXCLUSIVE` on `candles`, so live candle
 writers wait up to one second per chunk: run writes in quiet hours.
 
+### `check-candle-identities`
+
+Check, read-only, that stored candle ids are deterministic. For every candle key
+whose opening lies in `[--from, --to)`, the command reads the id of its active
+version and compares it with the key's deterministic id, a custom UUIDv8 built
+from SHA-256 of the instrument, timeframe and opening
+(`snapper.candle.public_id.v1`). The range is over openings, not over version
+times: a key created before deterministic ids keeps its random id, and is outside
+any range that starts after it opened.
+
+```bash
+snapper check-candle-identities --from 2026-11-12T23:00:00Z
+snapper check-candle-identities --from 2026-11-12T23:00:00Z --to 2026-11-14T00:00:00Z
+```
+
+| Option | Meaning |
+| ------ | ------- |
+| `--from` | Inclusive lower bound on the opening, an ISO-8601 UTC instant. Required. |
+| `--to` | Exclusive upper bound on the opening, an ISO-8601 UTC instant. Default: the instant the command starts. |
+
+The command reads one UTC day at a time and streams each day in bounded chunks,
+so its memory stays flat however many keys the range holds; it writes nothing.
+It prints one JSON report:
+
+- the identity algorithm and the SHA-256 of the modules that decide an id, so a
+  receipt can show the check ran on the same code as the writers;
+- the credential-free database identity and the range;
+- the keys scanned and mismatched per timeframe, and their totals;
+- up to 20 mismatching keys.
+
+It exits `1` when any key mismatches, and refuses a bound that is not a UTC
+instant, or a `--to` not later than `--from`. Run it before setting
+`candle_identity_deterministic_from` with `--from` at the verified rollout
+instant, and afterwards from the cutover (see `docs/configuration.md`).
+
 ### `annulment`
 
 Host-side execution-ledger correction commands use the configured `DB_URL`.

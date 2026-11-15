@@ -11,6 +11,12 @@ A clean result emits one HEALTHY frame to reset the alert rule's
 rolling state. Findings or excessive completed-coverage lag emit three
 WARNING frames spaced two seconds apart, satisfying the existing
 three-consecutive-warning gate.
+
+Swept rows are probed only within ``TRADE_INTEGRITY_PROBE_WINDOW``, seven
+days before and after each row's own execution time, so completed coverage
+certifies only conflicts inside that window. Durable worklog obligations
+(restore, import and replay) are still checked exactly, over every
+partition. Each heartbeat states the window as ``probe_window_days``.
 """
 
 import asyncio
@@ -32,7 +38,7 @@ from snapper.core.json_types import JsonObject
 from snapper.core.types import HealthStatusEnum
 from snapper.data.repository_types import TradeIntegrityMonitor
 from snapper.data.repository_types import TradeIntegrityRunResult
-from snapper.data.trade_integrity import TRADE_INTEGRITY_SWEEP_LIMIT
+from snapper.data.trade_integrity import TRADE_INTEGRITY_PROBE_WINDOW
 from snapper.data.trade_integrity import TRADE_INTEGRITY_WORKLOG_LIMIT
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.topics.builders import heartbeat_topic
@@ -43,9 +49,16 @@ DEFAULT_INTERVAL_SECONDS: Final = 60.0
 MIN_INTERVAL_SECONDS: Final = 30.0
 MAX_INTERVAL_SECONDS: Final = 60.0
 DEFAULT_STARTUP_GRACE_SECONDS: Final = 0.0
-DEFAULT_SWEEP_LIMIT: Final = TRADE_INTEGRITY_SWEEP_LIMIT
+DEFAULT_SWEEP_LIMIT: Final = 15_000
+"""Default sweep page per monitor, below the repository's hard maximum.
+
+One complete repository call, a windowed page of this size and a full
+worklog batch of exact candidates, has to finish inside
+:data:`DEFAULT_MONITOR_TIMEOUT_SECONDS`. A timeout still halves the page.
+"""
 DEFAULT_WORKLOG_LIMIT: Final = TRADE_INTEGRITY_WORKLOG_LIMIT
-DEFAULT_MONITOR_TIMEOUT_SECONDS: Final = 30.0
+DEFAULT_MONITOR_TIMEOUT_SECONDS: Final = 45.0
+"""Wall-clock bound for one repository call; the statement timeout is 2 s less."""
 MIN_SWEEP_LIMIT: Final = 500
 MIN_WORKLOG_LIMIT: Final = 100
 PAGE_GROWTH_SUCCESS_COUNT: Final = 3
@@ -178,6 +191,11 @@ class TradeIntegrityWatchdog:
     first guarded tick after the configured startup grace, which is zero
     by default, then repeats every minute. ``stop`` cancels and
     awaits that task.
+
+    The repository probes swept rows only within seven days of their own
+    execution time and checks worklog obligations exactly, so a healthy
+    frame certifies swept rows only inside that window. Every frame
+    reports the window as ``probe_window_days``.
     """
 
     def __init__(
@@ -470,6 +488,7 @@ class TradeIntegrityWatchdog:
                 "configured_sweep_limit": self._config.sweep_limit,
                 "configured_worklog_limit": self._config.worklog_limit,
                 "monitor_timeout_seconds": self._config.monitor_timeout_seconds,
+                "probe_window_days": TRADE_INTEGRITY_PROBE_WINDOW.days,
                 "evaluated_at": evaluated_at.isoformat(),
             }
             frame = HeartbeatData(
