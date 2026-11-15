@@ -1015,7 +1015,8 @@ async def test_an_interrupted_write_keeps_the_results_of_the_applied_lines(
     Given: A plan whose first line fails a Walutomat cancel and whose second line's
         insert raises,
     When: The plan is applied,
-    Then: The error propagates, the first line's result is kept and the second has none.
+    Then: The error propagates, the first line's result is kept, and the second line
+        stays in_flight with the sequence id it was given.
     """
     walutomat = await seed_walutomat_pair(repository)
     kraken = await seed_kraken_pair(repository)
@@ -1032,11 +1033,39 @@ async def test_an_interrupted_write_keeps_the_results_of_the_applied_lines(
     ):
         await repair.apply_write(repository, session)
     assert session.results == [
-        {"cancel_public_id": walutomat.cancel_id, "result": "failed", "sequence_id": 1}
+        {"cancel_public_id": walutomat.cancel_id, "result": "failed", "sequence_id": 1},
+        {"cancel_public_id": kraken.cancel_id, "result": "in_flight", "sequence_id": 2},
     ]
     assert session.sequence == 2
     receipt = repair.receipt_document(session)
     assert receipt["results"] == session.results and receipt["digest"] == plan.digest
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_the_insert_keeps_the_written_line_in_flight(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A line whose insert committed before the run failed stays in the results.
+
+    Given: A planned line whose insert commits and whose read-back then raises,
+    When: The plan is applied,
+    Then: The error propagates, the line stays in_flight with its sequence id, and the
+        row it wrote carries the session id.
+    """
+    pair = await seed_kraken_pair(repository)
+    plan = await _plan(repository, pair.cancel_id)
+    session = _session(plan)
+    failing_read = AsyncMock(side_effect=ConnectionError("connection dropped"))
+    with (
+        patch.object(repair.reads, "get_terminal_written_by_session", failing_read),
+        pytest.raises(ConnectionError, match="connection dropped"),
+    ):
+        await repair.apply_write(repository, session)
+    assert session.results == [
+        {"cancel_public_id": pair.cancel_id, "result": "in_flight", "sequence_id": 1}
+    ]
+    [terminal] = await _terminals(repository, pair.client_order_id)
+    assert (terminal.session_id, terminal.sequence_id) == (session.session_id, 1)
 
 
 @pytest.mark.asyncio

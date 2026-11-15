@@ -185,6 +185,7 @@ def test_a_write_that_raises_still_leaves_its_receipt(
     assert result.output.index(f"write session: {_STUB_SESSION_ID}") < result.output.index(
         "failed: RuntimeError"
     )
+    assert f"the rows carrying session {_STUB_SESSION_ID} are the authority" in result.output
     receipt = json.loads((tmp_path / "out" / "receipt.json").read_text())
     assert receipt == {
         "digest": "d" * 64,
@@ -296,3 +297,29 @@ def test_write_target_returns_the_vote_for_a_confirmed_run(tmp_path: Path) -> No
     assert command_module.write_target(False, None, None) is None
     with pytest.raises(CancelTargetRepairRefusedError):
         command_module.write_target(True, tmp_path, "not-a-digest")
+
+
+def test_the_receipt_is_written_before_the_plan_files(
+    database: tuple[str, SeededPair], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan file that cannot be written does not cost the receipt.
+
+    Given: A write during which another process puts preview.json into the output directory,
+    When: The run ends and its files are written,
+    Then: It exits 1 naming the file error, and receipt.json is there with the applied line.
+    """
+    _, pair = database
+    session = _stub_session()
+    out = tmp_path / "out"
+
+    async def collide(repository: SQLAlchemyRepository, prepared: WriteSession) -> None:
+        prepared.results.append({"cancel_public_id": pair.cancel_id, "result": "recorded"})
+        (out / "preview.json").write_text("[]")
+
+    monkeypatch.setattr(command_module, "prepare_write", AsyncMock(return_value=session))
+    monkeypatch.setattr(command_module, "apply_write", collide)
+    result = _confirmed(pair, tmp_path)
+    assert result.exit_code == 1, result.output
+    assert "failed: FileExistsError" in result.output
+    receipt = json.loads((out / "receipt.json").read_text())
+    assert receipt["results"] == [{"cancel_public_id": pair.cancel_id, "result": "recorded"}]

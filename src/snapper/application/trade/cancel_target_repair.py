@@ -880,13 +880,18 @@ class WriteSession:
     results: list[JsonValue]
     sequence: int = 0
 
-    def next_sequence(self) -> int:
-        """Return the next sequence number of the run.
+    def next_sequence(self, entry: JsonObject) -> int:
+        """Allocate the run's next sequence number and stamp it on a line's entry.
+
+        Args:
+            entry: The line's result entry, which keeps the number even when
+                the write that uses it fails.
 
         Returns:
             The run's next sequence number, counting from 1.
         """
         self.sequence += 1
+        entry["sequence_id"] = self.sequence
         return self.sequence
 
 
@@ -902,7 +907,7 @@ async def _recheck(
 
 
 async def _record_terminal(
-    repository: SQLAlchemyRepository, line: PlanLine, run: WriteSession
+    repository: SQLAlchemyRepository, line: PlanLine, run: WriteSession, entry: JsonObject
 ) -> JsonObject:
     """Recheck one Kraken line, record its terminal once and read the row back.
 
@@ -914,20 +919,18 @@ async def _record_terminal(
     if recheck is None:
         return {"result": "changed_before_write"}
     row = terminal_fields(cast(KrakenCase, recheck.kraken))
-    sequence_id = run.next_sequence()
     row["timestamp"] = run.write_time
     row["session_id"] = run.session_id
-    row["sequence_id"] = sequence_id
+    row["sequence_id"] = run.next_sequence(entry)
     if not await repository.insert_order_terminal_once(row):
-        return {"result": "already_recorded", "sequence_id": sequence_id}
+        return {"result": "already_recorded"}
     written = await reads.get_terminal_written_by_session(
         repository, cast(str, row["client_order_id"]), run.session_id
     )
     if written is None:
-        return {"result": "recorded_unconfirmed", "sequence_id": sequence_id}
+        return {"result": "recorded_unconfirmed"}
     return {
         "result": "recorded",
-        "sequence_id": sequence_id,
         "venue_event_id": written["id"],
         "venue_event_public_id": written["public_id"],
     }
@@ -942,7 +945,7 @@ def _first_failed_time(versions: Sequence[TradeCommandRow]) -> datetime | None:
 
 
 async def _fail_cancel(
-    repository: SQLAlchemyRepository, line: PlanLine, run: WriteSession
+    repository: SQLAlchemyRepository, line: PlanLine, run: WriteSession, entry: JsonObject
 ) -> JsonObject:
     """Recheck one Walutomat line and move its cancel to ``failed``."""
     if await _recheck(repository, line, RepairAction.FAIL_CANCEL) is None:
@@ -950,7 +953,7 @@ async def _fail_cancel(
     cancel = cast(TradeCommandRow, line.evidence.cancel)
     target = cast(TradeCommandRow, line.evidence.target)
     terminal_at = target["terminal_at"] or _first_failed_time(line.evidence.target_versions)
-    sequence_id = run.next_sequence()
+    sequence_id = run.next_sequence(entry)
     applied = await repository.advance_trade_command_lifecycle(
         public_id=cancel["public_id"],
         expected_status=cancel["status"],
@@ -961,7 +964,7 @@ async def _fail_cancel(
         terminal_at=terminal_at,
         last_error=NEVER_SUBMITTED,
     )
-    return {"result": "failed" if applied else "lost_compare_and_set", "sequence_id": sequence_id}
+    return {"result": "failed" if applied else "lost_compare_and_set"}
 
 
 async def prepare_write(
@@ -1005,18 +1008,27 @@ async def prepare_write(
 async def apply_write(repository: SQLAlchemyRepository, session: WriteSession) -> None:
     """Apply every line of a prepared write in order, recording each result as it lands.
 
+    A line enters the results as ``in_flight`` before anything is written for
+    it, and carries its sequence id as soon as the run allocates one. A
+    failure after a commit therefore still leaves the line in the receipt;
+    the rows carrying the session id are the authority for such a line.
+
     Args:
         repository: Repository to write through.
-        session: The prepared write; its results grow line by line, so a
-            failure leaves the results of the lines already applied.
+        session: The prepared write; its results grow line by line.
     """
     for line in session.plan.lines:
+        entry: JsonObject = {
+            "cancel_public_id": line.evidence.cancel_public_id,
+            "result": "in_flight",
+        }
+        session.results.append(entry)
         outcome: JsonObject = {"result": "nothing_to_write"}
         if line.decision.action is RepairAction.RECORD_TERMINAL:
-            outcome = await _record_terminal(repository, line, session)
+            outcome = await _record_terminal(repository, line, session, entry)
         elif line.decision.action is RepairAction.FAIL_CANCEL:
-            outcome = await _fail_cancel(repository, line, session)
-        session.results.append({"cancel_public_id": line.evidence.cancel_public_id, **outcome})
+            outcome = await _fail_cancel(repository, line, session, entry)
+        entry.update(outcome)
 
 
 def receipt_document(session: WriteSession) -> JsonObject:

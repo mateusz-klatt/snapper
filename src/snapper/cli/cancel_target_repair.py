@@ -118,9 +118,9 @@ def _write_plan_files(output_dir: Path, plan: RepairPlan) -> None:
 
 
 def _write_receipt(output_dir: Path, session: WriteSession) -> None:
-    """Write the plan files and the receipt of a write, complete or interrupted."""
-    _write_plan_files(output_dir, session.plan)
+    """Write the receipt of a write, complete or interrupted, and then its plan files."""
     write_exclusive(output_dir / "receipt.json", _document_bytes(receipt_document(session)))
+    _write_plan_files(output_dir, session.plan)
 
 
 async def _dry_run(
@@ -167,6 +167,12 @@ async def execute(
         typer.echo(f"write session: {session.session_id}")
         try:
             await apply_write(repository, session)
+        except BaseException:
+            typer.echo(
+                f"write interrupted: the rows carrying session {session.session_id} are the "
+                "authority for what was written"
+            )
+            raise
         finally:
             _write_receipt(output_dir, session)
         typer.echo(json.dumps(session.results, sort_keys=True))

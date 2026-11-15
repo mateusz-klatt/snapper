@@ -2,9 +2,9 @@
 
 Active-row reads are clockless. ``where_active`` at a point in time misses a
 row stamped after it, so these queries bound only ``known_to > now`` in SQL,
-which no closed version passes, and then prove each loaded row open-ended
+which every open version passes, and then prove each loaded row open-ended
 with :func:`~snapper.data.models.is_open_ended_version`, the sanctioned
-exact comparison. A read that finds more than one active row raises, as
+exact comparison, which drops a version closed later than now. A read that finds more than one active row raises, as
 ``get_active_create_command_by_client_order_id`` does. Orders, executions and
 venue events are read without joins, so a row whose instrument or symbol
 lineage is incomplete is still found. Nothing here writes; the repair writes
