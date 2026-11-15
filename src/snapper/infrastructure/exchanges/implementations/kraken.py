@@ -1736,11 +1736,12 @@ class KrakenExchangeClient(ExchangeClientBase):
             symbol: Trading pair (optional, improves performance).
 
         Returns:
-            Cancelled order snapshot.
+            The order snapshot read back from Kraken after the cancel request.
+            The native fallback does not invent a canceled, zero-filled order.
 
         Raises:
-            RuntimeError: If API credentials are missing.
-            Exception: If cancellation fails.
+            RuntimeError: If API credentials are missing, or the read-back is malformed.
+            Exception: If the cancel request or the read-back fails.
         """
         if not self.api_key or not self.api_secret:
             raise RuntimeError(_CREDENTIALS_REQUIRED_MSG)
@@ -1778,20 +1779,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                     target=spot_sdk_proxy_target(trade_client),
                     sync_call=lambda: trade_client.cancel_order(txid=order_id),
                 )
-                return ExchangeOrderSnapshot(
-                    id=order_id,
-                    client_order_id=None,
-                    symbol=symbol,
-                    side=OrderSideEnum.BUY,
-                    type=ExchangeOrderTypeEnum.LIMIT,
-                    amount=float("0"),
-                    price=None,
-                    status=ExchangeOrderStatusEnum.CANCELED,
-                    filled=float("0"),
-                    remaining=float("0"),
-                    timestamp=time.time(),
-                    fee=None,
-                )
+                return await self._get_order_native(order_id, symbol)
             except Exception as fallback_error:
                 logger.error(f"Failed to cancel order with native Kraken API: {fallback_error}")
                 raise
