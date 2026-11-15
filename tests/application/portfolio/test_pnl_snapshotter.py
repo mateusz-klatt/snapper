@@ -12,6 +12,7 @@ from typing import cast
 from uuid import UUID
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
@@ -1806,6 +1807,70 @@ class TestBudgetSplitAndHelpers:
 
 class TestEvidenceAndPartition:
     """Crypto plane, fiat forex plane, and the temporal position partition."""
+
+    @pytest.mark.parametrize("sqlstate", ["57014", "XX000"])
+    @pytest.mark.parametrize("recompute", [False, True])
+    async def test_crypto_query_failure_preserves_rows_and_baseline(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        sqlstate: str,
+        recompute: bool,
+    ) -> None:
+        """A failed evidence read cannot publish catch-up or advance its detector.
+
+        Given either new catch-up or an older calculation-version suffix
+        When the crypto evidence statement is cancelled or otherwise fails
+        Then durable rows and baselines stay unchanged and each tick reports failure.
+
+        Args:
+            monkeypatch: Isolate the repository read failure.
+            caplog: Capture scope and chunk diagnostics.
+            sqlstate: PostgreSQL cancellation or unrelated database failure.
+            recompute: Exercise suffix correction before catch-up publication.
+        """
+
+        class DriverError(Exception):
+            """Represent a driver-boundary PostgreSQL error."""
+
+            sqlstate: str
+
+        driver_error = DriverError("synthetic database failure")
+        driver_error.sqlstate = sqlstate
+        failure = DBAPIError("SELECT synthetic", {}, driver_error, False)
+        old = _persisted_sample(_minute(3))
+        old["calc_version"] = "previous-calculation"
+        repo = _FakeRepo(
+            credentials=[_cred("kraken")],
+            anchor=_anchor(),
+            latest=old if recompute else None,
+            persisted=[old] if recompute else [],
+            balances_json='[{"currency":"BTC","total":2.0}]',
+        )
+        before = list(repo.persisted)
+        snap = _snapshotter(repo, _minute(7))
+        monkeypatch.setattr(
+            repo, "get_pnl_crypto_usd_plane_candles", mock.AsyncMock(side_effect=failure)
+        )
+        with _patched_series(), caplog.at_level("WARNING", logger=pnl_snapshotter.__name__):
+            await snap._tick_once()
+            await snap._tick_once()
+        assert repo.persisted == before
+        assert repo.recorded == []
+        assert repo.superseded == []
+        assert repo.retracted == []
+        assert snap._baselines == {}
+        assert sum("scope(s) failed this tick" in record.message for record in caplog.records) == 2
+        timeouts = [
+            record.message
+            for record in caplog.records
+            if "crypto-plane query timed out" in record.message
+        ]
+        assert len(timeouts) == (1 if sqlstate == "57014" else 0)
+        if timeouts:
+            assert _WALLET in timeouts[0]
+            assert str(_minute(1)) in timeouts[0]
+            assert str(_minute(3 if recompute else 5)) in timeouts[0]
 
     @pytest.mark.asyncio
     async def test_usd_only_basket_skips_crypto_load(self) -> None:

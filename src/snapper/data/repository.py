@@ -1775,6 +1775,48 @@ def _pnl_crypto_usd_spot_proof_filters(as_of: datetime) -> list[ColumnElement[bo
     ]
 
 
+def _pnl_crypto_usd_candidate_filter(
+    currencies: Sequence[str], as_of: datetime, dialect_name: str
+) -> ColumnElement[bool]:
+    """Bound candle scan keys without replacing author-time eligibility proof.
+
+    Historical metadata only enumerates a superset of possible instrument IDs.
+    The outer candle query still proves each author's ownership, denomination,
+    spot classification and certification, including conflicting versions.
+
+    Args:
+        currencies: Requested crypto bases.
+        as_of: Knowledge horizon bounding candidate metadata.
+        dialect_name: Database dialect selecting the indexed key expression.
+
+    Returns:
+        A candle instrument-key filter using one typed array on PostgreSQL.
+    """
+    candidates = (
+        select(Instrument.public_id)
+        .select_from(Instrument)
+        .join(Symbol, Instrument.symbol_public_id == Symbol.public_id)
+        .where(
+            Symbol.base.in_(list(dict.fromkeys(currencies))),
+            Symbol.quote == "USD",
+            Symbol.timestamp <= as_of,
+            Instrument.timestamp <= as_of,
+        )
+        .distinct()
+        .correlate(None)
+        .cte("pnl_crypto_usd_candidate_instruments")
+        .prefix_with("MATERIALIZED", dialect="postgresql")
+    )
+    if dialect_name == "postgresql":
+        instrument_ids = (
+            select(func.array_agg(candidates.c.public_id))
+            .scalar_subquery()
+            .cast(ARRAY(Instrument.public_id.type))
+        )
+        return Candle.instrument_public_id == any_(instrument_ids)
+    return Candle.instrument_public_id.in_(select(candidates.c.public_id))
+
+
 def _pnl_spot_order_minimum_proof_filters(
     as_of: datetime,
 ) -> list[ColumnElement[bool]]:
@@ -22945,7 +22987,10 @@ class SQLAlchemyRepository(Repository):
         spot cannot retroactively become an eligible spot plane, a redenominated
         symbol cannot redraw an earlier candle's base, and a later certification or
         decertification cannot admit or de-plane a candle authored under the
-        earlier spec.
+        earlier spec. A historical candidate-ID set bounds the candle scan
+        without replacing any of those proofs. PostgreSQL executes the read
+        inside an explicit transaction with JIT disabled and a twenty-second
+        statement timeout; both settings expire with this transaction.
 
         Args:
             currencies: Distinct base currencies to price.
@@ -22959,7 +23004,11 @@ class SQLAlchemyRepository(Repository):
         """
         if not currencies:
             return []
-        async with self.session() as s:
+        candidate_filter = _pnl_crypto_usd_candidate_filter(currencies, as_of, self.dialect_name)
+        async with self.session() as s, s.begin():
+            if self.dialect_name == "postgresql":
+                await s.execute(text("SET LOCAL statement_timeout = '20s'"))
+                await s.execute(text("SET LOCAL jit = off"))
             result = await s.execute(
                 select(
                     Symbol.base,
@@ -22999,6 +23048,7 @@ class SQLAlchemyRepository(Repository):
                     ),
                 )
                 .where(
+                    candidate_filter,
                     Symbol.base.in_(list(dict.fromkeys(currencies))),
                     *_pnl_crypto_usd_spot_proof_filters(as_of),
                     Candle.timeframe == "1m",
