@@ -259,7 +259,37 @@ route to revoke one.
 
 ## Client configuration examples
 
-### Claude Code plugin (recommended)
+### Multi-CLI setup (`snapper-mcp integrate` and `snapper-mcp doctor`)
+
+`@mateusz-klatt/snapper-mcp` (`>= 0.16.0`) ships a unified installer and
+verifier that wires MCP tool access and interactive-only session wake across
+Claude Code, Codex, GitHub Copilot CLI, Antigravity, Kimi Code, Grok CLI, and
+Cursor CLI. Credentials stay in an owner-only mode-`0600` `config.json` file in
+the `snapper-mcp` state directory (or an existing `--config PATH`) so raw
+bearer tokens are never written into generated client configs, hook commands,
+or wake-worker `argv`. `integrate` requires a durable `snapper-mcp` binary path
+(global install or `--bin PATH`) and refuses ephemeral `npx` cache paths:
+
+```bash
+npm install -g @mateusz-klatt/snapper-mcp@0.16.0
+
+# Read the delegate JWT silently (keeps the token out of ps argv and shell history)
+printf 'Snapper delegate JWT: ' && read -rs SNAPPER_ACCESS_TOKEN && printf '\n'
+SNAPPER_ACCESS_TOKEN="$SNAPPER_ACCESS_TOKEN" \
+  snapper-mcp integrate all --base-url https://snapper.example.com/api/mcp
+unset SNAPPER_ACCESS_TOKEN
+
+# Or point directly at an existing owner-only (0600) JSON credential file
+snapper-mcp integrate codex --no-wake --config ~/.config/snapper/pat.json
+
+# Verify client configs, wake hooks/watchers, and token shape/expiry offline
+snapper-mcp doctor
+
+# Cleanly unwire Snapper-managed entries and restore prior client files
+snapper-mcp integrate all --remove
+```
+
+### Claude Code plugin (marketplace install)
 
 In any Claude Code session:
 
@@ -288,7 +318,7 @@ plugin's `userConfig` schema in
 Run `/mcp list` to confirm the `snapper` server is connected. The
 plugin pins the runtime to a specific `@mateusz-klatt/snapper-mcp`
 version — the manifest hardcodes the exact version string in
-`mcpServers.snapper.args` (currently `@0.15.0`), kept in lockstep
+`mcpServers.snapper.args` (currently `@0.16.0`), kept in lockstep
 with the plugin's own `version` field by the
 `integrations/snapper-mcp/test/plugin_manifest.test.ts` parity
 test so a bump to either side fails CI until both match. Future

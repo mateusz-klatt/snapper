@@ -1,8 +1,8 @@
 #!/bin/sh
 # snapper-mcp launcher: inject the compose-mounted PAT config without breaking
-# the CLI's subcommand dispatch (argv[0] must stay check|watch) and without
-# letting an explicit --base-url silently discard the PAT token. Only an
-# explicit --config suppresses the default.
+# the CLI's subcommand dispatch (argv[0] must stay check|watch|integrate|doctor|hook)
+# and without letting an explicit --base-url silently discard the PAT token.
+# Only an explicit --config suppresses the default.
 PAT=/run/secrets/snapper-mcp/config.json
 MCP="node /usr/local/lib/snapper-mcp/dist/index.js"
 
@@ -19,7 +19,7 @@ if [ "$explicit_config" -eq 1 ] || [ ! -r "$PAT" ]; then
 fi
 
 case "$1" in
-    check|watch)
+    check|watch|integrate|doctor|hook)
         sub="$1"; shift
         exec $MCP "$sub" --config "$PAT" "$@"
         ;;
