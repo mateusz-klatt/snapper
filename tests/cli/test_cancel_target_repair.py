@@ -10,13 +10,13 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
-import typer
 from click.testing import Result
 from typer.testing import CliRunner
 
 from snapper.application.trade.cancel_target_repair import CancelTargetRepairRefusedError
 from snapper.application.trade.cancel_target_repair import WriteSession
 from snapper.cli import cancel_target_repair as command_module
+from snapper.cli.app import app
 from snapper.data.repository import SQLAlchemyRepository
 from tests.helpers.cancel_target_repair import SeededPair
 from tests.helpers.cancel_target_repair import seed_kraken_pair
@@ -25,14 +25,6 @@ _DIGEST = re.compile(r"digest: ([0-9a-f]{64})")
 _SESSION = re.compile(r"write session: ([0-9a-f-]{36})")
 _STUB_SESSION_ID = "00000000-0000-7000-8000-0000000000ab"
 _STUB_WRITE_TIME = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
-
-
-def _app() -> typer.Typer:
-    """Mount the command on its own app, as ``cli/app.py`` will."""
-    app = typer.Typer()
-    app.command(name="repair-cancel-targets")(command_module.repair_cancel_targets)
-    app.command(name="noop")(lambda: None)
-    return app
 
 
 @pytest.fixture
@@ -55,7 +47,7 @@ def database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, Seed
 
 def _invoke(*arguments: str) -> Result:
     """Run the command with the given options."""
-    return CliRunner().invoke(_app(), ["repair-cancel-targets", *arguments])
+    return CliRunner().invoke(app, ["repair-cancel-targets", *arguments])
 
 
 def _stub_session() -> WriteSession:
@@ -323,3 +315,14 @@ def test_the_receipt_is_written_before_the_plan_files(
     assert "failed: FileExistsError" in result.output
     receipt = json.loads((out / "receipt.json").read_text())
     assert receipt["results"] == [{"cancel_public_id": pair.cancel_id, "result": "recorded"}]
+
+
+def test_the_command_is_registered_on_the_snapper_app() -> None:
+    """The operator command is reachable as ``snapper repair-cancel-targets``.
+
+    Given: The Snapper CLI application,
+    When: Its registered commands are read,
+    Then: ``repair-cancel-targets`` runs the command module's function.
+    """
+    command = next(item for item in app.registered_commands if item.name == "repair-cancel-targets")
+    assert command.callback is command_module.repair_cancel_targets
