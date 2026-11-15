@@ -87,7 +87,7 @@ _CANCEL_RETIREMENT_SOURCE_STATUSES: frozenset[str] = frozenset(
 
 
 @dataclass(frozen=True)
-class _LifecycleAdvance:
+class LifecycleAdvance:
     """Computed fold target for one command's durable status advance."""
 
     status: TradeCommandStatusEnum
@@ -125,7 +125,7 @@ class _LifecycleFoldState:
         elif event_type == "order_terminal":
             self._ingest_terminal(event)
 
-    def to_advance(self, cmd: TradeCommandRow) -> _LifecycleAdvance | None:
+    def to_advance(self, cmd: TradeCommandRow) -> LifecycleAdvance | None:
         """Return the durable status advance represented by this fold."""
         target = self._target_status(cmd["quantity"])
         if target is None:
@@ -133,7 +133,7 @@ class _LifecycleFoldState:
         if _STATUS_RANK[target] <= _STATUS_RANK.get(cmd["status"], 0):
             return None
         terminal_at, last_error = self._terminal_fields()
-        return _LifecycleAdvance(
+        return LifecycleAdvance(
             status=target,
             acked_at=self.acked_at,
             exchange_order_id=self.exchange_order_id,
@@ -239,9 +239,9 @@ def _max_cumulative_fill(current: float | None, candidate: float | None) -> floa
     return max(current, candidate)
 
 
-def _fold_lifecycle_advance(
+def fold_lifecycle_advance(
     cmd: TradeCommandRow, events: list[VenueEventRow]
-) -> _LifecycleAdvance | None:
+) -> LifecycleAdvance | None:
     """Fold a command's venue events into its target durable status.
 
     Walks the events in observation order (``id`` ascending). The FIRST
@@ -274,7 +274,7 @@ def _fold_lifecycle_advance(
     return state.to_advance(cmd)
 
 
-def _cancel_retirement(
+def cancel_retirement(
     target_status: str, ended_at: datetime, cancel_created_at: datetime
 ) -> tuple[TradeCommandStatusEnum, str]:
     """Return a retired cancel's new status and ``last_error`` (item G2 table).
@@ -371,7 +371,7 @@ class ReconciliationLoop:
             self._running = False
 
     async def _advance_command(
-        self, cmd: TradeCommandRow, advance: _LifecycleAdvance, now: datetime
+        self, cmd: TradeCommandRow, advance: LifecycleAdvance, now: datetime
     ) -> bool:
         """Apply one fold advance through the lifecycle CAS.
 
@@ -382,7 +382,7 @@ class ReconciliationLoop:
 
         Args:
             cmd: Active command row being advanced.
-            advance: Fold target computed by ``_fold_lifecycle_advance``.
+            advance: Fold target computed by ``fold_lifecycle_advance``.
             now: Cycle bus time.
 
         Returns:
@@ -473,11 +473,11 @@ class ReconciliationLoop:
     @staticmethod
     def _command_advance(
         cmd: TradeCommandRow, events_by_cid: dict[str, list[VenueEventRow]]
-    ) -> _LifecycleAdvance | None:
+    ) -> LifecycleAdvance | None:
         """Return a lifecycle advance for a foldable command."""
         if cmd["status"] not in _FOLD_SOURCE_STATUSES:
             return None
-        return _fold_lifecycle_advance(cmd, events_by_cid.get(cmd["client_order_id"], []))
+        return fold_lifecycle_advance(cmd, events_by_cid.get(cmd["client_order_id"], []))
 
     async def _advance_foldable_commands(
         self,
@@ -601,7 +601,7 @@ class ReconciliationLoop:
             return False
         if target is None or ended_at is None:
             return False
-        new_status, last_error = _cancel_retirement(target["status"], ended_at, cmd["created_at"])
+        new_status, last_error = cancel_retirement(target["status"], ended_at, cmd["created_at"])
         applied = await self._repo.advance_trade_command_lifecycle(
             public_id=cmd["public_id"],
             expected_status=cmd["status"],

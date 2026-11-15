@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from snapper.application.trade.reconciler import ReconciliationLoop
-from snapper.application.trade.reconciler import _fold_lifecycle_advance
+from snapper.application.trade.reconciler import fold_lifecycle_advance
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import TradeCommandStatusEnum
@@ -135,7 +135,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: no advance is produced.
         """
-        assert _fold_lifecycle_advance(_make_cmd(), []) is None
+        assert fold_lifecycle_advance(_make_cmd(), []) is None
 
     def test_accepted_event_advances_to_accepted(self) -> None:
         """An order_accepted row folds to ACCEPTED with ack fields.
@@ -145,7 +145,7 @@ class TestFoldLifecycleAdvance:
         Then: target is ACCEPTED carrying acked_at and exchange_order_id.
         """
         received = datetime.now(UTC)
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(), [_make_event(received_at=received, exchange_order_id="ex-9")]
         )
         assert advance is not None
@@ -165,7 +165,7 @@ class TestFoldLifecycleAdvance:
         """
         first = datetime.now(UTC)
         second = first + timedelta(seconds=5)
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [
                 _make_event(id=1, received_at=first, exchange_order_id="ex-9"),
@@ -183,7 +183,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: target is PARTIALLY_FILLED.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [_make_event(event_type="fill_observed", cum_fill_size=0.4, exchange_order_id=None)],
         )
@@ -197,7 +197,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: target is FILLED and the exchange id comes from the fill row.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [
                 _make_event(
@@ -225,7 +225,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: target is PARTIALLY_FILLED (no fabricated FILLED).
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(quantity=0.0),
             [_make_event(event_type="fill_observed", cum_fill_size=0.2, exchange_order_id=None)],
         )
@@ -240,7 +240,7 @@ class TestFoldLifecycleAdvance:
         Then: target is REJECTED with the venue error and terminal_at.
         """
         received = datetime.now(UTC)
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [
                 _make_event(
@@ -260,7 +260,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: last_error falls back to a generic venue-rejection note.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(), [_make_event(event_type="order_rejected", error=None)]
         )
         assert advance is not None
@@ -273,7 +273,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: target is FAILED with the circuit_breaker_open reason.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(), [_make_event(event_type="order_breaker_open")]
         )
         assert advance is not None
@@ -290,7 +290,7 @@ class TestFoldLifecycleAdvance:
             the live-trading interlock rejects the submit before the venue.
         """
         received = datetime.now(UTC)
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [
                 _make_event(
@@ -312,7 +312,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: last_error falls back to the generic order_interlock_blocked note.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(), [_make_event(event_type="order_interlock_blocked", error=None)]
         )
         assert advance is not None
@@ -329,7 +329,7 @@ class TestFoldLifecycleAdvance:
             terminal is never cleared by later live evidence, so a late accept
             cannot resurrect a command the interlock already killed.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [
                 _make_event(id=1, event_type="order_interlock_blocked"),
@@ -346,7 +346,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: target is CANCELLED with no error note.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(), [_make_event(event_type="order_terminal", status="canceled")]
         )
         assert advance is not None
@@ -360,7 +360,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: target is CANCELLED and last_error names the raw status.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(), [_make_event(event_type="order_terminal", status="vaporized")]
         )
         assert advance is not None
@@ -374,7 +374,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: target is FILLED via the terminal mapping.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [
                 _make_event(id=1, event_type="order_accepted"),
@@ -392,7 +392,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: no advance — the executor verification sweep owns it.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(), [_make_event(event_type="order_submit_unknown")]
         )
         assert advance is None
@@ -406,7 +406,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: target is ACCEPTED, never the stale REJECTED.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [
                 _make_event(id=1, event_type="order_rejected", error="nope"),
@@ -425,7 +425,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: target reflects the fill, not the stale rejection.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [
                 _make_event(id=1, event_type="order_rejected"),
@@ -442,7 +442,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: target is REJECTED (observation order decides).
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [
                 _make_event(id=1, event_type="order_accepted"),
@@ -461,7 +461,7 @@ class TestFoldLifecycleAdvance:
         Then: target stays CANCELLED — terminal-with-evidence commands
             are never retried, so later accept rows cannot resurrect.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [
                 _make_event(id=1, event_type="order_terminal", status="canceled"),
@@ -480,7 +480,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: target is FILLED, matching the executor's live decision.
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(),
             [_make_event(event_type="fill_observed", cum_fill_size=0.9999995, status="filled")],
         )
@@ -494,7 +494,7 @@ class TestFoldLifecycleAdvance:
         When: the fold runs,
         Then: no advance is produced (equal rank never re-applies).
         """
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(status="accepted"), [_make_event(event_type="order_accepted")]
         )
         assert advance is None
@@ -1210,7 +1210,7 @@ class TestCancelRetirement:
         Then: the create advances to cancelled with the terminal's time.
         """
         received = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
-        advance = _fold_lifecycle_advance(
+        advance = fold_lifecycle_advance(
             _make_cmd(status="accepted"),
             [
                 _make_event(id=1, event_type="order_accepted", received_at=received),

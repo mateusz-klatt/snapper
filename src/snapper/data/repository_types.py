@@ -566,6 +566,52 @@ class ExecutionRow(TypedDict):
     numeric_provenance: NotRequired[str | None]
 
 
+class ExecutionEvidenceRow(TypedDict):
+    """One ``executions`` row read without joins for the cancel-target repair.
+
+    Returned by ``get_executions_by_order_public_ids``, which applies no
+    ``known_to`` filter and joins no order, instrument or symbol, so an
+    execution whose lineage is incomplete is still found. Only ``size`` and
+    ``fee`` are judged; the price and the decimals are listed for the voters.
+    """
+
+    id: int
+    order_public_id: str
+    status: str
+    size: float
+    fee: float
+    price: float
+    exec_id: str | None
+    trade_id: str | None
+    numeric_provenance: str | None
+    price_decimal: str | None
+    size_decimal: str | None
+    fee_decimal: str | None
+    timestamp: datetime
+
+
+class OrderVersionRow(TypedDict):
+    """One SCD2 version of an ``orders`` row, read without joins.
+
+    Returned by ``get_order_versions_by_client_order_id`` for every version of
+    every order carrying a client order id, closed versions included, so the
+    cancel-target repair can find when the executor first stored ``canceled``.
+    """
+
+    id: int
+    public_id: str
+    instrument_public_id: str
+    mode: str
+    wallet_public_id: str
+    client_order_id: str | None
+    exchange_order_id: str | None
+    status: str
+    filled_size: float
+    leverage: int | None
+    timestamp: datetime
+    known_to: datetime
+
+
 class SpotExecutionWitnessRow(TypedDict):
     """One sealed-prefix execution's scope sequence, venue exec id, and Order.
 

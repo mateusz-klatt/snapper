@@ -359,6 +359,52 @@ The coordinator certifies the shard at its next start, so recreate the API
 container after a retirement. Durable evidence that the wallet used margin is
 kept on purpose: retirement does not change the reconciliation method.
 
+### `repair-cancel-targets`
+
+Preview and record the missing evidence of stale cancel commands. A Kraken spot order that the venue cancelled but
+whose `order_terminal` was never recorded gets that canceled terminal once, built field for field as the executor builds
+it; the reconciler's fold and its cancel-retirement pass then retire the create and the cancel on their next cycle. A
+Walutomat cancel whose target the live-trading interlock refused before any venue call moves to `failed` with
+`target_never_submitted`. The command never writes an order, an execution, a fill or an amount, and never calls a venue.
+
+```bash
+snapper repair-cancel-targets --cancel <cancel-public-id> --cancel <cancel-public-id> --output-dir <dir>
+snapper repair-cancel-targets --cancel <cancel-public-id> --cancel <cancel-public-id> --output-dir <new-dir> \
+    --confirm --voted-preview <dry-run-dir> --expect-digest <sha256>
+```
+
+| Option | Meaning |
+| ------ | ------- |
+| `--cancel` | Public id of one cancel command. Required; repeat it for every cancel. Name every stale cancel of a shard in one run. |
+| `--output-dir` | New or empty directory for `preview.json`, `summary.json` and, on a write, `receipt.json`. Required. |
+| `--confirm` | Write the voted plan. Without it the command is a dry run. |
+| `--voted-preview` | Output directory of the voted dry run. Required with `--confirm`. |
+| `--expect-digest` | The voted digest. Required with `--confirm`. |
+
+The dry run prints the credential-free database identity, the digest and the action counts, writes `preview.json` and
+`summary.json`, and exits `0`. Each cancel gets one action: `record_terminal`, `fail_cancel`, `already_recorded`,
+`already_failed` or `refuse` with a reason, and a refusal is data in the preview. The digest is the sha256 of the
+canonical preview and summary, and the summary binds the database identity, the code revision and, per Kraken shard,
+its open commands, checkpoint and wallets. Every open command on a Kraken shard must be the target of a cancel named in
+the same run, so name all of a shard's stale cancels together.
+
+With `--confirm` the command recomputes the plan and refuses before any write unless the stored vote, the expected
+digest and the recomputed plan agree and no line refuses. It prints the write session id, rechecks each line just
+before its write, and writes `receipt.json` even when the run stops: the digest, the session id, the write time and,
+per line, the result, the sequence id and the written `venue_events` row's id and public id. It exits `0` only when
+every line is `recorded`, `failed`, `already_recorded` or `nothing_to_write`; `changed_before_write`,
+`lost_compare_and_set`, `recorded_unconfirmed`, `skipped_after_shard_change` and `in_flight` exit `1`, and the rows
+carrying the session id are then the authority for what was written. After a line on a shard ends
+`changed_before_write`, `lost_compare_and_set` or `recorded_unconfirmed`, the run writes nothing more on that shard.
+
+After a write, one reconciliation cycle retires the commands. Restart the trading engine before any new order uses a
+touched shard, then confirm that each shard's checkpoint watermark is at or above the highest written id. A shard that
+had no checkpoint, or a NULL watermark, and has historical executions is recovered by execution replay at its first
+restart, and the checkpoint that restart commits counts only `fill_observed` rows; restart once more, then check again.
+Execution replay refuses a shard that holds an execution with a size or price of zero, such as an empty acknowledgement
+with no ids, so the shard never certifies until that row is annulled with [`annulment`](#annulment), by the operator's
+decision.
+
 ### `repair-candles`
 
 Repair one-minute candles that are wrong in exactly two ways: a minute with

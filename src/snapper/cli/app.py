@@ -28,6 +28,7 @@ Ledger Maintenance:
     - ``annulment inspect``: Report what blocks one scope's certification
     - ``annulment annul``: Append one guarded execution annulment
     - ``annulment complete-visibility``: Complete pending durability observations
+    - ``repair-cancel-targets``: Record the missing evidence of stale cancel commands under a voted digest
 
 Portfolio Evidence:
     - ``pnl-minimum-gate report``: Measure the disconnected F6 activation bound
@@ -145,6 +146,7 @@ from snapper.auth.domain.roles import UserRole
 from snapper.auth.user_service import UserService
 from snapper.cli.accrual_retirement import retire_accruals
 from snapper.cli.android_push import android_push_state
+from snapper.cli.cancel_target_repair import repair_cancel_targets
 from snapper.cli.candle_audit import audit_candles
 from snapper.cli.candle_identity_check import check_candle_identities
 from snapper.cli.candle_repair import REPAIR_CANDLES_CONTEXT
@@ -3028,6 +3030,7 @@ app.command(name="void-candles", context_settings=VOID_CANDLES_CONTEXT)(void_can
 app.command(name="check-candle-identities")(check_candle_identities)
 app.command(name="retire-accruals")(retire_accruals)
 app.command(name="retire-trade-projection-checkpoints")(retire_trade_projection_checkpoints)
+app.command(name="repair-cancel-targets")(repair_cancel_targets)
 app.add_typer(annulment_app, name="annulment")
 app.add_typer(daily_partitions_app, name="daily-partitions")
 app.add_typer(fx_proofs_app, name="fx-proofs")
