@@ -93,7 +93,7 @@ scikit-learn = "^1.9.1"
 tqdm = "^4.70.1"
 types-markdown = "^3.11.3.20261108"
 httpx2 = "^2.16.0"
-playwright = "~1.64.1"
+playwright = "~1.65.2"
 
 [tool.poetry.scripts]
 snapper = "snapper.__main__:main"
