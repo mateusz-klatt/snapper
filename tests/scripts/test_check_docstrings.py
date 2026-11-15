@@ -482,6 +482,35 @@ def test_main_covers_directory_exists_branches(monkeypatch: pytest.MonkeyPatch) 
     assert check_docstrings.main() == 0
 
 
+def test_main_scans_only_proprietary_src_and_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify main keeps the proprietary scan to src and tests.
+
+    Given: A checkout where every scanned directory exists,
+    When: main is called,
+    Then: It scans proprietary/src and proprietary/tests, and never proprietary as a
+        whole, so plans and evidence scripts stay out of scope.
+    """
+    scanned: list[Path] = []
+
+    def fake_scan_directory(
+        root_dir: Path,
+        _result: check_docstrings.ScanResult,
+        *,
+        enforce_bdd: bool,
+        enforce_google_sections: bool,
+    ) -> None:
+        scanned.append(root_dir)
+
+    monkeypatch.setattr(check_docstrings.Path, "exists", lambda _path: True)
+    monkeypatch.setattr(check_docstrings, "scan_directory", fake_scan_directory)
+    monkeypatch.setattr(check_docstrings.sys, "argv", ["check_docstrings.py"])
+    assert check_docstrings.main() == 0
+    root = Path(check_docstrings.__file__).parent.parent
+    names = {path.relative_to(root).as_posix() for path in scanned}
+    assert {"proprietary/src", "proprietary/tests"} <= names
+    assert "proprietary" not in names
+
+
 def test_main_returns_non_strict_success_with_issues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
