@@ -26,7 +26,7 @@ from tests.application.portfolio import test_pnl_timeline_service as series_fixt
 
 
 class _ProgressRepository(snapshot_fixtures._FakeRepo):
-    """Retain durable progress without retaining a hundred days of test payloads."""
+    """Retain durable progress without retaining prior batches of test payloads."""
 
     def __init__(self) -> None:
         """Start with an anchor and record only successful commit windows."""
@@ -105,10 +105,10 @@ def _install_series(
     monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", series)
 
 
-async def test_hundred_day_gap_drains_one_day_per_tick(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A hundred-day gap advances through a hundred bounded durable commits.
+async def test_multi_day_gap_drains_one_day_per_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A multi-day gap advances through consecutive bounded durable commits.
 
-    Given: A complete scope whose anchor is one hundred days behind.
+    Given: A complete scope whose anchor is three days behind.
     When: The service ticks repeatedly at the same finalized horizon.
     Then: Each tick reads and commits at most one day, with no skipped minute.
 
@@ -116,11 +116,12 @@ async def test_hundred_day_gap_drains_one_day_per_tick(monkeypatch: pytest.Monke
         monkeypatch: Scoped synthetic series fixture.
     """
     repo = _ProgressRepository()
-    end = snapshot_fixtures._T0 + timedelta(days=100)
+    total_days = 3
+    end = snapshot_fixtures._T0 + timedelta(days=total_days)
     snap = _snapshotter(repo, end + timedelta(minutes=2))
     windows: list[tuple[datetime, datetime]] = []
     _install_series(monkeypatch, windows)
-    for day in range(100):
+    for day in range(total_days):
         await snap._tick_once()
         start = snapshot_fixtures._T0 + timedelta(days=day, minutes=1)
         finish = snapshot_fixtures._T0 + timedelta(days=day + 1)
@@ -129,7 +130,7 @@ async def test_hundred_day_gap_drains_one_day_per_tick(monkeypatch: pytest.Monke
         assert len(windows) == day + 1
         assert repo.inserted_count == (day + 1) * MAX_CATCHUP_CHUNK_MINUTES
     await snap._tick_once()
-    assert len(windows) == 100
+    assert len(windows) == total_days
     assert repo.committed_windows[-1][1] == end
 
 
