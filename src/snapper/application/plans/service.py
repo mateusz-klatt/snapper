@@ -11,6 +11,7 @@ trailing_stop).
 import asyncio
 import contextlib
 import copy
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -452,7 +453,9 @@ class PlanExecutorService(RegisterableProcess):
                     row["public_id"],
                 )
                 continue
-            if await self._settle_recovered_plan(row):
+            if self._auto_settle_recovered_plans_enabled() and await self._settle_recovered_plan(
+                row
+            ):
                 continue
             unsettled_rows.append(row)
         recoverable_pids = [row["public_id"] for row in unsettled_rows]
@@ -474,6 +477,14 @@ class PlanExecutorService(RegisterableProcess):
             if row["status"] == ExecutionPlanStatusEnum.CANCEL_REQUESTED:
                 await self._reemit_stranded_cancel(row)
         logger.info("Recovered {} plans from DB", len(self.plans))
+
+    def _auto_settle_recovered_plans_enabled(self) -> bool:
+        """Return True only when automatic recovery settlement is explicitly enabled.
+
+        Returns:
+            True when `settings.plan_recovery_auto_settle_enabled` is `True`.
+        """
+        return getattr(self.settings, "plan_recovery_auto_settle_enabled", False) is True
 
     async def _settle_recovered_plan(self, row: ExecutionPlanRow) -> bool:
         """Settle an actionable plan on startup when its child is terminal.
@@ -632,7 +643,7 @@ class PlanExecutorService(RegisterableProcess):
                 result[cid] = None
         return result
 
-    def _extract_child_ids(self, params: JsonObject) -> list[str]:
+    def _extract_child_ids(self, params: Mapping[str, object]) -> list[str]:
         """Extract all child client order IDs from plan params.
 
         Unions both the list format (child_client_order_ids) and the
@@ -640,7 +651,7 @@ class PlanExecutorService(RegisterableProcess):
         mixed-format plans (upgraded mid-lifecycle) never lose IDs.
 
         Args:
-            params: Plan params dict.
+            params: Plan params mapping.
 
         Returns:
             Deduplicated list of child client order ID strings (may be empty).
@@ -1071,6 +1082,8 @@ class PlanExecutorService(RegisterableProcess):
         plan = self.plans.get(plan_public_id)
         if plan is None:
             return None
+        if await self._abort_dispatch_for_externally_settled_plan(plan_public_id):
+            return None
         if await self._fail_dispatch_for_missing_capabilities(plan_public_id, plan):
             return None
         if await self._cancel_dispatch_for_closed_cycle(plan_public_id, plan):
@@ -1079,6 +1092,38 @@ class PlanExecutorService(RegisterableProcess):
             await self._transition_plan(plan_public_id, ExecutionPlanStatusEnum.ACTIVE)
             return self.plans.get(plan_public_id)
         return plan
+
+    async def _abort_dispatch_for_externally_settled_plan(
+        self,
+        plan_public_id: str,
+    ) -> bool:
+        """Unregister and skip dispatch when durable DB state is already terminal.
+
+        Protects `bracket` and `trailing_stop` plans from firing duplicate child
+        orders on ticks if an operator settled the plan row via CLI while the
+        plan executor was still running.
+
+        Args:
+            plan_public_id: Public id of the plan about to emit commands.
+
+        Returns:
+            True when the durable plan is absent or terminal and was unregistered.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return False
+        current = await self.repository.get_execution_plan(
+            plan_public_id,
+            datetime.now(UTC),
+        )
+        if current is not None and current["status"] not in TERMINAL_EXECUTION_PLAN_STATUSES:
+            return False
+        logger.info(
+            "PlanExecutorService: skipping dispatch for externally settled plan {} (status={})",
+            plan_public_id,
+            None if current is None else current["status"],
+        )
+        self._unregister_plan(plan_public_id)
+        return True
 
     async def _fail_dispatch_for_missing_capabilities(
         self,

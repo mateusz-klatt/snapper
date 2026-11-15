@@ -19,11 +19,19 @@ from snapper.application.plans.settlement import PlanSettlementSkipped
 from snapper.cli import plan_settlement
 from snapper.cli.plan_settlement import main
 from snapper.cli.plan_settlement import settle_plans
+from snapper.core.json_types import JsonObject
 from snapper.data.repository import SQLAlchemyRepository
 
 _NOW = datetime(2026, 11, 15, 12, 0, 0, tzinfo=UTC)
 _DIGEST_A = "a" * 64
 _DIGEST_B = "b" * 64
+_TARGET_DB: JsonObject = {
+    "dialect": "postgresql",
+    "host": "prod-db",
+    "port": 5432,
+    "database": "snapper_prod",
+}
+_CODE_REV: JsonObject = {"snapper/application/plans/settlement.py": "c" * 64}
 
 
 def _build_cli() -> typer.Typer:
@@ -73,6 +81,8 @@ def _sample_preview(
                         client_order_id="cid-1",
                         command_public_id="01960000-0000-7000-8000-000000000020",
                         command_status="filled",
+                        terminal_venue_event_id=101,
+                        fill_venue_event_id=100,
                         cumulative_fill_size=10.0,
                         last_error=None,
                     ),
@@ -95,6 +105,8 @@ def _sample_preview(
     )
     return PlanSettlementPreview(
         mode=mode,
+        target_database=_TARGET_DB,
+        code_revision=_CODE_REV,
         candidates=candidates,
         skipped=skipped,
         digest=digest,
@@ -125,7 +137,7 @@ def patched_cli_env(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     monkeypatch.setattr(
         plan_settlement,
         "get_bootstrap_settings",
-        lambda: MagicMock(db_url="postgresql+asyncpg://operator:secret@prod-db/snapper_prod"),
+        lambda: MagicMock(db_url="postgresql+asyncpg://operator:secret@prod-db:5432/snapper_prod"),
     )
     return repo
 
@@ -137,10 +149,11 @@ def test_dry_run_prints_safe_db_identity_preview_and_digest(
     """Run read-only preview by default without exposing DB credentials.
 
     Given: One eligible settlement candidate, one skipped plan, and a
-        credential-bearing PostgreSQL URL.
+        credential-bearing PostgreSQL URL with explicit host and port.
     When: `settle-plans` runs without `--confirm`.
-    Then: It prints the sanitized database identity, candidate and skipped
-        summaries, `preview_sha256`, and never invokes `apply_plan_settlements`.
+    Then: It prints the sanitized database identity, operational disclosures,
+        candidate child evidence ids, `preview_sha256`, and never invokes
+        `apply_plan_settlements`.
     """
     preview_mock = AsyncMock(return_value=_sample_preview())
     apply_mock = AsyncMock()
@@ -154,8 +167,11 @@ def test_dry_run_prints_safe_db_identity_preview_and_digest(
     assert "operator" not in result.stdout
     assert "secret" not in result.stdout
     assert "mode scope: live" in result.stdout
+    assert "run order requirement:" in result.stdout
+    assert "residual concurrency window:" in result.stdout
     assert "settlement candidates: 1" in result.stdout
     assert "status=active->completed" in result.stdout
+    assert "term_ev=101:fill_ev=100" in result.stdout
     assert "skipped active plans: 1" in result.stdout
     assert f"preview_sha256: {_DIGEST_A}" in result.stdout
     assert "DRY RUN: nothing was written" in result.stdout
@@ -172,7 +188,8 @@ def test_confirm_with_matching_digest_applies_and_prints_json_receipt(
     When: `settle-plans --mode all --confirm --expect-digest` supplies the
         uppercase spelling of `_DIGEST_A`.
     Then: `apply_plan_settlements` is awaited once and stdout ends with a
-        valid sorted JSON receipt.
+        valid sorted JSON receipt including child evidence ids, endpoint, and
+        code revision.
     """
     preview = _sample_preview(mode=None, digest=_DIGEST_A)
     monkeypatch.setattr(
@@ -183,8 +200,11 @@ def test_confirm_with_matching_digest_applies_and_prints_json_receipt(
     apply_mock = AsyncMock(
         return_value=PlanSettlementReceipt(
             mode=None,
+            target_database=_TARGET_DB,
+            code_revision=_CODE_REV,
             digest=_DIGEST_A,
             settled_public_ids=("01960000-0000-7000-8000-000000000010",),
+            settled_candidates=preview.candidates,
             settled_at=_NOW,
             session_id="cli-settle-plans-fixed",
             count=1,
@@ -204,17 +224,21 @@ def test_confirm_with_matching_digest_applies_and_prints_json_receipt(
     receipt_json = json.loads(last_line)
     assert receipt_json["count"] == 1
     assert receipt_json["preview_sha256"] == _DIGEST_A
+    assert receipt_json["target_database"] == _TARGET_DB
+    assert receipt_json["code_revision"] == _CODE_REV
+    assert receipt_json["settled_plans"][0]["children"][0]["terminal_venue_event_id"] == 101
     apply_mock.assert_awaited_once()
 
 
-def test_validation_refuses_invalid_mode_missing_digest_or_malformed_digest(
+def test_validation_refuses_invalid_mode_digest_or_unsafe_database_url(
     patched_cli_env: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Refuse bad CLI arguments before opening the repository.
+    """Refuse bad CLI arguments or unsafe DB URLs before opening the repository.
 
     Given: Invocations with an unknown `--mode`, `--confirm` without
-        `--expect-digest`, or a non-sha256 `--expect-digest`.
+        `--expect-digest`, a non-sha256 `--expect-digest`, and an in-memory
+        SQLite `db_url`.
     When: Typer dispatches `settle-plans`.
     Then: Each exits with status 1 and never awaits `preview_plan_settlements`.
     """
@@ -225,6 +249,12 @@ def test_validation_refuses_invalid_mode_missing_digest_or_malformed_digest(
     bad_mode = CliRunner().invoke(cli, ["--mode", "staging"])
     no_digest = CliRunner().invoke(cli, ["--confirm"])
     bad_digest = CliRunner().invoke(cli, ["--expect-digest", "not-hex"])
+    monkeypatch.setattr(
+        plan_settlement,
+        "get_bootstrap_settings",
+        lambda: MagicMock(db_url="sqlite+aiosqlite:///:memory:"),
+    )
+    bad_db = CliRunner().invoke(cli, [])
 
     assert bad_mode.exit_code == 1
     assert "--mode must be one of" in bad_mode.stderr
@@ -232,6 +262,8 @@ def test_validation_refuses_invalid_mode_missing_digest_or_malformed_digest(
     assert "--confirm requires --expect-digest" in no_digest.stderr
     assert bad_digest.exit_code == 1
     assert "64-character hexadecimal sha256" in bad_digest.stderr
+    assert bad_db.exit_code == 1
+    assert "refused: a SQLite target must be a database file" in bad_db.stderr
     preview_mock.assert_not_awaited()
 
 

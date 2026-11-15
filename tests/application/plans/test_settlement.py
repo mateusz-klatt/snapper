@@ -1,5 +1,6 @@
 """Unit and SQLite integration tests for deterministic execution-plan settlement."""
 
+import sys
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
@@ -12,14 +13,19 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
+from snapper.application.plans import settlement as settlement_module
 from snapper.application.plans.settlement import PlanSettlementCandidate
+from snapper.application.plans.settlement import PlanSettlementConfigError
 from snapper.application.plans.settlement import PlanSettlementDriftError
 from snapper.application.plans.settlement import PlanSettlementSkipped
 from snapper.application.plans.settlement import apply_plan_settlements
 from snapper.application.plans.settlement import extract_plan_child_ids
 from snapper.application.plans.settlement import inspect_plan_settlement
 from snapper.application.plans.settlement import preview_plan_settlements
+from snapper.application.plans.settlement import serialize_candidate
 from snapper.application.plans.settlement import settle_single_recovered_plan
+from snapper.application.plans.settlement import settlement_code_revision
+from snapper.application.plans.settlement import settlement_database_endpoint
 from snapper.core.json_types import JsonObject
 from snapper.data.models import ExecutionPlan
 from snapper.data.repository import SQLAlchemyRepository
@@ -338,6 +344,48 @@ async def _seed_plan_with_child(
     return plan_public_id
 
 
+def test_settlement_endpoint_and_code_revision_validate_and_bind_cleanly(
+    tmp_path: Path,
+) -> None:
+    """Canonicalize credential-free DB endpoints and reject unsafe URLs.
+
+    Given: Valid file-SQLite and SSL PostgreSQL URLs, malformed/in-memory/optioned
+        URLs, an unsupported dialect URL, and `settlement_code_revision`.
+    When: `settlement_database_endpoint` and `settlement_code_revision` execute.
+    Then: Valid URLs strip credentials, unsafe URLs raise
+        `PlanSettlementConfigError`, and module SHA-256 digests are returned.
+    """
+    sqlite_file = tmp_path / "target.db"
+    sqlite_ep = settlement_database_endpoint(f"sqlite+aiosqlite:///{sqlite_file}")
+    assert sqlite_ep == {"dialect": "sqlite", "path": str(sqlite_file.resolve())}
+
+    pg_ep = settlement_database_endpoint(
+        "postgresql+asyncpg://operator:secret@db.internal:5432/snapper?ssl=require"
+    )
+    assert pg_ep == {
+        "dialect": "postgresql",
+        "host": "db.internal",
+        "port": 5432,
+        "database": "snapper",
+    }
+
+    for invalid_url in (
+        "sqlite+aiosqlite:///:memory:",
+        f"sqlite+aiosqlite:///{sqlite_file}?mode=ro",
+        "postgresql+asyncpg://operator:secret@db.internal/snapper",
+        "postgresql+asyncpg://operator:secret@a,b:5432/snapper",
+        "postgresql+asyncpg://operator:secret@db.internal:5432/snapper?options=-cfoo=1",
+        "mysql+aiomysql://operator:secret@db.internal:3306/snapper",
+    ):
+        with pytest.raises(PlanSettlementConfigError):
+            settlement_database_endpoint(invalid_url)
+
+    revisions = settlement_code_revision((sys.modules[__name__],))
+    assert "snapper/application/plans/settlement.py" in revisions
+    assert "snapper/data/plan_settlement_reads.py" in revisions
+    assert "snapper/application/trade/cancel_target.py" in revisions
+
+
 def test_extract_plan_child_ids_preserves_order_and_deduplicates() -> None:
     """Extract child order ids deterministically from list and scalar fields.
 
@@ -346,7 +394,7 @@ def test_extract_plan_child_ids_preserves_order_and_deduplicates() -> None:
     When: `extract_plan_child_ids` parses the params dictionary.
     Then: Only unique non-empty strings are returned in first-seen order.
     """
-    params: JsonObject = {
+    params: dict[str, object] = {
         "child_client_order_ids": ["cid-a", "", 42, "cid-b", "cid-a"],
         "child_client_order_id": "cid-c",
     }
@@ -409,20 +457,32 @@ async def test_inspect_skips_missing_mismatched_and_non_terminal_children() -> N
 
 
 @pytest.mark.asyncio
-async def test_inspect_maps_active_plan_terminal_children_and_fill_evidence() -> None:
-    """Map filled, rejected, failed, cancelled, and expired children cleanly.
+async def test_inspect_maps_active_plan_terminal_children_and_evidence_ids() -> None:
+    """Map terminal children and record qualifying venue event evidence ids.
 
     Given: Active `manual_once` plans whose child commands ended `filled` (with
-        and without `fill_observed`), `rejected`, `failed`, `cancelled`, and
-        `expired`.
+        `order_terminal(closed)` and fallback `fill_observed`), `rejected`,
+        pre-venue `failed`, `cancelled`, and `expired`.
     When: `inspect_plan_settlement` inspects each plan.
-    Then: Each candidate carries the expected terminal status, fill size, and
-        bounded error text.
+    Then: Each candidate carries the expected terminal status, fill size,
+        bounded error text, `terminal_venue_event_id`, and `fill_venue_event_id`.
     """
     plan = _plan_row()
-    filled_with_event = await inspect_plan_settlement(
+    filled_with_terminal = await inspect_plan_settlement(
         _mock_reader(
             command=_command_row(status="filled"),
+            events=[
+                _venue_event_row(event_id=2, event_type="fill_observed", cum_fill_size=10.0),
+                _venue_event_row(event_id=5, event_type="order_terminal", status="closed"),
+            ],
+            fill_event=_venue_event_row(event_id=2, event_type="fill_observed", cum_fill_size=10.0),
+        ),
+        plan,
+    )
+    filled_fallback_fill_id = await inspect_plan_settlement(
+        _mock_reader(
+            command=_command_row(status="filled"),
+            events=[_venue_event_row(event_id=3, event_type="fill_observed", cum_fill_size=10.0)],
             fill_event=_venue_event_row(event_id=3, event_type="fill_observed", cum_fill_size=10.0),
         ),
         plan,
@@ -442,48 +502,74 @@ async def test_inspect_maps_active_plan_terminal_children_and_fill_evidence() ->
         plan,
     )
     failed_long_err = await inspect_plan_settlement(
-        _mock_reader(command=_command_row(status="failed", last_error="x" * 1500)),
+        _mock_reader(
+            command=_command_row(status="failed", last_error="x" * 1500),
+            events=[_venue_event_row(event_id=7, event_type="order_breaker_open")],
+        ),
         plan,
     )
     failed_default_err = await inspect_plan_settlement(
-        _mock_reader(command=_command_row(status="failed", last_error=None)),
+        _mock_reader(
+            command=_command_row(status="failed", last_error=None),
+            events=[_venue_event_row(event_id=8, event_type="order_interlock_blocked")],
+        ),
         plan,
     )
     cancelled_cand = await inspect_plan_settlement(
-        _mock_reader(command=_command_row(status="cancelled")),
+        _mock_reader(
+            command=_command_row(status="cancelled"),
+            events=[
+                _venue_event_row(event_id=10, event_type="order_terminal", status="canceled"),
+                _venue_event_row(event_id=11, event_type="order_terminal", status="open"),
+            ],
+        ),
         plan,
     )
     expired_cand = await inspect_plan_settlement(
-        _mock_reader(command=_command_row(status="expired")),
+        _mock_reader(
+            command=_command_row(status="expired"),
+            events=[_venue_event_row(event_id=11, event_type="order_terminal", status="expired")],
+        ),
         plan,
     )
 
-    assert isinstance(filled_with_event, PlanSettlementCandidate)
-    assert filled_with_event.target_status == "completed"
-    assert filled_with_event.filled_quantity == 10.0
+    assert isinstance(filled_with_terminal, PlanSettlementCandidate)
+    assert filled_with_terminal.target_status == "completed"
+    assert filled_with_terminal.filled_quantity == 10.0
+    assert filled_with_terminal.children[0].terminal_venue_event_id == 5
+    assert filled_with_terminal.children[0].fill_venue_event_id == 2
+    assert isinstance(filled_fallback_fill_id, PlanSettlementCandidate)
+    assert filled_fallback_fill_id.children[0].terminal_venue_event_id == 3
     assert isinstance(filled_without_event, PlanSettlementCandidate)
     assert filled_without_event.filled_quantity is None
+    assert filled_without_event.children[0].terminal_venue_event_id is None
     assert isinstance(rejected_default_err, PlanSettlementCandidate)
     assert rejected_default_err.target_status == "failed"
     assert rejected_default_err.last_error == "venue rejected"
+    assert rejected_default_err.children[0].terminal_venue_event_id == 2
     assert isinstance(failed_long_err, PlanSettlementCandidate)
     assert failed_long_err.last_error == "x" * 1024
+    assert failed_long_err.children[0].terminal_venue_event_id == 7
     assert isinstance(failed_default_err, PlanSettlementCandidate)
     assert failed_default_err.last_error == "child command failed"
     assert isinstance(cancelled_cand, PlanSettlementCandidate)
     assert cancelled_cand.target_status == "cancelled"
+    assert cancelled_cand.children[0].terminal_venue_event_id == 10
     assert isinstance(expired_cand, PlanSettlementCandidate)
     assert expired_cand.target_status == "expired"
+    assert expired_cand.children[0].terminal_venue_event_id == 11
 
 
 @pytest.mark.asyncio
-async def test_inspect_skips_false_rejection_with_later_live_evidence() -> None:
-    """Do not fail a plan whose rejected child has newer live venue evidence.
+async def test_inspect_skips_false_rejection_and_unconfirmed_failed_in_active_plan() -> None:
+    """Guard active plans against false rejections and unconfirmed `failed` children.
 
-    Given: Two rejected child commands, one with `order_accepted` after
-        `order_rejected` and one with `fill_observed` without `order_rejected`.
+    Given: Active plans whose child command is `rejected` with later live
+        evidence, `failed` with zero refusal events, or `failed` with live
+        `order_accepted` evidence alongside refusal.
     When: `inspect_plan_settlement` inspects each plan.
-    Then: Both return `false_rejection_pending_resurrection`.
+    Then: False rejections return `false_rejection_pending_resurrection` and
+        unconfirmed failures return `unconfirmed_failed_child`.
     """
     plan = _plan_row()
     after_reject = await inspect_plan_settlement(
@@ -507,6 +593,20 @@ async def test_inspect_skips_false_rejection_with_later_live_evidence() -> None:
         _mock_reader(command=_command_row(status="rejected"), events=[]),
         plan,
     )
+    failed_no_refusal = await inspect_plan_settlement(
+        _mock_reader(command=_command_row(status="failed"), events=[]),
+        plan,
+    )
+    failed_with_live = await inspect_plan_settlement(
+        _mock_reader(
+            command=_command_row(status="failed"),
+            events=[
+                _venue_event_row(event_id=1, event_type="order_interlock_blocked"),
+                _venue_event_row(event_id=2, event_type="order_accepted"),
+            ],
+        ),
+        plan,
+    )
 
     assert isinstance(after_reject, PlanSettlementSkipped)
     assert after_reject.skip_code == "false_rejection_pending_resurrection"
@@ -514,6 +614,10 @@ async def test_inspect_skips_false_rejection_with_later_live_evidence() -> None:
     assert without_reject_row.skip_code == "false_rejection_pending_resurrection"
     assert isinstance(no_events_rejected, PlanSettlementCandidate)
     assert no_events_rejected.target_status == "failed"
+    assert isinstance(failed_no_refusal, PlanSettlementSkipped)
+    assert failed_no_refusal.skip_code == "unconfirmed_failed_child"
+    assert isinstance(failed_with_live, PlanSettlementSkipped)
+    assert failed_with_live.skip_code == "unconfirmed_failed_child"
 
 
 @pytest.mark.asyncio
@@ -590,25 +694,26 @@ async def test_inspect_cancel_requested_preserves_g2b_target_confirmation() -> N
     assert isinstance(interlock_failed, PlanSettlementCandidate)
     assert interlock_failed.target_status == "failed"
     assert isinstance(unconfirmed_failed, PlanSettlementSkipped)
+    assert unconfirmed_failed.skip_code == "unconfirmed_failed_child"
     assert isinstance(rejected_cancel_req, PlanSettlementSkipped)
+    assert rejected_cancel_req.skip_code == "cancel_requested_unconfirmed_target"
 
 
 @pytest.mark.asyncio
 async def test_preview_and_apply_settle_sqlite_plans_end_to_end(
     sqlite_repo: SQLAlchemyRepository,
 ) -> None:
-    """Preview and SCD2-apply all terminal plan archetypes in one transaction.
+    """Preview and SCD2-apply all terminal plan archetypes with bound metadata.
 
     Given: Five live execution plans in SQLite covering `filled`, `rejected`,
         outbox-`expired`, `cancel_requested` with `order_interlock_blocked`,
-        and `cancel_requested` with an open `accepted` child (subsequently
-        terminated by `order_terminal(canceled)`).
-    When: `preview_plan_settlements` and `apply_plan_settlements` run before and
-        after the fifth child's cancel terminal arrives.
-    Then: The first batch settles the four ready plans atomically and skips the
-        open fifth plan; once `order_terminal(canceled)` and `cancelled` land,
-        a second preview+apply settles the fifth plan, and an empty preview
-        returns a zero-count receipt.
+        and `cancel_requested` with an open `accepted` child.
+    When: `preview_plan_settlements` and `apply_plan_settlements` run with bound
+        `target_database` and `code_revision`.
+    Then: Changing endpoint or code revision changes `preview.digest`; the first
+        batch settles the four ready plans atomically and records child evidence
+        ids in `settled_candidates`; the fifth plan settles once cancelled; and
+        an empty preview commits cleanly with `count == 0`.
     """
     p_filled = await _seed_plan_with_child(
         sqlite_repo,
@@ -639,7 +744,7 @@ async def test_preview_and_apply_settle_sqlite_plans_end_to_end(
         "timestamp": _T0 + timedelta(seconds=2),
         "wallet_public_id": _WALLET_ID,
     }
-    await sqlite_repo.insert_venue_event(fill_event)
+    fill_event_id = await sqlite_repo.insert_venue_event(fill_event)
     p_rejected = await _seed_plan_with_child(
         sqlite_repo,
         created_at=_T0 + timedelta(seconds=10),
@@ -679,7 +784,7 @@ async def test_preview_and_apply_settle_sqlite_plans_end_to_end(
         "timestamp": _T0 + timedelta(seconds=31),
         "wallet_public_id": _WALLET_ID,
     }
-    await sqlite_repo.insert_venue_event(interlock_event)
+    interlock_event_id = await sqlite_repo.insert_venue_event(interlock_event)
     p_open_cancel = await _seed_plan_with_child(
         sqlite_repo,
         created_at=_T0 + timedelta(seconds=40),
@@ -688,7 +793,28 @@ async def test_preview_and_apply_settle_sqlite_plans_end_to_end(
         child_status="accepted",
     )
 
-    preview_one = await preview_plan_settlements(sqlite_repo, mode="live")
+    target_db: JsonObject = {"dialect": "sqlite", "path": "/tmp/settlement.db"}
+    code_rev: JsonObject = {"snapper/application/plans/settlement.py": "1" * 64}
+    preview_one = await preview_plan_settlements(
+        sqlite_repo,
+        mode="live",
+        target_database=target_db,
+        code_revision=code_rev,
+    )
+    other_db_preview = await preview_plan_settlements(
+        sqlite_repo,
+        mode="live",
+        target_database={"dialect": "sqlite", "path": "/tmp/other.db"},
+        code_revision=code_rev,
+    )
+    other_rev_preview = await preview_plan_settlements(
+        sqlite_repo,
+        mode="live",
+        target_database=target_db,
+        code_revision={"snapper/application/plans/settlement.py": "2" * 64},
+    )
+    assert preview_one.digest != other_db_preview.digest
+    assert preview_one.digest != other_rev_preview.digest
     assert [c.plan_public_id for c in preview_one.candidates] == [
         p_filled,
         p_rejected,
@@ -705,6 +831,14 @@ async def test_preview_and_apply_settle_sqlite_plans_end_to_end(
         session_id="cli-test-1",
     )
     assert receipt_one.count == 4
+    assert receipt_one.target_database == target_db
+    assert receipt_one.code_revision == code_rev
+    serialized_first = serialize_candidate(receipt_one.settled_candidates[0])
+    assert serialized_first["plan_public_id"] == p_filled
+    assert receipt_one.settled_candidates[0].children[0].fill_venue_event_id == fill_event_id
+    assert receipt_one.settled_candidates[3].children[0].terminal_venue_event_id == (
+        interlock_event_id
+    )
 
     filled_after = await sqlite_repo.get_execution_plan(p_filled, as_of=settled_at)
     rejected_after = await sqlite_repo.get_execution_plan(p_rejected, as_of=settled_at)
@@ -772,24 +906,98 @@ async def test_preview_and_apply_settle_sqlite_plans_end_to_end(
 
 
 @pytest.mark.asyncio
-async def test_two_engine_sqlite_drift_refuses_without_writing(tmp_path: Path) -> None:
-    """Refuse `apply_plan_settlements` when another engine mutates a plan row.
+async def test_two_engine_sqlite_plan_or_child_evidence_drift_refuses_cleanly(
+    tmp_path: Path,
+) -> None:
+    """Refuse settlement when another engine mutates plan or child venue evidence.
 
     Given: Two independent SQLite `SQLAlchemyRepository` engines sharing one DB
-        file and a preview captured on engine A.
-    When: Engine B transitions the previewed plan to `cancel_requested` before
-        engine A calls `apply_plan_settlements`.
-    Then: `PlanSettlementDriftError` is raised and the plan remains in
-        `cancel_requested` with no terminal version written.
+        file with one `filled` plan and one `rejected` plan.
+    When: Engine B appends late `order_accepted` evidence to the rejected child
+        before `settle_single_recovered_plan` and `apply_plan_settlements`, and
+        later mutates the remaining plan's status before apply.
+    Then: `settle_single_recovered_plan` returns False and
+        `apply_plan_settlements` raises `PlanSettlementDriftError` with zero
+        terminal plan versions written.
     """
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'two_engine.db'}"
     repo_a = SQLAlchemyRepository(db_url)
     repo_b = SQLAlchemyRepository(db_url)
     await repo_a.create_all()
     try:
-        plan_id = await _seed_plan_with_child(
+        plan_rej = await _seed_plan_with_child(
             repo_a,
             created_at=_T0,
+            plan_status="active",
+            child_order_id="cid-rej-race",
+            child_status="rejected",
+        )
+        await repo_a.insert_venue_event(
+            {
+                "event_type": "order_rejected",
+                "shard_key": f"kraken.XRP-EUR.live.{_WALLET_ID}",
+                "exchange": "kraken",
+                "instrument": "XRP-EUR",
+                "mode": "live",
+                "client_order_id": "cid-rej-race",
+                "venue_client_id": "cid-rej-race",
+                "side": "buy",
+                "status": "rejected",
+                "liquidity_role": "unknown",
+                "received_at": _T0 + timedelta(seconds=1),
+                "session_id": "seed-sess",
+                "sequence_id": 4,
+                "timestamp": _T0 + timedelta(seconds=1),
+                "wallet_public_id": _WALLET_ID,
+            }
+        )
+        preview_rej = await preview_plan_settlements(repo_a, mode="live")
+        rej_candidate = preview_rej.candidates[0]
+
+        await repo_b.insert_venue_event(
+            {
+                "event_type": "order_accepted",
+                "shard_key": f"kraken.XRP-EUR.live.{_WALLET_ID}",
+                "exchange": "kraken",
+                "instrument": "XRP-EUR",
+                "mode": "live",
+                "client_order_id": "cid-rej-race",
+                "venue_client_id": "cid-rej-race",
+                "exchange_order_id": "EX-LATE-ACCEPT",
+                "side": "buy",
+                "status": "open",
+                "liquidity_role": "unknown",
+                "received_at": _T0 + timedelta(seconds=2),
+                "session_id": "race-sess",
+                "sequence_id": 5,
+                "timestamp": _T0 + timedelta(seconds=2),
+                "wallet_public_id": _WALLET_ID,
+            }
+        )
+
+        assert (
+            await settle_single_recovered_plan(
+                repo_a,
+                rej_candidate,
+                settled_at=_T0 + timedelta(seconds=5),
+                session_id="rec-sess",
+                sequence_id=1,
+            )
+            is False
+        )
+        with pytest.raises(PlanSettlementDriftError, match="drifted before apply"):
+            await apply_plan_settlements(
+                repo_a,
+                preview_rej,
+                settled_at=_T0 + timedelta(seconds=6),
+                session_id="apply-sess-1",
+            )
+        rej_after = await repo_a.get_execution_plan(plan_rej, as_of=_T0 + timedelta(seconds=7))
+        assert rej_after is not None and rej_after["status"] == "active"
+
+        plan_id = await _seed_plan_with_child(
+            repo_a,
+            created_at=_T0 + timedelta(seconds=10),
             plan_status="active",
             child_order_id="cid-race",
             child_status="filled",
@@ -798,19 +1006,19 @@ async def test_two_engine_sqlite_drift_refuses_without_writing(tmp_path: Path) -
         await repo_b.update_execution_plan_status(
             public_id=plan_id,
             new_status="cancel_requested",
-            bus_time=_T0 + timedelta(seconds=5),
+            bus_time=_T0 + timedelta(seconds=15),
             session_id="race-sess",
             sequence_id=9,
-            cancel_requested_at=_T0 + timedelta(seconds=5),
+            cancel_requested_at=_T0 + timedelta(seconds=15),
         )
         with pytest.raises(PlanSettlementDriftError, match="drifted before apply"):
             await apply_plan_settlements(
                 repo_a,
                 preview,
-                settled_at=_T0 + timedelta(seconds=10),
-                session_id="apply-sess",
+                settled_at=_T0 + timedelta(seconds=20),
+                session_id="apply-sess-2",
             )
-        current = await repo_a.get_execution_plan(plan_id, as_of=_T0 + timedelta(seconds=15))
+        current = await repo_a.get_execution_plan(plan_id, as_of=_T0 + timedelta(seconds=25))
         assert current is not None and current["status"] == "cancel_requested"
     finally:
         await repo_a.engine.dispose()
@@ -825,9 +1033,9 @@ async def test_single_and_batch_locked_version_and_rowcount_guards(
     """Handle concurrent version changes, missing rows, and rowcount mismatches.
 
     Given: Previewed settlement candidates against real and mocked repository
-        sessions (including non-SQLite dialect and zero-rowcount update edges).
-    When: `settle_single_recovered_plan` and `apply_plan_settlements` encounter
-        concurrently mutated rows or mismatched update rowcounts.
+        sessions covering stale version identity, missing locked rows, and zero
+        `UPDATE` rowcounts.
+    When: `settle_single_recovered_plan` and `apply_plan_settlements` execute.
     Then: Single recovery settlement returns False without writing, and batch
         settlement raises `PlanSettlementDriftError`.
     """
@@ -905,16 +1113,8 @@ async def test_single_and_batch_locked_version_and_rowcount_guards(
     existing_orm.sequence_id = candidate.current_sequence_id
     existing_orm.filled_quantity = candidate.current_filled_quantity
 
-    select_scalars = MagicMock()
-    select_scalars.first.return_value = existing_orm
-    select_scalars.all.return_value = [existing_orm]
-    select_result = MagicMock()
-    select_result.scalars.return_value = select_scalars
-    zero_update = MagicMock()
-    zero_update.rowcount = 0
-
-    fake_session = AsyncMock(add=MagicMock())
-    fake_session.execute = AsyncMock(side_effect=[select_result, zero_update])
+    zero_update = MagicMock(rowcount=0)
+    fake_session = AsyncMock(add=MagicMock(), execute=AsyncMock(return_value=zero_update))
     session_cm = AsyncMock()
     session_cm.__aenter__.return_value = fake_session
     session_cm.__aexit__.return_value = False
@@ -922,7 +1122,28 @@ async def test_single_and_batch_locked_version_and_rowcount_guards(
     fake_pg_repo = MagicMock(spec=SQLAlchemyRepository)
     fake_pg_repo.dialect_name = "postgresql"
     fake_pg_repo.session.return_value = session_cm
+    fake_pg_repo._plan_row_to_dict.return_value = _plan_row(public_id=plan_id)
 
+    monkeypatch.setattr(
+        settlement_module,
+        "begin_plan_settlement_transaction",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "lock_child_create_commands",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "lock_active_execution_plans",
+        AsyncMock(return_value={plan_id: existing_orm}),
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "inspect_plan_settlement",
+        AsyncMock(return_value=candidate),
+    )
     assert (
         await settle_single_recovered_plan(
             fake_pg_repo,
@@ -935,10 +1156,10 @@ async def test_single_and_batch_locked_version_and_rowcount_guards(
     )
 
     monkeypatch.setattr(
-        "snapper.application.plans.settlement.preview_plan_settlements",
+        settlement_module,
+        "preview_plan_settlements",
         AsyncMock(return_value=preview),
     )
-    fake_session.execute = AsyncMock(side_effect=[select_result, zero_update])
     with pytest.raises(PlanSettlementDriftError, match="close count mismatch"):
         await apply_plan_settlements(
             fake_pg_repo,
@@ -947,11 +1168,11 @@ async def test_single_and_batch_locked_version_and_rowcount_guards(
             session_id="s-batch-zero",
         )
 
-    empty_scalars = MagicMock()
-    empty_scalars.all.return_value = []
-    empty_select = MagicMock()
-    empty_select.scalars.return_value = empty_scalars
-    fake_session.execute = AsyncMock(side_effect=[empty_select])
+    monkeypatch.setattr(
+        settlement_module,
+        "lock_active_execution_plans",
+        AsyncMock(return_value={}),
+    )
     with pytest.raises(PlanSettlementDriftError, match="changed concurrently"):
         await apply_plan_settlements(
             fake_pg_repo,

@@ -3,17 +3,24 @@
 Execution plans whose child create command reached a durable terminal state
 while the plan executor missed the live bus transition remain in an actionable
 status (`active` or `cancel_requested`). This command previews every candidate
-transition and SHA-256 binds the exact previewed set before any SCD2 write:
+transition and SHA-256 binds the target database endpoint, code revision, mode
+scope, and exact candidate set before any SCD2 write:
 
 1. Without `--confirm`, the command is strictly read-only and prints the
-   credential-free target database identity, candidate transitions, skipped
-   actionable plans, and `preview_sha256`.
+   credential-free target database identity, operational run-order requirement,
+   residual concurrency window disclosure, candidate transitions with child
+   evidence ids, skipped actionable plans, and `preview_sha256`.
 2. With `--confirm`, `--expect-digest` is mandatory and must equal the current
-   64-character hexadecimal `preview_sha256` before a single row is written.
+   64-character hexadecimal `preview_sha256` inside the locked write
+   transaction before any row is closed or inserted.
+3. Operational requirement: `--confirm` must run with `plan_executor` stopped,
+   or be followed immediately by restarting the API / `plan_executor` container
+   under operator authorization.
 """
 
 import asyncio
 import json
+import sys
 from datetime import UTC
 from datetime import datetime
 from typing import Annotated
@@ -22,14 +29,21 @@ from uuid import uuid4
 
 import typer
 
+from snapper.application.plans.settlement import RESIDUAL_VENUE_EVENT_WINDOW_NOTE
+from snapper.application.plans.settlement import RUN_ORDER_REQUIREMENT_NOTE
+from snapper.application.plans.settlement import PlanSettlementConfigError
 from snapper.application.plans.settlement import PlanSettlementDriftError
 from snapper.application.plans.settlement import PlanSettlementPreview
 from snapper.application.plans.settlement import apply_plan_settlements
 from snapper.application.plans.settlement import preview_plan_settlements
+from snapper.application.plans.settlement import serialize_candidate
+from snapper.application.plans.settlement import settlement_code_revision
+from snapper.application.plans.settlement import settlement_database_endpoint
 from snapper.cli.operator_support import configured_repository
 from snapper.cli.operator_support import database_identity
 from snapper.cli.operator_support import refuse
 from snapper.config.settings import get_bootstrap_settings
+from snapper.core.json_types import JsonObject
 from snapper.data.repository import dispose_repositories
 
 _VALID_MODES: Final[frozenset[str]] = frozenset({"live", "paper", "all"})
@@ -86,10 +100,19 @@ def _echo_preview(preview: PlanSettlementPreview) -> None:
     """
     scope_label = preview.mode if preview.mode is not None else "all"
     typer.echo(f"mode scope: {scope_label}")
+    typer.echo(f"run order requirement: {RUN_ORDER_REQUIREMENT_NOTE}")
+    typer.echo(f"residual concurrency window: {RESIDUAL_VENUE_EVENT_WINDOW_NOTE}")
     typer.echo(f"settlement candidates: {len(preview.candidates)}")
     for item in preview.candidates:
         child_summary = ",".join(
-            f"{child.client_order_id}:{child.command_status}" for child in item.children
+            (
+                f"{child.client_order_id}:{child.command_status}"
+                f":cmd={child.command_public_id}"
+                f":term_ev={child.terminal_venue_event_id}"
+                f":fill_ev={child.fill_venue_event_id}"
+                f":cum_fill={child.cumulative_fill_size!r}"
+            )
+            for child in item.children
         )
         typer.echo(
             f"  plan_public_id={item.plan_public_id} plan_type={item.plan_type} "
@@ -111,6 +134,7 @@ def _echo_preview(preview: PlanSettlementPreview) -> None:
 
 async def _run_settlement(
     db_url: str,
+    target_database: JsonObject,
     mode_filter: str | None,
     expected_digest: str | None,
     *,
@@ -120,13 +144,20 @@ async def _run_settlement(
 
     Args:
         db_url: Configured database URL.
+        target_database: Validated credential-free database endpoint.
         mode_filter: `live`, `paper`, or None for all modes.
         expected_digest: Optional or confirmation-bound SHA-256 digest.
         confirm: Whether to execute the SCD2 status transitions.
     """
+    code_revision = settlement_code_revision((sys.modules[__name__],))
     repository = configured_repository(db_url)
     try:
-        preview = await preview_plan_settlements(repository, mode=mode_filter)
+        preview = await preview_plan_settlements(
+            repository,
+            mode=mode_filter,
+            target_database=target_database,
+            code_revision=code_revision,
+        )
         _echo_preview(preview)
         if expected_digest is not None and preview.digest != expected_digest:
             refuse(
@@ -151,13 +182,18 @@ async def _run_settlement(
             session_id=session_id,
         )
         typer.echo(f"settled {receipt.count} execution plan(s) at {receipt.settled_at.isoformat()}")
-        payload: dict[str, str | int | list[str] | None] = {
+        payload: JsonObject = {
+            "code_revision": receipt.code_revision,
             "count": receipt.count,
             "mode": receipt.mode,
             "preview_sha256": receipt.digest,
+            "residual_window": RESIDUAL_VENUE_EVENT_WINDOW_NOTE,
+            "run_order_requirement": RUN_ORDER_REQUIREMENT_NOTE,
             "session_id": receipt.session_id,
             "settled_at": receipt.settled_at.isoformat(),
+            "settled_plans": [serialize_candidate(item) for item in receipt.settled_candidates],
             "settled_public_ids": list(receipt.settled_public_ids),
+            "target_database": receipt.target_database,
         }
         typer.echo(json.dumps(payload, sort_keys=True))
     except PlanSettlementDriftError as error:
@@ -185,16 +221,20 @@ def settle_plans(
         bool,
         typer.Option(
             "--confirm",
-            help="Apply the SCD2 transitions bound to --expect-digest.",
+            help=(
+                "Apply the SCD2 transitions bound to --expect-digest "
+                "(requires plan_executor stopped or restarted immediately)."
+            ),
         ),
     ] = False,
 ) -> None:
     """Preview or SCD2-settle execution plans whose child orders are terminal.
 
-    Without `--confirm`, prints the target database identity, candidate plan
-    transitions, skipped actionable plans, and `preview_sha256` without writing.
-    With `--confirm`, requires `--expect-digest` matching `preview_sha256` and
-    writes all transitions atomically in one database transaction.
+    Without `--confirm`, prints the target database identity, operational
+    requirements, candidate plan transitions, skipped actionable plans, and
+    `preview_sha256` without writing. With `--confirm`, requires
+    `--expect-digest` matching `preview_sha256` and writes all transitions
+    atomically in one database transaction.
 
     Args:
         mode: Execution mode filter (`live`, `paper`, or `all`).
@@ -204,10 +244,15 @@ def settle_plans(
     mode_filter = _normalize_mode(mode)
     expected_digest = _normalize_digest(expect_digest, confirm=confirm)
     db_url = get_bootstrap_settings().db_url
+    try:
+        target_database = settlement_database_endpoint(db_url)
+    except PlanSettlementConfigError as error:
+        refuse(f"refused: {error}")
     typer.echo(f"target database: {database_identity(db_url)}")
     asyncio.run(
         _run_settlement(
             db_url,
+            target_database,
             mode_filter,
             expected_digest,
             confirm=confirm,

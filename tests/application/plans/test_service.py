@@ -4578,6 +4578,7 @@ class TestRecoverySettlementAndCheckpointDedup:
                 bus_time=base_time + timedelta(seconds=12),
             )
 
+            mock_settings.return_value.plan_recovery_auto_settle_enabled = True
             service = PlanExecutorService()
             await service._recover_plans()
 
@@ -4673,6 +4674,8 @@ class TestRecoverySettlementAndCheckpointDedup:
                     client_order_id="cid-1",
                     command_public_id="cmd-1",
                     command_status="filled",
+                    terminal_venue_event_id=10,
+                    fill_venue_event_id=10,
                     cumulative_fill_size=1.0,
                     last_error=None,
                 ),
@@ -4717,6 +4720,9 @@ class TestRecoverySettlementAndCheckpointDedup:
         )
         assert await service._settle_recovered_plan(plan) is False
 
+        service.repository = MagicMock()
+        assert await service._settle_recovered_plan(plan) is False
+
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
     @patch("snapper.application.plans.service.get_repository")
@@ -4758,3 +4764,137 @@ class TestRecoverySettlementAndCheckpointDedup:
         mock_repo.insert_execution_plan_checkpoint = AsyncMock(side_effect=_unregister_on_write)
         await service._write_checkpoints()
         assert "plan-1" not in service._last_checkpoint_signatures
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_default_flag_skips_auto_settlement_and_dispatch_checks_durable_status(
+        self,
+        mock_repo_fn: MagicMock,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Keep startup auto-settlement off by default and fence external CLI settles.
+
+        Given: A SQLite repository with an eligible `manual_once` plan (`filled`
+            child) and an `armed` `trailing_stop` plan while
+            `plan_recovery_auto_settle_enabled` is `False`.
+        When: `_recover_plans()` runs under the default flag, and
+            `_prepare_plan_for_dispatch` runs while `trailing_stop` is `armed`,
+            after it is externally settled to `completed`, and for a missing DB
+            plan id.
+        Then: `_recover_plans()` leaves the eligible plan unsettled in DB, and
+            `_prepare_plan_for_dispatch` allows the `armed` plan once, then
+            unregisters and aborts dispatch when durable DB state is terminal or
+            absent.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'flag_and_fence.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        mock_settings.return_value.plan_recovery_auto_settle_enabled = False
+        base_time = datetime(2026, 11, 15, 10, 30, 0, tzinfo=UTC)
+        wallet_id = "01960000-0000-7000-8000-000000000201"
+        inst_id = "01960000-0000-7000-8000-000000000202"
+        try:
+            _m_id, manual_pid = await repo.insert_execution_plan(
+                {
+                    "plan_type": "manual_once",
+                    "created_via": "api",
+                    "instrument_public_id": inst_id,
+                    "exchange": "kraken",
+                    "mode": "live",
+                    "shard_key": f"kraken.XRP-EUR.live.{wallet_id}",
+                    "wallet_public_id": wallet_id,
+                    "total_quantity": 5.0,
+                    "side": "buy",
+                    "params": {
+                        "order_type": "market",
+                        "side": "buy",
+                        "child_client_order_id": "cid-flag-off",
+                        "native_instrument": "XRP-EUR",
+                    },
+                    "status": "active",
+                    "created_at": base_time,
+                    "session_id": "s-flag",
+                    "sequence_id": 1,
+                    "timestamp": base_time,
+                }
+            )
+            await repo.insert_trade_command(
+                {
+                    "command_type": "create",
+                    "shard_key": f"kraken.XRP-EUR.live.{wallet_id}",
+                    "exchange": "kraken",
+                    "instrument": "XRP-EUR",
+                    "mode": "live",
+                    "strategy_id": "manual_once",
+                    "client_order_id": "cid-flag-off",
+                    "venue_client_id": "cid-flag-off",
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": 5.0,
+                    "status": "filled",
+                    "created_at": base_time,
+                    "correlation_id": manual_pid,
+                    "session_id": "s-flag",
+                    "sequence_id": 2,
+                    "timestamp": base_time,
+                    "wallet_public_id": wallet_id,
+                    "plan_public_id": manual_pid,
+                }
+            )
+            _t_id, trail_pid = await repo.insert_execution_plan(
+                {
+                    "plan_type": "trailing_stop",
+                    "created_via": "api",
+                    "instrument_public_id": inst_id,
+                    "exchange": "kraken",
+                    "mode": "live",
+                    "shard_key": f"kraken.XRP-EUR.live.{wallet_id}",
+                    "wallet_public_id": wallet_id,
+                    "total_quantity": 5.0,
+                    "side": "buy",
+                    "params": {
+                        "entry_price": 2.0,
+                        "trailing_pct": 5.0,
+                        "native_instrument": "XRP-EUR",
+                    },
+                    "status": "armed",
+                    "created_at": base_time + timedelta(seconds=5),
+                    "session_id": "s-flag",
+                    "sequence_id": 3,
+                    "timestamp": base_time + timedelta(seconds=5),
+                }
+            )
+
+            service = PlanExecutorService()
+            service._check_capabilities = AsyncMock(return_value=[])
+            await service._recover_plans()
+
+            assert set(service.plans) == {manual_pid, trail_pid}
+            still_active = await repo.get_execution_plan(manual_pid, as_of=datetime.now(UTC))
+            assert still_active is not None and still_active["status"] == "active"
+
+            prepared_ok = await service._prepare_plan_for_dispatch(trail_pid)
+            assert prepared_ok is not None and prepared_ok["status"] == "active"
+
+            await repo.update_execution_plan_status(
+                public_id=trail_pid,
+                new_status="completed",
+                bus_time=datetime.now(UTC),
+                session_id="cli-ext",
+                sequence_id=9,
+                completed_at=datetime.now(UTC),
+            )
+            assert await service._prepare_plan_for_dispatch(trail_pid) is None
+            assert trail_pid not in service.plans
+
+            ghost_pid = "01960000-0000-7000-8000-000000000299"
+            service._register_plan(
+                _cast(ExecutionPlanRow, _make_plan_row(ghost_pid)),
+                ManualOnceEvaluator(),
+            )
+            assert await service._prepare_plan_for_dispatch(ghost_pid) is None
+            assert ghost_pid not in service.plans
+        finally:
+            await repo.engine.dispose()
