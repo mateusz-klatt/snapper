@@ -264,21 +264,29 @@ route to revoke one.
 `@mateusz-klatt/snapper-mcp` (`>= 0.16.0`) ships a unified installer and
 verifier that wires MCP tool access and interactive-only session wake across
 Claude Code, Codex, GitHub Copilot CLI, Antigravity, Kimi Code, Grok CLI, and
-Cursor CLI while keeping credentials in a mode-`0600` `config.json` file (never
-embedded in hook commands or process `argv`):
+Cursor CLI. Credentials stay in an owner-only mode-`0600` `config.json` file in
+the `snapper-mcp` state directory (or an existing `--config PATH`) so raw
+bearer tokens are never written into generated client configs, hook commands,
+or wake-worker `argv`. `integrate` requires a durable `snapper-mcp` binary path
+(global install or `--bin PATH`) and refuses ephemeral `npx` cache paths:
 
 ```bash
-# Configure MCP + interactive wake for all supported coding CLIs
-npx -y @mateusz-klatt/snapper-mcp integrate all \
-  --base-url https://snapper.example.com/api/mcp \
-  --access-token "<copied-from-create-response>"
+npm install -g @mateusz-klatt/snapper-mcp@0.16.0
 
-# Verify client configs, wake hooks/watchers, and token shape/expiry
-npx -y @mateusz-klatt/snapper-mcp doctor
+# Read the delegate JWT silently (keeps the token out of ps argv and shell history)
+printf 'Snapper delegate JWT: ' && read -rs SNAPPER_ACCESS_TOKEN && printf '\n'
+SNAPPER_ACCESS_TOKEN="$SNAPPER_ACCESS_TOKEN" \
+  snapper-mcp integrate all --base-url https://snapper.example.com/api/mcp
+unset SNAPPER_ACCESS_TOKEN
 
-# Configure MCP only (disable wake) or cleanly unwire Snapper-managed entries
-npx -y @mateusz-klatt/snapper-mcp integrate codex --no-wake
-npx -y @mateusz-klatt/snapper-mcp integrate all --remove
+# Or point directly at an existing owner-only (0600) JSON credential file
+snapper-mcp integrate codex --no-wake --config ~/.config/snapper/pat.json
+
+# Verify client configs, wake hooks/watchers, and token shape/expiry offline
+snapper-mcp doctor
+
+# Cleanly unwire Snapper-managed entries and restore prior client files
+snapper-mcp integrate all --remove
 ```
 
 ### Claude Code plugin (marketplace install)
