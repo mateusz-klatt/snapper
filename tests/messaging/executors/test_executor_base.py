@@ -1238,7 +1238,9 @@ async def test_orphan_ttl_expiry_increments_drop_count() -> None:
     ex: Any = MergedDummyExecutor()
     ex.running = True
     ex.orphan_ttl_seconds = 0.1
-    ex.orphaned_executions["old_ex"] = (SimpleNamespace(order_id="old_ex"), time_module.monotonic())
+    ex.orphaned_executions["old_ex"] = [
+        (SimpleNamespace(order_id="old_ex"), time_module.monotonic())
+    ]
     initial_count = ex.orphan_drop_count
     with mock_patch("time.monotonic", return_value=time_module.monotonic() + 1.0):
         ex._cleanup_expired_orphans()
@@ -1247,18 +1249,18 @@ async def test_orphan_ttl_expiry_increments_drop_count() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orphan_duplicate_updates_timestamp_without_relogging() -> None:
-    """Test duplicate orphan updates refresh timestamp but do not re-log.
+async def test_orphan_second_frame_is_appended_without_relogging() -> None:
+    """A second frame for a buffered order joins its list and is not re-logged.
 
-    Given: An orphan execution already buffered,
-    When: Another execution with the same order_id arrives,
-    Then: Timestamp is refreshed but the entry is not re-logged (already_buffered check).
+    Given: An orphan execution already buffered for an order,
+    When: Another execution with the same order_id arrives before the ack,
+    Then: Both frames are kept in arrival order and the buffering is logged once.
     """
     ex: Any = MergedDummyExecutor()
     ex.running = True
     ex.orphan_ttl_seconds = 5.0
-    initial_time = time_module.monotonic()
-    ex.orphaned_executions["dup_ex"] = (SimpleNamespace(order_id="dup_ex"), initial_time)
+    first = SimpleNamespace(order_id="dup_ex", exec_id="trade-first")
+    ex.orphaned_executions["dup_ex"] = [(first, time_module.monotonic())]
     new_execution = SimpleNamespace(
         order_id="dup_ex",
         exec_type="trade",
@@ -1268,11 +1270,313 @@ async def test_orphan_duplicate_updates_timestamp_without_relogging() -> None:
         fee_usd_equiv=0.0,
         exec_id="trade-dup",
     )
-    await ex._process_execution(new_execution)
-    assert "dup_ex" in ex.orphaned_executions
-    stored_execution, stored_time = ex.orphaned_executions["dup_ex"]
-    assert stored_execution.cum_qty == pytest.approx(2.0)
-    assert stored_time >= initial_time
+    with patch.object(base_module.logger, "info") as info:
+        await ex._process_execution(new_execution)
+    frames = ex.orphaned_executions["dup_ex"]
+    assert [frame.exec_id for frame, _ in frames] == ["trade-first", "trade-dup"]
+    assert not any("Buffered orphan execution" in str(item) for item in info.call_args_list)
+
+
+def _orphan_trade(
+    exchange_order_id: str, exec_id: str, *, cum_qty: float | None, last_qty: float, price: float
+) -> ExecutionUpdate:
+    """Build one trade frame for the orphan-buffer tests.
+
+    Args:
+        exchange_order_id: Venue order id the frame belongs to.
+        exec_id: Venue execution id.
+        cum_qty: Cumulative filled quantity, or None for a last-quantity-only venue.
+        last_qty: Quantity of this trade.
+        price: Price of this trade.
+
+    Returns:
+        The execution frame.
+    """
+    return ExecutionUpdate(
+        order_id=exchange_order_id,
+        exec_type="trade",
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.OPEN,
+        timestamp=datetime.now(UTC),
+        exec_id=exec_id,
+        cum_qty=cum_qty,
+        last_qty=last_qty,
+        last_price=price,
+        average_price=price,
+    )
+
+
+def _orphan_executor(client_order_id: str) -> tuple[Any, list[Any]]:
+    """Build an executor tracking one order and recording what it publishes.
+
+    Args:
+        client_order_id: Client order id of the tracked order.
+
+    Returns:
+        The executor and the list its published fills land in.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    order = make_order(client_order_id=client_order_id)
+    ex.pending_orders[client_order_id] = base_module.PendingOrderState(request=order)
+    published: list[Any] = []
+
+    async def record_publish(topic: str, fill: Any) -> bool:
+        """Record one published fill and report the publish as delivered.
+
+        Args:
+            topic: Bus topic of the fill.
+            fill: The published fill.
+
+        Returns:
+            True, so the executor commits the fill's cumulative.
+        """
+        published.append(fill)
+        return True
+
+    ex._publish_execution = record_publish
+    return ex, published
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cumulative", [True, False])
+async def test_orphan_frames_before_ack_are_all_booked_in_arrival_order(cumulative: bool) -> None:
+    """Every trade that arrives before the ack is booked, at its own price.
+
+    Given: Two trades of one order arrive before its ack, with or without cumulative quantity,
+    When: The ack maps the order and the buffered frames are drained,
+    Then: Two fills are published in arrival order, each at its own trade's size and price.
+
+    Args:
+        cumulative: Whether the venue's frames carry a cumulative quantity.
+    """
+    ex, published = _orphan_executor("walk-1")
+    first = _orphan_trade(
+        "ex-walk", "t1", cum_qty=0.2 if cumulative else None, last_qty=0.2, price=100.0
+    )
+    second = _orphan_trade(
+        "ex-walk", "t2", cum_qty=0.5 if cumulative else None, last_qty=0.3, price=101.0
+    )
+    await ex._process_execution(first)
+    await ex._process_execution(second)
+    assert [frame.exec_id for frame, _ in ex.orphaned_executions["ex-walk"]] == ["t1", "t2"]
+    ex.client_by_exchange["ex-walk"] = "walk-1"
+    ex._try_process_orphaned("ex-walk", "walk-1")
+    await asyncio.gather(*list(ex._background_tasks))
+    assert "ex-walk" not in ex.orphaned_executions
+    assert [fill.last_size for fill in published] == [pytest.approx(0.2), pytest.approx(0.3)]
+    assert [fill.last_price for fill in published] == [pytest.approx(100.0), pytest.approx(101.0)]
+    assert ex.pending_orders["walk-1"].last_seen_cum_qty == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_orphan_inline_flush_books_every_frame_in_order() -> None:
+    """The inline flush books the whole buffered list before returning.
+
+    Given: Two trades buffered for an order that is now mapped,
+    When: The terminal-verified path awaits the inline flush,
+    Then: Both fills are published in order before the flush returns.
+    """
+    ex, published = _orphan_executor("inline-1")
+    ex.client_by_exchange["ex-inline"] = "inline-1"
+    now = time_module.monotonic()
+    ex.orphaned_executions["ex-inline"] = [
+        (_orphan_trade("ex-inline", "i1", cum_qty=0.5, last_qty=0.5, price=200.0), now),
+        (_orphan_trade("ex-inline", "i2", cum_qty=0.8, last_qty=0.3, price=201.0), now),
+    ]
+    await ex._flush_orphaned_inline("ex-inline")
+    assert "ex-inline" not in ex.orphaned_executions
+    assert [fill.last_price for fill in published] == [pytest.approx(200.0), pytest.approx(201.0)]
+
+
+@pytest.mark.asyncio
+async def test_orphan_drain_holds_the_fill_lock_against_a_live_frame() -> None:
+    """A live frame that arrives during a drain waits for every buffered frame.
+
+    Given: A drain of two buffered frames is paused inside the first one,
+    When: A live frame for the same order arrives meanwhile,
+    Then: The live frame is handled only after both buffered frames.
+    """
+    ex, _published = _orphan_executor("race-1")
+    ex.client_by_exchange["ex-race"] = "race-1"
+    release = asyncio.Event()
+    handled: list[str | None] = []
+
+    async def record_correlated(
+        execution: ExecutionUpdate,
+        exchange_order_id: str,
+        client_order_id: str,
+        original_order: OrderRequestData,
+        exchange_name: str,
+    ) -> None:
+        """Record the frame and hold the first buffered one until released.
+
+        Args:
+            execution: The frame being handled.
+            exchange_order_id: Venue order id.
+            client_order_id: Client order id.
+            original_order: The tracked order request.
+            exchange_name: Exchange name.
+        """
+        handled.append(execution.exec_id)
+        if execution.exec_id == "r1":
+            await release.wait()
+
+    ex._apply_correlated_execution = record_correlated
+    now = time_module.monotonic()
+    orphans = [
+        (_orphan_trade("ex-race", "r1", cum_qty=0.1, last_qty=0.1, price=10.0), now),
+        (_orphan_trade("ex-race", "r2", cum_qty=0.2, last_qty=0.1, price=11.0), now),
+    ]
+    drain = asyncio.create_task(ex._drain_orphans("ex-race", orphans))
+    await asyncio.sleep(0)
+    live = asyncio.create_task(
+        ex._process_execution(_orphan_trade("ex-race", "r3", cum_qty=0.3, last_qty=0.1, price=12.0))
+    )
+    await asyncio.sleep(0)
+    assert handled == ["r1"]
+    release.set()
+    await asyncio.gather(drain, live)
+    assert handled == ["r1", "r2", "r3"]
+
+
+@pytest.mark.asyncio
+async def test_orphan_drain_for_an_untracked_order_takes_the_normal_path() -> None:
+    """A drain whose order is no longer tracked sends each frame down the live path.
+
+    Given: Buffered frames for one id mapped to a client no longer pending, and one never mapped,
+    When: Each list is drained,
+    Then: Nothing is published, the mapped-but-gone frame is dropped and the unmapped one re-buffers.
+    """
+    ex, published = _orphan_executor("kept-1")
+    ex.client_by_exchange["ex-gone"] = "gone-1"
+    now = time_module.monotonic()
+    gone = _orphan_trade("ex-gone", "g1", cum_qty=0.1, last_qty=0.1, price=5.0)
+    await ex._drain_orphans("ex-gone", [(gone, now)])
+    unmapped = _orphan_trade("ex-none", "n1", cum_qty=0.1, last_qty=0.1, price=5.0)
+    await ex._drain_orphans("ex-none", [(unmapped, now)])
+    assert published == []
+    assert "ex-gone" not in ex.orphaned_executions
+    assert [frame.exec_id for frame, _ in ex.orphaned_executions["ex-none"]] == ["n1"]
+
+
+@pytest.mark.asyncio
+async def test_buffered_frame_that_no_longer_belongs_to_the_held_order_is_not_booked() -> None:
+    """A frame is booked under a held lock only while it still belongs to that order.
+
+    Given: A drain holding one order's entry, and frames that now resolve elsewhere or nowhere,
+    When: Each frame is applied,
+    Then: Neither is handled, the re-mapped frame is warned about by exec id,
+        and the unmapped frame goes back to the orphan buffer.
+    """
+    ex, _published = _orphan_executor("held-1")
+    held = ex.pending_orders["held-1"]
+    ex.pending_orders["other-1"] = base_module.PendingOrderState(
+        request=make_order(client_order_id="other-1")
+    )
+    ex.client_by_exchange["ex-other"] = "other-1"
+    handled: list[str | None] = []
+
+    async def record_correlated(execution: ExecutionUpdate, *_args: str | OrderRequestData) -> None:
+        """Record a handled frame.
+
+        Args:
+            execution: The frame being handled.
+            _args: The remaining correlation arguments.
+        """
+        handled.append(execution.exec_id)
+
+    ex._apply_correlated_execution = record_correlated
+    other = _orphan_trade("ex-other", "o1", cum_qty=0.1, last_qty=0.1, price=1.0)
+    unmapped = _orphan_trade("ex-ended", "e1", cum_qty=0.1, last_qty=0.1, price=1.0)
+    with patch.object(base_module.logger, "warning") as warning:
+        await ex._apply_buffered_execution(other, held, "kraken")
+        await ex._apply_buffered_execution(unmapped, held, "kraken")
+    assert handled == []
+    assert warning.call_count == 1
+    assert "o1" in str(warning.call_args) and "other-1" in str(warning.call_args)
+    assert [frame.exec_id for frame, _ in ex.orphaned_executions["ex-ended"]] == ["e1"]
+
+
+@pytest.mark.asyncio
+async def test_buffered_frame_failure_is_logged_and_does_not_stop_the_drain() -> None:
+    """One failing buffered frame is logged and the next frame is still handled.
+
+    Given: A drain of two frames where handling the first raises,
+    When: The drain runs,
+    Then: The error is logged once and the second frame is handled.
+    """
+    ex, _published = _orphan_executor("fail-1")
+    ex.client_by_exchange["ex-fail"] = "fail-1"
+    handled: list[str | None] = []
+
+    async def fail_first(execution: ExecutionUpdate, *_args: str | OrderRequestData) -> None:
+        """Raise for the first frame and record the others.
+
+        Args:
+            execution: The frame being handled.
+            _args: The remaining correlation arguments.
+
+        Raises:
+            RuntimeError: For the first frame.
+        """
+        if execution.exec_id == "f1":
+            raise RuntimeError("synthetic buffered failure")
+        handled.append(execution.exec_id)
+
+    ex._apply_correlated_execution = fail_first
+    now = time_module.monotonic()
+    orphans = [
+        (_orphan_trade("ex-fail", "f1", cum_qty=0.1, last_qty=0.1, price=1.0), now),
+        (_orphan_trade("ex-fail", "f2", cum_qty=0.2, last_qty=0.1, price=1.0), now),
+    ]
+    with patch.object(base_module.logger, "error") as error:
+        await ex._drain_orphans("ex-fail", orphans)
+    assert handled == ["f2"]
+    assert error.call_count == 1
+    assert "synthetic buffered failure" in str(error.call_args)
+
+
+def test_orphan_ttl_drops_each_expired_frame_and_keeps_fresh_ones() -> None:
+    """Each buffered frame expires on its own arrival time.
+
+    Given: An order with one frame past the TTL and one fresh frame,
+    When: Expired orphans are cleaned up,
+    Then: Only the old frame is dropped, and the drop counter counts that one frame.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.orphan_ttl_seconds = 5.0
+    now = time_module.monotonic()
+    old = SimpleNamespace(order_id="mixed", exec_id="old")
+    fresh = SimpleNamespace(order_id="mixed", exec_id="fresh")
+    ex.orphaned_executions["mixed"] = [(old, now - 10.0), (fresh, now)]
+    ex._cleanup_expired_orphans()
+    assert [frame.exec_id for frame, _ in ex.orphaned_executions["mixed"]] == ["fresh"]
+    assert ex.orphan_drop_count == 1
+
+
+@pytest.mark.asyncio
+async def test_orphan_buffer_cap_drops_the_oldest_frame_and_warns() -> None:
+    """One order's list is capped; past the cap the oldest frame is dropped.
+
+    Given: A cap of two frames per order,
+    When: Three frames for the same unmapped order arrive,
+    Then: The two newest are kept, one drop is counted and a warning is logged.
+    """
+    ex: Any = MergedDummyExecutor()
+    ex.running = True
+    ex.orphan_max_frames_per_order = 2
+    with patch.object(base_module.logger, "warning") as warning:
+        for exec_id in ("c1", "c2", "c3"):
+            await ex._process_execution(
+                _orphan_trade("ex-cap", exec_id, cum_qty=None, last_qty=0.1, price=1.0)
+            )
+    assert [frame.exec_id for frame, _ in ex.orphaned_executions["ex-cap"]] == ["c2", "c3"]
+    assert ex.orphan_drop_count == 1
+    assert warning.call_count == 1
+    assert "dropped the oldest" in str(warning.call_args)
 
 
 @pytest.mark.asyncio
@@ -7532,10 +7836,14 @@ class TestAmbiguousVerification:
         async def record_reconcile(*_args: Any) -> None:
             call_order.append("reconcile")
 
+        async def record_correlated(*_args: Any) -> None:
+            call_order.append("orphan-fill")
+
         ex._process_execution = record_execution
+        ex._apply_correlated_execution = record_correlated
         ex._reconcile_disappeared_order = AsyncMock(side_effect=record_reconcile)
         orphan = SimpleNamespace(order_id="ex-ver-4", exec_type="trade")
-        ex.orphaned_executions["ex-ver-4"] = (orphan, 0.0)
+        ex.orphaned_executions["ex-ver-4"] = [(orphan, 0.0)]
         order = make_order()
         await ex._handle_ambiguous_submit(order, self._ambiguous(order))
         assert call_order == ["orphan-fill", "reconcile"]
