@@ -1,7 +1,7 @@
 """Repair the evidence of stale cancel commands (G3-C).
 
 The plan is ``plans/plan_2026_11_15_g3c_cancel_target_repair.md`` in the
-private repository (revision 3a). A cancel command whose target order the
+private repository (revision 3c). A cancel command whose target order the
 venue cancelled, but whose ``order_terminal`` evidence was never recorded,
 gets that evidence through ``insert_order_terminal_once``; the reconciler's
 fold and G2's retirement pass then advance both commands. A cancel whose
@@ -12,9 +12,12 @@ no order, no fill quantity, no venue call.
 Each cancel is evaluated in stages, first match wins: the cancel (A), its
 target (B), existing terminal evidence (C), an earlier failure (D), the
 cancel's status (E), then a branch on the target's exchange (F) into the
-Walutomat checks (G) or the Kraken spot checks (H). The dry run writes a
-deterministic preview and summary whose digest the voters approve; a write
-recomputes both and refuses unless they match the vote byte for byte.
+Walutomat checks (G) or the Kraken spot checks (H). Stage H's shard checks
+count an open command as covered when it is the target of a cancel named in
+the same run, so several stale pairs on one shard are repaired together. The
+dry run writes a deterministic preview and summary whose digest the voters
+approve; a write recomputes both and refuses unless they match the vote byte
+for byte.
 """
 
 import json
@@ -77,6 +80,11 @@ SUBMIT_EVIDENCE_TYPES: Final[tuple[str, ...]] = (
     "order_submit_unknown",
 )
 """Venue event types that only a submitted order produces."""
+
+_COVERABLE_STATUSES: Final[frozenset[str]] = _FOLD_SOURCE_STATUSES | frozenset(
+    reads.TERMINAL_COMMAND_STATUSES
+)
+"""Target statuses in which a run target covers its shard: the fold's sources and the terminals."""
 
 _CANCELED_ORDER_STATUS: Final[str] = "canceled"
 _CANCEL_COMMAND_TYPE: Final[str] = "cancel"
@@ -193,6 +201,89 @@ class PlanLine:
 
 
 @dataclass(frozen=True, slots=True)
+class RunTargets:
+    """The targets of every cancel named in one run, fixed for the whole run.
+
+    Attributes:
+        shard_keys: Each target's public id, mapped to the target's shard key.
+    """
+
+    shard_keys: dict[str, str]
+
+    def covers(self, public_id: str, shard_key: str) -> bool:
+        """Return whether a command is one of the run's targets on a shard.
+
+        Args:
+            public_id: Public id of an open command, or a checkpoint's open id.
+            shard_key: The shard whose open commands are being covered.
+
+        Returns:
+            True when the command is a run target whose own shard is ``shard_key``.
+        """
+        return self.shard_keys.get(public_id) == shard_key
+
+    def on_shard(self, shard_key: str) -> list[str]:
+        """Return the run's targets on one shard.
+
+        Args:
+            shard_key: The shard.
+
+        Returns:
+            The public ids of the run's targets on that shard, sorted.
+        """
+        return sorted(public_id for public_id, key in self.shard_keys.items() if key == shard_key)
+
+
+def run_targets_of(evidence: Sequence[CancelEvidence]) -> RunTargets:
+    """Collect the run's targets from the cancels that pass stages A and B.
+
+    Only a cancel that exists, is a cancel and has exactly one active target
+    has a target in its evidence. The target counts unless it is open in a
+    status the reconciler's fold does not retire: it counts in a fold source
+    status, which the fold retires once a canceled terminal exists, and in a
+    terminal status, which a checkpoint may still name until the engine
+    restarts. It counts whatever its own line's action: a refused line blocks
+    the whole write, and an ``already_recorded`` line keeps its target
+    covered while a retry of a partly applied run writes the rest of the
+    shard.
+
+    Args:
+        evidence: What was read for each cancel of the run.
+
+    Returns:
+        The run's targets.
+    """
+    return RunTargets(
+        {
+            item.target["public_id"]: item.target["shard_key"]
+            for item in evidence
+            if item.target is not None and item.target["status"] in _COVERABLE_STATUSES
+        }
+    )
+
+
+def refuse_shared_targets(evidence: Sequence[CancelEvidence]) -> None:
+    """Refuse a run in which two named cancels target the same order.
+
+    Args:
+        evidence: What was read for each cancel of the run.
+
+    Raises:
+        CancelTargetRepairRefusedError: When two cancels share a client order id.
+    """
+    seen: set[str] = set()
+    for item in evidence:
+        if item.cancel is None or item.cancel["command_type"] != _CANCEL_COMMAND_TYPE:
+            continue
+        client_order_id = item.cancel["client_order_id"]
+        if client_order_id in seen:
+            raise CancelTargetRepairRefusedError(
+                "two --cancel target the same order; name each target once"
+            )
+        seen.add(client_order_id)
+
+
+@dataclass(frozen=True, slots=True)
 class RepairPlan:
     """A complete plan, as voted or as recomputed.
 
@@ -201,12 +292,14 @@ class RepairPlan:
         preview: The preview document.
         summary: The summary document.
         digest: sha256 of the canonical JSON of both documents.
+        run_targets: The run's targets, which every recheck reuses.
     """
 
     lines: list[PlanLine]
     preview: list[JsonValue]
     summary: JsonObject
     digest: str
+    run_targets: RunTargets
 
 
 def _non_blank(value: str | None) -> bool:
@@ -371,12 +464,14 @@ def checkpoint_open_command_ids(checkpoint: TradeProjectionCheckpointRow | None)
     return [str(item) for item in raw]
 
 
-def _check_shard(case: KrakenCase) -> str | None:
-    """Check the shard holds no other open command and names no other wallet."""
-    target_id = case.target["public_id"]
-    if any(command["public_id"] != target_id for command in case.evidence.open_commands):
+def _check_shard(case: KrakenCase, run_targets: RunTargets) -> str | None:
+    """Check every open command on the shard is a run target on it, and no other wallet is seen."""
+    shard_key = case.target["shard_key"]
+    commands = case.evidence.open_commands
+    if any(not run_targets.covers(command["public_id"], shard_key) for command in commands):
         return "shard_has_other_open_command"
-    if any(item != target_id for item in checkpoint_open_command_ids(case.evidence.checkpoint)):
+    open_ids = checkpoint_open_command_ids(case.evidence.checkpoint)
+    if any(not run_targets.covers(item, shard_key) for item in open_ids):
         return "shard_checkpoint_open_command"
     if any(wallet != case.target["wallet_public_id"] for wallet in case.evidence.shard_wallets):
         return "shard_wallet_mismatch"
@@ -387,15 +482,17 @@ _KRAKEN_CHECKS: Final[tuple[Callable[[KrakenCase], str | None], ...]] = (
     _check_order_history,
     _check_executions,
     _check_lineage,
-    _check_shard,
 )
-"""Stage H's checks after the order is resolved, in plan order."""
+"""Stage H's checks after the order is resolved and before the shard checks, in plan order."""
 
 
 def _kraken_decision(
-    evidence: CancelEvidence, cancel: TradeCommandRow, target: TradeCommandRow
+    evidence: CancelEvidence,
+    cancel: TradeCommandRow,
+    target: TradeCommandRow,
+    run_targets: RunTargets,
 ) -> Decision:
-    """Stage H: the record-terminal checks of a Kraken spot target."""
+    """Stage H: the record-terminal checks of a Kraken spot target, the shard checks last."""
     if target["mode"] != ExecutionModeEnum.LIVE or target["leverage"] is not None:
         return _refuse("not_kraken_spot")
     if target["status"] not in _FOLD_SOURCE_STATUSES:
@@ -407,6 +504,9 @@ def _kraken_decision(
         reason = check(resolved)
         if reason is not None:
             return _refuse(reason)
+    shard_reason = _check_shard(resolved, run_targets)
+    if shard_reason is not None:
+        return _refuse(shard_reason)
     return Decision(RepairAction.RECORD_TERMINAL, kraken=resolved)
 
 
@@ -436,11 +536,12 @@ def _cancel_state_decision(cancel: TradeCommandRow) -> Decision | None:
     return None
 
 
-def evaluate(evidence: CancelEvidence) -> Decision:
+def evaluate(evidence: CancelEvidence, run_targets: RunTargets) -> Decision:
     """Decide one cancel's action, stages A to H, first match wins.
 
     Args:
         evidence: Everything read for the cancel.
+        run_targets: The targets of every cancel named in the run.
 
     Returns:
         The line's decision.
@@ -456,18 +557,60 @@ def evaluate(evidence: CancelEvidence) -> Decision:
     if target["exchange"] == ExchangeEnum.WALUTOMAT:
         return _walutomat_decision(evidence, target)
     if target["exchange"] == ExchangeEnum.KRAKEN:
-        return _kraken_decision(evidence, cancel, target)
+        return _kraken_decision(evidence, cancel, target, run_targets)
     return _refuse("unsupported_exchange")
 
 
+@dataclass(frozen=True, slots=True)
+class ShardFacts:
+    """One reading of a target shard's open commands, active checkpoint and wallets.
+
+    Attributes:
+        open_commands: The shard's open commands.
+        checkpoint: The shard's active checkpoint, or ``None``.
+        wallets: Every wallet seen on the shard.
+    """
+
+    open_commands: list[TradeCommandRow]
+    checkpoint: TradeProjectionCheckpointRow | None
+    wallets: list[str]
+
+
+async def read_shard(repository: SQLAlchemyRepository, shard_key: str) -> ShardFacts:
+    """Read one target shard's facts.
+
+    Args:
+        repository: Repository to read from.
+        shard_key: The shard.
+
+    Returns:
+        The shard's open commands, active checkpoint and wallets.
+
+    Raises:
+        CancelTargetRepairRefusedError: When the shard has several active checkpoints.
+    """
+    return ShardFacts(
+        open_commands=await reads.get_open_commands_on_shard(repository, shard_key),
+        checkpoint=await _active_checkpoint(repository, shard_key),
+        wallets=await reads.get_shard_wallets(repository, shard_key),
+    )
+
+
 async def gather_evidence(
-    repository: SQLAlchemyRepository, cancel_public_id: str
+    repository: SQLAlchemyRepository, cancel_public_id: str, shards: dict[str, ShardFacts]
 ) -> CancelEvidence:
     """Read everything the evaluation of one cancel needs.
+
+    Stage B's read runs only for a cancel that passes stage A, so a missing
+    cancel or a command of another type has no target, and contributes no
+    run target and no shard.
 
     Args:
         repository: Repository to read from.
         cancel_public_id: Public id of the cancel command.
+        shards: The shard readings of this pass, by shard key. A shard not
+            yet in it is read once and added, so every line on it shares one
+            reading; a recheck passes an empty mapping to read afresh.
 
     Returns:
         The evidence; fields that need a missing cancel or target are empty.
@@ -482,8 +625,8 @@ async def gather_evidence(
         raise CancelTargetRepairRefusedError(
             f"cancel {cancel_public_id} has several active versions"
         ) from error
-    if cancel is None:
-        return CancelEvidence(cancel_public_id, None, None, False, [], [], [], [], [], None, [])
+    if cancel is None or cancel["command_type"] != _CANCEL_COMMAND_TYPE:
+        return CancelEvidence(cancel_public_id, cancel, None, False, [], [], [], [], [], None, [])
     client_order_id = cancel["client_order_id"]
     target: TradeCommandRow | None = None
     ambiguous = False
@@ -512,6 +655,9 @@ async def gather_evidence(
             [],
         )
     shard_key = target["shard_key"]
+    if shard_key not in shards:
+        shards[shard_key] = await read_shard(repository, shard_key)
+    facts = shards[shard_key]
     return CancelEvidence(
         cancel_public_id=cancel_public_id,
         cancel=cancel,
@@ -521,9 +667,9 @@ async def gather_evidence(
         order_versions=versions,
         executions=executions,
         events=events,
-        open_commands=await reads.get_open_commands_on_shard(repository, shard_key),
-        checkpoint=await _active_checkpoint(repository, shard_key),
-        shard_wallets=await reads.get_shard_wallets(repository, shard_key),
+        open_commands=facts.open_commands,
+        checkpoint=facts.checkpoint,
+        shard_wallets=facts.wallets,
     )
 
 
@@ -689,15 +835,25 @@ def _command_document(command: TradeCommandRow | None) -> JsonObject | None:
     }
 
 
-def _shard_document(evidence: CancelEvidence) -> JsonObject:
-    """Render the target shard's open commands, checkpoint and wallets."""
-    checkpoint = evidence.checkpoint
+def _shard_document(evidence: CancelEvidence, run_targets: RunTargets) -> JsonObject:
+    """Render the target shard's facts relative to the run.
+
+    Only commands that are not run targets are listed, so a target that the
+    reconciler retires while the run is writing changes no later line.
+    """
+    shard_key = "" if evidence.target is None else evidence.target["shard_key"]
     return {
-        "open_commands": [command["public_id"] for command in evidence.open_commands],
-        "checkpoint_open_command_ids": list(checkpoint_open_command_ids(checkpoint)),
-        "checkpoint_last_venue_event_id": (
-            None if checkpoint is None else checkpoint["last_venue_event_id"]
-        ),
+        "non_target_open_commands": [
+            command["public_id"]
+            for command in evidence.open_commands
+            if not run_targets.covers(command["public_id"], shard_key)
+        ],
+        "non_target_checkpoint_open_ids": [
+            item
+            for item in checkpoint_open_command_ids(evidence.checkpoint)
+            if not run_targets.covers(item, shard_key)
+        ],
+        "run_targets_on_shard": list(run_targets.on_shard(shard_key)) if shard_key else [],
         "wallets": list(evidence.shard_wallets),
     }
 
@@ -720,12 +876,15 @@ def _kraken_document(case: KrakenCase) -> JsonObject:
     }
 
 
-def line_document(evidence: CancelEvidence, decision: Decision) -> JsonObject:
+def line_document(
+    evidence: CancelEvidence, decision: Decision, run_targets: RunTargets
+) -> JsonObject:
     """Render one cancel line of the preview.
 
     Args:
         evidence: What was read for the cancel.
         decision: The evaluated action.
+        run_targets: The targets of every cancel named in the run.
 
     Returns:
         The line's deterministic preview document.
@@ -751,7 +910,7 @@ def line_document(evidence: CancelEvidence, decision: Decision) -> JsonObject:
             {"id": event["id"], "event_type": event["event_type"], "status": event["status"]}
             for event in evidence.events
         ],
-        "shard": _shard_document(evidence),
+        "shard": _shard_document(evidence, run_targets),
     }
     if decision.kraken is not None:
         document["record_terminal"] = _kraken_document(decision.kraken)
@@ -786,14 +945,56 @@ def code_revision(extra_modules: Sequence[ModuleType]) -> JsonObject:
     }
 
 
-def _summary(lines: Sequence[PlanLine], database: JsonObject, code: JsonObject) -> JsonObject:
-    """Count the actions and bind the database and the code."""
+def _checkpoint_summary(checkpoint: TradeProjectionCheckpointRow | None) -> JsonObject | None:
+    """Render an active checkpoint's identity, open ids and watermark for the summary."""
+    if checkpoint is None:
+        return None
+    return {
+        "public_id": checkpoint["public_id"],
+        "open_command_ids": list(checkpoint_open_command_ids(checkpoint)),
+        "last_venue_event_id": checkpoint["last_venue_event_id"],
+    }
+
+
+def _shard_summary(lines: Sequence[PlanLine], run_targets: RunTargets) -> JsonObject:
+    """Render, per shard of a Kraken target that passed stage B, its one planning reading."""
+    shards: JsonObject = {}
+    for line in lines:
+        target = line.evidence.target
+        if target is None or target["exchange"] != ExchangeEnum.KRAKEN:
+            continue
+        shards[target["shard_key"]] = {
+            "open_commands": [
+                {
+                    "public_id": command["public_id"],
+                    "command_type": command["command_type"],
+                    "status": command["status"],
+                    "client_order_id": command["client_order_id"],
+                }
+                for command in line.evidence.open_commands
+            ],
+            "checkpoint": _checkpoint_summary(line.evidence.checkpoint),
+            "wallets": list(line.evidence.shard_wallets),
+            "run_targets": list(run_targets.on_shard(target["shard_key"])),
+        }
+    return dict(sorted(shards.items()))
+
+
+def _summary(
+    lines: Sequence[PlanLine], database: JsonObject, code: JsonObject, run_targets: RunTargets
+) -> JsonObject:
+    """Count the actions, list each Kraken shard's facts, and bind the database and the code."""
     counts: dict[str, int] = {}
     for line in lines:
         key = line.decision.action.value
         counts[key] = counts.get(key, 0) + 1
     action_counts: JsonObject = dict(sorted(counts.items()))
-    return {"counts": action_counts, "database": database, "code_revision": code}
+    return {
+        "counts": action_counts,
+        "shards": _shard_summary(lines, run_targets),
+        "database": database,
+        "code_revision": code,
+    }
 
 
 def refuse_duplicates(cancel_public_ids: Sequence[str]) -> None:
@@ -829,15 +1030,20 @@ async def plan_repair(
         The plan with its preview, summary and digest.
     """
     refuse_duplicates(cancel_public_ids)
+    shards: dict[str, ShardFacts] = {}
+    gathered = [
+        await gather_evidence(repository, cancel_id, shards) for cancel_id in cancel_public_ids
+    ]
+    refuse_shared_targets(gathered)
+    run_targets = run_targets_of(gathered)
     lines: list[PlanLine] = []
-    for cancel_public_id in cancel_public_ids:
-        evidence = await gather_evidence(repository, cancel_public_id)
-        decision = evaluate(evidence)
-        lines.append(PlanLine(evidence, decision, line_document(evidence, decision)))
+    for evidence in gathered:
+        decision = evaluate(evidence, run_targets)
+        lines.append(PlanLine(evidence, decision, line_document(evidence, decision, run_targets)))
     preview: list[JsonValue] = [line.preview for line in lines]
-    summary = _summary(lines, database, code)
+    summary = _summary(lines, database, code, run_targets)
     digest = sha256_hex(canonical_json({"preview": preview, "summary": summary}))
-    return RepairPlan(lines, preview, summary, digest)
+    return RepairPlan(lines, preview, summary, digest, run_targets)
 
 
 def voted_digest(voted_dir: Path) -> str:
@@ -896,12 +1102,13 @@ class WriteSession:
 
 
 async def _recheck(
-    repository: SQLAlchemyRepository, line: PlanLine, action: RepairAction
+    repository: SQLAlchemyRepository, line: PlanLine, action: RepairAction, run: WriteSession
 ) -> Decision | None:
-    """Re-read one line and return its fresh decision when nothing has changed."""
-    fresh = await gather_evidence(repository, line.evidence.cancel_public_id)
-    decision = evaluate(fresh)
-    if decision.action is not action or line_document(fresh, decision) != line.preview:
+    """Re-read one line, evaluate it with the run's targets, and return it when unchanged."""
+    targets = run.plan.run_targets
+    fresh = await gather_evidence(repository, line.evidence.cancel_public_id, {})
+    decision = evaluate(fresh, targets)
+    if decision.action is not action or line_document(fresh, decision, targets) != line.preview:
         return None
     return decision
 
@@ -915,7 +1122,7 @@ async def _record_terminal(
     client order id, event type and session id is reported as
     ``recorded_unconfirmed``, which the command treats as a failure.
     """
-    recheck = await _recheck(repository, line, RepairAction.RECORD_TERMINAL)
+    recheck = await _recheck(repository, line, RepairAction.RECORD_TERMINAL, run)
     if recheck is None:
         return {"result": "changed_before_write"}
     row = terminal_fields(cast(KrakenCase, recheck.kraken))
@@ -948,7 +1155,7 @@ async def _fail_cancel(
     repository: SQLAlchemyRepository, line: PlanLine, run: WriteSession, entry: JsonObject
 ) -> JsonObject:
     """Recheck one Walutomat line and move its cancel to ``failed``."""
-    if await _recheck(repository, line, RepairAction.FAIL_CANCEL) is None:
+    if await _recheck(repository, line, RepairAction.FAIL_CANCEL, run) is None:
         return {"result": "changed_before_write"}
     cancel = cast(TradeCommandRow, line.evidence.cancel)
     target = cast(TradeCommandRow, line.evidence.target)

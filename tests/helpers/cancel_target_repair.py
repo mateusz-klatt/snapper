@@ -296,7 +296,9 @@ async def seed_kraken_pair(repository: SQLAlchemyRepository, index: int = 1) -> 
     """Seed a Kraken create stuck in ``accepted`` and its cancel stuck in ``dispatched``.
 
     The order went ``open`` then ``canceled`` four seconds after the cancel,
-    has no execution, and has only its ``order_accepted`` event.
+    has no execution, and has only its ``order_accepted`` event. Every pair
+    sits on the one Kraken shard, as production's three pairs do, and pair
+    ``index`` has the exchange order id ``OX-<index>``.
 
     Args:
         repository: Repository to seed.
@@ -311,38 +313,39 @@ async def seed_kraken_pair(repository: SQLAlchemyRepository, index: int = 1) -> 
         order_id=f"00000000-0000-7000-8000-00000000{index:02d}0d",
         client_order_id=f"cid-{index}",
     )
-    await add_rows(
-        repository,
-        [
-            command(
-                pair.create_id,
-                command_type="create",
-                status="accepted",
-                client_order_id=pair.client_order_id,
-            ),
-            command(
-                pair.cancel_id,
-                command_type="cancel",
-                status="dispatched",
-                client_order_id=pair.client_order_id,
-                created_at=CANCEL_AT,
-            ),
-            order_version(
-                pair.order_id,
-                status="open",
-                client_order_id=pair.client_order_id,
-                timestamp=CREATED_AT,
-                known_to=CANCELED_AT,
-            ),
-            order_version(
-                pair.order_id,
-                status="canceled",
-                client_order_id=pair.client_order_id,
-                timestamp=CANCELED_AT,
-            ),
-            venue_event(pair.client_order_id, event_type="order_accepted", status="open"),
-        ],
-    )
+    rows: list[TradeCommand | Order | Execution | VenueEvent | TradeProjectionCheckpoint] = [
+        command(
+            pair.create_id,
+            command_type="create",
+            status="accepted",
+            client_order_id=pair.client_order_id,
+        ),
+        command(
+            pair.cancel_id,
+            command_type="cancel",
+            status="dispatched",
+            client_order_id=pair.client_order_id,
+            created_at=CANCEL_AT,
+        ),
+        order_version(
+            pair.order_id,
+            status="open",
+            client_order_id=pair.client_order_id,
+            timestamp=CREATED_AT,
+            known_to=CANCELED_AT,
+        ),
+        order_version(
+            pair.order_id,
+            status="canceled",
+            client_order_id=pair.client_order_id,
+            timestamp=CANCELED_AT,
+        ),
+        venue_event(pair.client_order_id, event_type="order_accepted", status="open"),
+    ]
+    for row in rows:
+        if isinstance(row, Order | VenueEvent):
+            row.exchange_order_id = f"OX-{index}"
+    await add_rows(repository, rows)
     return pair
 
 

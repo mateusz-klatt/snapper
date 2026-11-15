@@ -6,6 +6,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -13,19 +14,27 @@ from unittest.mock import patch
 import pytest
 import sqlalchemy as sa
 
+from snapper.application.engine.service import compute_shard_key
 from snapper.application.trade import cancel_target_repair as repair
 from snapper.application.trade.cancel_target_repair import CancelTargetRepairRefusedError
 from snapper.application.trade.cancel_target_repair import ExecutionClass
 from snapper.application.trade.cancel_target_repair import RepairAction
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import TradeService
+from snapper.core.json_types import JsonValue
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import ExecutionModeEnum
+from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Order
 from snapper.data.models import TradeCommand
+from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import VenueEvent
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ExecutionEvidenceRow
 from snapper.data.repository_types import OrderVersionRow
+from snapper.data.repository_types import TradeCommandRow
+from snapper.data.repository_types import VenueEventInsertRow
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from tests.helpers.cancel_target_repair import CANCEL_AT
@@ -33,7 +42,9 @@ from tests.helpers.cancel_target_repair import CANCELED_AT
 from tests.helpers.cancel_target_repair import CREATED_AT
 from tests.helpers.cancel_target_repair import KRAKEN_SHARD
 from tests.helpers.cancel_target_repair import OTHER_WALLET
+from tests.helpers.cancel_target_repair import SESSION
 from tests.helpers.cancel_target_repair import WALLET
+from tests.helpers.cancel_target_repair import SeededPair
 from tests.helpers.cancel_target_repair import add_rows
 from tests.helpers.cancel_target_repair import checkpoint
 from tests.helpers.cancel_target_repair import command
@@ -119,6 +130,63 @@ async def _status(repository: SQLAlchemyRepository, public_id: str) -> tuple[str
         )
         row = result.scalars().one()
         return row.status, row.last_error
+
+
+async def _seed_three_pairs(repository: SQLAlchemyRepository) -> list[SeededPair]:
+    """Seed production's three Kraken pairs, all on the one shard."""
+    return [await seed_kraken_pair(repository, index) for index in (1, 2, 3)]
+
+
+async def _record_first_terminal(repository: SQLAlchemyRepository, plan: repair.RepairPlan) -> None:
+    """Record the first line's terminal, as an earlier, partly applied run would have."""
+    row = repair.terminal_fields(cast(repair.KrakenCase, plan.lines[0].decision.kraken))
+    row["timestamp"] = WRITE_TIME
+    row["session_id"] = SESSION
+    row["sequence_id"] = 1
+    assert await repository.insert_order_terminal_once(row)
+
+
+async def _retire(repository: SQLAlchemyRepository, create_id: str) -> None:
+    """Retire one accepted create to cancelled, as the reconciler's fold would."""
+    assert await repository.advance_trade_command_lifecycle(
+        create_id,
+        "accepted",
+        TradeCommandStatusEnum.CANCELLED,
+        WRITE_TIME,
+        SESSION,
+        9,
+        terminal_at=CANCELED_AT,
+    )
+
+
+async def _move_to_wallet(repository: SQLAlchemyRepository, pair: SeededPair, wallet: str) -> str:
+    """Move one seeded pair onto another wallet's XRP-EUR shard, and return that shard."""
+    shard = compute_shard_key(
+        instrument="XRP-EUR",
+        exchange=ExchangeEnum.KRAKEN,
+        mode=ExecutionModeEnum.LIVE,
+        wallet_public_id=wallet,
+        strategy_tag=None,
+    )
+    async with repository.session() as session:
+        for model in (TradeCommand, VenueEvent):
+            await session.execute(
+                sa.update(model)
+                .where(model.client_order_id == pair.client_order_id)
+                .values(wallet_public_id=wallet, shard_key=shard)
+            )
+        await session.execute(
+            sa.update(Order)
+            .where(Order.client_order_id == pair.client_order_id)
+            .values(wallet_public_id=wallet)
+        )
+        await session.commit()
+    return shard
+
+
+def _line_results(session: repair.WriteSession) -> list[JsonValue]:
+    """Return each applied line's result string."""
+    return [entry["result"] for entry in session.results if isinstance(entry, dict)]
 
 
 def _version(status: str, version_id: int, known_to: datetime = KNOWN_TO_MAX) -> OrderVersionRow:
@@ -1186,3 +1254,360 @@ def test_checkpoint_ids_without_a_checkpoint_are_empty() -> None:
     Then: The list is empty.
     """
     assert repair.checkpoint_open_command_ids(None) == []
+
+
+@pytest.mark.asyncio
+async def test_three_pairs_on_one_shard_are_repaired_together(
+    repository: SQLAlchemyRepository, tmp_path: Path
+) -> None:
+    """Production's three Kraken pairs on one shard pass together, are written and retire.
+
+    Given: Three Kraken pairs on one shard, each create accepted and each cancel dispatched,
+    When: All three cancels are planned, voted and written, and one reconciliation cycle runs,
+    Then: Every line records its terminal, the shard facts name the run's targets, and all
+        six commands end cancelled.
+    """
+    pairs = await _seed_three_pairs(repository)
+    cancel_ids = [pair.cancel_id for pair in pairs]
+    plan = await _plan(repository, *cancel_ids)
+    assert [line.decision.action for line in plan.lines] == [RepairAction.RECORD_TERMINAL] * 3
+    targets = sorted(pair.create_id for pair in pairs)
+    assert all(
+        line.preview["shard"]
+        == {
+            "non_target_open_commands": [],
+            "non_target_checkpoint_open_ids": [],
+            "run_targets_on_shard": targets,
+            "wallets": [WALLET],
+        }
+        for line in plan.lines
+    )
+    assert plan.summary["shards"] == {
+        KRAKEN_SHARD: {
+            "open_commands": [
+                {
+                    "public_id": pair.create_id,
+                    "command_type": "create",
+                    "status": "accepted",
+                    "client_order_id": pair.client_order_id,
+                }
+                for pair in pairs
+            ],
+            "checkpoint": None,
+            "wallets": [WALLET],
+            "run_targets": targets,
+        }
+    }
+    voted = _vote(tmp_path, plan)
+    session = await repair.prepare_write(
+        repository, cancel_ids, (voted, plan.digest), (DATABASE, CODE), WRITE_TIME
+    )
+    await repair.apply_write(repository, session)
+    assert _line_results(session) == ["recorded"] * 3
+    for pair in pairs:
+        assert len(await _terminals(repository, pair.client_order_id)) == 1
+
+    loop = ReconciliationLoop(
+        exchange_name="kraken",
+        repository=repository,
+        trade_service=MagicMock(spec=TradeService),
+        interval_seconds=60.0,
+    )
+    await loop._reconcile_cycle()
+    for pair in pairs:
+        assert await _status(repository, pair.create_id) == ("cancelled", None)
+        assert await _status(repository, pair.cancel_id) == (
+            "cancelled",
+            "target order ended canceled",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_run_naming_only_some_pairs_on_a_shard_refuses_each(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Leaving one pair of a shard out of the run refuses the pairs that are named.
+
+    Given: Three Kraken pairs on one shard,
+    When: Only two of their cancels are planned,
+    Then: Both lines refuse as shard_has_other_open_command, naming the left-out create.
+    """
+    pairs = await _seed_three_pairs(repository)
+    plan = await _plan(repository, pairs[0].cancel_id, pairs[1].cancel_id)
+    assert [line.decision.reason for line in plan.lines] == ["shard_has_other_open_command"] * 2
+    assert all(
+        line.preview["shard"]
+        == {
+            "non_target_open_commands": [pairs[2].create_id],
+            "non_target_checkpoint_open_ids": [],
+            "run_targets_on_shard": sorted([pairs[0].create_id, pairs[1].create_id]),
+            "wallets": [WALLET],
+        }
+        for line in plan.lines
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_non_target_open_command_refuses_every_line_on_its_shard(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """An open command that no named cancel targets refuses the whole shard.
+
+    Given: Three Kraken pairs on one shard and one more open create on it,
+    When: All three cancels are planned,
+    Then: Every line refuses as shard_has_other_open_command.
+    """
+    pairs = await _seed_three_pairs(repository)
+    await add_rows(
+        repository,
+        [
+            command(
+                "00000000-0000-7000-8000-0000000000f3",
+                command_type="create",
+                status="accepted",
+                client_order_id="cid-live",
+            )
+        ],
+    )
+    plan = await _plan(repository, *[pair.cancel_id for pair in pairs])
+    assert [line.decision.reason for line in plan.lines] == ["shard_has_other_open_command"] * 3
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_holding_run_targets_passes_and_another_id_refuses(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A checkpoint's open ids are covered when they are run targets, and refuse otherwise.
+
+    Given: Three Kraken pairs on one shard and a checkpoint naming two of their creates,
+    When: All three cancels are planned, then again with a checkpoint naming another id,
+    Then: The first plan records all three, and the second refuses all three.
+    """
+    pairs = await _seed_three_pairs(repository)
+    cancel_ids = [pair.cancel_id for pair in pairs]
+    covered = checkpoint(open_command_ids=json.dumps([pairs[1].create_id, pairs[2].create_id]))
+    await add_rows(repository, [covered])
+    plan = await _plan(repository, *cancel_ids)
+    assert [line.decision.action for line in plan.lines] == [RepairAction.RECORD_TERMINAL] * 3
+    async with repository.session() as session:
+        await session.execute(
+            sa.update(TradeProjectionCheckpoint).values(
+                open_command_ids=json.dumps([pairs[1].create_id, "other-command"])
+            )
+        )
+        await session.commit()
+    refused = await _plan(repository, *cancel_ids)
+    assert [line.decision.reason for line in refused.lines] == ["shard_checkpoint_open_command"] * 3
+    shard = refused.lines[0].preview["shard"]
+    assert isinstance(shard, dict) and shard["non_target_checkpoint_open_ids"] == ["other-command"]
+
+
+@pytest.mark.asyncio
+async def test_a_target_retired_between_inserts_still_lets_the_later_lines_write(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A reconciler cycle that retires an already written target changes no later line.
+
+    Given: Three Kraken pairs on one shard, planned together,
+    When: The first pair's create is retired to cancelled right after its terminal is inserted,
+    Then: The other two lines still pass their recheck and are recorded.
+    """
+    pairs = await _seed_three_pairs(repository)
+    plan = await _plan(repository, *[pair.cancel_id for pair in pairs])
+    real_insert = repository.insert_order_terminal_once
+
+    async def insert_then_retire(row: VenueEventInsertRow) -> bool:
+        """Insert the terminal, then retire the first create as the reconciler would."""
+        inserted = await real_insert(row)
+        if row["client_order_id"] == pairs[0].client_order_id:
+            assert await repository.advance_trade_command_lifecycle(
+                pairs[0].create_id,
+                "accepted",
+                TradeCommandStatusEnum.CANCELLED,
+                WRITE_TIME,
+                SESSION,
+                9,
+                terminal_at=CANCELED_AT,
+            )
+        return inserted
+
+    session = _session(plan)
+    with patch.object(repository, "insert_order_terminal_once", insert_then_retire):
+        await repair.apply_write(repository, session)
+    assert _line_results(session) == ["recorded"] * 3
+    assert await _status(repository, pairs[0].create_id) == ("cancelled", None)
+
+
+@pytest.mark.asyncio
+async def test_a_partly_applied_shard_is_retried_with_the_written_cancel_still_named(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A retry that names the written cancel again keeps its still open target covered.
+
+    Given: Three pairs on one shard whose first terminal is already recorded, its create
+        still accepted and named in the checkpoint,
+    When: A retry names only the two remaining cancels, then all three,
+    Then: The first retry refuses both lines, and the second writes only the remaining two.
+    """
+    pairs = await _seed_three_pairs(repository)
+    cancel_ids = [pair.cancel_id for pair in pairs]
+    await _record_first_terminal(repository, await _plan(repository, *cancel_ids))
+    await add_rows(repository, [checkpoint(open_command_ids=json.dumps([pairs[0].create_id]))])
+    partial = await _plan(repository, *cancel_ids[1:])
+    assert [line.decision.reason for line in partial.lines] == ["shard_has_other_open_command"] * 2
+    retry = await _plan(repository, *cancel_ids)
+    assert [line.decision.action for line in retry.lines] == [
+        RepairAction.ALREADY_RECORDED,
+        RepairAction.RECORD_TERMINAL,
+        RepairAction.RECORD_TERMINAL,
+    ]
+    session = _session(retry)
+    await repair.apply_write(repository, session)
+    assert _line_results(session) == ["nothing_to_write", "recorded", "recorded"]
+
+
+@pytest.mark.asyncio
+async def test_a_retry_after_the_reconciler_retired_the_written_target_still_covers_it(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A retired target that the checkpoint still names is covered when its cancel is named.
+
+    Given: Three pairs on one shard whose first terminal is recorded and whose first create
+        the reconciler already retired, while the checkpoint still names it,
+    When: A retry names only the two remaining cancels, then all three,
+    Then: The first retry refuses on the checkpoint, and the second records the two.
+    """
+    pairs = await _seed_three_pairs(repository)
+    cancel_ids = [pair.cancel_id for pair in pairs]
+    await _record_first_terminal(repository, await _plan(repository, *cancel_ids))
+    await _retire(repository, pairs[0].create_id)
+    await add_rows(repository, [checkpoint(open_command_ids=json.dumps([pairs[0].create_id]))])
+    partial = await _plan(repository, *cancel_ids[1:])
+    assert [line.decision.reason for line in partial.lines] == ["shard_checkpoint_open_command"] * 2
+    retry = await _plan(repository, *cancel_ids)
+    assert [line.decision.action for line in retry.lines] == [
+        RepairAction.ALREADY_RECORDED,
+        RepairAction.RECORD_TERMINAL,
+        RepairAction.RECORD_TERMINAL,
+    ]
+    assert pairs[0].create_id in retry.run_targets.shard_keys
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("variant", "first_reason"),
+    [
+        ("not_a_cancel", "not_a_cancel"),
+        ("ambiguous", "target_ambiguous"),
+        ("created", "target_not_foldable"),
+    ],
+)
+async def test_targets_that_cannot_retire_cover_nothing(
+    repository: SQLAlchemyRepository, variant: str, first_reason: str
+) -> None:
+    """A line that fails stage A or B, or whose target is open but not foldable, covers nothing.
+
+    Given: Three pairs on one shard, the first line changed as stated,
+    When: The three are planned together,
+    Then: The first line refuses as stated, its create is no run target, and the other two
+        refuse because that create is still open on their shard.
+    """
+    pairs = await _seed_three_pairs(repository)
+    first = pairs[0].create_id if variant == "not_a_cancel" else pairs[0].cancel_id
+    if variant == "created":
+        await _set_command(repository, pairs[0].create_id, status="created")
+    real_lookup = repository.get_active_create_command_by_client_order_id
+
+    async def lookup(client_order_id: str, exchange: str) -> TradeCommandRow | None:
+        """Make the first pair's target ambiguous in the ambiguous variant."""
+        if variant == "ambiguous" and client_order_id == pairs[0].client_order_id:
+            raise RuntimeError("several active creates")
+        return await real_lookup(client_order_id, exchange)
+
+    with patch.object(repository, "get_active_create_command_by_client_order_id", lookup):
+        plan = await _plan(repository, first, pairs[1].cancel_id, pairs[2].cancel_id)
+    assert [line.decision.reason for line in plan.lines] == [
+        first_reason,
+        "shard_has_other_open_command",
+        "shard_has_other_open_command",
+    ]
+    assert sorted(plan.run_targets.shard_keys) == sorted([pairs[1].create_id, pairs[2].create_id])
+    assert list(cast(dict[str, JsonValue], plan.summary["shards"])) == [KRAKEN_SHARD]
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_naming_a_run_target_of_another_shard_refuses(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A run target covers only its own shard.
+
+    Given: One pair on the Kraken shard, a second pair on another wallet's shard, and a
+        checkpoint on the first shard that names the second pair's create,
+    When: Both cancels are planned together,
+    Then: The first line refuses on the checkpoint, the second records, and the summary
+        lists both shards.
+    """
+    first = await seed_kraken_pair(repository, 1)
+    second = await seed_kraken_pair(repository, 4)
+    other_shard = await _move_to_wallet(repository, second, OTHER_WALLET)
+    await add_rows(repository, [checkpoint(open_command_ids=json.dumps([second.create_id]))])
+    plan = await _plan(repository, first.cancel_id, second.cancel_id)
+    assert [line.decision.reason for line in plan.lines] == ["shard_checkpoint_open_command", None]
+    assert plan.lines[1].decision.action is RepairAction.RECORD_TERMINAL
+    assert plan.run_targets.covers(second.create_id, other_shard)
+    assert not plan.run_targets.covers(second.create_id, KRAKEN_SHARD)
+    assert list(cast(dict[str, JsonValue], plan.summary["shards"])) == sorted(
+        [KRAKEN_SHARD, other_shard]
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_cancels_targeting_one_order_refuse_the_run(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Two named cancels whose targets share a client order id refuse the whole run.
+
+    Given: A pair and a second cancel of the same client order id,
+    When: Both cancels are planned,
+    Then: The run refuses before any line is evaluated.
+    """
+    pair = await seed_kraken_pair(repository)
+    second_cancel = "00000000-0000-7000-8000-0000000001cb"
+    await add_rows(
+        repository,
+        [
+            command(
+                second_cancel,
+                command_type="cancel",
+                status="dispatched",
+                client_order_id=pair.client_order_id,
+                created_at=CANCEL_AT,
+            )
+        ],
+    )
+    with pytest.raises(CancelTargetRepairRefusedError, match="the same order"):
+        await _plan(repository, pair.cancel_id, second_cancel)
+
+
+@pytest.mark.asyncio
+async def test_a_watermark_change_after_the_vote_refuses_the_write(
+    repository: SQLAlchemyRepository, tmp_path: Path
+) -> None:
+    """The summary binds each shard's checkpoint watermark to the vote.
+
+    Given: Three pairs on one shard with a checkpoint, planned and voted,
+    When: The checkpoint's watermark moves before the write is prepared,
+    Then: The recomputed summary differs and the write refuses.
+    """
+    pairs = await _seed_three_pairs(repository)
+    cancel_ids = [pair.cancel_id for pair in pairs]
+    await add_rows(repository, [checkpoint()])
+    plan = await _plan(repository, *cancel_ids)
+    voted = _vote(tmp_path, plan)
+    async with repository.session() as session:
+        await session.execute(sa.update(TradeProjectionCheckpoint).values(last_venue_event_id=3))
+        await session.commit()
+    with pytest.raises(CancelTargetRepairRefusedError, match="differs from the vote"):
+        await repair.prepare_write(
+            repository, cancel_ids, (voted, plan.digest), (DATABASE, CODE), WRITE_TIME
+        )
