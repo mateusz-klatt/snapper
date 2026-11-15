@@ -1555,11 +1555,11 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             symbol: Native symbol (optional, used for response).
 
         Returns:
-            ExchangeOrderSnapshot with cancelled status.
+            ExchangeOrderSnapshot with venue-reported cancellation or read-back state.
 
         Raises:
             RuntimeError: If API credentials are missing.
-            Exception: If cancellation fails.
+            Exception: If cancellation or a required read-back fails.
         """
         self._require_authenticated()
         self._record_rest_call()
@@ -1571,7 +1571,17 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             sync_call=lambda: trade_client.cancel_order(order_id=order_id),
         )
         cancel_status = result.get("cancelStatus", {})
-        status_str = cancel_status.get("status", "cancelled")
+        status_str = cancel_status.get("status") if isinstance(cancel_status, dict) else None
+        if not isinstance(status_str, str) or not status_str.strip():
+            try:
+                return await self.get_order(order_id, symbol)
+            except Exception:
+                logger.warning(
+                    "cancel_order: cancel sent but reply carried no status, "
+                    "and the read-back failed for {}",
+                    order_id,
+                )
+                raise
         events = cancel_status.get("orderEvents", [])
         order_data: dict[str, Any] = {}
         if events:

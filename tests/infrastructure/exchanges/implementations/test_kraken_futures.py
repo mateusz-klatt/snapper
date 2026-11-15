@@ -28,6 +28,7 @@ from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
@@ -2428,6 +2429,107 @@ class TestOrderMethods:
         assert result.id == "ord-123"
         assert result.status == ExchangeOrderStatusEnum.CANCELED
         assert result.symbol == "BTC-USD-PERP"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "cancel_reply",
+        [
+            pytest.param({"cancelStatus": {}}, id="missing-status"),
+            pytest.param({}, id="missing-cancel-status"),
+            pytest.param({"cancelStatus": {"status": ""}}, id="empty-status"),
+            pytest.param({"cancelStatus": {"status": " \t"}}, id="whitespace-status"),
+            pytest.param({"cancelStatus": {"status": None}}, id="null-status"),
+            pytest.param({"cancelStatus": {"status": 123}}, id="non-string-status"),
+            pytest.param({"cancelStatus": None}, id="null-cancel-status"),
+            pytest.param({"cancelStatus": "cancelled"}, id="string-cancel-status"),
+            pytest.param({"cancelStatus": []}, id="list-cancel-status"),
+            pytest.param(
+                {
+                    "cancelStatus": {
+                        "orderEvents": [
+                            {
+                                "order": {
+                                    "orderId": "ord-123",
+                                    "symbol": "PF_XBTUSD",
+                                    "side": "buy",
+                                    "type": "lmt",
+                                    "quantity": 1.0,
+                                    "filled": 0.0,
+                                    "limitPrice": 66000.0,
+                                }
+                            }
+                        ]
+                    }
+                },
+                id="missing-status-with-order-events",
+            ),
+        ],
+    )
+    async def test_cancel_order_without_usable_status_reads_back(
+        self, auth_client: KrakenFuturesExchangeClient, cancel_reply: dict[str, object]
+    ) -> None:
+        """Return venue truth when the cancel reply carries no usable status.
+
+        Given: A cancel reply without a non-blank string status, possibly with order events.
+        When: cancel_order is called and get_order returns an open order.
+        Then: The exact read-back snapshot is returned after one cancel dispatch.
+        """
+        assert auth_client._trade_client is not None
+        cancel_call = MagicMock(return_value=cancel_reply)
+        auth_client._trade_client.cancel_order = cancel_call
+        snapshot = ExchangeOrderSnapshot(
+            id="ord-123",
+            client_order_id="client-123",
+            symbol="BTC-USD-PERP",
+            side=OrderSideEnum.SELL,
+            type=ExchangeOrderTypeEnum.LIMIT,
+            amount=1.0,
+            price=66000.0,
+            status=ExchangeOrderStatusEnum.OPEN,
+            filled=0.25,
+            remaining=0.75,
+            timestamp=1640995200.0,
+        )
+        with patch.object(
+            auth_client, "get_order", new_callable=AsyncMock, return_value=snapshot
+        ) as read_back:
+            result = await auth_client.cancel_order("ord-123", symbol="BTC-USD-PERP")
+        assert result is snapshot
+        read_back.assert_awaited_once_with("ord-123", "BTC-USD-PERP")
+        cancel_call.assert_called_once_with(order_id="ord-123")
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_without_status_reraises_read_back_failure(
+        self, auth_client: KrakenFuturesExchangeClient
+    ) -> None:
+        """Propagate a failed read-back instead of fabricating cancellation.
+
+        Given: A cancel reply with no status and a failing get_order read-back.
+        When: cancel_order is called.
+        Then: The original exception is raised with one warning and one cancel dispatch.
+        """
+        assert auth_client._trade_client is not None
+        cancel_call = MagicMock(return_value={"cancelStatus": {}})
+        auth_client._trade_client.cancel_order = cancel_call
+        read_error = ValueError("read-back failed")
+        with (
+            patch.object(
+                auth_client, "get_order", new_callable=AsyncMock, side_effect=read_error
+            ) as read_back,
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken_futures.logger.warning"
+            ) as warning,
+            pytest.raises(ValueError, match="read-back failed") as exc_info,
+        ):
+            await auth_client.cancel_order("ord-123", symbol="BTC-USD-PERP")
+        assert exc_info.value is read_error
+        read_back.assert_awaited_once_with("ord-123", "BTC-USD-PERP")
+        cancel_call.assert_called_once_with(order_id="ord-123")
+        warning.assert_called_once_with(
+            "cancel_order: cancel sent but reply carried no status, "
+            "and the read-back failed for {}",
+            "ord-123",
+        )
 
     @pytest.mark.asyncio
     async def test_get_order_returns_snapshot(
