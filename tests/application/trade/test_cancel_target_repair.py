@@ -161,7 +161,7 @@ async def _retire(repository: SQLAlchemyRepository, create_id: str) -> None:
 
 async def _move_to_wallet(repository: SQLAlchemyRepository, pair: SeededPair, wallet: str) -> str:
     """Move one seeded pair onto another wallet's XRP-EUR shard, and return that shard."""
-    shard = compute_shard_key(
+    shard: str = compute_shard_key(
         instrument="XRP-EUR",
         exchange=ExchangeEnum.KRAKEN,
         mode=ExecutionModeEnum.LIVE,
@@ -1269,7 +1269,10 @@ async def test_three_pairs_on_one_shard_are_repaired_together(
     """
     pairs = await _seed_three_pairs(repository)
     cancel_ids = [pair.cancel_id for pair in pairs]
-    plan = await _plan(repository, *cancel_ids)
+    real_read = repair.read_shard
+    with patch.object(repair, "read_shard", AsyncMock(side_effect=real_read)) as shard_reads:
+        plan = await _plan(repository, *cancel_ids)
+    assert shard_reads.await_count == 1
     assert [line.decision.action for line in plan.lines] == [RepairAction.RECORD_TERMINAL] * 3
     targets = sorted(pair.create_id for pair in pairs)
     assert all(
@@ -1418,7 +1421,7 @@ async def test_a_target_retired_between_inserts_still_lets_the_later_lines_write
 
     async def insert_then_retire(row: VenueEventInsertRow) -> bool:
         """Insert the terminal, then retire the first create as the reconciler would."""
-        inserted = await real_insert(row)
+        inserted: bool = await real_insert(row)
         if row["client_order_id"] == pairs[0].client_order_id:
             assert await repository.advance_trade_command_lifecycle(
                 pairs[0].create_id,
@@ -1491,6 +1494,9 @@ async def test_a_retry_after_the_reconciler_retired_the_written_target_still_cov
         RepairAction.RECORD_TERMINAL,
     ]
     assert pairs[0].create_id in retry.run_targets.shard_keys
+    session = _session(retry)
+    await repair.apply_write(repository, session)
+    assert _line_results(session) == ["nothing_to_write", "recorded", "recorded"]
 
 
 @pytest.mark.asyncio
@@ -1611,3 +1617,24 @@ async def test_a_watermark_change_after_the_vote_refuses_the_write(
         await repair.prepare_write(
             repository, cancel_ids, (voted, plan.digest), (DATABASE, CODE), WRITE_TIME
         )
+
+
+@pytest.mark.asyncio
+async def test_a_plan_without_any_stage_b_target_lists_no_shard(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Lines that stop at stage A or B read no shard and leave the summary's shards empty.
+
+    Given: A create named as a cancel, and an id that names no command,
+    When: Both are planned,
+    Then: They refuse as not_a_cancel and cancel_missing, no shard is read, and the
+        summary's shards and the run's targets are empty.
+    """
+    pair = await seed_kraken_pair(repository)
+    missing = "00000000-0000-7000-8000-0000000000fe"
+    with patch.object(repair, "read_shard", AsyncMock()) as shard_reads:
+        plan = await _plan(repository, pair.create_id, missing)
+    assert [line.decision.reason for line in plan.lines] == ["not_a_cancel", "cancel_missing"]
+    shard_reads.assert_not_awaited()
+    assert plan.summary["shards"] == {}
+    assert plan.run_targets.shard_keys == {}
