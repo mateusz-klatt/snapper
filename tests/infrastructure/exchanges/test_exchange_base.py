@@ -981,6 +981,195 @@ async def test_log_execution_to_db_logs_successfully() -> None:
     assert call_args["fee_decimal"] == "10.000000000000000005"
     assert call_args["counter_amount_decimal"] == "50000.000000000000000005"
     assert call_args["numeric_provenance"] == "venue_raw"
+    assert call_args["executed_at"] == execution.timestamp
+    assert call_args["timestamp"] == execution.timestamp
+
+
+def _zero_size_execution(
+    exec_id: str | None = None,
+    trade_id: int | None = None,
+    fee_usd_equiv: float | None = None,
+) -> ExecutionUpdate:
+    """Build a filled execution update that carries no fill quantity.
+
+    Args:
+        exec_id: Optional venue execution id.
+        trade_id: Optional venue trade id.
+        fee_usd_equiv: Optional fee carried by the update.
+
+    Returns:
+        An update with no last or cumulative quantity.
+    """
+    return ExecutionUpdate(
+        order_id="order_123",
+        exec_type="trade",
+        symbol="XRP-EUR",
+        side=OrderSideEnum.BUY,
+        order_type=ExchangeOrderTypeEnum.LIMIT,
+        order_status=ExchangeOrderStatusEnum.FILLED,
+        timestamp=datetime(2026, 7, 19, 19, 54, 52, tzinfo=UTC),
+        exec_id=exec_id,
+        trade_id=trade_id,
+        fee_usd_equiv=fee_usd_equiv,
+    )
+
+
+def _client_with_insert_spy() -> tuple[DummyExchangeClient, AsyncMock]:
+    """Build a client whose repository records execution inserts.
+
+    Returns:
+        The client and its ``insert_execution`` mock.
+    """
+    mock_repo = MagicMock(spec=Repository)
+    mock_repo.insert_execution = AsyncMock()
+    client = DummyExchangeClient(repository=mock_repo)
+    client.set_tracker(SequenceTracker())
+    return client, mock_repo.insert_execution
+
+
+@pytest.mark.asyncio
+async def test_log_execution_to_db_skips_an_empty_acknowledgement() -> None:
+    """An update with no size, no fee and no venue fill identity writes no row.
+
+    Given: A filled update with no quantity, no fee, no exec id and no trade id,
+    When: _log_execution_to_db is called,
+    Then: No execution is inserted, so no filled row of size 0 records the absence of a fill.
+    """
+    client, insert_execution = _client_with_insert_spy()
+    tracker = SequenceTracker()
+    client.set_tracker(tracker)
+    await client._log_execution_to_db(
+        order_public_id="order-pub-1",
+        wallet_public_id="",
+        execution=_zero_size_execution(),
+    )
+    insert_execution.assert_not_called()
+    assert tracker.next_sequence("executions") == 1
+
+
+@pytest.mark.parametrize(
+    ("delta_size", "fee"),
+    [
+        (-1.0, None),
+        (0.0, -0.5),
+        (0.0, float("inf")),
+        (0.0, float("nan")),
+    ],
+)
+@pytest.mark.asyncio
+async def test_log_execution_to_db_keeps_negative_and_non_finite_values(
+    delta_size: float, fee: float | None
+) -> None:
+    """A negative or non-finite size or fee is not an empty acknowledgement.
+
+    Given: An update without ids whose resolved size or fee is negative or non-finite,
+        a rebate included,
+    When: _log_execution_to_db is called,
+    Then: The established path persists it, so the anomaly stays visible.
+    """
+    client, insert_execution = _client_with_insert_spy()
+    await client._log_execution_to_db(
+        order_public_id="order-pub-1",
+        wallet_public_id="",
+        execution=_zero_size_execution(),
+        delta_size=delta_size,
+        fee=fee,
+    )
+    insert_execution.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_log_execution_to_db_skips_an_explicit_zero_delta_without_identity() -> None:
+    """A caller-resolved zero delta and zero fee without identity writes no row.
+
+    Given: The executor passes delta_size 0.0 and fee 0.0 for an update without ids,
+    When: _log_execution_to_db is called,
+    Then: No execution is inserted.
+    """
+    client, insert_execution = _client_with_insert_spy()
+    await client._log_execution_to_db(
+        order_public_id="order-pub-1",
+        wallet_public_id="",
+        execution=_zero_size_execution(),
+        delta_size=0.0,
+        delta_price=0.0,
+        fee=0.0,
+    )
+    insert_execution.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_log_execution_to_db_keeps_a_zero_size_row_with_a_fee() -> None:
+    """A zero size with a fee keeps its established path and is persisted.
+
+    Given: An update with no quantity but a fee of 0.5,
+    When: _log_execution_to_db is called,
+    Then: The execution is inserted with size 0 and that fee.
+    """
+    client, insert_execution = _client_with_insert_spy()
+    await client._log_execution_to_db(
+        order_public_id="order-pub-1",
+        wallet_public_id="",
+        execution=_zero_size_execution(fee_usd_equiv=0.5),
+    )
+    insert_execution.assert_called_once()
+    call_args = insert_execution.call_args[1]
+    assert call_args["size"] == pytest.approx(0.0)
+    assert call_args["fee"] == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_log_execution_to_db_keeps_a_zero_size_row_with_an_exec_id() -> None:
+    """A zero size with a venue exec id keeps its established path.
+
+    Given: An update with no quantity and no fee but an exec id,
+    When: _log_execution_to_db is called,
+    Then: The execution is inserted with that exec id.
+    """
+    client, insert_execution = _client_with_insert_spy()
+    await client._log_execution_to_db(
+        order_public_id="order-pub-1",
+        wallet_public_id="",
+        execution=_zero_size_execution(exec_id="exec-9"),
+    )
+    insert_execution.assert_called_once()
+    assert insert_execution.call_args[1]["exec_id"] == "exec-9"
+
+
+@pytest.mark.asyncio
+async def test_log_execution_to_db_keeps_a_zero_size_row_with_a_trade_id() -> None:
+    """A zero size with a venue trade id keeps its established path.
+
+    Given: An update with no quantity and no fee but a trade id,
+    When: _log_execution_to_db is called,
+    Then: The execution is inserted with that trade id.
+    """
+    client, insert_execution = _client_with_insert_spy()
+    await client._log_execution_to_db(
+        order_public_id="order-pub-1",
+        wallet_public_id="",
+        execution=_zero_size_execution(trade_id=7),
+    )
+    insert_execution.assert_called_once()
+    assert insert_execution.call_args[1]["trade_id"] == "7"
+
+
+@pytest.mark.asyncio
+async def test_log_execution_to_db_keeps_a_non_finite_size() -> None:
+    """A non-finite resolved size is not an empty acknowledgement.
+
+    Given: The executor passes a NaN delta and no fee for an update without ids,
+    When: _log_execution_to_db is called,
+    Then: The established path persists it, so the anomaly stays visible.
+    """
+    client, insert_execution = _client_with_insert_spy()
+    await client._log_execution_to_db(
+        order_public_id="order-pub-1",
+        wallet_public_id="",
+        execution=_zero_size_execution(),
+        delta_size=float("nan"),
+    )
+    insert_execution.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -1220,12 +1409,18 @@ async def test_log_execution_to_db_handles_exception() -> None:
         order_type=ExchangeOrderTypeEnum.LIMIT,
         order_status=ExchangeOrderStatusEnum.FILLED,
         timestamp=datetime.now(UTC),
+        last_price=50000.0,
+        last_qty=1.0,
     )
-    await client._log_execution_to_db(
-        order_public_id="order-pub-4",
-        wallet_public_id="",
-        execution=execution,
-    )
+    with patch("snapper.infrastructure.exchanges.base.logger.error") as error_log:
+        await client._log_execution_to_db(
+            order_public_id="order-pub-4",
+            wallet_public_id="",
+            execution=execution,
+        )
+    mock_repo.insert_execution.assert_called_once()
+    error_log.assert_called_once()
+    assert "Database error" in error_log.call_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -1255,6 +1450,8 @@ async def test_log_execution_to_db_swallows_scope_resolution_refusal() -> None:
         order_type=ExchangeOrderTypeEnum.LIMIT,
         order_status=ExchangeOrderStatusEnum.FILLED,
         timestamp=datetime.now(UTC),
+        last_price=50000.0,
+        last_qty=1.0,
     )
     with patch("snapper.infrastructure.exchanges.base.logger.error") as error_log:
         await client._log_execution_to_db(
