@@ -211,7 +211,8 @@ def venue_history_tip_from_raw(raw_tip: VenueAccountHistoryTip) -> VenueHistoryT
     Projects each raw row to the certification-plane fields the bootstrap needs:
     the MARKET_FX marker, our-key attribution (evidence only), currency, the
     venue's own post-event balance, and — verbatim — the operation type, the
-    order id, and the correcting-entry flag the ownership classification reads.
+    order id, and the correcting-entry flag the ownership classification reads,
+    and the submit id the never-submitted cross-check reads.
     The page order (descending) is preserved.
 
     Args:
@@ -230,6 +231,7 @@ def venue_history_tip_from_raw(raw_tip: VenueAccountHistoryTip) -> VenueHistoryT
             operation_type=item.operation_type,
             order_id=item.order_id,
             correcting_entry=item.correcting_entry,
+            submit_id=item.submit_id,
         )
         for item in raw_tip.items
     )

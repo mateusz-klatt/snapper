@@ -3250,7 +3250,20 @@ def _anchor_population(
         for order_public_id, exchange_order_id in resolved
     )
     command_rows: tuple[SpotOwnedSubmitCommandRow, ...] = tuple(
-        {"public_id": f"command-{index}", "status": status, "exchange_order_id": venue_id}
+        {
+            "public_id": f"command-{index}",
+            "status": status,
+            "exchange_order_id": venue_id,
+            "row_id": index + 1,
+            "command_type": "create",
+            "client_order_id": f"client-{index}",
+            "venue_client_id": f"client-{index}",
+            "wallet_public_id": "00000000-0000-7000-8000-000000000101",
+            "mode": "live",
+            "exchange": "walutomat",
+            "acked_at": None,
+            "candidate": None,
+        }
         for index, (status, venue_id) in enumerate(commands)
     )
     return {
@@ -3262,6 +3275,9 @@ def _anchor_population(
         "blocked_order_ids": frozenset(),
         "other_exchange_unidentified_orders": (),
         "commands": command_rows,
+        "excluded_command_public_ids": frozenset(),
+        "excluded_client_order_ids": frozenset(),
+        "retired_command_public_ids": (),
     }
 
 
@@ -3812,6 +3828,7 @@ _WAL_GUARANTEE = ownership_artifact.WalutomatOrderOwnershipGuarantee(
     reviewed_at=datetime(2026, 7, 1, tzinfo=UTC),
     order_id_non_reuse_source="support-ticket-test",
     order_id_in_history_source="https://api.walutomat.pl/v2.0.0/",
+    create_refusal_source="support-ticket-test-2",
 )
 
 

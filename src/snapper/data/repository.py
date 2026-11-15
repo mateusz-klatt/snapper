@@ -158,6 +158,7 @@ from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.execution_chain import ExecutionChainRecord
 from snapper.application.portfolio.execution_chain import execution_row_digest
 from snapper.application.portfolio.execution_chain import extend_execution_chain
+from snapper.application.portfolio.never_submitted_commands import NEVER_SUBMITTED_COMMAND_DIGESTS
 from snapper.application.portfolio.pnl_anchor_identity import normalize_portfolio_pnl_valuation_ccy
 from snapper.application.portfolio.pnl_anchor_identity import (
     normalize_portfolio_pnl_wallet_public_id,
@@ -182,6 +183,7 @@ from snapper.application.portfolio.reconciliation_invariants import (
     validate_portfolio_reconciliation_spot_anchor_lineage,
 )
 from snapper.application.portfolio.spot_anchor_ownership import build_owned_order_population
+from snapper.application.portfolio.spot_anchor_ownership import is_venue_order_id
 from snapper.application.trade.command_request import parse_shard_key
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
@@ -305,6 +307,7 @@ from snapper.data.models import Wallet
 from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.models import WalletUserReadGrant
+from snapper.data.models import is_open_ended_version
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import PNL_SAMPLE_DIAGNOSTIC_REQUIRED_KEYS
 from snapper.data.repository_types import PNL_SAMPLE_MAX_DIAGNOSTIC_RECORDS
@@ -450,14 +453,19 @@ from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
+from snapper.data.repository_types import SpotCommandVersionRow
 from snapper.data.repository_types import SpotExecutionWitnessRow
 from snapper.data.repository_types import SpotInstrumentIdentitySourceRow
+from snapper.data.repository_types import SpotNeverSubmittedAudit
+from snapper.data.repository_types import SpotNeverSubmittedCandidate
+from snapper.data.repository_types import SpotNeverSubmittedEventRow
 from snapper.data.repository_types import SpotOwnedOrderPopulation
 from snapper.data.repository_types import SpotOwnedOrderSourceRow
 from snapper.data.repository_types import SpotOwnedSubmitCommandRow
 from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import SpotReconciliationBundle
 from snapper.data.repository_types import SpotReplayExecutionSourceRow
+from snapper.data.repository_types import SpotSubmitCommandRead
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
 from snapper.data.repository_types import TradeCommandDispatchUpdate
@@ -5933,7 +5941,12 @@ class Repository(ABC):
         its sentinel-tip Instrument (an inner join would drop the missing
         lineage that is itself evidence), reads every version of each
         referenced Instrument, and reads the sentinel-tip ``create`` and
-        ``submit`` commands of the exact wallet, exchange, and mode. On
+        ``submit`` commands of the exact wallet, exchange, and mode. For each
+        ``failed`` or ``rejected`` command without a venue order id or an
+        acknowledgement it also reads every version of its public id, every
+        venue event linked to it in any scope, the number of Orders carrying
+        its client order id, and its audit context; and it reads the public ids
+        of in-scope commands without an open-ended version in scope. On
         PostgreSQL the reads share one ``REPEATABLE READ, READ ONLY``
         transaction; on SQLite they share one transaction. Commands never
         filter or assign Order ownership. Used only by the spot anchor
@@ -9902,6 +9915,130 @@ def _register_sqlite_fk_pragma(engine: Any) -> None:
         driver_connection = getattr(dbapi_connection, "driver_connection", None)
         if driver_connection is not None:
             _live_aiosqlite_connections.pop(id(driver_connection), None)
+
+
+def _spot_owned_command_scope(
+    table: type[TradeCommand], wallet_public_id: str, exchange: str, mode: str
+) -> tuple[ColumnElement[bool], ...]:
+    """Return the spot anchor's command scope predicate for a ``trade_commands`` entity.
+
+    Args:
+        table: ``TradeCommand`` or an alias of it.
+        wallet_public_id: The canonical wallet public id.
+        exchange: The requested exchange.
+        mode: The execution mode.
+
+    Returns:
+        The wallet, exchange, mode and ``create``/``submit`` conditions.
+    """
+    return (
+        table.wallet_public_id == wallet_public_id,
+        table.exchange == exchange,
+        table.mode == mode,
+        table.command_type.in_(("create", "submit")),
+    )
+
+
+def _is_never_submitted_candidate(command: TradeCommand) -> bool:
+    """Return whether a sentinel-tip command needs its never-submitted facts read.
+
+    Args:
+        command: One sentinel-tip in-scope command.
+
+    Returns:
+        Whether it is ``failed`` or ``rejected`` with no venue order id, no
+        acknowledgement, and a usable client order id.
+    """
+    return (
+        command.status in ("failed", "rejected")
+        and command.exchange_order_id is None
+        and command.acked_at is None
+        and is_venue_order_id(command.client_order_id)
+    )
+
+
+def _spot_owned_command_row(
+    command: TradeCommand, candidate: SpotNeverSubmittedCandidate | None
+) -> SpotOwnedSubmitCommandRow:
+    """Project one sentinel-tip command with its never-submitted facts, if any.
+
+    Args:
+        command: One sentinel-tip in-scope command.
+        candidate: Its never-submitted facts, or ``None`` when it is no candidate.
+
+    Returns:
+        The command row the owned-population builder reads.
+    """
+    return {
+        "public_id": str(command.public_id),
+        "status": str(command.status),
+        "exchange_order_id": command.exchange_order_id,
+        "row_id": command.id,
+        "command_type": command.command_type,
+        "client_order_id": command.client_order_id,
+        "venue_client_id": command.venue_client_id,
+        "wallet_public_id": str(command.wallet_public_id),
+        "mode": command.mode,
+        "exchange": command.exchange,
+        "acked_at": command.acked_at,
+        "candidate": candidate,
+    }
+
+
+def _events_linked_to(
+    command: TradeCommand, events: Sequence[VenueEvent]
+) -> tuple[SpotNeverSubmittedEventRow, ...]:
+    """Select, in id order, the venue events linked to one candidate.
+
+    Args:
+        command: One never-submitted candidate.
+        events: The batched events of every candidate, in id order, each once.
+
+    Returns:
+        The events whose client order id or venue client id is the candidate's
+        client order id, or whose command public id is its public id.
+    """
+    public_id = str(command.public_id)
+    return tuple(
+        {
+            "id": event.id,
+            "event_type": event.event_type,
+            "command_public_id": (
+                None if event.command_public_id is None else str(event.command_public_id)
+            ),
+            "client_order_id": event.client_order_id,
+            "exchange_order_id": event.exchange_order_id,
+            "status": event.status,
+            "error": event.error,
+            "received_at": event.received_at,
+        }
+        for event in events
+        if command.client_order_id in (event.client_order_id, event.venue_client_id)
+        or (event.command_public_id is not None and str(event.command_public_id) == public_id)
+    )
+
+
+def _never_submitted_audit(command: TradeCommand) -> SpotNeverSubmittedAudit:
+    """Read a candidate's unhashed review context from its sentinel-tip version.
+
+    Args:
+        command: One never-submitted candidate.
+
+    Returns:
+        Its timing, attempt count, last error and order parameters.
+    """
+    return {
+        "created_at": command.created_at,
+        "dispatched_at": command.dispatched_at,
+        "terminal_at": command.terminal_at,
+        "attempt_count": command.attempt_count,
+        "last_error": command.last_error,
+        "instrument": command.instrument,
+        "side": command.side,
+        "order_type": command.order_type,
+        "quantity": command.quantity,
+        "price": command.price,
+    }
 
 
 class SQLAlchemyRepository(Repository):
@@ -28160,9 +28297,10 @@ class SQLAlchemyRepository(Repository):
     ) -> SpotOwnedOrderPopulation:
         """Read the anchor bootstrap's owned-order population in one snapshot.
 
-        See the abstract declaration. The three reads run inside one explicit
-        database transaction, so the Orders, the Instrument versions, and the
-        commands describe one database cut. On PostgreSQL it is opened
+        See the abstract declaration. Every read runs inside one explicit
+        database transaction, so the Orders, the Instrument versions, the
+        commands with their never-submitted facts, and the retired command ids
+        describe one database cut. On PostgreSQL it is opened
         ``REPEATABLE READ, READ ONLY``. On SQLite the driver's legacy
         transaction control issues no ``BEGIN`` before a ``SELECT``, so each
         read would see its own cut; an explicit deferred ``BEGIN`` makes the
@@ -28182,8 +28320,14 @@ class SQLAlchemyRepository(Repository):
             instrument_versions = await self._spot_owned_instrument_versions(
                 s, wallet_public_id, mode
             )
-            commands = await self._spot_owned_submit_commands(s, wallet_public_id, exchange, mode)
-        return build_owned_order_population(exchange, order_rows, instrument_versions, commands)
+            command_read = await self._spot_owned_command_read(s, wallet_public_id, exchange, mode)
+        return build_owned_order_population(
+            exchange,
+            order_rows,
+            instrument_versions,
+            command_read,
+            NEVER_SUBMITTED_COMMAND_DIGESTS,
+        )
 
     @staticmethod
     async def _spot_owned_order_source_rows(
@@ -28269,29 +28413,137 @@ class SQLAlchemyRepository(Repository):
         return {key: frozenset(value) for key, value in versions.items()}
 
     @staticmethod
-    async def _spot_owned_submit_commands(
+    async def _spot_owned_command_read(
         s: AsyncSession, wallet_public_id: str, exchange: str, mode: str
-    ) -> list[SpotOwnedSubmitCommandRow]:
-        """Read the sentinel-tip ``create`` and ``submit`` commands of the exact scope."""
+    ) -> SpotSubmitCommandRead:
+        """Read the exact scope's sentinel-tip ``create`` and ``submit`` commands and retired ids.
+
+        Each command carries its never-submitted facts when it is a candidate.
+        The candidates' facts are read in three batched reads, so their cost
+        does not grow with the number of candidates.
+        """
         result = await s.execute(
-            select(TradeCommand.public_id, TradeCommand.status, TradeCommand.exchange_order_id)
+            select(TradeCommand)
             .where(
                 TradeCommand.known_to == KNOWN_TO_MAX,
-                TradeCommand.wallet_public_id == wallet_public_id,
-                TradeCommand.exchange == exchange,
-                TradeCommand.mode == mode,
-                TradeCommand.command_type.in_(("create", "submit")),
+                *_spot_owned_command_scope(TradeCommand, wallet_public_id, exchange, mode),
             )
             .order_by(TradeCommand.id.asc())
         )
-        return [
-            {
-                "public_id": str(public_id),
-                "status": str(status),
-                "exchange_order_id": exchange_order_id,
+        tips = list(result.scalars().all())
+        facts = await SQLAlchemyRepository._spot_never_submitted_facts(
+            s, [command for command in tips if _is_never_submitted_candidate(command)]
+        )
+        retired = await SQLAlchemyRepository._spot_retired_command_public_ids(
+            s, wallet_public_id, exchange, mode
+        )
+        return {
+            "commands": tuple(
+                _spot_owned_command_row(command, facts.get(str(command.public_id)))
+                for command in tips
+            ),
+            "retired_public_ids": retired,
+        }
+
+    @staticmethod
+    async def _spot_never_submitted_facts(
+        s: AsyncSession, candidates: Sequence[TradeCommand]
+    ) -> dict[str, SpotNeverSubmittedCandidate]:
+        """Read every candidate's versions, linked events, Order count and audit context.
+
+        Three batched reads serve all candidates: every version of their public
+        ids, with no scope or ``known_to`` filter so the whole history is
+        bound; every venue event in any scope whose client order id or venue
+        client id is a candidate's client order id, or whose command public id
+        is a candidate's public id; and the number of Orders of any version,
+        wallet or mode per client order id. Each event is attributed to every
+        candidate it links to, in id order, once.
+        """
+        if not candidates:
+            return {}
+        public_ids = [str(command.public_id) for command in candidates]
+        client_order_ids = [command.client_order_id for command in candidates]
+        versions = await s.execute(
+            select(
+                TradeCommand.public_id,
+                TradeCommand.id,
+                TradeCommand.status,
+                TradeCommand.exchange_order_id,
+                TradeCommand.acked_at,
+                TradeCommand.known_to,
+            )
+            .where(TradeCommand.public_id.in_(public_ids))
+            .order_by(TradeCommand.id.asc())
+        )
+        events = await s.execute(
+            select(VenueEvent)
+            .where(
+                or_(
+                    VenueEvent.client_order_id.in_(client_order_ids),
+                    VenueEvent.venue_client_id.in_(client_order_ids),
+                    VenueEvent.command_public_id.in_(public_ids),
+                )
+            )
+            .order_by(VenueEvent.id.asc())
+        )
+        counts = await s.execute(
+            select(Order.client_order_id, func.count(Order.id))
+            .where(Order.client_order_id.in_(client_order_ids))
+            .group_by(Order.client_order_id)
+        )
+        version_rows: dict[str, list[SpotCommandVersionRow]] = {}
+        for public_id, row_id, status, exchange_order_id, acked_at, known_to in versions.all():
+            version_rows.setdefault(str(public_id), []).append(
+                {
+                    "row_id": row_id,
+                    "status": str(status),
+                    "exchange_order_id": exchange_order_id,
+                    "acked_at": acked_at,
+                    "open_ended": is_open_ended_version(known_to),
+                }
+            )
+        linked_events = list(events.scalars().all())
+        order_counts = {str(client_order_id): int(count) for client_order_id, count in counts.all()}
+        return {
+            str(command.public_id): {
+                "versions": tuple(version_rows.get(str(command.public_id), [])),
+                "venue_events": _events_linked_to(command, linked_events),
+                "order_row_count": order_counts.get(command.client_order_id, 0),
+                "audit": _never_submitted_audit(command),
             }
-            for public_id, status, exchange_order_id in result.all()
-        ]
+            for command in candidates
+        }
+
+    @staticmethod
+    async def _spot_retired_command_public_ids(
+        s: AsyncSession, wallet_public_id: str, exchange: str, mode: str
+    ) -> tuple[str, ...]:
+        """Read the in-scope command public ids that have no open-ended version in scope.
+
+        The scope predicate is applied on both sides, so a fully closed history
+        and a successor version moved to another wallet, exchange, mode or
+        command type are both found.
+        """
+        tip = aliased(TradeCommand)
+        open_in_scope = (
+            select(tip.id)
+            .where(
+                tip.public_id == TradeCommand.public_id,
+                tip.known_to == KNOWN_TO_MAX,
+                *_spot_owned_command_scope(tip, wallet_public_id, exchange, mode),
+            )
+            .exists()
+        )
+        result = await s.execute(
+            select(TradeCommand.public_id)
+            .where(
+                *_spot_owned_command_scope(TradeCommand, wallet_public_id, exchange, mode),
+                ~open_in_scope,
+            )
+            .distinct()
+            .order_by(TradeCommand.public_id)
+        )
+        return tuple(str(public_id) for public_id in result.scalars().all())
 
     @staticmethod
     def _spot_bundle_unavailable(error: str) -> SpotReconciliationBundle:

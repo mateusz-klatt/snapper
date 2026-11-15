@@ -27,6 +27,8 @@ _SCHEME = "walutomat:api-v2.0.0:account/history:v1"
 _BALANCES = {"BTC": Decimal("1.5"), "USD": Decimal("100")}
 _ORDER_PUBLIC_ID = "00000000-0000-7000-8000-000000000601"
 _COMMAND_PUBLIC_ID = "00000000-0000-7000-8000-000000000701"
+_CLIENT_ORDER_ID = "00000000-0000-7000-8000-000000000801"
+_EXCLUDED_CLIENT_ORDER_ID = "00000000-0000-7000-8000-000000000802"
 _EXTERNAL_ONLY_OPERATIONS = ("PAYIN", "PAYOUT", "TRANSFER", "DIRECT_FX")
 
 
@@ -59,6 +61,15 @@ def _command(
         "public_id": _COMMAND_PUBLIC_ID,
         "status": status,
         "exchange_order_id": exchange_order_id,
+        "row_id": 1,
+        "command_type": "create",
+        "client_order_id": _CLIENT_ORDER_ID,
+        "venue_client_id": _CLIENT_ORDER_ID,
+        "wallet_public_id": "00000000-0000-7000-8000-000000000101",
+        "mode": "live",
+        "exchange": "walutomat",
+        "acked_at": None,
+        "candidate": None,
     }
 
 
@@ -66,6 +77,7 @@ def _population(
     *,
     owned: frozenset[str] = frozenset({"O1"}),
     commands: tuple[SpotOwnedSubmitCommandRow, ...] | None = None,
+    excluded_client_order_ids: frozenset[str] = frozenset(),
 ) -> SpotOwnedOrderPopulation:
     """Build an owned-order population whose resolved Orders carry ``owned``."""
     resolved: list[SpotOwnedOrderRow] = [
@@ -79,6 +91,9 @@ def _population(
         "blocked_order_ids": frozenset(),
         "other_exchange_unidentified_orders": (),
         "commands": (_command(),) if commands is None else commands,
+        "excluded_command_public_ids": frozenset(),
+        "excluded_client_order_ids": excluded_client_order_ids,
+        "retired_command_public_ids": (),
     }
 
 
@@ -203,6 +218,16 @@ _REFUSAL_CASES = [
         id="no_witness",
     ),
     pytest.param(replace(_BASELINE, margin_signal=True), "margin_not_proven_cash", id="margin"),
+    pytest.param(
+        replace(
+            _with_rows(
+                replace(_item(98, "USD", "90", order_id="M1"), submit_id=_EXCLUDED_CLIENT_ORDER_ID)
+            ),
+            ownership=_population(excluded_client_order_ids=frozenset({_EXCLUDED_CLIENT_ORDER_ID})),
+        ),
+        "never_submitted_command_on_venue",
+        id="never_submitted_on_venue",
+    ),
     pytest.param(
         replace(_BASELINE, ownership=_population(commands=(_command("dispatched"),))),
         "own_submit_unresolved",
@@ -896,3 +921,117 @@ def test_an_observation_built_without_ownership_fields_fails_closed() -> None:
         "venue_ownership_guarantee_unrecorded",
         "venue_reserved_funds_present",
     )
+
+
+def test_a_page_row_under_an_excluded_command_refuses() -> None:
+    """The venue showing activity under a never-submitted command's id contradicts the review.
+
+    Given: An external MARKET_FX row, whose order id lies outside ``S``, carrying
+        the client order id of a command a reviewed exclusion settles as its
+        ``submitId``, in an observation that would otherwise seal as external.
+    When: The refusals are computed and the anchor is built.
+    Then: ``never_submitted_command_on_venue`` is the only refusal and the seal
+        is refused.
+    """
+    observation = replace(
+        _with_rows(
+            replace(_item(98, "USD", "90", order_id="M1"), submit_id=_EXCLUDED_CLIENT_ORDER_ID)
+        ),
+        ownership=_population(excluded_client_order_ids=frozenset({_EXCLUDED_CLIENT_ORDER_ID})),
+    )
+    assert spot_anchor_bootstrap_refusals(observation) == ("never_submitted_command_on_venue",)
+    with pytest.raises(SpotAnchorNotCertifiableError) as caught:
+        build_spot_anchor(observation)
+    assert caught.value.refusals == ("never_submitted_command_on_venue",)
+
+
+def test_an_external_row_without_an_excluded_submit_id_still_seals() -> None:
+    """The cross-check leaves an unrelated external row to the classification.
+
+    Given: The same external row carrying another command's client order id, and
+        one excluded client order id.
+    When: The anchor is built.
+    Then: It seals as external activity.
+    """
+    observation = replace(
+        _with_rows(replace(_item(98, "USD", "90", order_id="M1"), submit_id=_CLIENT_ORDER_ID)),
+        ownership=_population(excluded_client_order_ids=frozenset({_EXCLUDED_CLIENT_ORDER_ID})),
+    )
+    assert build_spot_anchor(observation)["provenance"].endswith(":external_observed")
+
+
+def test_the_cross_check_never_masks_page_refusals_or_the_gate() -> None:
+    """The cross-check runs beside the gate and the page refusals, without short-circuit.
+
+    Given: A page holding a correcting entry and a row under an excluded
+        command's id, and a population whose only command is still dispatched.
+    When: The history refusals are computed.
+    Then: Both the cross-check and the gate refuse.
+    """
+    observation = replace(
+        _with_rows(
+            replace(_item(98, "USD", "90"), submit_id=_EXCLUDED_CLIENT_ORDER_ID),
+            replace(_item(97, "USD", "80"), correcting_entry=True),
+        ),
+        ownership=_population(
+            commands=(_command("dispatched"),),
+            excluded_client_order_ids=frozenset({_EXCLUDED_CLIENT_ORDER_ID}),
+        ),
+    )
+    assert _history_refusals(observation) == {
+        "never_submitted_command_on_venue",
+        "own_submit_unresolved",
+    }
+
+
+def test_the_cross_check_keeps_the_classification_refusals_when_the_gate_passes() -> None:
+    """With the gate passing, the cross-check adds to the page's own refusals.
+
+    Given: A page holding a correcting entry and a row under an excluded
+        command's id, and a population the gate accepts.
+    When: The history refusals are computed.
+    Then: The correcting entry and the cross-check both refuse.
+    """
+    observation = replace(
+        _with_rows(
+            replace(_item(98, "USD", "90"), submit_id=_EXCLUDED_CLIENT_ORDER_ID),
+            replace(_item(97, "USD", "80"), correcting_entry=True),
+        ),
+        ownership=_population(excluded_client_order_ids=frozenset({_EXCLUDED_CLIENT_ORDER_ID})),
+    )
+    refusals = _history_refusals(observation)
+    assert "never_submitted_command_on_venue" in refusals
+    assert "venue_history_correcting_entry" in refusals
+
+
+@pytest.mark.parametrize("submit_id", [None, "", "  ", _CLIENT_ORDER_ID])
+def test_rows_without_an_excluded_submit_id_pass_the_cross_check(submit_id: str | None) -> None:
+    """A missing, blank or unrelated ``submitId`` never trips the cross-check.
+
+    Given: A page row whose ``submitId`` is missing, blank, or another command's
+        client order id, and one excluded client order id.
+    When: The history refusals are computed.
+    Then: ``never_submitted_command_on_venue`` is not among them.
+
+    Args:
+        submit_id: The row's verbatim ``submitId``.
+    """
+    observation = replace(
+        _with_rows(replace(_item(98, "USD", "90"), submit_id=submit_id)),
+        ownership=_population(excluded_client_order_ids=frozenset({_EXCLUDED_CLIENT_ORDER_ID})),
+    )
+    assert "never_submitted_command_on_venue" not in _history_refusals(observation)
+
+
+def test_the_cross_check_needs_the_population() -> None:
+    """Without a population there is no exclusion to contradict.
+
+    Given: A page row carrying some ``submitId`` and no population.
+    When: The history refusals are computed.
+    Then: Only the gate refuses.
+    """
+    observation = replace(
+        _with_rows(replace(_item(98, "USD", "90"), submit_id=_EXCLUDED_CLIENT_ORDER_ID)),
+        ownership=None,
+    )
+    assert _history_refusals(observation) == {"own_submit_unresolved"}

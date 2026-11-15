@@ -36,7 +36,12 @@ or ``:windowed`` — a durable, per-anchor record of the claim actually made.
 
 OWNERSHIP (the seal page only): every row on the page, all at or below the cut
 ``H0``, is classified against the owned order set ``S`` of one database
-snapshot, never by ``orderedBy``. The unresolved-submit gate runs first; while
+snapshot, never by ``orderedBy``. Beside the gate, any page row whose
+``submitId`` names a command that a reviewed never-submitted exclusion settles
+refuses ``never_submitted_command_on_venue``: the venue shows activity under an
+id the review found never submitted. That check only narrows, sees only this
+page, and needs the venue to echo ``submitId``; the exclusion's proof does not
+rest on it. The unresolved-submit gate runs first; while
 it refuses (``own_submit_unresolved``) no row is classified at all, because an
 incomplete ``S`` cannot tell an own fill from an external one. Then, in order:
 a correcting entry refuses; a row whose order id lies in ``S`` but whose
@@ -84,6 +89,7 @@ type SpotAnchorRefusal = Literal[
     "inventory_not_observed",
     "local_execution_not_in_venue_history",
     "margin_not_proven_cash",
+    "never_submitted_command_on_venue",
     "own_submit_unresolved",
     "scope_without_committed_execution",
     "venue_cursor_malformed",
@@ -125,7 +131,8 @@ class VenueHistoryItem:
     is evidence only and never decides ownership. ``balance_after`` is the
     venue's own post-event balance for ``currency``. ``operation_type``,
     ``order_id`` and ``correcting_entry`` are the raw row's fields, verbatim,
-    that the ownership classification reads.
+    that the ownership classification reads. ``submit_id`` is the raw row's
+    ``submitId``, verbatim, which only the never-submitted cross-check reads.
     """
 
     item_id: int
@@ -136,6 +143,7 @@ class VenueHistoryItem:
     operation_type: str
     order_id: str | None
     correcting_entry: bool
+    submit_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -499,13 +507,39 @@ def _ownership_refusals(
     return refusals
 
 
+def _never_submitted_on_page(
+    page: Sequence[VenueHistoryItem], excluded_client_order_ids: frozenset[str]
+) -> bool:
+    """Return whether the seal page shows activity under a never-submitted command's id.
+
+    The venue echoes an API order's client order id as the history row's
+    ``submitId``. A page row carrying the client order id of a command that a
+    reviewed never-submitted exclusion settles contradicts that review. The
+    check sees only this page and relies on the echo, so it can only refuse.
+
+    Args:
+        page: The seal page's rows.
+        excluded_client_order_ids: The client order ids of the excluded commands.
+
+    Returns:
+        Whether any row's usable ``submitId`` is one of those ids.
+    """
+    return any(
+        is_venue_order_id(item.submit_id) and item.submit_id in excluded_client_order_ids
+        for item in page
+    )
+
+
 def _history_refusals(observation: SpotAnchorObservation) -> set[SpotAnchorRefusal]:
     """Collect venue-page integrity, ownership, and execution-witness refusals.
 
     The page-integrity, balance-chain, and reverse-coverage checks need no
-    ownership. The unresolved-submit gate then decides whether ``S`` may be
-    trusted; while it refuses, no row is classified, so an incomplete owned set
-    can never turn an own fill into external activity.
+    ownership. Whenever the population is supplied, a page row carrying the
+    client order id of a command a reviewed never-submitted exclusion settles
+    refuses ``never_submitted_command_on_venue``, independently of the gate.
+    The unresolved-submit gate then decides whether ``S`` may be trusted; while
+    it refuses, no row is classified, so an incomplete owned set can never turn
+    an own fill into external activity.
 
     Args:
         observation: The gathered bootstrap evidence.
@@ -527,6 +561,10 @@ def _history_refusals(observation: SpotAnchorObservation) -> set[SpotAnchorRefus
     ):
         refusals.add("local_execution_not_in_venue_history")
     ownership = observation.ownership
+    if ownership is not None and _never_submitted_on_page(
+        tip.page, ownership["excluded_client_order_ids"]
+    ):
+        refusals.add("never_submitted_command_on_venue")
     if ownership is None or own_submit_unresolved(ownership):
         refusals.add("own_submit_unresolved")
         return refusals
