@@ -521,7 +521,15 @@ snapper archive --from 2024-01-01 --to 2024-01-31 --exchange polygon
 snapper archive --table ticks --day 2024-01-15 --exchange polygon
 snapper archive --table candles-audit --day 2024-01-15 --closed-only --purge
 snapper restore --table candles --dir data/archive/candles/polygon/BTC-USD/
+snapper void-candles --instrument I --evidence writer_cessation=E --output-dir D  # Preview a guarded candle void
 ```
+
+`void-candles` previews every active candle version of the selected retired Kraken instruments,
+across all timeframes. Applying an approved preview requires its exact digest and explicit
+confirmation; it closes versions under the candle writer fence and preserves their historical
+values. See the [CLI reference](docs/cli.md#void-candles) for evidence, approval and recovery.
+Candle archive restore preserves an existing version's `known_to`; its summary distinguishes
+exact duplicates from versions skipped because that value differs.
 
 ### Backtests
 
