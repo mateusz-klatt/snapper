@@ -22,6 +22,14 @@ from snapper.messaging.schemas.data import HeartbeatData
 
 _NOW = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
 
+_LIVENESS_TIMEOUT_S = 10.0
+"""Upper bound for waits that only check an asyncio.Event becomes set.
+
+These waits return as soon as the code under test signals progress, so a
+longer bound costs nothing when the test is healthy. Keep the value under
+the 15 s per-test pytest timeout used on Linux CI.
+"""
+
 
 class _TrackerStub:
     """Minimal sequence tracker satisfying the publisher protocol."""
@@ -213,12 +221,12 @@ class TestLifecycle:
         )
 
         watchdog.start()
-        await asyncio.wait_for(grace_started.wait(), timeout=1.0)
+        await asyncio.wait_for(grace_started.wait(), timeout=_LIVENESS_TIMEOUT_S)
 
         repo.has_live_ai_delegate.assert_not_awaited()
         publisher.send.assert_not_awaited()
         release_grace.set()
-        await asyncio.wait_for(first_frame_sent.wait(), timeout=1.0)
+        await asyncio.wait_for(first_frame_sent.wait(), timeout=_LIVENESS_TIMEOUT_S)
         repo.has_live_ai_delegate.assert_awaited_once()
         publisher.send.assert_awaited_once()
         await watchdog.stop()
@@ -250,7 +258,7 @@ class TestLifecycle:
         watchdog = _make_watchdog(repo, publisher)
 
         watchdog.start()
-        await asyncio.wait_for(publication_started.wait(), timeout=1.0)
+        await asyncio.wait_for(publication_started.wait(), timeout=_LIVENESS_TIMEOUT_S)
 
         assert watchdog._loop_task is not None
         assert not watchdog._loop_task.done()
