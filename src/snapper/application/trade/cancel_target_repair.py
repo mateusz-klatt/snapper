@@ -81,10 +81,10 @@ SUBMIT_EVIDENCE_TYPES: Final[tuple[str, ...]] = (
 )
 """Venue event types that only a submitted order produces."""
 
-_COVERABLE_STATUSES: Final[frozenset[str]] = _FOLD_SOURCE_STATUSES | frozenset(
-    reads.TERMINAL_COMMAND_STATUSES
+_SHARD_STOPPING_RESULTS: Final[frozenset[str]] = frozenset(
+    {"changed_before_write", "lost_compare_and_set", "recorded_unconfirmed"}
 )
-"""Target statuses in which a run target covers its shard: the fold's sources and the terminals."""
+"""Line results after which the run writes nothing more on that line's shard."""
 
 _CANCELED_ORDER_STATUS: Final[str] = "canceled"
 _CANCEL_COMMAND_TYPE: Final[str] = "cancel"
@@ -103,6 +103,12 @@ class RepairAction(StrEnum):
     ALREADY_RECORDED = "already_recorded"
     ALREADY_FAILED = "already_failed"
     REFUSE = "refuse"
+
+
+_WRITING_ACTIONS: Final[frozenset[RepairAction]] = frozenset(
+    {RepairAction.RECORD_TERMINAL, RepairAction.FAIL_CANCEL}
+)
+"""Actions whose lines write to the database."""
 
 
 class ExecutionClass(StrEnum):
@@ -238,14 +244,14 @@ def run_targets_of(evidence: Sequence[CancelEvidence]) -> RunTargets:
     """Collect the run's targets from the cancels that pass stages A and B.
 
     Only a cancel that exists, is a cancel and has exactly one active target
-    has a target in its evidence. The target counts unless it is open in a
-    status the reconciler's fold does not retire: it counts in a fold source
-    status, which the fold retires once a canceled terminal exists, and in a
-    terminal status, which a checkpoint may still name until the engine
-    restarts. It counts whatever its own line's action: a refused line blocks
-    the whole write, and an ``already_recorded`` line keeps its target
-    covered while a retry of a partly applied run writes the rest of the
-    shard.
+    has a target in its evidence. A target in a terminal status counts,
+    because a checkpoint may still name it until the engine restarts. An
+    open target counts only on the branch that can end with a canceled
+    terminal: a Kraken target in a fold source status, which the fold
+    retires once that terminal exists. It counts whatever its own line's
+    action: a refused line blocks the whole write, and an
+    ``already_recorded`` line keeps its target covered while a retry of a
+    partly applied run writes the rest of the shard.
 
     Args:
         evidence: What was read for each cancel of the run.
@@ -257,9 +263,16 @@ def run_targets_of(evidence: Sequence[CancelEvidence]) -> RunTargets:
         {
             item.target["public_id"]: item.target["shard_key"]
             for item in evidence
-            if item.target is not None and item.target["status"] in _COVERABLE_STATUSES
+            if item.target is not None and _covers_its_shard(item.target)
         }
     )
+
+
+def _covers_its_shard(target: TradeCommandRow) -> bool:
+    """Return whether a target may cover its shard's open commands and checkpoint ids."""
+    if target["status"] in reads.TERMINAL_COMMAND_STATUSES:
+        return True
+    return target["status"] in _FOLD_SOURCE_STATUSES and target["exchange"] == ExchangeEnum.KRAKEN
 
 
 def refuse_shared_targets(evidence: Sequence[CancelEvidence]) -> None:
@@ -464,14 +477,44 @@ def checkpoint_open_command_ids(checkpoint: TradeProjectionCheckpointRow | None)
     return [str(item) for item in raw]
 
 
+def uncovered_on_shard(
+    evidence: CancelEvidence, run_targets: RunTargets
+) -> tuple[list[str], list[str]]:
+    """Return the shard's open commands and checkpoint ids that no run target on it covers.
+
+    Stage H and the preview both use this one computation, so the voters see
+    exactly what the check decided.
+
+    Args:
+        evidence: What was read for the cancel.
+        run_targets: The targets of every cancel named in the run.
+
+    Returns:
+        The uncovered open command public ids and the uncovered checkpoint open
+        ids, both empty for a line without a target.
+    """
+    if evidence.target is None:
+        return [], []
+    shard_key = evidence.target["shard_key"]
+    commands = [
+        command["public_id"]
+        for command in evidence.open_commands
+        if not run_targets.covers(command["public_id"], shard_key)
+    ]
+    open_ids = [
+        item
+        for item in checkpoint_open_command_ids(evidence.checkpoint)
+        if not run_targets.covers(item, shard_key)
+    ]
+    return commands, open_ids
+
+
 def _check_shard(case: KrakenCase, run_targets: RunTargets) -> str | None:
     """Check every open command on the shard is a run target on it, and no other wallet is seen."""
-    shard_key = case.target["shard_key"]
-    commands = case.evidence.open_commands
-    if any(not run_targets.covers(command["public_id"], shard_key) for command in commands):
+    commands, open_ids = uncovered_on_shard(case.evidence, run_targets)
+    if commands:
         return "shard_has_other_open_command"
-    open_ids = checkpoint_open_command_ids(case.evidence.checkpoint)
-    if any(not run_targets.covers(item, shard_key) for item in open_ids):
+    if open_ids:
         return "shard_checkpoint_open_command"
     if any(wallet != case.target["wallet_public_id"] for wallet in case.evidence.shard_wallets):
         return "shard_wallet_mismatch"
@@ -841,18 +884,11 @@ def _shard_document(evidence: CancelEvidence, run_targets: RunTargets) -> JsonOb
     Only commands that are not run targets are listed, so a target that the
     reconciler retires while the run is writing changes no later line.
     """
+    commands, open_ids = uncovered_on_shard(evidence, run_targets)
     shard_key = "" if evidence.target is None else evidence.target["shard_key"]
     return {
-        "non_target_open_commands": [
-            command["public_id"]
-            for command in evidence.open_commands
-            if not run_targets.covers(command["public_id"], shard_key)
-        ],
-        "non_target_checkpoint_open_ids": [
-            item
-            for item in checkpoint_open_command_ids(evidence.checkpoint)
-            if not run_targets.covers(item, shard_key)
-        ],
+        "non_target_open_commands": list(commands),
+        "non_target_checkpoint_open_ids": list(open_ids),
         "run_targets_on_shard": list(run_targets.on_shard(shard_key)) if shard_key else [],
         "wallets": list(evidence.shard_wallets),
     }
@@ -1220,22 +1256,35 @@ async def apply_write(repository: SQLAlchemyRepository, session: WriteSession) -
     failure after a commit therefore still leaves the line in the receipt;
     the rows carrying the session id are the authority for such a line.
 
+    Once a line ends ``changed_before_write``, ``lost_compare_and_set`` or
+    ``recorded_unconfirmed``, the run writes nothing more on that line's
+    shard: the shard's later writing lines report
+    ``skipped_after_shard_change``. A shard whose state moved during the run
+    must not gain more terminals that the engine would replay at its next
+    restart.
+
     Args:
         repository: Repository to write through.
         session: The prepared write; its results grow line by line.
     """
+    stopped: set[str] = set()
     for line in session.plan.lines:
         entry: JsonObject = {
             "cancel_public_id": line.evidence.cancel_public_id,
             "result": "in_flight",
         }
         session.results.append(entry)
+        shard_key = None if line.evidence.target is None else line.evidence.target["shard_key"]
         outcome: JsonObject = {"result": "nothing_to_write"}
-        if line.decision.action is RepairAction.RECORD_TERMINAL:
+        if line.decision.action in _WRITING_ACTIONS and shard_key in stopped:
+            outcome = {"result": "skipped_after_shard_change"}
+        elif line.decision.action is RepairAction.RECORD_TERMINAL:
             outcome = await _record_terminal(repository, line, session, entry)
         elif line.decision.action is RepairAction.FAIL_CANCEL:
             outcome = await _fail_cancel(repository, line, session, entry)
         entry.update(outcome)
+        if shard_key is not None and outcome["result"] in _SHARD_STOPPING_RESULTS:
+            stopped.add(shard_key)
 
 
 def receipt_document(session: WriteSession) -> JsonObject:

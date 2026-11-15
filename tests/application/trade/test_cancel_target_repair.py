@@ -1560,6 +1560,9 @@ async def test_a_checkpoint_naming_a_run_target_of_another_shard_refuses(
     plan = await _plan(repository, first.cancel_id, second.cancel_id)
     assert [line.decision.reason for line in plan.lines] == ["shard_checkpoint_open_command", None]
     assert plan.lines[1].decision.action is RepairAction.RECORD_TERMINAL
+    first_shard = cast(dict[str, JsonValue], plan.lines[0].preview["shard"])
+    assert first_shard["non_target_checkpoint_open_ids"] == [second.create_id]
+    assert first_shard["run_targets_on_shard"] == [first.create_id]
     assert plan.run_targets.covers(second.create_id, other_shard)
     assert not plan.run_targets.covers(second.create_id, KRAKEN_SHARD)
     assert list(cast(dict[str, JsonValue], plan.summary["shards"])) == sorted(
@@ -1638,3 +1641,102 @@ async def test_a_plan_without_any_stage_b_target_lists_no_shard(
     shard_reads.assert_not_awaited()
     assert plan.summary["shards"] == {}
     assert plan.run_targets.shard_keys == {}
+
+
+@pytest.mark.asyncio
+async def test_the_four_production_shapes_plan_and_write_with_a_checkpoint(
+    repository: SQLAlchemyRepository, tmp_path: Path
+) -> None:
+    """The three Kraken pairs and the Walutomat pair, each on its own shard, plan and write together.
+
+    Given: Three Kraken pairs on one shard whose checkpoint names the newest create, and the
+        Walutomat pair on its own shard,
+    When: The four cancels are planned, voted and written,
+    Then: The summary lists the Kraken shard alone with its checkpoint, and the write
+        records three terminals and fails the Walutomat cancel.
+    """
+    pairs = await _seed_three_pairs(repository)
+    walutomat = await seed_walutomat_pair(repository)
+    await add_rows(repository, [checkpoint(open_command_ids=json.dumps([pairs[2].create_id]))])
+    cancel_ids = [pair.cancel_id for pair in pairs] + [walutomat.cancel_id]
+    plan = await _plan(repository, *cancel_ids)
+    assert [line.decision.action for line in plan.lines] == [RepairAction.RECORD_TERMINAL] * 3 + [
+        RepairAction.FAIL_CANCEL
+    ]
+    shards = cast(dict[str, JsonValue], plan.summary["shards"])
+    assert list(shards) == [KRAKEN_SHARD]
+    kraken = cast(dict[str, JsonValue], shards[KRAKEN_SHARD])
+    stored = cast(dict[str, JsonValue], kraken["checkpoint"])
+    assert (stored["open_command_ids"], stored["last_venue_event_id"]) == ([pairs[2].create_id], 1)
+    assert isinstance(stored["public_id"], str)
+    walutomat_shard = cast(dict[str, JsonValue], plan.lines[3].preview["shard"])
+    assert walutomat_shard["run_targets_on_shard"] == [walutomat.create_id]
+    voted = _vote(tmp_path, plan)
+    session = await repair.prepare_write(
+        repository, cancel_ids, (voted, plan.digest), (DATABASE, CODE), WRITE_TIME
+    )
+    await repair.apply_write(repository, session)
+    assert _line_results(session) == ["recorded", "recorded", "recorded", "failed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["counted_execution", "new_open_command"])
+async def test_a_shard_that_changes_mid_run_writes_nothing_more(
+    repository: SQLAlchemyRepository, change: str
+) -> None:
+    """A line skipped as changed stops every later line on its shard.
+
+    Given: Three Kraken pairs on one shard, planned together,
+    When: Right after the first insert, the second pair's order gets a counted execution, or
+        a new open command appears on the shard,
+    Then: The first line is recorded, the second reports changed_before_write, the third
+        reports skipped_after_shard_change, and only one terminal exists.
+    """
+    pairs = await _seed_three_pairs(repository)
+    plan = await _plan(repository, *[pair.cancel_id for pair in pairs])
+    real_insert = repository.insert_order_terminal_once
+
+    async def insert_then_change(row: VenueEventInsertRow) -> bool:
+        """Insert the terminal, then change the shard as the stated event would."""
+        inserted: bool = await real_insert(row)
+        if row["client_order_id"] == pairs[0].client_order_id:
+            moved = (
+                execution(pairs[1].order_id, size=1.0, exec_id="E-2")
+                if change == "counted_execution"
+                else command(
+                    "00000000-0000-7000-8000-0000000000f4",
+                    command_type="create",
+                    status="accepted",
+                    client_order_id="cid-live",
+                )
+            )
+            await add_rows(repository, [moved])
+        return inserted
+
+    session = _session(plan)
+    with patch.object(repository, "insert_order_terminal_once", insert_then_change):
+        await repair.apply_write(repository, session)
+    assert _line_results(session) == [
+        "recorded",
+        "changed_before_write",
+        "skipped_after_shard_change",
+    ]
+    assert [len(await _terminals(repository, pair.client_order_id)) for pair in pairs] == [1, 0, 0]
+
+
+@pytest.mark.asyncio
+async def test_an_open_target_outside_kraken_covers_nothing(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Only a Kraken target can end with a canceled terminal, so only it covers while open.
+
+    Given: The Walutomat pair, first with its create failed, then with the create accepted,
+    When: Its cancel is planned each time,
+    Then: The failed create is a run target, and the accepted one is not.
+    """
+    walutomat = await seed_walutomat_pair(repository)
+    failed = await _plan(repository, walutomat.cancel_id)
+    assert walutomat.create_id in failed.run_targets.shard_keys
+    await _set_command(repository, walutomat.create_id, status="accepted")
+    accepted = await _plan(repository, walutomat.cancel_id)
+    assert accepted.run_targets.shard_keys == {}

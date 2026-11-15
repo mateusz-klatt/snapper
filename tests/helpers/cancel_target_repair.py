@@ -49,6 +49,15 @@ KRAKEN_SHARD = compute_shard_key(
 )
 """Shard key of the seeded Kraken spot commands."""
 
+WALUTOMAT_SHARD = compute_shard_key(
+    instrument="EUR-PLN",
+    exchange=ExchangeEnum.WALUTOMAT,
+    mode=ExecutionModeEnum.LIVE,
+    wallet_public_id=WALLET,
+    strategy_tag=None,
+)
+"""Shard key of the seeded Walutomat commands, a shard of its own as in production."""
+
 
 @dataclass(frozen=True, slots=True)
 class SeededPair:
@@ -352,6 +361,8 @@ async def seed_kraken_pair(repository: SQLAlchemyRepository, index: int = 1) -> 
 async def seed_walutomat_pair(repository: SQLAlchemyRepository) -> SeededPair:
     """Seed a Walutomat create refused by the interlock and its cancel in ``dispatched``.
 
+    The pair and its event sit on their own EUR-PLN shard, as production's do.
+
     Args:
         repository: Repository to seed.
 
@@ -373,6 +384,8 @@ async def seed_walutomat_pair(repository: SQLAlchemyRepository) -> SeededPair:
     create.exchange = "walutomat"
     create.last_error = "order_interlock_blocked"
     create.terminal_at = None
+    create.shard_key = WALUTOMAT_SHARD
+    create.instrument = "EUR-PLN"
     cancel = command(
         pair.cancel_id,
         command_type="cancel",
@@ -381,16 +394,15 @@ async def seed_walutomat_pair(repository: SQLAlchemyRepository) -> SeededPair:
         created_at=CANCEL_AT,
     )
     cancel.exchange = "walutomat"
-    await add_rows(
-        repository,
-        [
-            create,
-            cancel,
-            venue_event(
-                pair.client_order_id,
-                event_type="order_interlock_blocked",
-                status="rejected",
-            ),
-        ],
+    cancel.shard_key = WALUTOMAT_SHARD
+    cancel.instrument = "EUR-PLN"
+    blocked = venue_event(
+        pair.client_order_id,
+        event_type="order_interlock_blocked",
+        status="rejected",
     )
+    blocked.exchange = "walutomat"
+    blocked.shard_key = WALUTOMAT_SHARD
+    blocked.instrument = "EUR-PLN"
+    await add_rows(repository, [create, cancel, blocked])
     return pair
