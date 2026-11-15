@@ -1,6 +1,7 @@
 """Exercise actual explicit-scope journal lifetimes on signed sources and a real local bus."""
 
 import asyncio
+import gc
 from collections.abc import AsyncIterator
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -829,14 +830,48 @@ async def test_actual_owner_requires_one_start_and_refuses_refresh_after_closed(
         await owner.wait()
 
 
+def _owned_subscriber(owner: FinancialPublicationLifecycle) -> ValidatedSubscriber:
+    """Return the lifecycle's own receive SUB, which startup connects before it drains.
+
+    Args:
+        owner: The lifecycle whose startup has reached its drain.
+
+    Returns:
+        The subscriber the lifecycle owns.
+    """
+    subscriber = owner._subscriber
+    assert subscriber is not None
+    return subscriber
+
+
+def _finalize_unowned_subscribers() -> None:
+    """Drop unowned subscribers so their finalizers reach the patched ``close``.
+
+    The raw sockets prove each finalizer ran and closed its socket.
+    """
+    context = zmq.asyncio.Context()
+    sockets = [context.socket(zmq.SUB) for _ in range(3)]
+    subscribers = [ValidatedSubscriber(raw) for raw in sockets]
+    del subscribers
+    gc.collect()
+    assert all(raw.closed for raw in sockets)
+    context.destroy(linger=0)
+
+
 async def test_late_actual_startup_return_cannot_spawn_unjoined_workers_after_shutdown(
     projection_scenario: ContractPositionScenario,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Wait for a real publication/receipt operation that returns only after consuming cancellation.
 
+    Only the lifecycle's own SUB is observed: ``ValidatedSubscriber.__del__`` calls ``close``,
+    so finalizers of subscribers left over from earlier tests on the same worker reach the
+    patched method too, and counting them would make the ordering assertion depend on garbage
+    collection. Unowned subscribers dropped inside the window prove they are not counted.
+
     Given: Startup completed the actual source-bound drain and receipt commit before a gated late return.
-    When: Shutdown cancels startup but the operation consumes that cancellation and returns after release.
+    When: Shutdown cancels startup but the operation consumes that cancellation and returns after
+        release, while unowned subscribers are finalized inside the window.
     Then: Startup refuses activation, no late workers survive, and the owned SUB closes only after joining it.
     """
     intent = await record_projection_position(projection_scenario)
@@ -845,6 +880,7 @@ async def test_late_actual_startup_return_cannot_spawn_unjoined_workers_after_sh
     original_drain = lifecycle_module.publish_pending_versioned_financial_notifications
     original_close = ValidatedSubscriber.close
     closes: list[ValidatedSubscriber] = []
+    owned: list[ValidatedSubscriber] = []
 
     async def late_original_return(
         actual_repository: AccountingRepository,
@@ -863,8 +899,9 @@ async def test_late_actual_startup_return_cannot_spawn_unjoined_workers_after_sh
         return result
 
     def observe_close(subscriber: ValidatedSubscriber) -> None:
-        """Preserve original disposal and record its actual order relative to startup termination."""
-        closes.append(subscriber)
+        """Preserve original disposal and record only the owned SUB's order relative to startup."""
+        if any(subscriber is item for item in owned):
+            closes.append(subscriber)
         original_close(subscriber)
 
     monkeypatch.setattr(
@@ -878,8 +915,10 @@ async def test_late_actual_startup_return_cannot_spawn_unjoined_workers_after_sh
             stopping: asyncio.Task[None] | None = None
             try:
                 await entered.wait()
+                owned.append(_owned_subscriber(owner))
                 stopping = asyncio.create_task(owner.stop())
                 await cancelled.wait()
+                _finalize_unowned_subscribers()
                 assert closes == [] and owner.status is FinancialPublicationLifecycleStatus.CLOSING
                 release.set()
                 await stopping
