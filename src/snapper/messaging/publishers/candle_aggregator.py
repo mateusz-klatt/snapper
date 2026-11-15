@@ -52,6 +52,39 @@ _WARNED_LATE_CAP: int = 4096
 _FORWARD_FILL_MAX_WINDOWS: int = 2000
 
 
+def _later(first: datetime | None, second: datetime | None) -> datetime | None:
+    """Return the later of two optional instants.
+
+    Args:
+        first: An instant, or ``None``.
+        second: An instant, or ``None``.
+
+    Returns:
+        The later instant, the only one given, or ``None`` when neither is.
+    """
+    if first is None:
+        return second
+    if second is None:
+        return first
+    return max(first, second)
+
+
+def _newly_certified(end_ts: int, previous: int | None, through_ts: int) -> bool:
+    """Return whether a mark through ``through_ts`` newly reaches a window's end.
+
+    Args:
+        end_ts: UNIX end of the window.
+        previous: Boundary certified before the mark, or ``None`` before the
+            first mark of a generation.
+        through_ts: Boundary the mark certifies.
+
+    Returns:
+        True when the end is after the previous boundary and at or before the
+        mark's.
+    """
+    return end_ts <= through_ts and (previous is None or end_ts > previous)
+
+
 @dataclass
 class _HtfBucket:
     """Running OHLCV state for one ``(symbol, timeframe, window)`` bucket.
@@ -59,6 +92,12 @@ class _HtfBucket:
     ``interval_begin`` is the canonical UTC window start; ``open_ts`` /
     ``close_ts`` track the earliest / latest folded 1m by event time so that
     out-of-order same-window 1m candles still yield the correct open and close.
+
+    ``acquired_at`` is the newest acquisition time among the folded 1m bars.
+    ``certified_at`` is the production time of the first completion mark that
+    reached the window's end while the window had live input. ``late_created``
+    marks a bucket created after its end was already certified, without a held
+    certification: only its own constituents may author it.
     """
 
     symbol: str
@@ -77,6 +116,9 @@ class _HtfBucket:
     seeded: bool
     expected_minute_count: int
     counted_minutes: set[datetime]
+    acquired_at: datetime | None = None
+    certified_at: datetime | None = None
+    late_created: bool = False
 
 
 @dataclass(frozen=True)
@@ -153,6 +195,15 @@ class CandleAggregator:
     :attr:`late_rolls_after_close`. The Kraken spot 1m feed delivers candles in
     event-time order, so this bounds to pathological reordering; a non-zero
     counter is the signal to widen handling.
+
+    Authorship: with :attr:`authoring` on, every emitted window carries, as its
+    ``acquired_at``, the instant its evidence became final. For a window emitted
+    from a bucket that is the later of the certification of its end by a
+    completion mark (:meth:`certify`) and its newest constituent's acquisition, or
+    the constituent alone for a late-created bucket; for a forward fill, the later
+    of the filling mark and the author of the carried close. Each author is fixed
+    when the window is emitted. With it off, the default, emitted windows carry
+    no author and the publisher stamps them at processing.
     """
 
     def __init__(
@@ -216,6 +267,10 @@ class CandleAggregator:
         self._late_drops: list[LateCandleDrop] = []
         self._seeded_incomplete_windows: list[SeededIncompleteWindow] = []
         self._warned_fill_overflow: set[tuple[str, str]] = set()
+        self.authoring: bool = False
+        self._held_certifications: dict[tuple[str, str, int], datetime] = {}
+        self._certified_through_ts: int | None = None
+        self._last_close_author: dict[tuple[str, str], datetime | None] = {}
 
     @staticmethod
     def _floor(ts: datetime, tf_seconds: int) -> datetime:
@@ -351,8 +406,94 @@ class CandleAggregator:
         """
         if not self._forward_fill:
             return []
+        return self._seal_through(now - timedelta(seconds=self._flush_grace_s), fill_at=None)
+
+    def flush_through(
+        self, through: datetime, produced_at: datetime
+    ) -> list[tuple[str, CandleUpdate]]:
+        """Seal and forward-fill every window that ends at or before a mark's boundary.
+
+        The same two steps as :meth:`flush`, at ``through`` itself: the mark
+        already accounts for the producer's grace and the consumer's progress, so
+        no grace is subtracted. A no-op unless forward-fill is enabled.
+
+        Args:
+            through: Boundary the handled completion mark certifies.
+            produced_at: Production time of that mark; with :attr:`authoring` on,
+                a forward fill is authored no earlier than it.
+
+        Returns:
+            Closed and forward-filled bars as ``(timeframe_label, candle)`` pairs.
+        """
+        if not self._forward_fill:
+            return []
+        return self._seal_through(through, fill_at=produced_at)
+
+    def certify(self, through: datetime, produced_at: datetime) -> None:
+        """Record a completion mark's certification on the windows it newly reaches.
+
+        Only windows whose end is later than the previous certified boundary (any
+        end before the first mark of a generation) and at or before ``through``
+        are certified, each at most once. A window represented by a bucket gets
+        the certification on the bucket; one represented only by a held minute
+        keeps it until the minute's bucket is created. A window whose end was
+        already certified is never certified again, so a late input to it is
+        authored by its own acquisition.
+
+        Args:
+            through: Boundary the mark certifies.
+            produced_at: Production time of the mark.
+        """
+        previous = self._certified_through_ts
+        through_ts = int(through.timestamp())
+        for (_sym, tf, begin_ts), bucket in self._buckets.items():
+            end_ts = begin_ts + self._tf_seconds[tf]
+            if bucket.certified_at is None and _newly_certified(end_ts, previous, through_ts):
+                bucket.certified_at = produced_at
+        for sym, open_minutes in self._open_minutes.items():
+            for minute_ts in open_minutes:
+                self._certify_held_minute(sym, minute_ts, previous, through_ts, produced_at)
+        self._certified_through_ts = through_ts if previous is None else max(previous, through_ts)
+
+    def _certify_held_minute(
+        self,
+        sym: str,
+        minute_ts: int,
+        previous: int | None,
+        through_ts: int,
+        produced_at: datetime,
+    ) -> None:
+        """Certify the windows of a held minute that have no bucket yet.
+
+        Args:
+            sym: Symbol of the held minute.
+            minute_ts: UNIX start of the held minute.
+            previous: Previously certified boundary, or ``None``.
+            through_ts: Boundary the mark certifies.
+            produced_at: Production time of the mark.
+        """
+        for tf, tf_seconds in self._tf_seconds.items():
+            begin_ts = minute_ts // tf_seconds * tf_seconds
+            key = (sym, tf, begin_ts)
+            if key in self._buckets or key in self._held_certifications:
+                continue
+            if _newly_certified(begin_ts + tf_seconds, previous, through_ts):
+                self._held_certifications[key] = produced_at
+
+    def _seal_through(
+        self, effective: datetime, *, fill_at: datetime | None
+    ) -> list[tuple[str, CandleUpdate]]:
+        """Finalize ended held minutes, then seal and fill windows up to a boundary.
+
+        Args:
+            effective: Boundary up to which minutes and windows have ended.
+            fill_at: Production time of the mark that fills, or ``None`` for the
+                wall-clock flush.
+
+        Returns:
+            Closed and forward-filled bars as ``(timeframe_label, candle)`` pairs.
+        """
         out: list[tuple[str, CandleUpdate]] = []
-        effective = now - timedelta(seconds=self._flush_grace_s)
         minute_floor_ts = int(self._floor(effective, 60).timestamp())
         for sym in self._open_minutes:
             open_minutes = self._open_minutes[sym]
@@ -363,7 +504,7 @@ class CandleAggregator:
                 out += self._emit_closed(sym)
         for sym in self._symbols_with_state():
             for tf, tf_seconds in self._tf_seconds.items():
-                out += self._flush_timeframe(sym, tf, tf_seconds, effective)
+                out += self._flush_timeframe(sym, tf, tf_seconds, effective, fill_at)
         return out
 
     def window_start(self, timeframe: str, now: datetime) -> datetime | None:
@@ -442,6 +583,10 @@ class CandleAggregator:
         bar re-seeds the carry. The cost of a break is bounded to the windows
         it actually spans.
 
+        A break also starts a new generation of completion marks: the certified
+        boundary, the held certifications and the carried closes' authors are
+        forgotten with the state they describe.
+
         Args:
             resumed_at: When live consumption resumed. Floored to the minute
                 by :meth:`set_live_epoch`.
@@ -451,7 +596,10 @@ class CandleAggregator:
         for key in [k for k in self._buckets if k[2] < epoch]:
             del self._buckets[key]
         self._last_close.clear()
+        self._last_close_author.clear()
         self._last_real_window.clear()
+        self._held_certifications.clear()
+        self._certified_through_ts = None
 
     def timeframe_seconds(self, timeframe: str) -> int:
         """Return the width in seconds of a configured higher timeframe.
@@ -567,15 +715,19 @@ class CandleAggregator:
         tf_seconds = self._tf_seconds[tf]
         begin = self._floor(candle.interval_begin, tf_seconds)
         begin_ts = int(begin.timestamp())
+        key = (candle.symbol, tf, begin_ts)
         if not seeded:
             frontier = self._closed_window.get((candle.symbol, tf))
             if frontier is not None and begin_ts <= frontier:
+                self._held_certifications.pop(key, None)
                 self._record_late(candle.symbol, int(candle.interval_begin.timestamp()))
                 return
-        key = (candle.symbol, tf, begin_ts)
         bucket = self._buckets.get(key)
         counted_minutes = {candle.interval_begin} if candle.complete else set()
         if bucket is None:
+            certified_at, late_created = self._creation_certification(
+                key, tf_seconds, seeded=seeded
+            )
             self._buckets[key] = _HtfBucket(
                 symbol=candle.symbol,
                 timeframe=tf,
@@ -593,8 +745,12 @@ class CandleAggregator:
                 seeded=seeded,
                 expected_minute_count=len(counted_minutes),
                 counted_minutes=counted_minutes,
+                acquired_at=candle.acquired_at,
+                certified_at=certified_at,
+                late_created=late_created,
             )
             return
+        bucket.acquired_at = _later(bucket.acquired_at, candle.acquired_at)
         if seeded:
             bucket.seeded = True
         if candle.complete and candle.interval_begin not in bucket.counted_minutes:
@@ -611,6 +767,44 @@ class CandleAggregator:
         if candle.interval_begin >= bucket.close_ts:
             bucket.close = candle.close
             bucket.close_ts = candle.interval_begin
+
+    def _creation_certification(
+        self, key: tuple[str, str, int], tf_seconds: int, *, seeded: bool
+    ) -> tuple[datetime | None, bool]:
+        """Return the certification a new bucket inherits, and whether it is late.
+
+        A held certification moves to the bucket and is removed. A live bucket
+        created for a window whose end the current generation already certified,
+        with no held certification to move, is late-created.
+
+        Args:
+            key: The new bucket's ``(symbol, timeframe, window_begin)`` key.
+            tf_seconds: Timeframe width in seconds.
+            seeded: Whether the bucket comes from the restart seed.
+
+        Returns:
+            The inherited certification or ``None``, and the late-created flag.
+        """
+        if seeded:
+            return None, False
+        held = self._held_certifications.pop(key, None)
+        certified = self._certified_through_ts
+        late = held is None and certified is not None and key[2] + tf_seconds <= certified
+        return held, late
+
+    def _bucket_author(self, bucket: _HtfBucket) -> datetime | None:
+        """Return the instant a bucket's evidence became final.
+
+        Args:
+            bucket: A bucket being emitted.
+
+        Returns:
+            Its newest constituent's acquisition for a late-created bucket, and
+            otherwise the later of that and the certification of its end.
+        """
+        if bucket.late_created:
+            return bucket.acquired_at
+        return _later(bucket.certified_at, bucket.acquired_at)
 
     def _is_complete_on_open(self, first_minute: datetime, begin_ts: int, *, seeded: bool) -> bool:
         """Decide whether a freshly-opened bucket is a trustworthy (complete) bar.
@@ -713,13 +907,15 @@ class CandleAggregator:
                         )
                     )
                 continue
+            author = self._bucket_author(bucket)
             self._last_close[fkey] = bucket.close
+            self._last_close_author[fkey] = author
             self._last_real_window[fkey] = begin_ts
             emitted.append(
                 (
                     self._tf_seconds[bucket.timeframe],
                     bucket.timeframe,
-                    self._to_candle_update(bucket),
+                    self._to_candle_update(bucket, author),
                 )
             )
         emitted.sort(key=lambda item: item[0])
@@ -768,7 +964,7 @@ class CandleAggregator:
         return min(candidates, default=None)
 
     def _flush_timeframe(
-        self, sym: str, tf: str, tf_seconds: int, now: datetime
+        self, sym: str, tf: str, tf_seconds: int, now: datetime, fill_at: datetime | None
     ) -> list[tuple[str, CandleUpdate]]:
         """Seal ended real buckets and forward-fill empty windows for one timeframe.
 
@@ -786,7 +982,8 @@ class CandleAggregator:
             sym: Symbol.
             tf: Timeframe label.
             tf_seconds: Timeframe width in seconds.
-            now: Current wall-clock time (UTC).
+            now: Current wall-clock time (UTC), or a mark's boundary.
+            fill_at: Production time of the filling mark, or ``None``.
 
         Returns:
             Sealed and forward-filled bars as ``(timeframe_label, candle)`` pairs.
@@ -794,6 +991,7 @@ class CandleAggregator:
         current_begin_ts = int(self._floor(now, tf_seconds).timestamp())
         frontier = self._closed_window.get((sym, tf))
         last_close = self._last_close.get((sym, tf))
+        last_author = self._last_close_author.get((sym, tf))
         last_real = self._last_real_window.get((sym, tf))
         if frontier is not None:
             w = frontier + tf_seconds
@@ -812,7 +1010,8 @@ class CandleAggregator:
         while w < current_begin_ts:
             bucket = self._buckets.pop((sym, tf, w), None)
             if bucket is not None and bucket.complete:
-                out.append((tf, self._to_candle_update(bucket)))
+                last_author = self._bucket_author(bucket)
+                out.append((tf, self._to_candle_update(bucket, last_author)))
                 last_close = bucket.close
                 last_real = w
                 self._last_real_window[(sym, tf)] = w
@@ -822,10 +1021,12 @@ class CandleAggregator:
                 and last_real is not None
                 and w - last_real <= horizon
             ):
-                out.append((tf, self._flat_fill(sym, tf_seconds, w, last_close)))
+                fill_author = _later(fill_at, last_author)
+                out.append((tf, self._flat_fill(sym, tf_seconds, w, last_close, fill_author)))
             self._closed_window[(sym, tf)] = w
             if last_close is not None:
                 self._last_close[(sym, tf)] = last_close
+                self._last_close_author[(sym, tf)] = last_author
             w += tf_seconds
         return out
 
@@ -849,7 +1050,12 @@ class CandleAggregator:
             del self._buckets[key]
 
     def _flat_fill(
-        self, sym: str, tf_seconds: int, window_begin_ts: int, last_close: float
+        self,
+        sym: str,
+        tf_seconds: int,
+        window_begin_ts: int,
+        last_close: float,
+        author: datetime | None,
     ) -> CandleUpdate:
         """Build a flat synthetic bar carrying the prior close for an empty window.
 
@@ -858,6 +1064,7 @@ class CandleAggregator:
             tf_seconds: Timeframe width in seconds (carried for provenance).
             window_begin_ts: Canonical UTC window-start UNIX timestamp.
             last_close: Close of the last sealed bar, used for OHLC and VWAP.
+            author: The fill's author, carried only while :attr:`authoring` is on.
 
         Returns:
             A zero-volume :class:`CandleUpdate` flat at ``last_close``.
@@ -873,6 +1080,7 @@ class CandleAggregator:
             volume=0.0,
             interval_begin=datetime.fromtimestamp(window_begin_ts, UTC),
             interval=tf_seconds,
+            acquired_at=author if self.authoring else None,
         )
 
     def _warn_fill_overflow(self, sym: str, tf: str) -> None:
@@ -898,7 +1106,7 @@ class CandleAggregator:
             f"a long-dark or delisted instrument is the likely cause)"
         )
 
-    def _to_candle_update(self, bucket: _HtfBucket) -> CandleUpdate:
+    def _to_candle_update(self, bucket: _HtfBucket, author: datetime | None) -> CandleUpdate:
         """Project a bucket to a :class:`CandleUpdate`.
 
         VWAP is the volume-weighted combination of the constituent 1m VWAPs
@@ -922,6 +1130,8 @@ class CandleAggregator:
 
         Args:
             bucket: The closed bucket to project.
+            author: The window's author, carried only while :attr:`authoring`
+                is on.
 
         Returns:
             The synthesized higher-TF :class:`CandleUpdate`.
@@ -939,6 +1149,7 @@ class CandleAggregator:
             interval_begin=bucket.interval_begin,
             interval=self._tf_seconds[bucket.timeframe],
             complete=bucket.complete,
+            acquired_at=author if self.authoring else None,
         )
 
     def _record_late(self, sym: str, minute_ts: int) -> None:

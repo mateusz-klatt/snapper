@@ -41,7 +41,6 @@ from time import monotonic
 from typing import Any
 from typing import Final
 from typing import cast
-from uuid import uuid7
 
 from loguru import logger
 from sqlalchemy.exc import DBAPIError
@@ -49,6 +48,7 @@ from sqlalchemy.exc import DBAPIError
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
 from snapper.config.settings import AppSettings
+from snapper.core.candle_identity import deterministic_candle_public_id
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
 from snapper.core.types import ExchangeEnum
@@ -67,6 +67,8 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import (
 )
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_resubscribe_pacing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreak
+from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleItem
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
 from snapper.infrastructure.symbols.functions import has_kraken_candle_history_identity
@@ -116,6 +118,15 @@ Lowered from the 300 s base default: the wildcard ticker covers the whole
 feed is genuinely dark (some symbol ticks every few seconds otherwise), and a
 multi-minute outage is detected and recovered in ~1 minute rather than five."""
 """Sleep between disconnect and reconnect during in-process WS restart."""
+
+_PRODUCER_STALL_S: Final[float] = 10.0
+"""Age of the trade-built producer's last tick beyond which a live producer is stalled.
+
+The producer ticks once a second, so ten seconds without a completed tick
+while its task is alive means it is blocked, and no completion mark moves."""
+
+_PRODUCER_STALL_WARN_INTERVAL_S: Final[float] = 60.0
+"""Shortest interval between two warnings about a stalled trade-built producer."""
 
 _NATIVE_CANDLE_LIVENESS_THRESHOLD_S: Final[int] = 300
 """Native-candle silence threshold (seconds) before Spot candle recovery fires.
@@ -293,7 +304,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
 
     def _subscribe_candle_stream(
         self, symbols: list[str], timeframe: str
-    ) -> AsyncIterator[CandleUpdate]:
+    ) -> AsyncIterator[TradeCandleItem]:
         """Subscribe to the selected live Spot candle source.
 
         Args:
@@ -301,8 +312,9 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             timeframe: Candle timeframe requested by the base candle loop.
 
         Returns:
-            Native OHLC candles by default, or trade-built 1m candles when the
-            operator explicitly selects ``spot_candle_source=trade_built``.
+            Native OHLC candles by default, or trade-built 1m candles with their
+            completion marks and breaks when the operator explicitly selects
+            ``spot_candle_source=trade_built``.
         """
         if self.settings.spot_candle_source == "trade_built":
             return self._subscribe_trade_built_live_candles(symbols)
@@ -310,19 +322,26 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
 
     async def _subscribe_trade_built_live_candles(
         self, symbols: list[str]
-    ) -> AsyncIterator[CandleUpdate]:
+    ) -> AsyncIterator[TradeCandleItem]:
         """Subscribe to calculated Spot candles and mark candle liveness at receipt.
 
         Args:
             symbols: Native Spot symbols to subscribe.
 
+        The client's own resets are handled synchronously by the discard path,
+        so no wall-clock sweep or flush can emit from state the reset made stale
+        while its break would still be waiting in the stream.
+
         Yields:
-            Trade-built 1m candle updates from the exchange client.
+            Trade-built 1m candle updates, completion marks and breaks from the
+            exchange client, in queue order. Only a bar marks candle liveness.
         """
         client = cast(KrakenExchangeClient, self._exchange_client)
-        async for candle in client.subscribe_trade_built_candles(symbols, "1m"):
-            self._mark_candle_liveness_progress()
-            yield candle
+        client.set_trade_candle_reset_listener(self._handle_trade_candle_break)
+        async for item in client.subscribe_trade_built_stream(symbols):
+            if isinstance(item, CandleUpdate):
+                self._mark_candle_liveness_progress()
+            yield item
 
     def _candle_source_for(self, timeframe: str) -> str:
         """Return the provenance tag for Spot live 1m candle rows.
@@ -468,6 +487,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._force_ws_restart_task: asyncio.Task[None] | None = None
         self._startup_liveness_armed = False
         self._candle_catchup: KrakenCandleCatchup | None = None
+        self._producer_stall_warned_at: float | None = None
         self._candle_identity_gate = asyncio.Lock()
         self._pending_candle_identities: dict[tuple[str, str, datetime], str] = {}
         self._identity_snapshots: dict[tuple[str, datetime], _IdentitySnapshot] = {}
@@ -478,13 +498,129 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         self._identity_counters: dict[str, int] = {}
         self._identity_samples: deque[JsonObject] = deque(maxlen=_IDENTITY_SAMPLE_SIZE)
         self._identity_last_read_ms: float | None = None
+        self._identity_cutover: datetime | None = None
+
+    def _trade_built_client(self) -> KrakenExchangeClient | None:
+        """Return the exchange client while Spot candles are built from trades.
+
+        Returns:
+            The client in ``trade_built`` mode, otherwise ``None``.
+        """
+        if self.settings.spot_candle_source != "trade_built":
+            return None
+        return self._exchange_client
+
+    def _completion_follows_consumer(self) -> bool:
+        """Spot completion follows its consumer's marks in trade-built mode.
+
+        Returns:
+            The live ``spot_completion_follows_consumer`` setting in
+            ``trade_built`` mode; ``False`` with the native candle source.
+        """
+        if self.settings.spot_candle_source != "trade_built":
+            return False
+        return self.settings.spot_completion_follows_consumer
+
+    def _supervise_candle_producer(self) -> None:
+        """Restart a stopped trade-built producer and warn about a stalled one.
+
+        The warning fires at most once a minute, while the producer task is
+        alive but its last completed tick is older than the stall bound.
+        """
+        client = self._trade_built_client()
+        if client is None:
+            return
+        client.ensure_trade_candle_producer()
+        age = client.trade_candle_last_tick_age(datetime.now(UTC))
+        if not client.trade_candle_producer_alive() or age is None or age <= _PRODUCER_STALL_S:
+            return
+        now = monotonic()
+        warned = self._producer_stall_warned_at
+        if warned is not None and now - warned < _PRODUCER_STALL_WARN_INTERVAL_S:
+            return
+        self._producer_stall_warned_at = now
+        logger.warning(
+            "kraken publisher: trade-built candle producer is alive but its last tick "
+            "is {}s old",
+            age,
+        )
+
+    def _current_trade_candle_generation(self) -> int | None:
+        """Return the generation of the trade-built candle stream.
+
+        Returns:
+            The client's current generation in ``trade_built`` mode, otherwise
+            ``None``.
+        """
+        client = self._trade_built_client()
+        return None if client is None else client.trade_candle_generation()
+
+    def _discard_trade_candle_backlog(self) -> TradeCandleBreak | None:
+        """Discard the queued trade-built backlog; an empty queue discards nothing.
+
+        Returns:
+            The lag break, or ``None`` with an empty queue or outside
+            ``trade_built`` mode.
+        """
+        client = self._trade_built_client()
+        if client is None or client.trade_candle_queue_depth() == 0:
+            return None
+        return client.discard_trade_candle_backlog()
+
+    def _max_consumer_lag_seconds(self) -> int:
+        """Return the live bound on the trade-built consumer's lag.
+
+        Returns:
+            ``trade_built_max_consumer_lag_seconds`` in ``trade_built`` mode,
+            otherwise ``0``.
+        """
+        if self.settings.spot_candle_source != "trade_built":
+            return 0
+        return self.settings.trade_built_max_consumer_lag_seconds
+
+    def _request_candle_catchup(self) -> None:
+        """Ask the bounded native-history catchup, when it runs, to reconcile."""
+        if self._candle_catchup is not None:
+            self._candle_catchup.request()
+
+    def _trade_candle_health(self) -> JsonObject:
+        """Return the trade-built stream's state for the heartbeat.
+
+        Reading it restarts the maximum consumer lag, so the heartbeat reports
+        the maximum since its previous tick.
+
+        Returns:
+            The completion state and boundary, the stream's generation and
+            queue depth, the stale marks, the consumer lag, and the producer's
+            health; empty outside ``trade_built`` mode.
+        """
+        client = self._trade_built_client()
+        if client is None:
+            return {}
+        through = self._completion_through
+        health: JsonObject = {
+            "state": self._completion_clock.value,
+            "completed_through": None if through is None else through.isoformat(),
+            "generation": client.trade_candle_generation(),
+            "queue_depth": client.trade_candle_queue_depth(),
+            "stale_marks": self._stale_trade_candle_marks,
+        }
+        health.update(self._take_consumer_lag())
+        health.update(client.trade_candle_producer_health(datetime.now(UTC)))
+        return health
 
     async def _resolve_live_candle_public_id(
         self, instrument_public_id: str, timeframe: str, open_at: datetime, native_symbol: str
     ) -> str:
         """Adopt committed identities or reserve one bounded UUID before publication.
 
-        Pending reservations and the newest cached key answer first. A key
+        A key outside the persistence policy is answered from the per-key
+        cache, which never reads storage. A persisted key opening at or after
+        ``candle_identity_deterministic_from`` is answered with its
+        deterministic id at once, before the identity gate: every writer has
+        minted that id since before the cutover, so there is nothing to read.
+        The cutover read here is remembered for the heartbeat. For any other
+        key, pending reservations and the newest cached key answer first. A key
         they do not settle is answered from a window identity snapshot when
         one covers it (:meth:`_window_identity_snapshot`), and otherwise by
         the fenced per-key lookup.
@@ -503,6 +639,11 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         """
         if not self._should_persist_row("candles", self._get_data_exchange(), native_symbol):
             return self._resolve_candle_public_id(instrument_public_id, timeframe, open_at)
+        cutover = self.settings.candle_identity_deterministic_from
+        self._identity_cutover = cutover
+        if cutover is not None and open_at >= cutover:
+            self._bump_identity_counter("deterministic_answers")
+            return deterministic_candle_public_id(instrument_public_id, timeframe, open_at)
         async with self._candle_identity_gate:
             key = (instrument_public_id, timeframe, open_at)
             self._prune_identity_state_on_cadence()
@@ -833,12 +974,17 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             reserved from snapshots with their natural keys. A reserved identity
             is not yet proof of publication or persistence; the published-equals-
             stored check compares it with storage once the key is persisted.
+            ``deterministic_from`` is the cutover this process's resolver read
+            at its latest persisted resolution, so a rollout or rollback can
+            confirm that every publisher received it.
         """
         counters: JsonObject = {}
         for name, count in sorted(self._identity_counters.items()):
             counters[name] = count
         reserved: list[JsonValue] = list(self._identity_samples)
+        cutover = self._identity_cutover
         return {
+            "deterministic_from": None if cutover is None else cutover.isoformat(),
             "counters": counters,
             "last_read_ms": self._identity_last_read_ms,
             "snapshots": len(self._identity_snapshots),
@@ -870,7 +1016,8 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             key: Full natural key whose first event is about to be emitted.
 
         Returns:
-            New UUID7 retained until a durable matching commit acknowledgement.
+            The key's deterministic id, retained until a durable matching
+            commit acknowledgement.
 
         Raises:
             RuntimeError: When the finite writer-derived reservation bound is full.
@@ -878,7 +1025,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         capacity = self._candle_write_queue.maxsize + self._candle_batch_max_rows
         if capacity <= 0 or len(self._pending_candle_identities) >= capacity:
             raise RuntimeError("unresolved candle identities exhaust bounded writer capacity")
-        public_id = str(uuid7())
+        public_id = deterministic_candle_public_id(*key)
         self._pending_candle_identities[key] = public_id
         return public_id
 
@@ -1074,13 +1221,17 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
                 self._pending_candle_identities.pop(key)
 
     def _suspend_candle_synthesis_across_break(self) -> None:
-        """Reset live trade trust and request bounded native history reconciliation."""
+        """Reset live trade trust and request bounded native history reconciliation.
+
+        The reset's break is recorded like any other break of the stream: the
+        completion state waits for the new generation, and the emitter forgets
+        its closes and arms its floor at the break's popped boundary.
+        """
         super()._suspend_candle_synthesis_across_break()
         client = self._exchange_client
         if client is not None:
-            client.reset_trade_candle_epoch()
-        if self._candle_catchup is not None:
-            self._candle_catchup.request()
+            self._note_trade_candle_break(client.reset_trade_candle_epoch())
+        self._request_candle_catchup()
 
     def _catchup_symbols(self, subscribed: list[str]) -> list[str]:
         """Resolve only subscribed instruments allowed by candle persistence policy.

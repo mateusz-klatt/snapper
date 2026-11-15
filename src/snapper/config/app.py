@@ -36,10 +36,14 @@ Example:
     per-wallet executor startup.
 """
 
+from datetime import datetime
 from typing import Any
+
+from loguru import logger
 
 from snapper.application.services.settings import SettingsService
 from snapper.config.bootstrap import BootstrapSettingsLoader
+from snapper.core.candle_identity import parse_candle_identity_cutover
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ProcessAutostartProfileEnum
 from snapper.infrastructure.security.kdf import AUTH_TOKEN_SIGNING_PURPOSE
@@ -75,6 +79,7 @@ class AppSettings:
         """
         self._bootstrap = bootstrap_settings
         self._settings_service = settings_service
+        self._warned_identity_cutovers: set[str] = set()
 
     @property
     def db_url(self) -> str:
@@ -750,6 +755,36 @@ class AppSettings:
         return self._get_db_setting("candle_identity_window_snapshot", True)
 
     @property
+    def candle_identity_deterministic_from(self) -> datetime | None:
+        """Return the cutover from which the live spot path computes candle ids.
+
+        Every writer gives a new candle key its deterministic id
+        (:func:`~snapper.core.candle_identity.deterministic_candle_public_id`).
+        From this instant on, the Kraken spot publisher answers a key whose
+        opening is at or after it with that id directly, with no fence, window
+        snapshot, reservation or database read. Set it only once every
+        candle-writing runtime runs code that mints deterministic ids, and only
+        to a later instant; moving it earlier is unsafe. Empty (default) keeps
+        today's resolution for every key. A malformed value is ignored with one
+        warning per distinct value, so a typo keeps today's resolution.
+
+        Returns:
+            The cutover as an aware UTC datetime, or ``None`` when unset or
+            malformed.
+        """
+        raw = self._get_db_setting("candle_identity_deterministic_from", "")
+        try:
+            return parse_candle_identity_cutover(raw)
+        except ValueError as error:
+            text = str(raw)
+            if text not in self._warned_identity_cutovers:
+                self._warned_identity_cutovers.add(text)
+                logger.warning(
+                    "candle_identity_deterministic_from={!r} is ignored: {}", text, error
+                )
+            return None
+
+    @property
     def persist_intermediate_candles(self) -> bool:
         """Return whether in-progress (non-final) native candle bars are persisted.
 
@@ -798,6 +833,46 @@ class AppSettings:
         if isinstance(raw, str) and raw.strip().lower() == "trade_built":
             return "trade_built"
         return "native"
+
+    @property
+    def spot_completion_follows_consumer(self) -> bool:
+        """Return whether Kraken Spot completion follows its candle consumer.
+
+        In ``trade_built`` mode, ``True`` (default) makes the minute-completion
+        sweep and the higher-timeframe seal and forward fill follow the
+        completion marks that the trade-built producer puts into the candle
+        queue, instead of the wall clock, so neither runs ahead of a lagging
+        consumer. Live windows are then authored at the time their evidence
+        became final. ``False`` restores the wall-clock sweep, the wall-clock
+        flush and processing-time window authors from the next call, without
+        a restart.
+
+        Returns:
+            ``True`` (default) to follow the consumer; ``False`` to follow the
+            wall clock.
+        """
+        raw = self._get_db_setting("spot_completion_follows_consumer", True)
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in ("true", "1", "yes", "on")
+        return bool(raw)
+
+    @property
+    def trade_built_max_consumer_lag_seconds(self) -> int:
+        """Return the bound on the Kraken Spot trade-built candle consumer's lag.
+
+        When positive, a bar or completion mark that the consumer takes more
+        than this many seconds after its acquisition discards the queued
+        backlog: the trade candle builder is kept, the lost minutes are
+        reported, and the native catchup is asked to reconcile them. ``0``
+        (default) never discards. Read live.
+
+        Returns:
+            Non-negative seconds; ``0`` disables the bound.
+        """
+        raw = self._get_db_setting("trade_built_max_consumer_lag_seconds", 0)
+        return max(0, int(raw))
 
     @property
     def trade_built_finalize_grace_seconds(self) -> int:

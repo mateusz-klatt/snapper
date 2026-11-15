@@ -44,6 +44,7 @@ Data Updates:
     - ``backfill-synthesized-candles``: Backfill synthesized higher-timeframe candles
     - ``repair-candles``: Repair absent and false-zero 1m candles through guarded writers
     - ``void-candles``: Void the active candles of retired Kraken instruments under the candle fence
+    - ``check-candle-identities``: Check read-only that stored candle ids are deterministic
     - ``update-kraken-futures-funding-rates``: Backfill funding rates
 
 Example:
@@ -145,6 +146,7 @@ from snapper.auth.user_service import UserService
 from snapper.cli.accrual_retirement import retire_accruals
 from snapper.cli.android_push import android_push_state
 from snapper.cli.candle_audit import audit_candles
+from snapper.cli.candle_identity_check import check_candle_identities
 from snapper.cli.candle_repair import REPAIR_CANDLES_CONTEXT
 from snapper.cli.candle_repair import repair_candles
 from snapper.cli.candle_void import VOID_CANDLES_CONTEXT
@@ -3023,6 +3025,7 @@ app.command(name="android-push-state")(android_push_state)
 app.command(name="dev-mint-pat")(dev_mint_pat)
 app.command(name="repair-candles", context_settings=REPAIR_CANDLES_CONTEXT)(repair_candles)
 app.command(name="void-candles", context_settings=VOID_CANDLES_CONTEXT)(void_candles)
+app.command(name="check-candle-identities")(check_candle_identities)
 app.command(name="retire-accruals")(retire_accruals)
 app.command(name="retire-trade-projection-checkpoints")(retire_trade_projection_checkpoints)
 app.add_typer(annulment_app, name="annulment")

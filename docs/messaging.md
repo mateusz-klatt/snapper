@@ -956,9 +956,17 @@ and intervals older than the window are closed (no further updates).
 When a new tick arrives for an existing candle interval (`open_at` matches),
 the cached `public_id` is reused so the same logical candle keeps a stable
 identity across ZMQ, WebSocket, and the database.  When `open_at` advances
-to a new interval (or falls outside the warm-up window), a fresh UUID7 is
-minted and the cache entry is replaced. This avoids any DB reads on the
-hot path.
+to a new interval (or falls outside the warm-up window), the key's
+deterministic id is used and the cache entry is replaced. This avoids any DB
+reads on the hot path.
+
+A candle key's **deterministic id** is a custom UUIDv8 built from SHA-256 of
+its instrument, timeframe and opening, with the opening in Unix milliseconds as
+its first 48 bits (algorithm `snapper.candle.public_id.v1`, in
+`snapper.core.candle_identity`). Every writer that creates a key gives it this
+id: the live publishers, the catchup and repair inserts, and the historical
+loaders. A write for a key that already has a version adopts the stored id, so
+keys created before deterministic ids keep their random UUID7 ids.
 
 The Kraken spot publisher adds a database check before it mints, because its
 history catchup and repairs can commit a key before the live consumer
@@ -968,8 +976,8 @@ newest cached key, the publisher holds its identity gate and does this:
 - It takes a **window identity snapshot**: one fenced read of every known
     instrument's identity at that timeframe and opening, under the same writer
     protocol as the per-key lookup. A snapshot answers for two monotonic
-    seconds; a key it finds absent gets a new UUID7, which is written into the
-    snapshot at once.
+    seconds; a key it finds absent reserves its deterministic id, which is
+    written into the snapshot at once.
 - Every key with a live write of this process that is not known to be
     committed is excluded from the read, because that write may commit while
     the read runs. That means pending reservations, persisted resolutions not
@@ -1003,6 +1011,20 @@ waited for. Such a commit may not be adopted at publication. The stored row
 still keeps one id, but how long a published id can differ from the stored
 one is not bounded by the two seconds. `candle_identity_window_snapshot`
 switches the snapshot off; see [configuration](configuration.md).
+
+From the instant `candle_identity_deterministic_from` names, a key whose opening
+is at or after it is answered before all of the above: the publisher returns
+its deterministic id without the identity gate, a reservation, a snapshot or a
+database read, and counts it as `deterministic_answers`. Every writer has
+minted that id since before the cutover, so storage holds the same id, in any
+process, and the two-second concession does not apply to those keys. Keys that
+opened before the cutover, including old frames after a reconnect, keep the
+resolution above. The heartbeat reports, as
+`meta.venue.candle_identity.deterministic_from`, the cutover the resolver read at
+its latest persisted resolution; it is `null` until the first one, so a rollout
+or rollback check waits for one resolution after the setting changes.
+`snapper check-candle-identities` verifies stored ids read-only (see
+[CLI](cli.md)).
 
 ### Higher-Timeframe Candle Synthesis
 
@@ -1196,6 +1218,52 @@ Key properties:
     flush grace past the sweep settle, so higher-TF bars publish about 20 s later
     and now include their final minute, which the default 5 s seal could drop as
     late.
+- **Completion that follows the consumer (Kraken spot, `trade_built`)** — the
+    trade-built producer puts completion marks into the same FIFO queue as its
+    bars. Before each minute group that advances its boundary, a mark certifies
+    every earlier minute; after each tick, a mark certifies the tick's own
+    boundary. With `spot_completion_follows_consumer` on (the default), the
+    candle loop handles a mark completely before it takes the next item:
+    - it certifies every higher-timeframe window whose end the mark newly
+      reaches;
+    - it sweeps every minute the mark certifies, one minute at a time;
+    - it seals and forward-fills inline at the mark's boundary, with no grace;
+    - only then does it record its progress.
+
+    The wall-clock sweep and the periodic flush tick do nothing in this mode,
+    so neither gets ahead of a queued real bar.
+
+    The state is `wall`, `waiting` or `progress`. `waiting` moves nothing; it
+    is the state at startup and after every break, until a mark of the current
+    generation is handled. A mark of an older generation is ignored and
+    counted as stale.
+
+    The minute-completion witness keeps 130 minutes, so a consumer up to about
+    two hours behind still asserts the minutes it sweeps. Older minutes are
+    passed over in one step and counted as `skipped_unswept`.
+
+    The trade-built queue refuses an item instead of evicting a queued bar. The
+    next read turns the refusals into a break with the lost minute range and a
+    new generation. An overflow, a lag discard
+    (`trade_built_max_consumer_lag_seconds`, default off) or a reconnect then:
+    - suspends the aggregator, so no window spanning the lost minutes is
+      published as complete;
+    - forgets every carried close;
+    - arms a floor below which a real bar no longer arms a close;
+    - asks the native catchup to reconcile.
+
+    A row's `timestamp`, its author, is the time its evidence became final:
+    - a 1m bar's acquisition by the producer;
+    - a flat bar's certifying mark;
+    - for a window, the later of its certification and its newest constituent;
+    - a repair's derivation.
+
+    A delayed row therefore never supersedes a version authored strictly later,
+    such as a native catchup row or a repair. The heartbeat carries the stream's
+    `state`, `completed_through`, `generation`, `queue_depth`, `stale_marks`,
+    `consumer_lag_s`, `consumer_lag_max_s` and the producer's health under
+    `meta.venue.trade_candles`. Switching the setting off returns to the wall
+    clock and to processing-time window authors from the next call.
 - **Native-feed replacement (kraken spot)** — kraken spot is the one venue with a
     native higher-TF OHLC feed; synthesizing those timeframes from 1m REPLACES it
     (a deliberate one-mechanism choice — the rolled-up VWAP/trades approximate the

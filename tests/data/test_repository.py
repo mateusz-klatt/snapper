@@ -267,7 +267,7 @@ async def test_upsert_candles_closes_old_and_inserts_new(
     existing_candle = SimpleNamespace(
         id=42,
         public_id="existing-uuid",
-        instrument_public_id="fake-inst-pid",
+        instrument_public_id="00000000-0000-4000-8000-0000000f0004",
         timeframe="1m",
         open_at=ts,
         timestamp=ts,
@@ -296,7 +296,7 @@ async def test_upsert_candles_closes_old_and_inserts_new(
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
-            "instrument_public_id": "fake-inst-pid",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -372,7 +372,7 @@ async def test_upsert_candles_inserts_new_when_no_existing(
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
-            "instrument_public_id": "fake-inst-pid",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -415,7 +415,7 @@ async def test_upsert_candles_preserves_caller_supplied_public_id(
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
-            "instrument_public_id": "fake-inst-pid",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -455,7 +455,7 @@ async def test_upsert_candles_preserves_caller_supplied_known_to(
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
-            "instrument_public_id": "fake-inst-pid",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -495,7 +495,7 @@ async def test_upsert_candles_requires_caller_timestamp(
     fixed_time = datetime(2024, 1, 1, tzinfo=UTC)
     rows = [
         {
-            "instrument_public_id": "fake-inst-pid",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
             "open_at": datetime(2024, 1, 1, tzinfo=UTC),
             "timeframe": "1m",
             "open": 100.0,
@@ -552,7 +552,7 @@ async def test_upsert_candles_duplicate_keys_use_sequential_path() -> None:
     repo = _make_repo(lambda: _session_factory(session), dialect="custom")
     rows = [
         {
-            "instrument_public_id": "fake-inst-pid",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -567,7 +567,7 @@ async def test_upsert_candles_duplicate_keys_use_sequential_path() -> None:
             "sequence_id": 1,
         },
         {
-            "instrument_public_id": "fake-inst-pid",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -605,7 +605,7 @@ async def test_upsert_candles_with_caller_session_defers_commit() -> None:
     existing_candle = SimpleNamespace(
         id=42,
         public_id="existing-uuid",
-        instrument_public_id="inst-dup",
+        instrument_public_id="00000000-0000-4000-8000-0000000f0007",
         timeframe="1m",
         open_at=ts,
         timestamp=ts,
@@ -641,7 +641,7 @@ async def test_upsert_candles_with_caller_session_defers_commit() -> None:
     repo = _make_repo(lambda: _session_factory(_DummyAsyncSession()), dialect="custom")
     rows: list[CandleUpsertRow] = [
         {
-            "instrument_public_id": "inst-unique",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0008",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -656,7 +656,7 @@ async def test_upsert_candles_with_caller_session_defers_commit() -> None:
             "sequence_id": 1,
         },
         {
-            "instrument_public_id": "inst-dup",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0007",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -671,7 +671,7 @@ async def test_upsert_candles_with_caller_session_defers_commit() -> None:
             "sequence_id": 2,
         },
         {
-            "instrument_public_id": "inst-dup",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0007",
             "open_at": ts,
             "timestamp": ts + timedelta(minutes=1),
             "timeframe": "1m",
@@ -708,7 +708,7 @@ async def test_load_existing_candles_filters_timestamp_window() -> None:
     candidate = SimpleNamespace(
         id=42,
         public_id="future-uuid",
-        instrument_public_id="fake-inst-pid",
+        instrument_public_id="00000000-0000-4000-8000-0000000f0004",
         timeframe="1m",
         open_at=ts,
         timestamp=datetime(2024, 1, 2, tzinfo=UTC),
@@ -722,7 +722,7 @@ async def test_load_existing_candles_filters_timestamp_window() -> None:
     session.execute = _execute
     rows = [
         {
-            "instrument_public_id": "fake-inst-pid",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
             "open_at": ts,
             "timestamp": ts,
             "timeframe": "1m",
@@ -795,7 +795,7 @@ async def test_load_existing_candles_chunks_large_lookup() -> None:
 def _candle_match_row(**overrides: Any) -> CandleUpsertRow:
     """Build a candle upsert row with stable business defaults for guard tests."""
     base: dict[str, Any] = {
-        "instrument_public_id": "fake-inst-pid",
+        "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
         "open_at": datetime(2024, 1, 1, tzinfo=UTC),
         "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
         "timeframe": "1m",
@@ -922,7 +922,7 @@ async def test_upsert_candles_skips_identical_batch_row() -> None:
     existing_candle = SimpleNamespace(
         id=42,
         public_id="existing-uuid",
-        instrument_public_id="fake-inst-pid",
+        instrument_public_id="00000000-0000-4000-8000-0000000f0004",
         timeframe="1m",
         open_at=ts,
         timestamp=ts,
@@ -1131,7 +1131,7 @@ async def test_upsert_trades_native_dialects_with_caller_session_defer_commit(
     repo = _make_repo(lambda: _session_factory(_DummyAsyncSession()), dialect=dialect)
     rows: list[TradeUpsertRow] = [
         {
-            "instrument_public_id": "inst-pub-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0001",
             "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
             "price": 100.5,
             "size": 1.25,
@@ -1303,7 +1303,7 @@ async def test_upsert_market_snapshots_generates_defaults() -> None:
     fixed_time = datetime(2024, 1, 1, tzinfo=UTC)
     rows: list[dict[str, Any]] = [
         {
-            "instrument_public_id": "inst-xyz",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0006",
             "bid": 50.0,
             "ask": 51.0,
             "session_id": "s1",
@@ -1340,7 +1340,7 @@ async def test_upsert_market_snapshots_preserves_supplied_keys() -> None:
     custom_known_to = datetime(2099, 1, 1, tzinfo=UTC)
     rows: list[dict[str, Any]] = [
         {
-            "instrument_public_id": "inst-xyz",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0006",
             "bid": 50.0,
             "ask": 51.0,
             "session_id": "s1",
@@ -2517,7 +2517,7 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aexit__.return_value = None
             rows: list[dict[str, Any]] = [
                 {
-                    "instrument_public_id": "fake-inst-pid",
+                    "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
                     "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "timeframe": "1m",
@@ -2560,7 +2560,7 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aexit__.return_value = None
             rows: list[dict[str, Any]] = [
                 {
-                    "instrument_public_id": "fake-inst-pid",
+                    "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
                     "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "timeframe": "1m",
@@ -2575,7 +2575,7 @@ class TestSQLAlchemyRepositoryDialects:
                     "sequence_id": 1,
                 },
                 {
-                    "instrument_public_id": "fake-inst-pid",
+                    "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
                     "open_at": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
                     "timeframe": "1m",
@@ -2611,7 +2611,7 @@ class TestSQLAlchemyRepositoryDialects:
         existing_candle = SimpleNamespace(
             id=42,
             public_id="old-uuid",
-            instrument_public_id="fake-inst-pid",
+            instrument_public_id="00000000-0000-4000-8000-0000000f0004",
             timeframe="1m",
             open_at=datetime(2024, 1, 1, tzinfo=UTC),
             timestamp=datetime(2024, 1, 1, tzinfo=UTC),
@@ -2638,7 +2638,7 @@ class TestSQLAlchemyRepositoryDialects:
             mock_session_ctx.return_value.__aexit__.return_value = None
             rows: list[dict[str, Any]] = [
                 {
-                    "instrument_public_id": "fake-inst-pid",
+                    "instrument_public_id": "00000000-0000-4000-8000-0000000f0004",
                     "open_at": datetime(2024, 1, 1, tzinfo=UTC),
                     "timestamp": datetime(2024, 1, 1, tzinfo=UTC),
                     "timeframe": "1m",
@@ -4621,7 +4621,7 @@ async def test_upsert_ticks_appends_rows(monkeypatch: pytest.MonkeyPatch) -> Non
     ts = datetime(2024, 6, 1, tzinfo=UTC)
     rows: list[dict[str, Any]] = [
         {
-            "instrument_public_id": "inst-pub-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0001",
             "timestamp": ts,
             "bid": 100.0,
             "ask": 101.0,
@@ -4632,7 +4632,7 @@ async def test_upsert_ticks_appends_rows(monkeypatch: pytest.MonkeyPatch) -> Non
             "public_id": "tick-pub-1",
         },
         {
-            "instrument_public_id": "inst-pub-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0001",
             "timestamp": ts,
             "bid": 100.5,
             "ask": 101.5,
@@ -4671,7 +4671,7 @@ async def test_upsert_ticks_with_caller_session_skips_internal_commit() -> None:
     repo = _make_repo(lambda: _session_factory(_DummyAsyncSession()))
     rows: list[dict[str, Any]] = [
         {
-            "instrument_public_id": "inst-pub-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0001",
             "timestamp": datetime(2024, 6, 1, tzinfo=UTC),
             "bid": 100.0,
             "ask": 101.0,
@@ -4739,7 +4739,7 @@ async def test_get_ticks_returns_rows_when_instrument_found(
     with patch("snapper.data.repository.create_async_engine"):
         repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     ts = datetime(2024, 6, 1, tzinfo=UTC)
-    mock_inst = SimpleNamespace(public_id="inst-pub-1")
+    mock_inst = SimpleNamespace(public_id="00000000-0000-4000-8000-0000000f0001")
     mock_inst_result = SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: mock_inst))
     tick_row = SimpleNamespace(
         timestamp=ts,
@@ -5294,7 +5294,7 @@ async def test_iter_exchange_trades_streams_single_instrument() -> None:
     r, session = _make_streaming_repo(
         [
             SimpleNamespace(
-                instrument_public_id="inst-btc",
+                instrument_public_id="00000000-0000-4000-8000-0000000f0005",
                 timestamp=base + timedelta(seconds=5),
                 executed_at=base + timedelta(seconds=5),
                 price=100.0,
@@ -5310,11 +5310,11 @@ async def test_iter_exchange_trades_streams_single_instrument() -> None:
         base,
         base + timedelta(seconds=30),
         as_of=base + timedelta(minutes=1),
-        instrument_public_ids=["inst-btc"],
+        instrument_public_ids=["00000000-0000-4000-8000-0000000f0005"],
     )
     assert rows == [
         (
-            "inst-btc",
+            "00000000-0000-4000-8000-0000000f0005",
             {
                 "timestamp": base + timedelta(seconds=5),
                 "executed_at": base + timedelta(seconds=5),
@@ -5336,7 +5336,7 @@ async def test_iter_exchange_trades_groups_and_stably_orders_multiple_instrument
     r, session = _make_streaming_repo(
         [
             SimpleNamespace(
-                instrument_public_id="inst-btc",
+                instrument_public_id="00000000-0000-4000-8000-0000000f0005",
                 timestamp=base + timedelta(seconds=5),
                 executed_at=base + timedelta(seconds=5),
                 price=100.0,
@@ -5345,7 +5345,7 @@ async def test_iter_exchange_trades_groups_and_stably_orders_multiple_instrument
                 trade_id="bulk-btc-1",
             ),
             SimpleNamespace(
-                instrument_public_id="inst-btc",
+                instrument_public_id="00000000-0000-4000-8000-0000000f0005",
                 timestamp=base + timedelta(seconds=6),
                 executed_at=base + timedelta(seconds=5),
                 price=101.0,
@@ -5370,12 +5370,12 @@ async def test_iter_exchange_trades_groups_and_stably_orders_multiple_instrument
         base,
         base + timedelta(seconds=30),
         as_of=base + timedelta(minutes=1),
-        instrument_public_ids=["inst-eth", "inst-btc"],
+        instrument_public_ids=["inst-eth", "00000000-0000-4000-8000-0000000f0005"],
     )
     sql = _stream_sql(session)
     assert [instrument_public_id for instrument_public_id, _trade in rows] == [
-        "inst-btc",
-        "inst-btc",
+        "00000000-0000-4000-8000-0000000f0005",
+        "00000000-0000-4000-8000-0000000f0005",
         "inst-eth",
     ]
     assert "ORDER BY trades.instrument_public_id ASC, trades.executed_at ASC, trades.id ASC" in sql
@@ -8245,7 +8245,7 @@ async def test_get_instrument_capabilities_returns_active_rows(tmp_path: Path) -
     async with r.session() as s:
         s.add(
             InstrumentOrderCapability(
-                instrument_public_id="inst-1",
+                instrument_public_id="00000000-0000-4000-8000-0000000f0002",
                 exchange="kraken",
                 supported_order_types=["market", "limit"],
                 supports_post_only=True,
@@ -8552,7 +8552,7 @@ async def test_insert_and_get_execution_plan(tmp_path: Path) -> None:
             "plan_type": "manual_once",
             "created_by_user_id": "user-1",
             "created_via": "ui",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "exchange": "kraken",
             "mode": "live",
             "shard_key": "kraken:BTC-USD:live",
@@ -8589,7 +8589,7 @@ async def test_get_execution_plans_with_filters(tmp_path: Path) -> None:
                 "plan_type": "manual_once",
                 "created_by_user_id": "user-1",
                 "created_via": "ui",
-                "instrument_public_id": "inst-1",
+                "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
                 "exchange": "kraken",
                 "mode": "live",
                 "shard_key": "kraken:BTC-USD:live",
@@ -8623,7 +8623,7 @@ async def test_update_execution_plan_status_scd2(tmp_path: Path) -> None:
             "plan_type": "manual_once",
             "created_by_user_id": "user-1",
             "created_via": "ui",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "exchange": "kraken",
             "mode": "live",
             "shard_key": "kraken:BTC-USD:live",
@@ -8677,7 +8677,7 @@ def _claim_cancel_plan_payload(now: datetime, status: str = "active") -> dict[st
         "plan_type": "manual_once",
         "created_by_user_id": "user-1",
         "created_via": "ui",
-        "instrument_public_id": "inst-1",
+        "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
         "exchange": "kraken",
         "mode": "live",
         "shard_key": "kraken:BTC-USD:live",
@@ -8925,7 +8925,7 @@ async def test_get_active_execution_plans(tmp_path: Path) -> None:
                 "plan_type": "manual_once",
                 "created_by_user_id": "user-1",
                 "created_via": "ui",
-                "instrument_public_id": "inst-1",
+                "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
                 "exchange": "kraken",
                 "mode": "live",
                 "shard_key": "kraken:BTC-USD:live",
@@ -8959,7 +8959,7 @@ async def test_insert_and_get_plan_checkpoint(tmp_path: Path) -> None:
             "plan_type": "manual_once",
             "created_by_user_id": "user-1",
             "created_via": "ui",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "exchange": "kraken",
             "mode": "live",
             "shard_key": "kraken:BTC-USD:live",
@@ -9117,7 +9117,7 @@ async def test_get_execution_plans_exchange_mode_wallet_filters(tmp_path: Path) 
             "plan_type": "manual_once",
             "created_by_user_id": "user-1",
             "created_via": "ui",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "exchange": "kraken",
             "mode": "live",
             "shard_key": "kraken:BTC-USD:live",
@@ -9148,7 +9148,7 @@ async def test_get_execution_plans_exchange_mode_wallet_filters(tmp_path: Path) 
 
 def _make_cycle_row(
     shard_key: str = "kraken.BTC-USD.live.w0000000000aa",
-    instrument_public_id: str = "inst-btc",
+    instrument_public_id: str = "00000000-0000-4000-8000-0000000f0005",
     exchange: str = "kraken",
     mode: str = "live",
     wallet_public_id: str = "wallet-1",
@@ -9924,7 +9924,7 @@ async def test_revise_execution_plan_params(tmp_path: Path) -> None:
             "plan_type": "manual_once",
             "created_by_user_id": "user-1",
             "created_via": "ui",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "exchange": "kraken",
             "mode": "live",
             "shard_key": "kraken:BTC-USD:live",
@@ -9968,7 +9968,7 @@ async def test_revise_params_multiple_revisions(tmp_path: Path) -> None:
             "plan_type": "manual_once",
             "created_by_user_id": "user-1",
             "created_via": "ui",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "exchange": "kraken",
             "mode": "live",
             "shard_key": "kraken:BTC-USD:live",
@@ -10004,7 +10004,7 @@ async def test_revise_params_shallow_merge(tmp_path: Path) -> None:
             "plan_type": "manual_once",
             "created_by_user_id": "user-1",
             "created_via": "ui",
-            "instrument_public_id": "inst-1",
+            "instrument_public_id": "00000000-0000-4000-8000-0000000f0002",
             "exchange": "kraken",
             "mode": "live",
             "shard_key": "kraken:BTC-USD:live",
