@@ -182,6 +182,11 @@ class BootstrapSettingsLoader(BaseSettings):
         trade_command_dispatch_ttl_s: Maximum command age before outbox
             dispatch and executor order processing refuse a stale trade
             command. ``<= 0`` disables both gates.
+        plan_recovery_auto_settle_enabled: Gate for automatic SCD2
+            settlement of actionable single-order execution plans during
+            ``PlanExecutorService`` startup recovery. Default ``False``
+            keeps startup recovery from settling historical plans without
+            an explicit operator preview and digest confirmation.
     """
 
     model_config = SettingsConfigDict(
@@ -274,6 +279,10 @@ class BootstrapSettingsLoader(BaseSettings):
     re-emit a replacement and a late-executing stale original would
     double exposure. ``<= 0`` disables both gates.
     """
+    plan_recovery_auto_settle_enabled: bool = Field(
+        default=False,
+        alias="PLAN_RECOVERY_AUTO_SETTLE_ENABLED",
+    )
 
     @model_validator(mode="before")
     @classmethod
