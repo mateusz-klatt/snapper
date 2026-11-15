@@ -32,6 +32,7 @@ from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
+from snapper.infrastructure.exchanges.contracts import ExchangeOrderSnapshot
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import ExecutionUpdate
@@ -3135,6 +3136,21 @@ class TestKrakenCoverageImprovement:
         """Verify cancel order fallback to native api."""
         mock_native_to_ccxt.return_value = "AAPL/USD"
         trade_client = MagicMock()
+        read_back = ExchangeOrderSnapshot(
+            id="ABC123",
+            client_order_id="cl-abc",
+            symbol="AAPL-USD",
+            side=OrderSideEnum.SELL,
+            type=ExchangeOrderTypeEnum.LIMIT,
+            amount=float("2"),
+            price=float("10"),
+            status=ExchangeOrderStatusEnum.CANCELED,
+            filled=float("0.5"),
+            remaining=float("1.5"),
+            timestamp=1_700_000_000.0,
+            fee=None,
+        )
+        read_order = AsyncMock(return_value=read_back)
         with (
             patch.object(
                 kraken_client,
@@ -3142,11 +3158,12 @@ class TestKrakenCoverageImprovement:
                 side_effect=ValueError("Unknown native symbol"),
             ),
             patch.object(kraken_client, "_get_trade_client", return_value=trade_client),
+            patch.object(kraken_client, "_get_order_native", read_order),
         ):
             result = await kraken_client.cancel_order("ABC123", "AAPL-USD")
         trade_client.cancel_order.assert_called_once_with(txid="ABC123")
-        assert result.id == "ABC123"
-        assert result.status == ExchangeOrderStatusEnum.CANCELED
+        read_order.assert_awaited_once_with("ABC123", "AAPL-USD")
+        assert result is read_back
 
 
 class TestCloseWsClientBranches:
@@ -6316,11 +6333,52 @@ class TestKrakenFallbackToNativeAPI:
             mock_trade_client = MagicMock()
             mock_trade_class.return_value = mock_trade_client
             mock_trade_client.cancel_order.return_value = {"count": 1}
-            result = await kraken_client.cancel_order("ORDER123", symbol="AAPLx-USD")
+            read_back = ExchangeOrderSnapshot(
+                id="ORDER123",
+                client_order_id=None,
+                symbol="AAPLx-USD",
+                side=OrderSideEnum.BUY,
+                type=ExchangeOrderTypeEnum.LIMIT,
+                amount=float("10"),
+                price=float("150"),
+                status=ExchangeOrderStatusEnum.CLOSED,
+                filled=float("10"),
+                remaining=float("0"),
+                timestamp=1_700_000_000.0,
+                fee=None,
+            )
+            read_order = AsyncMock(return_value=read_back)
+            with patch.object(kraken_client, "_get_order_native", read_order):
+                result = await kraken_client.cancel_order("ORDER123", symbol="AAPLx-USD")
             mock_trade_client.cancel_order.assert_called_once_with(txid="ORDER123")
-            assert result.id == "ORDER123"
-            assert result.symbol == "AAPLx-USD"
-            assert result.status == ExchangeOrderStatusEnum.CANCELED
+            read_order.assert_awaited_once_with("ORDER123", "AAPLx-USD")
+            assert result is read_back
+
+    @pytest.mark.asyncio
+    async def test_cancel_order_native_read_back_failure_raises(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Verify a failed native read-back is not replaced with a fake cancel."""
+        with (
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
+                side_effect=ValueError("Unknown native symbol: AAPLx-USD"),
+            ),
+            patch(
+                "snapper.infrastructure.exchanges.implementations.kraken.Trade"
+            ) as mock_trade_class,
+            patch.object(
+                kraken_client,
+                "_get_order_native",
+                AsyncMock(side_effect=RuntimeError("malformed orders-info")),
+            ),
+        ):
+            mock_trade_client = MagicMock()
+            mock_trade_class.return_value = mock_trade_client
+            mock_trade_client.cancel_order.return_value = {"count": 1}
+            with pytest.raises(RuntimeError, match="malformed orders-info"):
+                await kraken_client.cancel_order("ORDER123", symbol="AAPLx-USD")
+        mock_trade_client.cancel_order.assert_called_once_with(txid="ORDER123")
 
     @pytest.mark.asyncio
     async def test_create_order_no_fallback_for_other_errors(
@@ -7647,12 +7705,27 @@ class TestKrakenLiveFixtures:
 
     @pytest.mark.asyncio
     async def test_native_cancel_inflight(self, client: KrakenExchangeClient) -> None:
-        """Verify native REST path cancel returns CANCELED status.
+        """Verify native REST path cancel returns the order read back from Kraken.
 
         Given: An order OLKARR created via native API that needs canceling,
         When: cancel_order falls back to native API,
-        Then: The snapshot has status=CANCELED.
+        Then: The snapshot is the venue read, including a non-zero fill.
         """
+        read_back = ExchangeOrderSnapshot(
+            id="OLKARR",
+            client_order_id=None,
+            symbol="BTC-EUR",
+            side=OrderSideEnum.SELL,
+            type=ExchangeOrderTypeEnum.LIMIT,
+            amount=0.0001,
+            price=58238.0,
+            status=ExchangeOrderStatusEnum.CANCELED,
+            filled=0.00004,
+            remaining=0.00006,
+            timestamp=1_700_000_000.0,
+            fee=None,
+        )
+        read_order = AsyncMock(return_value=read_back)
         with (
             patch(
                 "snapper.infrastructure.exchanges.implementations.kraken.native_to_ccxt",
@@ -7661,13 +7734,14 @@ class TestKrakenLiveFixtures:
             patch(
                 "snapper.infrastructure.exchanges.implementations.kraken.Trade"
             ) as mock_trade_class,
+            patch.object(client, "_get_order_native", read_order),
         ):
             mock_trade_client = MagicMock()
             mock_trade_class.return_value = mock_trade_client
             mock_trade_client.cancel_order.return_value = {"count": 1}
             snapshot = await client.cancel_order("OLKARR", symbol="BTC-EUR")
-        assert snapshot.id == "OLKARR"
-        assert snapshot.status == ExchangeOrderStatusEnum.CANCELED
+        assert snapshot is read_back
+        read_order.assert_awaited_once_with("OLKARR", "BTC-EUR")
         mock_trade_client.cancel_order.assert_called_once_with(txid="OLKARR")
 
     @pytest.mark.asyncio
