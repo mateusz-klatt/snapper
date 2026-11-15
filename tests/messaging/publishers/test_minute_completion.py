@@ -133,6 +133,7 @@ class _CompletionSettings:
         self.spot_candle_source = candle_source
         self.trade_built_finalize_grace_seconds = finalize_grace
         self.candle_identity_window_snapshot = False
+        self.candle_identity_deterministic_from = None
 
 
 async def _resolve_instrument(native_symbol: str) -> str:
@@ -145,7 +146,7 @@ async def _resolve_instrument(native_symbol: str) -> str:
         A fixed instrument public id.
     """
     del native_symbol
-    return "inst-1"
+    return "00000000-0000-4000-8000-0000000f0002"
 
 
 def _make_emitter(

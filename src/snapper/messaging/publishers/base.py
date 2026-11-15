@@ -44,6 +44,7 @@ from snapper.application.services.settings import SettingsService
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.candle_identity import deterministic_candle_public_id
 from snapper.core.json_types import JsonObject
 from snapper.core.types import AllExchange
 from snapper.core.types import FrameOrigin
@@ -2476,7 +2477,10 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
         If the cache holds a matching (instrument_public_id, timeframe) entry
         whose open_at equals the incoming value, the existing public_id is
-        reused.  Otherwise a new UUID7 is generated and the cache is updated.
+        reused. Otherwise the key's deterministic id
+        (:func:`~snapper.core.candle_identity.deterministic_candle_public_id`)
+        is used and the cache is updated, so every writer that creates the
+        key stores the same id.
 
         Args:
             instrument_public_id: Instrument public identity string.
@@ -2490,7 +2494,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         cached = self._candle_id_cache.get(cache_key)
         if cached is not None and cached[0] == open_at:
             return cached[1]
-        public_id = str(uuid7())
+        public_id = deterministic_candle_public_id(instrument_public_id, timeframe, open_at)
         self._candle_id_cache[cache_key] = (open_at, public_id)
         return public_id
 

@@ -2,9 +2,12 @@
 
 import hashlib
 import hmac as hmac_mod
+from datetime import UTC
+from datetime import datetime
 from typing import Any
 
 import pytest
+from loguru import logger
 
 from snapper.auth.dependencies import CSRFManager
 from snapper.config.app import AppSettings
@@ -512,6 +515,53 @@ class TestAppSettingsTradingProperties:
             settings_service=MockSettingsService({"candle_identity_window_snapshot": False}),
         )
         assert disabled.candle_identity_window_snapshot is False
+
+    def test_candle_identity_deterministic_from_defaults_to_no_cutover(self) -> None:
+        """Verify the cutover is unset by default and parses a valid instant.
+
+        Given a service without and with candle_identity_deterministic_from set,
+        When accessing settings.candle_identity_deterministic_from,
+        Then the default is None and a UTC minute is returned as an aware datetime.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        default = AppSettings(bootstrap, settings_service=MockSettingsService({}))
+        assert default.candle_identity_deterministic_from is None
+        configured = AppSettings(
+            bootstrap,
+            settings_service=MockSettingsService(
+                {"candle_identity_deterministic_from": "2026-11-12T23:00:00Z"}
+            ),
+        )
+        assert configured.candle_identity_deterministic_from == datetime(
+            2026, 11, 12, 23, 0, tzinfo=UTC
+        )
+
+    def test_candle_identity_deterministic_from_ignores_a_malformed_value_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Verify a malformed cutover reads as unset, with one warning per value.
+
+        Given a service whose cutover is not on a whole minute,
+        When the setting is read twice,
+        Then both reads return None and only one warning names the value.
+        """
+        bootstrap = BootstrapSettingsLoader(DB_URL="sqlite:///:memory:")
+        settings = AppSettings(
+            bootstrap,
+            settings_service=MockSettingsService(
+                {"candle_identity_deterministic_from": "2026-11-12T23:00:30Z"}
+            ),
+        )
+        handler_id = logger.add(caplog.handler, level="WARNING", format="{message}")
+        try:
+            assert settings.candle_identity_deterministic_from is None
+            assert settings.candle_identity_deterministic_from is None
+        finally:
+            logger.remove(handler_id)
+        warnings = [
+            record for record in caplog.records if "2026-11-12T23:00:30Z" in record.getMessage()
+        ]
+        assert len(warnings) == 1
 
     def test_persist_intermediate_candles_defaults_false_and_coerces(self) -> None:
         """Verify persist_intermediate_candles defaults False and coerces values.
