@@ -398,7 +398,12 @@ carrying the session id are then the authority for what was written. After a lin
 `changed_before_write`, `lost_compare_and_set` or `recorded_unconfirmed`, the run writes nothing more on that shard.
 
 After a write, one reconciliation cycle retires the commands. Restart the trading engine before any new order uses a
-touched shard, then confirm that each shard's checkpoint watermark is at or above the highest written id.
+touched shard, then confirm that each shard's checkpoint watermark is at or above the highest written id. A shard that
+had no checkpoint, or a NULL watermark, and has historical executions is recovered by execution replay at its first
+restart, and the checkpoint that restart commits counts only `fill_observed` rows; restart once more, then check again.
+Execution replay refuses a shard that holds an execution with a size or price of zero, such as an empty acknowledgement
+with no ids, so the shard never certifies until that row is annulled with [`annulment`](#annulment), by the operator's
+decision.
 
 ### `repair-candles`
 
