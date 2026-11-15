@@ -679,7 +679,7 @@ SELECT 'election' AS artifact_kind, public_id,
        requested_knowledge_at
 FROM race_elections
 UNION ALL
-SELECT 'proof', public_id, election_public_id, source_instrument_public_id,
+SELECT DISTINCT 'proof', public_id, election_public_id, source_instrument_public_id,
        requested_knowledge_at
 FROM race_proofs;
 ```
