@@ -92,6 +92,18 @@ def _id(number: int) -> str:
     return f"00000000-0000-7000-8000-{number:012d}"
 
 
+_LIVENESS_TIMEOUT_S = 10.0
+"""Upper bound for a blocked actual HTTP worker to enter, or to be released.
+
+Both waits only guard liveness: the worker enters after the real key request and
+its committed identity proof, and the test releases it right after cancelling.
+The former two- and four-second bounds made a slow CI runner fail before the
+worker entered. A wait returns as soon as its event is set, so a longer bound
+costs nothing when the run is healthy, and staying under the per-test timeout
+keeps a genuine hang a clear assertion failure.
+"""
+
+
 class _Adapter(BaseAdapter):
     """Exercise the actual signed requests session using local bytes and a committed database probe."""
 
@@ -126,7 +138,7 @@ class _Adapter(BaseAdapter):
         is_key = (request.url or "").endswith(_KEY_PATH)
         if is_key != self.block_accounts:
             self.entered.set()
-            if self.block and not self.release.wait(4):
+            if self.block and not self.release.wait(_LIVENESS_TIMEOUT_S):
                 raise TimeoutError("Isolated transport release was not delivered")
         if self.fail or (self.fail_accounts and not is_key):
             raise RequestsConnectionError("Isolated transport failure")
@@ -527,7 +539,8 @@ async def test_cancelled_actual_worker_cannot_later_reauthorize_its_discarded_re
         )
     )
     try:
-        assert await asyncio.to_thread(scenario.adapter.entered.wait, 2)
+        entered = await asyncio.to_thread(scenario.adapter.entered.wait, _LIVENESS_TIMEOUT_S)
+        assert entered, f"blocked worker never entered; read already finished: {task.done()}"
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
