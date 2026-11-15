@@ -1,0 +1,979 @@
+"""Tests of the cancel-target repair (G3-C): evaluation, prediction, preview and write."""
+
+import json
+from collections.abc import AsyncIterator
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
+from pathlib import Path
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import patch
+
+import pytest
+import sqlalchemy as sa
+
+from snapper.application.trade import cancel_target_repair as repair
+from snapper.application.trade.cancel_target_repair import CancelTargetRepairRefusedError
+from snapper.application.trade.cancel_target_repair import ExecutionClass
+from snapper.application.trade.cancel_target_repair import RepairAction
+from snapper.application.trade.reconciler import ReconciliationLoop
+from snapper.application.trade.trade_service import TradeService
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Order
+from snapper.data.models import TradeCommand
+from snapper.data.models import VenueEvent
+from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import ExecutionEvidenceRow
+from snapper.data.repository_types import OrderVersionRow
+from snapper.messaging.executors.base import ExchangeExecutorService
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from tests.helpers.cancel_target_repair import CANCEL_AT
+from tests.helpers.cancel_target_repair import CANCELED_AT
+from tests.helpers.cancel_target_repair import CREATED_AT
+from tests.helpers.cancel_target_repair import KRAKEN_SHARD
+from tests.helpers.cancel_target_repair import OTHER_WALLET
+from tests.helpers.cancel_target_repair import WALLET
+from tests.helpers.cancel_target_repair import add_rows
+from tests.helpers.cancel_target_repair import checkpoint
+from tests.helpers.cancel_target_repair import command
+from tests.helpers.cancel_target_repair import execution
+from tests.helpers.cancel_target_repair import order_version
+from tests.helpers.cancel_target_repair import seed_kraken_pair
+from tests.helpers.cancel_target_repair import seed_walutomat_pair
+from tests.helpers.cancel_target_repair import sqlite_repository
+from tests.helpers.cancel_target_repair import venue_event
+
+DATABASE = {"dialect": "sqlite", "path": "test.db"}
+CODE = {"snapper/application/trade/cancel_target_repair.py": "0" * 64}
+WRITE_TIME = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
+    """Provide an empty SQLite repository owned by one test."""
+    async with sqlite_repository(tmp_path / "repair.db") as created:
+        yield created
+
+
+async def _plan(repository: SQLAlchemyRepository, *cancel_ids: str) -> repair.RepairPlan:
+    """Plan the repair of the given cancels with the fixed binding."""
+    return await repair.plan_repair(repository, list(cancel_ids), DATABASE, CODE)
+
+
+async def _decision(repository: SQLAlchemyRepository, cancel_id: str) -> repair.Decision:
+    """Return the decision of one cancel."""
+    plan = await _plan(repository, cancel_id)
+    return plan.lines[0].decision
+
+
+def _vote(tmp_path: Path, plan: repair.RepairPlan) -> Path:
+    """Store a plan's preview and summary as a voted run's directory."""
+    voted = tmp_path / "voted"
+    voted.mkdir()
+    (voted / "preview.json").write_text(json.dumps(plan.preview))
+    (voted / "summary.json").write_text(json.dumps(plan.summary))
+    return voted
+
+
+async def _terminals(repository: SQLAlchemyRepository, client_order_id: str) -> list[VenueEvent]:
+    """Read the order_terminal rows of one client order id."""
+    async with repository.session() as session:
+        result = await session.execute(
+            sa.select(VenueEvent).where(
+                VenueEvent.client_order_id == client_order_id,
+                VenueEvent.event_type == "order_terminal",
+            )
+        )
+        return list(result.scalars().all())
+
+
+async def _status(repository: SQLAlchemyRepository, public_id: str) -> tuple[str, str | None]:
+    """Read a command's active status and last error."""
+    async with repository.session() as session:
+        result = await session.execute(
+            sa.select(TradeCommand).where(
+                TradeCommand.public_id == public_id, TradeCommand.known_to == KNOWN_TO_MAX
+            )
+        )
+        row = result.scalars().one()
+        return row.status, row.last_error
+
+
+def _version(status: str, version_id: int, known_to: datetime = KNOWN_TO_MAX) -> OrderVersionRow:
+    """Build one order version row for the pure helpers."""
+    return {
+        "id": version_id,
+        "public_id": "order",
+        "instrument_public_id": "instrument",
+        "mode": "live",
+        "wallet_public_id": WALLET,
+        "client_order_id": "cid",
+        "exchange_order_id": "OX-1",
+        "status": status,
+        "filled_size": 0.0,
+        "leverage": None,
+        "timestamp": CREATED_AT + timedelta(seconds=version_id),
+        "known_to": known_to,
+    }
+
+
+def _execution_row(
+    size: float, fee: float, exec_id: str | None = None, trade_id: str | None = None
+) -> ExecutionEvidenceRow:
+    """Build one execution evidence row for the classifier."""
+    return {
+        "id": 1,
+        "order_public_id": "order",
+        "status": "filled",
+        "size": size,
+        "fee": fee,
+        "price": 0.0,
+        "exec_id": exec_id,
+        "trade_id": trade_id,
+        "numeric_provenance": "legacy_float",
+        "price_decimal": None,
+        "size_decimal": None,
+        "fee_decimal": None,
+        "timestamp": CREATED_AT,
+    }
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (_execution_row(0.0, 0.0), ExecutionClass.EMPTY),
+        (_execution_row(0.0, 0.0, exec_id="  "), ExecutionClass.COUNTED),
+        (_execution_row(0.0, 0.0, exec_id="E-1"), ExecutionClass.COUNTED),
+        (_execution_row(0.0, 0.0, trade_id="T-1"), ExecutionClass.COUNTED),
+        (_execution_row(1.0, 0.0), ExecutionClass.COUNTED),
+        (_execution_row(1.0, -0.1), ExecutionClass.ANOMALOUS),
+        (_execution_row(0.0, 0.5), ExecutionClass.ANOMALOUS),
+        (_execution_row(-1.0, 0.0), ExecutionClass.ANOMALOUS),
+        (_execution_row(float("nan"), 0.0), ExecutionClass.ANOMALOUS),
+        (_execution_row(0.0, float("inf")), ExecutionClass.ANOMALOUS),
+    ],
+)
+def test_classify_execution_applies_condition_one_in_order(
+    row: ExecutionEvidenceRow, expected: ExecutionClass
+) -> None:
+    """Condition 1 classifies each row, anomalous first, then counted, then empty.
+
+    Given: An execution row,
+    When: It is classified,
+    Then: Anomalous values win over identities, a blank id is absent, and the rest is empty.
+    """
+    assert repair.classify_execution(row) is expected
+
+
+def test_canceled_version_is_the_start_of_the_trailing_canceled_run() -> None:
+    """The canceled version is the first of the canceled run that ends the history.
+
+    Given: Versions open, canceled, canceled, and a history whose last version is open,
+    When: The canceled version is taken,
+    Then: It is the first canceled version of the trailing run, or None.
+    """
+    versions = [_version("open", 1), _version("canceled", 2), _version("canceled", 3)]
+    assert repair.canceled_version(versions) is versions[1]
+    assert repair.canceled_version([_version("canceled", 1), _version("open", 2)]) is None
+    only_canceled = [_version("canceled", 1), _version("canceled", 2)]
+    assert repair.canceled_version(only_canceled) is only_canceled[0]
+
+
+@pytest.mark.asyncio
+async def test_record_terminal_end_to_end_matches_the_reconciler(
+    repository: SQLAlchemyRepository, tmp_path: Path
+) -> None:
+    """A voted write records the terminal once, and one cycle advances both commands.
+
+    Given: A Kraken create in accepted, its cancel in dispatched, the order canceled
+        4 s after the cancel, no execution and only order_accepted,
+    When: The plan is voted, written and one reconciliation cycle runs,
+    Then: One terminal like the executor's exists, and the cycle's advances equal the prediction.
+    """
+    pair = await seed_kraken_pair(repository)
+    plan = await _plan(repository, pair.cancel_id)
+    line = plan.lines[0]
+    assert line.decision.action is RepairAction.RECORD_TERMINAL
+    predicted = line.preview["record_terminal"]
+    assert isinstance(predicted, dict)
+    assert predicted["predicted"] == {
+        "target": {"from": "accepted", "to": "cancelled"},
+        "cancel": {
+            "from": "dispatched",
+            "to": "cancelled",
+            "last_error": "target order ended canceled",
+        },
+    }
+    assert predicted["gap_seconds"] == pytest.approx(4.0)
+
+    voted = _vote(tmp_path, plan)
+    written, results = await repair.write_repair(
+        repository, [pair.cancel_id], (voted, plan.digest), (DATABASE, CODE), WRITE_TIME
+    )
+    assert written.digest == plan.digest
+    assert results == [{"cancel_public_id": pair.cancel_id, "result": "recorded"}]
+    terminals = await _terminals(repository, pair.client_order_id)
+    assert len(terminals) == 1
+    terminal = terminals[0]
+    assert (terminal.status, terminal.shard_key, terminal.wallet_public_id) == (
+        "canceled",
+        KRAKEN_SHARD,
+        WALLET,
+    )
+    assert terminal.received_at == CANCELED_AT
+    assert terminal.timestamp == WRITE_TIME
+    assert terminal.sequence_id == 1
+    assert (terminal.fill_size, terminal.cum_fill_size, terminal.command_public_id) == (
+        None,
+        None,
+        None,
+    )
+
+    loop = ReconciliationLoop(
+        exchange_name="kraken",
+        repository=repository,
+        trade_service=MagicMock(spec=TradeService),
+        interval_seconds=60.0,
+    )
+    await loop._reconcile_cycle()
+    assert await _status(repository, pair.create_id) == ("cancelled", None)
+    assert await _status(repository, pair.cancel_id) == (
+        "cancelled",
+        "target order ended canceled",
+    )
+
+    rerun = await _plan(repository, pair.cancel_id)
+    assert rerun.lines[0].decision.action is RepairAction.ALREADY_RECORDED
+
+
+@pytest.mark.asyncio
+async def test_planned_terminal_matches_the_executor_row(repository: SQLAlchemyRepository) -> None:
+    """The planned row has the fields the executor's own builder gives a confirmed cancel.
+
+    Given: A Kraken pair ready for a terminal,
+    When: The planned fields are compared with _venue_event_row for the same inputs,
+    Then: They agree on every field except the write-time ones.
+    """
+    pair = await seed_kraken_pair(repository)
+    plan = await _plan(repository, pair.cancel_id)
+    case = plan.lines[0].decision.kraken
+    assert case is not None
+    planned = repair.terminal_fields(case)
+    executor = MagicMock()
+    executor.wallet_public_id = WALLET
+    executor._tracker = SequenceTracker()
+    built = ExchangeExecutorService._venue_event_row(
+        executor,
+        {
+            "event_type": "order_terminal",
+            "exchange_name": "kraken",
+            "instrument": "XRP-EUR",
+            "exchange_order_id": "OX-1",
+            "client_order_id": pair.client_order_id,
+            "status": "canceled",
+        },
+    )
+    assert built is not None
+    write_time_fields = {"received_at", "timestamp", "session_id", "sequence_id"}
+    built_fields: dict[str, object] = dict(built)
+    planned_fields: dict[str, object] = dict(planned)
+    assert set(planned_fields) | {"timestamp", "session_id", "sequence_id"} == set(built_fields)
+    for key, value in planned_fields.items():
+        if key not in write_time_fields:
+            assert built_fields[key] == value, key
+
+
+@pytest.mark.asyncio
+async def test_fail_cancel_end_to_end(repository: SQLAlchemyRepository, tmp_path: Path) -> None:
+    """A never-submitted Walutomat cancel becomes failed with target_never_submitted.
+
+    Given: A Walutomat create failed by the interlock, with no exchange order id and
+        no submit evidence, and its cancel in dispatched,
+    When: The plan is voted and written,
+    Then: The cancel is failed with target_never_submitted, and a rerun says already_failed.
+    """
+    pair = await seed_walutomat_pair(repository)
+    plan = await _plan(repository, pair.cancel_id)
+    assert plan.lines[0].decision.action is RepairAction.FAIL_CANCEL
+    voted = _vote(tmp_path, plan)
+    _, results = await repair.write_repair(
+        repository, [pair.cancel_id], (voted, plan.digest), (DATABASE, CODE), WRITE_TIME
+    )
+    assert results == [{"cancel_public_id": pair.cancel_id, "result": "failed"}]
+    assert await _status(repository, pair.cancel_id) == ("failed", "target_never_submitted")
+    rerun = await _plan(repository, pair.cancel_id)
+    assert rerun.lines[0].decision.action is RepairAction.ALREADY_FAILED
+
+
+@pytest.mark.asyncio
+async def test_fail_cancel_takes_the_target_terminal_time_when_present(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The failed cancel's terminal time is the target's own when it has one.
+
+    Given: A Walutomat target with terminal_at set,
+    When: The cancel is failed,
+    Then: The compare-and-set receives that terminal time.
+    """
+    pair = await seed_walutomat_pair(repository)
+    async with repository.session() as session:
+        await session.execute(
+            sa.update(TradeCommand)
+            .where(TradeCommand.public_id == pair.create_id)
+            .values(terminal_at=CREATED_AT)
+        )
+        await session.commit()
+    plan = await _plan(repository, pair.cancel_id)
+    with patch.object(
+        repository, "advance_trade_command_lifecycle", AsyncMock(return_value=False)
+    ) as cas:
+        results = await repair.apply_plan(repository, plan, WRITE_TIME)
+    assert cas.call_args.kwargs["terminal_at"] == CREATED_AT
+    assert results == [{"cancel_public_id": pair.cancel_id, "result": "lost_compare_and_set"}]
+
+
+@pytest.mark.asyncio
+async def test_first_failed_time_returns_none_without_a_failed_version() -> None:
+    """Without a failed version there is no fallback terminal time.
+
+    Given: No command versions,
+    When: The first failed time is read,
+    Then: It is None.
+    """
+    assert repair._first_failed_time([]) is None
+
+
+@pytest.mark.asyncio
+async def test_first_failed_time_skips_earlier_versions(repository: SQLAlchemyRepository) -> None:
+    """The fallback terminal time is the first failed version's, after earlier ones.
+
+    Given: A command with a closed dispatched version and a later failed one,
+    When: The first failed time is read from its versions,
+    Then: It is the failed version's timestamp.
+    """
+    public_id = "00000000-0000-7000-8000-0000000000b1"
+    dispatched = command(public_id, command_type="create", status="dispatched", client_order_id="c")
+    dispatched.known_to = CANCEL_AT
+    failed = command(
+        public_id,
+        command_type="create",
+        status="failed",
+        client_order_id="c",
+        created_at=CANCEL_AT,
+    )
+    await add_rows(repository, [dispatched])
+    await add_rows(repository, [failed])
+    versions = await repair.reads.get_trade_command_versions(repository, public_id)
+    assert repair._first_failed_time(versions) == CANCEL_AT
+
+
+@pytest.mark.asyncio
+async def test_missing_and_foreign_cancels_refuse(repository: SQLAlchemyRepository) -> None:
+    """Stage A refuses a missing cancel and a command that is not a cancel.
+
+    Given: An unknown public id and a create command,
+    When: Each is evaluated,
+    Then: They refuse as cancel_missing and not_a_cancel.
+    """
+    pair = await seed_kraken_pair(repository)
+    plan = await _plan(repository, "00000000-0000-7000-8000-0000000000ff", pair.create_id)
+    assert [line.decision.reason for line in plan.lines] == ["cancel_missing", "not_a_cancel"]
+
+
+@pytest.mark.asyncio
+async def test_missing_and_ambiguous_targets_refuse(repository: SQLAlchemyRepository) -> None:
+    """Stage B refuses a cancel without a target, and one with two active targets.
+
+    Given: A cancel whose client order id has no create, and one with two creates,
+    When: Each is evaluated,
+    Then: They refuse as target_missing and target_ambiguous.
+    """
+    lonely = command(
+        "00000000-0000-7000-8000-0000000000e1",
+        command_type="cancel",
+        status="dispatched",
+        client_order_id="cid-none",
+    )
+    pair = await seed_kraken_pair(repository)
+    twin = command(
+        "00000000-0000-7000-8000-0000000000e2",
+        command_type="submit",
+        status="accepted",
+        client_order_id=pair.client_order_id,
+    )
+    await add_rows(repository, [lonely, twin])
+    plan = await _plan(repository, lonely.public_id, pair.cancel_id)
+    assert [line.decision.reason for line in plan.lines] == ["target_missing", "target_ambiguous"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("filled", (RepairAction.REFUSE, "terminal_exists_filled")),
+        (None, (RepairAction.REFUSE, "terminal_exists_none")),
+        ("CANCELLED", (RepairAction.ALREADY_RECORDED, None)),
+    ],
+)
+async def test_existing_terminals_decide_before_the_branch(
+    repository: SQLAlchemyRepository,
+    status: str | None,
+    expected: tuple[RepairAction, str | None],
+) -> None:
+    """Stage C refuses a non-cancel terminal and reports a cancel terminal as recorded.
+
+    Given: A Kraken pair with an existing order_terminal of the given status,
+    When: The cancel is evaluated,
+    Then: The decision follows the terminal, case-insensitively.
+    """
+    pair = await seed_kraken_pair(repository)
+    await add_rows(
+        repository,
+        [venue_event(pair.client_order_id, event_type="order_terminal", status=status)],
+    )
+    decision = await _decision(repository, pair.cancel_id)
+    assert (decision.action, decision.reason) == expected
+
+
+@pytest.mark.asyncio
+async def test_a_non_cancel_terminal_wins_over_a_cancel_terminal(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A filled terminal refuses even when a canceled one exists as well.
+
+    Given: Both a canceled and a filled order_terminal for the order,
+    When: The cancel is evaluated,
+    Then: It refuses as terminal_exists_filled.
+    """
+    pair = await seed_kraken_pair(repository)
+    await add_rows(
+        repository,
+        [
+            venue_event(pair.client_order_id, event_type="order_terminal", status="canceled"),
+            venue_event(pair.client_order_id, event_type="order_terminal", status="filled"),
+        ],
+    )
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "terminal_exists_filled"
+
+
+async def _set_command(
+    repository: SQLAlchemyRepository, public_id: str, **values: str | int | None
+) -> None:
+    """Update one seeded command's columns in place."""
+    async with repository.session() as session:
+        await session.execute(
+            sa.update(TradeCommand).where(TradeCommand.public_id == public_id).values(**values)
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("values", "reason"),
+    [
+        ({"status": "cancelled"}, "cancel_not_retirable"),
+        ({"status": "failed", "last_error": "other"}, "cancel_not_retirable"),
+    ],
+)
+async def test_cancel_states_that_g2_would_not_retire_refuse(
+    repository: SQLAlchemyRepository, values: dict[str, str | int | None], reason: str
+) -> None:
+    """Stage E refuses a cancel outside G2's source statuses.
+
+    Given: A cancel already cancelled, or failed for another reason,
+    When: It is evaluated,
+    Then: It refuses as cancel_not_retirable.
+    """
+    pair = await seed_kraken_pair(repository)
+    await _set_command(repository, pair.cancel_id, **values)
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == reason
+
+
+@pytest.mark.asyncio
+async def test_an_unsupported_exchange_refuses(repository: SQLAlchemyRepository) -> None:
+    """Stage F refuses a target on another exchange.
+
+    Given: A pair whose commands are on kraken_futures,
+    When: The cancel is evaluated,
+    Then: It refuses as unsupported_exchange.
+    """
+    pair = await seed_kraken_pair(repository)
+    await _set_command(repository, pair.create_id, exchange="kraken_futures")
+    await _set_command(repository, pair.cancel_id, exchange="kraken_futures")
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "unsupported_exchange"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("values", "reason"),
+    [
+        ({"mode": "paper"}, "not_kraken_spot"),
+        ({"leverage": 2}, "not_kraken_spot"),
+        ({"status": "created"}, "target_not_foldable"),
+        ({"wallet_public_id": OTHER_WALLET}, "order_missing"),
+    ],
+)
+async def test_kraken_target_checks_refuse(
+    repository: SQLAlchemyRepository, values: dict[str, str | int | None], reason: str
+) -> None:
+    """Stage H refuses a target that is not live spot, not foldable, or without its order.
+
+    Given: A Kraken target changed as stated,
+    When: The cancel is evaluated,
+    Then: It refuses with the stated reason.
+    """
+    pair = await seed_kraken_pair(repository)
+    await _set_command(repository, pair.create_id, **values)
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == reason
+
+
+async def _set_orders(repository: SQLAlchemyRepository, public_id: str, **values: object) -> None:
+    """Update every version of one seeded order in place."""
+    async with repository.session() as session:
+        await session.execute(sa.update(Order).where(Order.public_id == public_id).values(**values))
+        await session.commit()
+
+
+async def _active_order_status(
+    repository: SQLAlchemyRepository, public_id: str, status: str
+) -> None:
+    """Set the status of one seeded order's active version."""
+    async with repository.session() as session:
+        await session.execute(
+            sa.update(Order)
+            .where(Order.public_id == public_id, Order.known_to == KNOWN_TO_MAX)
+            .values(status=status)
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_two_orders_for_one_target_refuse(repository: SQLAlchemyRepository) -> None:
+    """Stage H refuses when the target's client order id names two orders.
+
+    Given: A second order with the same client order id, wallet and mode,
+    When: The cancel is evaluated,
+    Then: It refuses as order_ambiguous.
+    """
+    pair = await seed_kraken_pair(repository)
+    second = order_version(
+        "00000000-0000-7000-8000-0000000000d2",
+        status="canceled",
+        client_order_id=pair.client_order_id,
+        timestamp=CANCELED_AT,
+    )
+    second.instrument_public_id = "00000000-0000-7000-8000-0000000000c2"
+    await add_rows(repository, [second])
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "order_ambiguous"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("leverage", "not_kraken_spot"),
+        ("not_canceled", "order_not_canceled"),
+        ("same_time", "canceled_not_after_cancel"),
+        ("closed_last", "order_versions_inconsistent"),
+    ],
+)
+async def test_order_history_checks_refuse(
+    repository: SQLAlchemyRepository, change: str, reason: str
+) -> None:
+    """Stage H refuses margin orders, inconsistent histories and late or missing cancels.
+
+    Given: The seeded order changed as stated,
+    When: The cancel is evaluated,
+    Then: It refuses with the stated reason; an equal time refuses because G2 is strict.
+    """
+    pair = await seed_kraken_pair(repository)
+    if change == "leverage":
+        await _set_orders(repository, pair.order_id, leverage=2)
+    elif change == "not_canceled":
+        await _active_order_status(repository, pair.order_id, "open")
+    elif change == "same_time":
+        async with repository.session() as session:
+            await session.execute(
+                sa.update(TradeCommand)
+                .where(TradeCommand.public_id == pair.cancel_id)
+                .values(created_at=CANCELED_AT)
+            )
+            await session.commit()
+    else:
+        await add_rows(
+            repository,
+            [
+                order_version(
+                    pair.order_id,
+                    status="canceled",
+                    client_order_id=pair.client_order_id,
+                    timestamp=CANCELED_AT + timedelta(seconds=1),
+                    known_to=CANCELED_AT + timedelta(seconds=2),
+                )
+            ],
+        )
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("shape", "reason"),
+    [
+        ((1.0, 0.0, None, None), "has_execution"),
+        ((0.0, 0.0, "E-1", None), "has_execution"),
+        ((0.0, 0.0, None, "T-1"), "has_execution"),
+        ((0.0, 0.5, None, None), "anomalous_execution"),
+    ],
+)
+async def test_executions_refuse_under_condition_one(
+    repository: SQLAlchemyRepository,
+    shape: tuple[float, float, str | None, str | None],
+    reason: str,
+) -> None:
+    """Condition 1 refuses a counted or anomalous execution.
+
+    Given: One execution of the stated size, fee, exec id and trade id,
+    When: The cancel is evaluated,
+    Then: It refuses with the stated reason.
+    """
+    size, fee, exec_id, trade_id = shape
+    pair = await seed_kraken_pair(repository)
+    await add_rows(
+        repository,
+        [execution(pair.order_id, size=size, fee=fee, exec_id=exec_id, trade_id=trade_id)],
+    )
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == reason
+
+
+@pytest.mark.asyncio
+async def test_an_empty_execution_is_listed_and_does_not_refuse(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A zero-size row with no id, like row 5, is listed as empty and does not refuse.
+
+    Given: One execution of size 0, fee 0 and no ids,
+    When: The cancel is evaluated,
+    Then: The line records the terminal, and its preview lists the row as empty.
+    """
+    pair = await seed_kraken_pair(repository)
+    await add_rows(repository, [execution(pair.order_id)])
+    plan = await _plan(repository, pair.cancel_id)
+    assert plan.lines[0].decision.action is RepairAction.RECORD_TERMINAL
+    executions = plan.lines[0].preview["executions"]
+    assert isinstance(executions, list) and isinstance(executions[0], dict)
+    assert executions[0]["class"] == "empty"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change", ["no_wallet", "no_exchange_order_id", "bad_shard", "other_shard", "order_mode"]
+)
+async def test_lineage_checks_refuse(repository: SQLAlchemyRepository, change: str) -> None:
+    """Stage H refuses when the wallet, the venue id or the shard key cannot be reproduced.
+
+    Given: The seeded lineage changed as stated,
+    When: The cancel is evaluated,
+    Then: It refuses as lineage_mismatch.
+    """
+    pair = await seed_kraken_pair(repository)
+    if change == "no_wallet":
+        await _set_command(repository, pair.create_id, wallet_public_id="")
+        await _set_orders(repository, pair.order_id, wallet_public_id="")
+    elif change == "no_exchange_order_id":
+        await _set_orders(repository, pair.order_id, exchange_order_id="  ")
+    elif change == "bad_shard":
+        await _set_command(repository, pair.create_id, shard_key="kraken")
+    elif change == "other_shard":
+        await _set_command(repository, pair.create_id, shard_key="kraken.XRP-EUR.live")
+    else:
+        await _active_order_status(repository, pair.order_id, "canceled")
+        async with repository.session() as session:
+            await session.execute(
+                sa.update(Order)
+                .where(Order.public_id == pair.order_id, Order.known_to != KNOWN_TO_MAX)
+                .values(mode="paper")
+            )
+            await session.commit()
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "lineage_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command_type", ["create", "submit", "replace"])
+async def test_another_open_command_on_the_shard_refuses(
+    repository: SQLAlchemyRepository, command_type: str
+) -> None:
+    """Stage H refuses when the shard holds another open command of any open type.
+
+    Given: Another active, non-terminal command of the stated type on the shard,
+    When: The cancel is evaluated,
+    Then: It refuses as shard_has_other_open_command.
+    """
+    pair = await seed_kraken_pair(repository)
+    await add_rows(
+        repository,
+        [
+            command(
+                "00000000-0000-7000-8000-0000000000f1",
+                command_type=command_type,
+                status="accepted",
+                client_order_id="cid-newer",
+            )
+        ],
+    )
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "shard_has_other_open_command"
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_holding_another_command_refuses(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Stage H refuses when the shard checkpoint holds another open command.
+
+    Given: A checkpoint whose open command ids name another command,
+    When: The cancel is evaluated,
+    Then: It refuses as shard_checkpoint_open_command.
+    """
+    pair = await seed_kraken_pair(repository)
+    await add_rows(repository, [checkpoint(open_command_ids=json.dumps(["other-command"]))])
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "shard_checkpoint_open_command"
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_holding_only_the_target_passes(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A checkpoint that holds only the target does not refuse.
+
+    Given: A checkpoint whose open command ids are the target alone,
+    When: The cancel is evaluated,
+    Then: The line records the terminal.
+    """
+    pair = await seed_kraken_pair(repository)
+    await add_rows(repository, [checkpoint(open_command_ids=json.dumps([pair.create_id]))])
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.action is RepairAction.RECORD_TERMINAL
+
+
+@pytest.mark.asyncio
+async def test_a_second_wallet_on_the_shard_refuses(repository: SQLAlchemyRepository) -> None:
+    """Stage H refuses when the shard names a wallet other than the target's.
+
+    Given: A venue event on the shard from another wallet,
+    When: The cancel is evaluated,
+    Then: It refuses as shard_wallet_mismatch.
+    """
+    pair = await seed_kraken_pair(repository)
+    await add_rows(
+        repository,
+        [venue_event("cid-other", event_type="order_accepted", wallet_public_id=OTHER_WALLET)],
+    )
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "shard_wallet_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("not_interlock", "target_not_interlock_blocked"),
+        ("exchange_order_id", "target_has_exchange_order_id"),
+        ("accepted_event", "target_has_submit_evidence"),
+    ],
+)
+async def test_walutomat_checks_refuse(
+    repository: SQLAlchemyRepository, change: str, reason: str
+) -> None:
+    """Stage G refuses unless the local records prove the target was never submitted.
+
+    Given: The Walutomat pair changed as stated,
+    When: The cancel is evaluated,
+    Then: It refuses with the stated reason.
+    """
+    pair = await seed_walutomat_pair(repository)
+    if change == "not_interlock":
+        await _set_command(repository, pair.create_id, last_error="circuit_breaker_open")
+    elif change == "exchange_order_id":
+        walutomat_order = order_version(
+            pair.order_id,
+            status="canceled",
+            client_order_id=pair.client_order_id,
+            timestamp=CANCELED_AT,
+        )
+        walutomat_order.exchange_order_id = "W-1"
+        await add_rows(repository, [walutomat_order])
+    else:
+        await add_rows(
+            repository,
+            [venue_event(pair.client_order_id, event_type="order_accepted", status="open")],
+        )
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == reason
+
+
+@pytest.mark.asyncio
+async def test_a_stale_vote_and_a_changed_state_refuse(
+    repository: SQLAlchemyRepository, tmp_path: Path
+) -> None:
+    """A write refuses on a digest mismatch, and on a state that moved since the vote.
+
+    Given: A voted plan,
+    When: The write is given another digest, or a terminal appears before it,
+    Then: Both refuse and nothing is written.
+    """
+    pair = await seed_kraken_pair(repository)
+    plan = await _plan(repository, pair.cancel_id)
+    voted = _vote(tmp_path, plan)
+    with pytest.raises(CancelTargetRepairRefusedError, match="does not match"):
+        await repair.write_repair(
+            repository, [pair.cancel_id], (voted, "0" * 64), (DATABASE, CODE), WRITE_TIME
+        )
+    await add_rows(
+        repository,
+        [venue_event(pair.client_order_id, event_type="order_terminal", status="filled")],
+    )
+    with pytest.raises(CancelTargetRepairRefusedError, match="differs from the vote"):
+        await repair.write_repair(
+            repository, [pair.cancel_id], (voted, plan.digest), (DATABASE, CODE), WRITE_TIME
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_plan_with_a_refused_line_does_not_write(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A plan holding a refusal is refused whole.
+
+    Given: A plan of one valid cancel and one unknown cancel,
+    When: It is applied,
+    Then: The write refuses before anything is written.
+    """
+    pair = await seed_kraken_pair(repository)
+    plan = await _plan(repository, pair.cancel_id, "00000000-0000-7000-8000-0000000000ff")
+    with pytest.raises(CancelTargetRepairRefusedError, match="refused line"):
+        await repair.apply_plan(repository, plan, WRITE_TIME)
+    assert await _terminals(repository, pair.client_order_id) == []
+
+
+@pytest.mark.asyncio
+async def test_a_change_before_the_insert_skips_the_line(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The recheck before each insert skips a line whose shard changed.
+
+    Given: A planned record_terminal line, then a newer open command on the shard,
+    When: The stale plan is applied,
+    Then: The line reports changed_before_write and no terminal is written.
+    """
+    pair = await seed_kraken_pair(repository)
+    plan = await _plan(repository, pair.cancel_id)
+    await add_rows(
+        repository,
+        [
+            command(
+                "00000000-0000-7000-8000-0000000000f2",
+                command_type="create",
+                status="accepted",
+                client_order_id="cid-newer",
+            )
+        ],
+    )
+    results = await repair.apply_plan(repository, plan, WRITE_TIME)
+    assert results == [{"cancel_public_id": pair.cancel_id, "result": "changed_before_write"}]
+    assert await _terminals(repository, pair.client_order_id) == []
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_recorded_concurrently_counts_as_already_recorded(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """An insert that finds a terminal already recorded is reported as such.
+
+    Given: A planned line whose record-once insert returns False,
+    When: The plan is applied,
+    Then: The line reports already_recorded.
+    """
+    pair = await seed_kraken_pair(repository)
+    plan = await _plan(repository, pair.cancel_id)
+    with patch.object(repository, "insert_order_terminal_once", AsyncMock(return_value=False)):
+        results = await repair.apply_plan(repository, plan, WRITE_TIME)
+    assert results == [{"cancel_public_id": pair.cancel_id, "result": "already_recorded"}]
+
+
+@pytest.mark.asyncio
+async def test_already_done_lines_write_nothing(repository: SQLAlchemyRepository) -> None:
+    """Lines already recorded or failed apply as nothing to write.
+
+    Given: A pair whose terminal already exists,
+    When: Its plan is applied,
+    Then: The line reports nothing_to_write.
+    """
+    pair = await seed_kraken_pair(repository)
+    await add_rows(
+        repository,
+        [venue_event(pair.client_order_id, event_type="order_terminal", status="canceled")],
+    )
+    plan = await _plan(repository, pair.cancel_id)
+    results = await repair.apply_plan(repository, plan, WRITE_TIME)
+    assert results == [{"cancel_public_id": pair.cancel_id, "result": "nothing_to_write"}]
+
+
+def test_refuse_duplicates_refuses_empty_and_repeated_lists() -> None:
+    """The cancel list must be non-empty and free of repeats.
+
+    Given: An empty list and a repeated id,
+    When: They are checked,
+    Then: Both refuse.
+    """
+    with pytest.raises(CancelTargetRepairRefusedError, match="no --cancel"):
+        repair.refuse_duplicates([])
+    with pytest.raises(CancelTargetRepairRefusedError, match="twice"):
+        repair.refuse_duplicates(["a", "a"])
+
+
+def test_voted_digest_refuses_an_unreadable_vote(tmp_path: Path) -> None:
+    """A voted directory without its files cannot be matched.
+
+    Given: An empty directory,
+    When: Its digest is read,
+    Then: The run refuses with the error class only.
+    """
+    with pytest.raises(CancelTargetRepairRefusedError, match="FileNotFoundError"):
+        repair.voted_digest(tmp_path)
+
+
+def test_code_revision_hashes_every_deciding_module() -> None:
+    """The code revision hashes the repair, its reads and every module it relies on.
+
+    Given: No extra module,
+    When: The code revision is taken,
+    Then: It names the repair, its reads, the repository and the reconciler.
+    """
+    revision = repair.code_revision([])
+    for name in (
+        "snapper/application/trade/cancel_target_repair.py",
+        "snapper/data/cancel_target_repair_reads.py",
+        "snapper/data/repository.py",
+        "snapper/application/trade/reconciler.py",
+    ):
+        assert isinstance(revision[name], str) and len(revision[name]) == 64
+
+
+def test_checkpoint_ids_without_a_checkpoint_are_empty() -> None:
+    """A shard without a checkpoint holds no open command id.
+
+    Given: No checkpoint,
+    When: Its open command ids are read,
+    Then: The list is empty.
+    """
+    assert repair.checkpoint_open_command_ids(None) == []
