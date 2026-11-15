@@ -594,6 +594,17 @@ apply_fill LRU). At one fill per second this covers ~3 hours of
 lookback — far beyond any venue replay window — while capping memory.
 """
 
+_ORPHAN_MAX_FRAMES_PER_ORDER = 256
+"""Most execution frames buffered for one venue order id before its ack.
+
+An order that walks the book can fill in many trades before the venue
+acknowledges the submit, and every one of them must be booked, so the
+orphan buffer keeps a list per order. The 5 s TTL bounds it in time; this
+cap bounds one order's list in count. At the cap the oldest frame is
+dropped, counted and logged: a later cumulative frame still carries its
+quantity, and a last-quantity-only frame is left to reconciliation.
+"""
+
 
 _STOP_TYPED_EXCHANGE_ORDER_TYPES = frozenset(
     {ExchangeOrderTypeEnum.STOP_LOSS, ExchangeOrderTypeEnum.STOP_LOSS_LIMIT}
@@ -810,8 +821,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.pending_orders: dict[str, PendingOrderState] = {}
         self._native_inventory_parked: dict[str, FuturesInventoryRecoveryObservation] = {}
         self.client_by_exchange: dict[str, str] = {}
-        self.orphaned_executions: dict[str, tuple[ExecutionUpdate, float]] = {}
+        self.orphaned_executions: dict[str, list[tuple[ExecutionUpdate, float]]] = {}
         self.orphan_ttl_seconds: float = 5.0
+        self.orphan_max_frames_per_order: int = _ORPHAN_MAX_FRAMES_PER_ORDER
         self.orphan_drop_count: int = 0
         self._unhealed_accept_events: dict[str, RecordVenueEventParams] = {}
         self._unrecorded_order_terminals: dict[str, RecordVenueEventParams] = {}
@@ -7186,6 +7198,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     def _cleanup_expired_orphans(self) -> None:
         """Remove orphaned executions that exceeded TTL.
 
+        Each buffered frame expires on its own arrival time, so a fresh
+        frame for an order outlives an older one; every dropped frame is
+        counted in ``orphan_drop_count``.
+
         Called from two sites:
 
         - The scheduled 60s cleanup task — handles steady-state cases
@@ -7198,18 +7214,20 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
           let ``orphaned_executions`` grow unbounded.
         """
         now = time.monotonic()
-        expired_keys = [
-            key
-            for key, (_, timestamp) in self.orphaned_executions.items()
-            if now - timestamp > self.orphan_ttl_seconds
-        ]
-        for key in expired_keys:
-            self.orphaned_executions.pop(key, None)
-            self.orphan_drop_count += 1
-        if expired_keys:
+        dropped = 0
+        for key in list(self.orphaned_executions):
+            frames = self.orphaned_executions[key]
+            fresh = [entry for entry in frames if now - entry[1] <= self.orphan_ttl_seconds]
+            dropped += len(frames) - len(fresh)
+            if fresh:
+                self.orphaned_executions[key] = fresh
+            else:
+                del self.orphaned_executions[key]
+        self.orphan_drop_count += dropped
+        if dropped:
             exchange_name = self._get_exchange_name()
             logger.info(
-                f"[{exchange_name}] Dropped {len(expired_keys)} orphaned executions after TTL "
+                f"[{exchange_name}] Dropped {dropped} orphaned executions after TTL "
                 f"(total drops: {self.orphan_drop_count})"
             )
 
@@ -7227,35 +7245,131 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Args:
             exchange_order_id: Exchange-assigned order ID to flush.
         """
-        orphan = self.orphaned_executions.pop(exchange_order_id, None)
-        if orphan is not None:
-            execution, _ = orphan
+        orphans = self.orphaned_executions.pop(exchange_order_id, None)
+        if orphans:
             exchange_name = self._get_exchange_name()
             logger.info(
                 f"[{exchange_name}] Processing buffered orphan execution inline "
-                f"for {exchange_order_id} before REST reconciliation"
+                f"for {exchange_order_id} before REST reconciliation ({len(orphans)} frames)"
             )
-            await self._process_execution(execution)
+            await self._drain_orphans(exchange_order_id, orphans)
 
     def _try_process_orphaned(self, exchange_order_id: str, client_order_id: str) -> None:
         """Try to process any orphaned execution for a newly mapped order.
 
         Called after ACK when client_by_exchange mapping is established.
+        The order's whole buffered list moves to one background task, so
+        only one drain can ever own it.
 
         Args:
             exchange_order_id: Exchange-assigned order ID.
             client_order_id: Client-assigned order ID.
         """
-        orphan = self.orphaned_executions.pop(exchange_order_id, None)
-        if orphan is not None:
-            execution, _ = orphan
+        orphans = self.orphaned_executions.pop(exchange_order_id, None)
+        if orphans:
             exchange_name = self._get_exchange_name()
             logger.info(
-                f"[{exchange_name}] Processing buffered orphan execution for {exchange_order_id}"
+                f"[{exchange_name}] Processing buffered orphan execution for {exchange_order_id} "
+                f"({len(orphans)} frames)"
             )
-            task = asyncio.create_task(self._process_execution(execution))
+            task = asyncio.create_task(self._drain_orphans(exchange_order_id, orphans))
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
+
+    async def _drain_orphans(
+        self, exchange_order_id: str, orphans: list[tuple[ExecutionUpdate, float]]
+    ) -> None:
+        """Book an order's buffered executions in arrival order, as one section.
+
+        The frames run one after another under the order's ``fill_lock``,
+        held across the whole list, so a live frame that arrives during
+        the drain waits until every buffered frame is booked. Each frame's
+        delta is then taken against the committed cumulative that the
+        frame before it left, and a frame whose cumulative is not above it
+        books nothing, as on the live path. If the order is no longer
+        tracked, each frame takes the normal path, which buffers or drops
+        it again.
+
+        Args:
+            exchange_order_id: Exchange-assigned order ID the frames belong to.
+            orphans: The order's buffered frames, oldest first.
+        """
+        exchange_name = self._get_exchange_name()
+        client_order_id = self.client_by_exchange.get(exchange_order_id)
+        holder = self.pending_orders.get(client_order_id) if client_order_id is not None else None
+        if holder is None:
+            for execution, _ in orphans:
+                await self._process_execution(execution)
+            return
+        async with holder.fill_lock:
+            for execution, _ in orphans:
+                await self._apply_buffered_execution(execution, holder, exchange_name)
+
+    async def _apply_buffered_execution(
+        self,
+        execution: ExecutionUpdate,
+        holder: PendingOrderState,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Apply one buffered frame while the drain holds ``holder.fill_lock``.
+
+        A frame that no longer correlates to ``holder``, because an earlier
+        frame in the same drain ended the order, is not booked under this
+        lock. A failure is logged and the drain moves on to the next frame,
+        as :meth:`_process_execution` does for a single frame.
+
+        Args:
+            execution: One buffered execution frame.
+            holder: The tracked entry whose ``fill_lock`` the drain holds.
+            exchange_name: Exchange name for logs.
+        """
+        try:
+            resolved = self._resolve_execution_order(execution, exchange_name)
+            if resolved is None:
+                return
+            exchange_order_id, client_order_id, original_order = resolved
+            if self.pending_orders.get(client_order_id) is not holder:
+                return
+            await self._apply_correlated_execution(
+                execution, exchange_order_id, client_order_id, original_order, exchange_name
+            )
+        except Exception as e:
+            logger.error(f"[{exchange_name}] Error processing buffered execution: {e}")
+
+    def _buffer_orphan(
+        self, exchange_order_id: str, execution: ExecutionUpdate, exchange_name: OrderExchange
+    ) -> None:
+        """Append one not-yet-correlated frame to its order's orphan list.
+
+        Frames keep their arrival order, and each carries its own arrival
+        time for the TTL. The first frame of an order is logged. Past
+        ``orphan_max_frames_per_order`` the oldest frame is dropped,
+        counted and logged, so one order cannot grow the buffer without
+        bound inside the TTL window.
+
+        Args:
+            exchange_order_id: Exchange-assigned order ID of the frame.
+            execution: The frame that arrived before the order's ack.
+            exchange_name: Exchange name for logs.
+        """
+        self._cleanup_expired_orphans()
+        frames = self.orphaned_executions.get(exchange_order_id)
+        if frames is None:
+            frames = []
+            self.orphaned_executions[exchange_order_id] = frames
+            logger.info(
+                f"[{exchange_name}] Buffered orphan execution for {exchange_order_id} "
+                f"(status={execution.exec_type}, awaiting ACK or TTL expiry)"
+            )
+        elif len(frames) >= self.orphan_max_frames_per_order:
+            frames.pop(0)
+            self.orphan_drop_count += 1
+            logger.warning(
+                f"[{exchange_name}] Orphan buffer for {exchange_order_id} reached "
+                f"{self.orphan_max_frames_per_order} frames; dropped the oldest "
+                f"(total drops: {self.orphan_drop_count})"
+            )
+        frames.append((execution, time.monotonic()))
 
     def _resolve_execution_order(
         self, execution: ExecutionUpdate, exchange_name: OrderExchange
@@ -7278,14 +7392,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return None
         client_order_id = self.client_by_exchange.get(exchange_order_id)
         if client_order_id is None:
-            self._cleanup_expired_orphans()
-            already_buffered = exchange_order_id in self.orphaned_executions
-            self.orphaned_executions[exchange_order_id] = (execution, time.monotonic())
-            if not already_buffered:
-                logger.info(
-                    f"[{exchange_name}] Buffered orphan execution for {exchange_order_id} "
-                    f"(status={execution.exec_type}, awaiting ACK or TTL expiry)"
-                )
+            self._buffer_orphan(exchange_order_id, execution, exchange_name)
             return None
         pending = self.pending_orders.get(client_order_id)
         if pending is None:
@@ -7763,17 +7870,42 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if holder is None:
                 return
             async with holder.fill_lock:
-                if await self._handle_cancellation(
-                    execution, exchange_order_id, client_order_id, exchange_name
-                ):
-                    return
-                if await self._handle_lifecycle_ack(execution, client_order_id, exchange_name):
-                    return
-                await self._book_correlated_fill(
+                await self._apply_correlated_execution(
                     execution, exchange_order_id, client_order_id, original_order, exchange_name
                 )
         except Exception as e:
             logger.error(f"[{exchange_name}] Error processing execution: {e}")
+
+    async def _apply_correlated_execution(
+        self,
+        execution: ExecutionUpdate,
+        exchange_order_id: str,
+        client_order_id: str,
+        original_order: OrderRequestData,
+        exchange_name: OrderExchange,
+    ) -> None:
+        """Handle one correlated frame: cancellation, lifecycle ack or fill.
+
+        The caller holds the order's ``fill_lock``: the live path takes it
+        per frame in :meth:`_process_execution`, and an orphan drain holds
+        it across the whole buffered list in :meth:`_drain_orphans`.
+
+        Args:
+            execution: Execution update from the exchange.
+            exchange_order_id: Exchange-assigned order ID.
+            client_order_id: Client-assigned order ID.
+            original_order: The tracked order request.
+            exchange_name: Exchange name for logs.
+        """
+        if await self._handle_cancellation(
+            execution, exchange_order_id, client_order_id, exchange_name
+        ):
+            return
+        if await self._handle_lifecycle_ack(execution, client_order_id, exchange_name):
+            return
+        await self._book_correlated_fill(
+            execution, exchange_order_id, client_order_id, original_order, exchange_name
+        )
 
     async def _book_correlated_fill(
         self,
