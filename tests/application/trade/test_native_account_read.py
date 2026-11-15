@@ -78,6 +78,7 @@ from snapper.infrastructure.exchanges.kraken_futures_account_receipts import (
 )
 from snapper.infrastructure.exchanges.kraken_rest_egress import futures_sdk_proxy_target
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from tests.helpers.native_liveness import LIVENESS_TIMEOUT_S
 
 _WIRE = (
     b'{"result":"success","serverTime":"2026-10-23T13:00:00Z","accounts":'
@@ -90,18 +91,6 @@ _KEY_PATH = "/api/auth/v1/api-keys/v3/check"
 def _id(number: int) -> str:
     """Separate fixture wallet, credential and producer session identities."""
     return f"00000000-0000-7000-8000-{number:012d}"
-
-
-_LIVENESS_TIMEOUT_S = 10.0
-"""Upper bound for a blocked actual HTTP worker to enter, or to be released.
-
-Both waits only guard liveness: the worker enters after the real key request and
-its committed identity proof, and the test releases it right after cancelling.
-The former two- and four-second bounds made a slow CI runner fail before the
-worker entered. A wait returns as soon as its event is set, so a longer bound
-costs nothing when the run is healthy, and staying under the per-test timeout
-keeps a genuine hang a clear assertion failure.
-"""
 
 
 class _Adapter(BaseAdapter):
@@ -138,7 +127,7 @@ class _Adapter(BaseAdapter):
         is_key = (request.url or "").endswith(_KEY_PATH)
         if is_key != self.block_accounts:
             self.entered.set()
-            if self.block and not self.release.wait(_LIVENESS_TIMEOUT_S):
+            if self.block and not self.release.wait(LIVENESS_TIMEOUT_S):
                 raise TimeoutError("Isolated transport release was not delivered")
         if self.fail or (self.fail_accounts and not is_key):
             raise RequestsConnectionError("Isolated transport failure")
@@ -560,7 +549,7 @@ async def test_cancelled_actual_worker_cannot_later_reauthorize_its_discarded_re
         )
     )
     entry = asyncio.create_task(
-        asyncio.to_thread(scenario.adapter.entered.wait, _LIVENESS_TIMEOUT_S)
+        asyncio.to_thread(scenario.adapter.entered.wait, LIVENESS_TIMEOUT_S)
     )
     try:
         await _wait_for_blocked_entry(task, entry)

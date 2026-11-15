@@ -29,6 +29,7 @@ from snapper.infrastructure.exchanges.prepared_private_key import PreparedKeyTok
 from snapper.infrastructure.exchanges.prepared_private_key import PreparedKeyTokenError
 from tests.helpers.native_account_authority import NativeAuthorityScenario
 from tests.helpers.native_account_authority import native_authority_scenario
+from tests.helpers.native_liveness import LIVENESS_TIMEOUT_S
 
 
 @dataclass
@@ -45,7 +46,7 @@ class _ReadGate:
     def wait(self) -> None:
         """Hold real SDK source processing until the test explicitly releases its owned worker."""
         self.entered.set()
-        if not self.release.wait(5):
+        if not self.release.wait(LIVENESS_TIMEOUT_S):
             raise TimeoutError("Synthetic local source release was not delivered")
         if self.fail_after_release:
             raise RequestsConnectionError("Synthetic late local source failure")
@@ -165,7 +166,7 @@ async def test_cancelled_actual_source_joins_before_failure_or_owner_release(
             producer.read_native_futures_accounts(source.repository, source.client, source.tracker)
         )
         try:
-            assert await asyncio.to_thread(gate.entered.wait, 2)
+            assert await asyncio.to_thread(gate.entered.wait, LIVENESS_TIMEOUT_S)
             task.cancel("synthetic-first-cancellation")
             await asyncio.sleep(0)
             for _ in range(3 if repeated else 0):
@@ -217,7 +218,7 @@ async def test_uncancelled_actual_source_keeps_one_shot_success(
             producer.read_native_futures_accounts(source.repository, source.client, source.tracker)
         )
         try:
-            assert await asyncio.to_thread(gate.entered.wait, 2)
+            assert await asyncio.to_thread(gate.entered.wait, LIVENESS_TIMEOUT_S)
             gate.release.set()
             outcome = await task
             assert outcome.payload.result.kind == "captured"
@@ -267,12 +268,12 @@ async def test_cancelled_queued_source_joins_without_http_or_token_issuance(
         _install_gate(source, gate, monkeypatch)
         pool = _ObservedExecutor()
         source.client._rest_pool = pool
-        occupied = pool.submit(gate.release.wait, 5)
+        occupied = pool.submit(gate.release.wait, LIVENESS_TIMEOUT_S)
         task = asyncio.create_task(
             producer.read_native_futures_accounts(source.repository, source.client, source.tracker)
         )
         try:
-            assert await asyncio.to_thread(pool.queued.wait, 2)
+            assert await asyncio.to_thread(pool.queued.wait, LIVENESS_TIMEOUT_S)
             task.cancel("synthetic-queued-cancellation")
             await asyncio.sleep(0)
             assert not task.done()
@@ -305,7 +306,7 @@ class _EnqueueThenRaiseExecutor(ThreadPoolExecutor):
         result = super().submit(fn, *args, **kwargs)
         self.submissions += 1
         if self.submissions == self.fail_submission:
-            if self.wait_for_start and not self.gate.entered.wait(2):
+            if self.wait_for_start and not self.gate.entered.wait(LIVENESS_TIMEOUT_S):
                 raise RuntimeError("Synthetic source did not reach its controlled actual HTTP wait")
             raise RuntimeError("Synthetic thread creation acknowledgement failure after enqueue")
         return result
@@ -339,7 +340,7 @@ async def test_enqueue_then_raise_joins_running_source_and_disposes_its_actual_t
             producer.read_native_futures_accounts(source.repository, source.client, source.tracker)
         )
         try:
-            assert await asyncio.to_thread(gate.entered.wait, 2)
+            assert await asyncio.to_thread(gate.entered.wait, LIVENESS_TIMEOUT_S)
             await asyncio.sleep(0)
             assert not task.done()
             assert not gate.failure_started.is_set()
@@ -388,7 +389,7 @@ async def test_enqueue_then_raise_prevents_late_queued_http_after_failure(
         _install_gate(source, gate, monkeypatch)
         pool = _EnqueueThenRaiseExecutor(gate, 2, False)
         source.client._rest_pool = pool
-        occupied = pool.submit(gate.release.wait, 5)
+        occupied = pool.submit(gate.release.wait, LIVENESS_TIMEOUT_S)
         task = asyncio.create_task(
             producer.read_native_futures_accounts(source.repository, source.client, source.tracker)
         )
@@ -423,12 +424,12 @@ async def test_actual_executor_shutdown_cancels_queued_source_without_http(
         _install_gate(source, gate, monkeypatch)
         pool = _ObservedExecutor()
         source.client._rest_pool = pool
-        occupied = pool.submit(gate.release.wait, 5)
+        occupied = pool.submit(gate.release.wait, LIVENESS_TIMEOUT_S)
         task = asyncio.create_task(
             producer.read_native_futures_accounts(source.repository, source.client, source.tracker)
         )
         try:
-            assert await asyncio.to_thread(pool.queued.wait, 2)
+            assert await asyncio.to_thread(pool.queued.wait, LIVENESS_TIMEOUT_S)
             pool.shutdown(wait=False, cancel_futures=True)
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -474,9 +475,9 @@ async def test_enqueue_failure_joins_original_proxy_restoration_before_token_dis
             producer.read_native_futures_accounts(source.repository, source.client, source.tracker)
         )
         try:
-            assert await asyncio.to_thread(gate.entered.wait, 2)
+            assert await asyncio.to_thread(gate.entered.wait, LIVENESS_TIMEOUT_S)
             gate.release.set()
-            assert await asyncio.to_thread(restoration.entered.wait, 2)
+            assert await asyncio.to_thread(restoration.entered.wait, LIVENESS_TIMEOUT_S)
             await asyncio.sleep(0)
             assert not task.done()
             assert not gate.failure_started.is_set()
@@ -534,7 +535,7 @@ async def test_cancelled_source_waiting_for_actual_egress_lock_performs_no_http(
             producer.read_native_futures_accounts(source.repository, source.client, source.tracker)
         )
         try:
-            assert await asyncio.to_thread(routed_entered.wait, 2)
+            assert await asyncio.to_thread(routed_entered.wait, LIVENESS_TIMEOUT_S)
             task.cancel("synthetic-egress-wait-cancellation")
             await asyncio.sleep(0)
             assert not task.done()
@@ -593,7 +594,7 @@ async def test_real_caller_cancellation_supersedes_cancelled_dispatch_with_histo
         monkeypatch.setattr(source.client, "_dispatch_blocking", observe)
         task = asyncio.create_task(caller())
         try:
-            assert await asyncio.to_thread(gate.entered.wait, 2)
+            assert await asyncio.to_thread(gate.entered.wait, LIVENESS_TIMEOUT_S)
             assert len(dispatched) == 1
             dispatched[0].cancel("synthetic-dispatch-task-cancellation")
             await asyncio.sleep(0)
@@ -654,7 +655,7 @@ async def test_actual_key_result_is_closed_after_original_proxy_restore_raises(
             producer.read_native_futures_accounts(source.repository, source.client, source.tracker)
         )
         try:
-            assert await asyncio.to_thread(restoration.entered.wait, 2)
+            assert await asyncio.to_thread(restoration.entered.wait, LIVENESS_TIMEOUT_S)
             assert len(source_gate.issued) == 1
             with pytest.raises(PreparedKeyTokenError, match="proof_not_committed"):
                 source_gate.issued[0].require_proof_reference()

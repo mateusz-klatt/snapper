@@ -30,6 +30,7 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from tests.helpers.native_account_authority import NativeAuthorityScenario
 from tests.helpers.native_account_authority import native_authority_scenario
 from tests.helpers.native_account_authority import native_authority_uuid
+from tests.helpers.native_liveness import LIVENESS_TIMEOUT_S
 
 
 def _observe_actual_issuance(monkeypatch: pytest.MonkeyPatch) -> list[PreparedKeyToken]:
@@ -223,7 +224,7 @@ async def test_actual_inflight_read_cancellation_closes_owner_before_private_han
             )
         )
         try:
-            assert await asyncio.to_thread(source.adapter.accounts_entered.wait, 2)
+            assert await asyncio.to_thread(source.adapter.accounts_entered.wait, LIVENESS_TIMEOUT_S)
             assert len(issued) == 1
             task.cancel()
             await asyncio.sleep(0)
