@@ -3379,7 +3379,7 @@ _CANDLE_VERSION_KEY_FIELDS: Final[tuple[str, ...]] = (
 )
 """Candle columns of :class:`CandleVersionKey`, in its field order."""
 
-_CANDLE_KEY_BATCH: Final[int] = 1000
+_CANDLE_KEY_BATCH: Final[int] = 500
 """Most candle version keys bound into one statement."""
 
 _CANDLE_FENCE_LOCK_TIMEOUT_SQL: Final[str] = (
@@ -38483,7 +38483,15 @@ class SQLAlchemyRepository(Repository):
             for batch in _candle_key_batches(sorted(set(keys))):
                 found = await session.execute(
                     select(*_candle_version_key_columns(), Candle.known_to).where(
-                        *_candle_version_key_match(self._candle_key_cte(batch))
+                        Candle.instrument_public_id.in_(
+                            list(dict.fromkeys(key.instrument_public_id for key in batch))
+                        ),
+                        Candle.timeframe.in_(list(dict.fromkeys(key.timeframe for key in batch))),
+                        Candle.open_at.between(
+                            min(key.open_at for key in batch),
+                            max(key.open_at for key in batch),
+                        ),
+                        *_candle_version_key_match(self._candle_key_cte(batch)),
                     )
                 )
                 for row in found.all():
@@ -38550,6 +38558,14 @@ class SQLAlchemyRepository(Repository):
             result = await session.execute(
                 update(Candle)
                 .where(
+                    Candle.instrument_public_id.in_(
+                        list(dict.fromkeys(key.instrument_public_id for key in batch))
+                    ),
+                    Candle.timeframe.in_(list(dict.fromkeys(key.timeframe for key in batch))),
+                    Candle.open_at.between(
+                        min(key.open_at for key in batch),
+                        max(key.open_at for key in batch),
+                    ),
                     *_candle_version_key_match(self._candle_key_cte(batch)),
                     Candle.known_to == KNOWN_TO_MAX,
                 )
@@ -39634,7 +39650,8 @@ class DatabaseRepository:
         its ``known_to`` is the current knowledge, so an archived copy is never
         inserted next to it. Classification and insertion share one fenced
         transaction, so no candle writer can close or insert a version between
-        them.
+        them. The lookup is bounded to the batch's instruments and open-time
+        range, allowing PostgreSQL to prune unrelated daily leaves.
 
         Args:
             rows: Archived candle rows with every non-id column, typed.
@@ -39652,9 +39669,13 @@ class DatabaseRepository:
                     for row in rows
                 )
             )
+            instruments = list(dict.fromkeys(str(row["instrument_public_id"]) for row in rows))
+            open_times = [cast(datetime, row["open_at"]).astimezone(UTC) for row in rows]
             stored = session.execute(
                 select(Candle.public_id, Candle.timestamp, Candle.known_to).where(
-                    tuple_(Candle.public_id, Candle.timestamp).in_(identities)
+                    tuple_(Candle.public_id, Candle.timestamp).in_(identities),
+                    Candle.instrument_public_id.in_(instruments),
+                    Candle.open_at.between(min(open_times), max(open_times)),
                 )
             ).all()
             versions = {(str(row[0]), row[1].astimezone(UTC)) for row in stored}

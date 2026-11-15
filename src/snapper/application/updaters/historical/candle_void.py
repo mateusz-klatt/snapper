@@ -258,17 +258,31 @@ def void_code_revision(extra_modules: Sequence[ModuleType]) -> JsonObject:
 
 
 def write_durable(path: Path, data: bytes) -> None:
-    """Write a new file with mode 0600 and flush it to disk before returning.
+    """Write a new file with mode 0600 and sync it and its parent directory.
 
     Args:
         path: File to create; an existing path is never replaced.
         data: Complete content.
     """
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(path.parent)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_directory(path: Path) -> None:
+    """Sync a directory or raise when durability cannot be established."""
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def evidence_entries(evidence: Sequence[EvidenceFile]) -> list[JsonValue]:
@@ -673,8 +687,19 @@ def _run_binding(context: VoidContext, run_id: str, voted_digest: str) -> JsonOb
     }
 
 
+def _recovery_binding(context: VoidContext, run_id: str, voted_digest: str) -> JsonObject:
+    """Bind recovery to its run and vote without requiring the original image."""
+    return {
+        "schema": SCHEMA,
+        "operation": OPERATION,
+        "database": context.database,
+        "run_id": run_id,
+        "voted_digest": voted_digest,
+    }
+
+
 def _check_run_binding(document: JsonObject, run: JsonObject) -> None:
-    """Refuse an artifact belonging to a different target, source or run.
+    """Refuse an artifact belonging to a different schema, operation, database or run.
 
     Args:
         document: Persisted run artifact.
@@ -712,7 +737,7 @@ def _recovery_request(
         raise VoidRefusedError("the run intent has no valid identity") from None
     if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
         raise VoidRefusedError("the run intent has no valid vote digest")
-    run = _run_binding(context, run_id, digest)
+    run = _recovery_binding(context, run_id, digest)
     _check_run_binding(intent, run)
     raw_keys = intent.get("keys")
     if not isinstance(raw_keys, list) or not raw_keys:
@@ -808,12 +833,18 @@ def conclude(
         void_at: The run's prepared instant, or None without ``prepared.json``.
 
     Returns:
-        ``not_applied`` without a preparation or with every version still
-        active; ``reconciled_applied`` when every version ends at the prepared
-        instant; ``inconsistent`` otherwise.
+        ``not_applied`` when every version is still active, with or without a
+        preparation; ``reconciled_applied`` when every version ends at the
+        prepared instant; ``inconsistent`` otherwise. Without a preparation,
+        any non-active version is inconsistent because the file-synced
+        preparation is the only proof that no update was attempted.
     """
     if void_at is None:
-        return "not_applied"
+        return (
+            "not_applied"
+            if all(reading.active for reading in readings.values())
+            else "inconsistent"
+        )
     values = list(readings.values())
     if all(reading.known_to == void_at for reading in values):
         return "reconciled_applied"
@@ -882,6 +913,7 @@ async def reconcile_void(context: VoidContext, directory: Path) -> VoidOutcome:
         document: JsonObject = {
             "status": status,
             **run,
+            "reconciler_code_revision": context.code_revision,
             "void_at": None if void_at is None else void_at.isoformat(),
             "expected": len(readings),
             "active": sum(1 for reading in readings.values() if reading.active),

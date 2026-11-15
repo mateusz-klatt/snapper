@@ -21,7 +21,9 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import Result
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
+from sqlalchemy.sql import Select
 from sqlalchemy.sql.base import Executable
+from sqlalchemy.sql.dml import Update
 
 from snapper.application.portfolio.pnl_timeline_service import _PlaneCoverage
 from snapper.application.portfolio.pnl_timeline_service import _preferred_fx_plane
@@ -846,6 +848,42 @@ async def test_observe_reads_each_key_under_the_fence_and_writes_nothing(
     assert len(await repo.get_active_candle_versions([_KRAKEN])) == 3
 
 
+async def test_void_update_and_observe_use_literal_batch_bounds(repo: SQLAlchemyRepository) -> None:
+    """Batch statements prune by instrument, timeframe and open-time before exact-key joins.
+
+    Given a seeded cohort and its exact expected keys.
+    When the void and a fenced observation execute their batch statements.
+    Then UPDATE and observe SELECT both carry the literal batch bounds.
+    """
+    await _seed_cohort(repo)
+    keys = await _keys(repo)
+    original_execute = AsyncSession.execute
+    statements: list[Executable] = []
+
+    async def capture_execute(
+        session: AsyncSession, statement: Executable
+    ) -> Result[tuple[object, ...]]:
+        """Capture real statements without changing their execution."""
+        statements.append(statement)
+        return cast(Result[tuple[object, ...]], await original_execute(session, statement))
+
+    with patch.object(AsyncSession, "execute", new=capture_execute):
+        await repo.void_candle_versions(_request(keys, await _catalog(repo), []))
+        await repo.observe_candle_void(keys, lambda readings: None)
+
+    update_sql = [str(statement) for statement in statements if isinstance(statement, Update)]
+    observe_sql = [
+        str(statement)
+        for statement in statements
+        if isinstance(statement, Select) and "candle_void_keys" in str(statement)
+    ]
+    assert update_sql and observe_sql, [str(statement) for statement in statements]
+    for sql in [*update_sql, *observe_sql]:
+        assert "candles.instrument_public_id IN" in sql
+        assert "candles.timeframe IN" in sql
+        assert "candles.open_at BETWEEN" in sql
+
+
 async def test_fx_discovery_and_election_drop_the_kraken_plane_from_void_at(
     repo: SQLAlchemyRepository,
 ) -> None:
@@ -959,6 +997,37 @@ def test_restore_batch_of_nothing_writes_nothing(sync_repo: DatabaseRepository) 
     counts = sync_repo.restore_candle_archive_batch([])
 
     assert (counts.inserted, counts.skipped_exact, counts.skipped_known_to_differs) == (0, 0, 0)
+
+
+def test_restore_batch_of_only_duplicates_skips_insert_and_bounds_lookup(
+    sync_repo: DatabaseRepository,
+) -> None:
+    """An all-skipped batch commits without an insert and prunes unrelated leaves."""
+    stored = _candle(_KRAKEN, _FIRST_MINUTE)
+    with sync_repo.get_session() as session:
+        session.add(stored)
+        session.commit()
+        row = _archive_row(stored)
+    original_execute = SyncSession.execute
+    statements: list[Executable] = []
+
+    def capture_execute(session: SyncSession, statement: Executable) -> Result[tuple[object, ...]]:
+        """Capture the fenced lookup while preserving real database execution."""
+        statements.append(statement)
+        return cast(Result[tuple[object, ...]], original_execute(session, statement))
+
+    with patch.object(SyncSession, "execute", new=capture_execute):
+        counts = sync_repo.restore_candle_archive_batch([row])
+
+    assert (counts.inserted, counts.skipped_exact, counts.skipped_known_to_differs) == (0, 1, 0)
+    lookups = [
+        str(statement)
+        for statement in statements
+        if str(statement).startswith("SELECT candles.public_id")
+    ]
+    assert len(lookups) == 1
+    assert "candles.instrument_public_id IN" in lookups[0]
+    assert "candles.open_at BETWEEN" in lookups[0]
 
 
 def _fenced_repo(dialect: str) -> DatabaseRepository:

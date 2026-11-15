@@ -465,10 +465,15 @@ writers wait up to one second per chunk: run writes in quiet hours.
 ### `void-candles`
 
 Preview a guarded closure of the active candle versions of retired Kraken
-instruments, across every timeframe. The default dry run reads the database and
-writes `preview.csv`, `summary.json` and `approval.json` to a new or empty local
-directory. It does not change candles. The preview contains their full version
-keys and original values; the digest to approve is the sha256 of `approval.json`.
+instruments, across every timeframe. After the void commits, a discovery or
+election with a horizon `as_of >= void_at` finds none of those Kraken candles.
+A computation at an earlier horizon still sees their values. Stored FX
+elections and proofs stay intact.
+
+The default dry run reads the database and writes `preview.csv`, `summary.json`
+and `approval.json` to a new or empty local directory. It does not change
+candles. The preview contains their full version keys and original values; the
+digest to approve is the sha256 of the canonical `approval.json`.
 
 ```bash
 snapper void-candles --instrument <retired-instrument-id> \
@@ -485,34 +490,121 @@ snapper void-candles --instrument <retired-instrument-id> \
 | `--expect-digest` | sha256 of that dry run's `approval.json`. |
 | `--reconcile` | Directory of an earlier execution whose outcome needs reconciliation. Takes no other option. |
 
-Review writer cessation, catalog-writer exclusion and the cache/export
-dispositions before approving a digest. Evidence-file hashes bind the reviewed
-documents; hashing does not establish those external conditions. Targets must
-be Kraken instruments without active aliases or market-data/trading capability,
-and their newest active candle must be at least 60 minutes old. The summary
+Planning refuses an unknown or non-Kraken instrument, an active Kraken alias,
+a capability with market data or trading enabled, an empty cohort, or a newest
+active candle written less than 60 minutes before the run. Missing, duplicated
+or unreadable evidence also refuses before the dry-run artifacts.
+
+Review writer cessation, catalog-writer exclusion and these cache/export
+dispositions before approving a digest:
+
+- Existing in-process bars expire on restart; FX discovery never reads that
+  cache.
+- CSV cache projections keep their old rows but have no production Kraken
+  loader, and audit restore rejects their header.
+- Candle audit files retain every version. Restore never re-activates a version
+  already present with another `known_to`; the dry-run evidence must inventory
+  files with active pre-void copies and decide their handling.
+- Stored strategies, charts, backtests and warmups are not rewritten. Temporal
+  readers stop returning the closed versions at and after `void_at`; candle
+  audit reports those slots as missing, and the receipt records why.
+
+Evidence-file paths and hashes bind the reviewed documents. Re-supply every
+file at the same path with identical bytes when executing the vote. Hashing
+does not establish the external writer-exclusion conditions. The summary
 reports FX references and shadow candles from one database statement snapshot.
 
 After the separate approval, repeat the same instruments and evidence with a
 new `--output-dir`, adding `--confirm --voted-preview <dry-run-dir>
---expect-digest <approved-digest>`. Execution binds the database and source,
-checks the saved approval/preview, rebuilds the plan and refuses any difference.
-Under the shared candle writer fence it rechecks the exact cohort and catalog,
-records the database closure instant in `prepared.json`, then closes exactly
-those versions at that instant. Original values and earlier knowledge horizons
-remain available; stored FX elections and proofs are not rewritten.
+--expect-digest <approved-digest>`. Execution binds the database and voted
+source, checks the saved approval/preview, rebuilds the plan and refuses any
+difference. Under the shared candle writer fence it rechecks the exact cohort
+and catalog, records the database closure instant in `prepared.json`, then
+closes exactly those versions at that instant.
+
+The write takes `SHARE ROW EXCLUSIVE` on `candles` and holds it through the
+cohort/catalog reads, durable preparation, batched compare-and-set updates and
+commit. Live writers wait or reach their one-second lock timeout: run the write
+in quiet hours, with the PostgreSQL witness's lock-to-commit measurement below
+one second and no live-writer queue eviction.
+
+Execution produces one of these outcomes:
+
+| Status | Artifact and required handling |
+| ------ | ------------------------------ |
+| `acknowledged` | `receipt.json` records `void_at`, the closed keys and run identity. Success. |
+| `refused` | `refusal.json` records the reason; no version closed. Exit 1. |
+| `failed` | `failure.json` records only the classified outcome and safe error fields. Exit 1. |
+| `uncertain` | The commit acknowledgement or durable artifact state is unknown. Reconcile before any new attempt. Exit 1. |
 
 If the commit acknowledgement is lost, use only `snapper void-candles
---reconcile <execution-dir>`. Reconciliation validates the saved database,
-source, run and approval identities, observes the original keys under the same
-fence, and records its conclusion without closing any candle. A concluded run
-cannot subsequently prepare another write. Only `acknowledged` and
-`reconciled_applied` are successful execution outcomes; other outcomes exit 1.
-Keep every run artifact for review instead of replaying an uncertain write.
+--reconcile <execution-dir>`. Reconciliation validates the schema, operation,
+database, run and vote identities, observes the original keys under the same
+fence, and records its conclusion without closing any candle. The reconciler's
+own source hash is recorded as `reconciler_code_revision`; a routine image
+change therefore does not make an earlier run unrecoverable. The original write
+remains bound to the voted source through its approval and intent.
 
-Candle archive restore shares the writer fence and never changes the stored
-`known_to` of an existing version. Its summary reports exact duplicate skips
-separately from `skipped_known_to_differs`, so an old active archive copy cannot
-silently re-activate a version already closed in the database.
+`prepared.json` and `reconciliation.json` sync both the file and its parent
+directory. A sync failure removes the new artifact and leaves the outcome
+uncertain instead of claiming durable success. A truncated or unreadable
+preparation refuses recovery after the original transaction has rolled back.
+Without `prepared.json`, all-active expected keys conclude `not_applied`; any
+closed or absent key concludes `inconsistent`.
+
+Recovery outcomes have these dispositions:
+
+- `reconciled_applied`: every expected key closed at the prepared instant;
+  success.
+- `not_applied`: every expected key remains active. A new attempt needs a new
+  run directory and run id.
+- `inconsistent`: keys are closed at another instant, absent or mixed. Stop and
+  report; retry nothing.
+- `uncertain`: the fence could not be taken after three bounded attempts, or
+  durable evidence could not be written. No new conclusion is reported.
+
+An existing final conclusion is read under the fence and returned byte for
+byte, never replaced with another image's metadata. Fence contention can
+therefore report `uncertain` even when a final conclusion already exists. A
+concluded run cannot subsequently prepare another write. Only `acknowledged`
+and `reconciled_applied` are successful execution outcomes; other outcomes exit
+1. Keep every run artifact for review instead of replaying an uncertain write.
+
+Acceptance includes a read-only race query. Any returned row is a race victim
+for fleet review, not a row to modify. Elections at earlier knowledge horizons
+are legitimate history and are excluded:
+
+```sql
+WITH race_elections AS (
+    SELECT public_id, requested_knowledge_at, selected_source_instrument_public_id
+    FROM fx_conversion_elections
+    WHERE requested_knowledge_at >= :void_at
+      AND selected_source_instrument_public_id IN (:instrument_1, :instrument_2)
+),
+race_proofs AS (
+    SELECT p.public_id, p.election_public_id, p.source_instrument_public_id,
+           e.requested_knowledge_at
+    FROM fx_conversion_proofs AS p
+    JOIN fx_conversion_elections AS e ON e.public_id = p.election_public_id
+    WHERE e.requested_knowledge_at >= :void_at
+      AND (
+          p.election_public_id IN (SELECT public_id FROM race_elections)
+          OR p.source_instrument_public_id IN (:instrument_1, :instrument_2)
+      )
+)
+SELECT 'election' AS artifact_kind, public_id,
+       CAST(NULL AS text) AS election_public_id,
+       selected_source_instrument_public_id AS source_instrument_public_id,
+       requested_knowledge_at
+FROM race_elections
+UNION ALL
+SELECT 'proof', public_id, election_public_id, source_instrument_public_id,
+       requested_knowledge_at
+FROM race_proofs;
+```
+
+See [`restore`](#restore) for the archive rule that prevents an old active copy
+from re-activating a closed candle version.
 
 ### `annulment`
 
@@ -1765,6 +1857,16 @@ snapper restore --table candles --dir data/archive/candles/polygon/BTC-USD/
   raised to favor throughput.
 - Rows already present in DB (matching `public_id + timestamp + known_to`) are skipped.
 - Audit restore inserts all temporal columns exactly as exported.
+- **Candle version safeguard:** for `table=candles`, classification and insertion
+  share one transaction under the candle writer fence. The lookup matches exact
+  `(public_id, timestamp)` versions and is bounded to the batch's instruments and
+  `open_at` range so PostgreSQL can prune unrelated daily leaves. Exact
+  duplicates count as `rows_skipped`; a version already stored with another
+  `known_to` counts as `skipped_known_to_differs` and is not inserted. An old
+  active archive copy therefore cannot re-activate a closed version, while an
+  entirely absent version can still be restored.
+- Candle restore holds the same blocking fence as other candle writers; run it
+  in quiet hours.
 - **Execution exception (restore refused):** `snapper restore --table
   executions` fails closed with `ExecutionRestoreUnsupportedError`. The
   audit restore's direct bulk insert would bypass the per-wallet

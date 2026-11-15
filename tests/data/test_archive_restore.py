@@ -18,10 +18,12 @@ from sqlalchemy import DateTime
 from sqlalchemy import select
 from typer.testing import CliRunner
 
+from snapper.application.updaters.historical.candle_void import version_key
 from snapper.cli.app import app
 from snapper.data.archiver import EVENT_TABLES
 from snapper.data.archiver import ArchiveRestorer
 from snapper.data.archiver import CandleAuditArchiver
+from snapper.data.archiver import CandleCacheArchiver
 from snapper.data.archiver import EventArchiver
 from snapper.data.archiver import ExecutionRestoreUnsupportedError
 from snapper.data.archiver import RestoreResult
@@ -36,6 +38,7 @@ from snapper.data.archiver import _parse_json_csv
 from snapper.data.archiver import _parse_str_csv
 from snapper.data.archiver import _parser_for_column
 from snapper.data.archiver import _restore_headers_for_table
+from snapper.data.candle_void_types import CandleVoidRequest
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import Candle
@@ -47,6 +50,7 @@ from snapper.data.models import Trade
 from snapper.data.models import TZDateTime
 from snapper.data.models import UUIDColumn
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import SQLAlchemyRepository
 
 _TRADE_ARCHIVE_HEADER = (
     "public_id",
@@ -1084,6 +1088,75 @@ def test_round_trip_purge_restore_candle_audit(tmp_path: Path) -> None:
         date(2024, 1, 1),
     )
     assert [row[1:] for row in rows_after_restore] == [row[1:] for row in rows_before]
+    repo.dispose()
+
+
+async def test_pre_void_audit_export_does_not_reactivate_versions(tmp_path: Path) -> None:
+    """A pre-void audit export restores no active copy after the void.
+
+    Given: Closed and active versions exported before the active one is voided.
+    When: The audit file is restored after the void.
+    Then: The closed original is an exact skip, the old active copy differs, and
+        no candle becomes active again.
+    """
+    repo, csv_dir, inst_id = _make_db_with_candle_versions(tmp_path)
+    async_repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'restore_candles.db'}")
+    try:
+        rows = await async_repo.get_active_candle_versions((inst_id,))
+        assert len(rows) == 1
+        keys = tuple(version_key(row) for row in rows)
+        targets = await async_repo.get_candle_void_targets((inst_id,))
+        await async_repo.void_candle_versions(
+            CandleVoidRequest(
+                instrument_public_ids=(inst_id,),
+                expected=keys,
+                catalog=tuple(target.catalog for target in targets),
+                on_prepared=lambda void_at: None,
+            )
+        )
+    finally:
+        await async_repo.engine.dispose()
+
+    result = ArchiveRestorer(repo).restore(table="candles", paths=sorted(csv_dir.rglob("*.csv")))
+
+    assert (result.rows_inserted, result.rows_skipped, result.skipped_known_to_differs) == (0, 1, 1)
+    with repo.get_session() as session:
+        active = (
+            session.execute(
+                select(Candle).where(
+                    Candle.instrument_public_id == inst_id,
+                    Candle.known_to == KNOWN_TO_MAX,
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert active == []
+    repo.dispose()
+
+
+def test_cache_projection_is_refused_by_audit_restore_header(
+    tmp_path: Path,
+) -> None:
+    """A polygon-format cache projection never enters the temporal audit restore.
+
+    Given: Active candles exported through CandleCacheArchiver.
+    When: The audit restorer reads the projection.
+    Then: Its header is refused before any database mutation.
+    """
+    repo, csv_dir, _ = _make_db_with_candle_versions(tmp_path)
+    CandleCacheArchiver(repo, csv_dir).export(
+        timeframe="1m",
+        day_start=date(2024, 1, 1),
+        day_end=date(2024, 1, 1),
+    )
+
+    with pytest.raises(ValueError, match="header"):
+        ArchiveRestorer(repo).restore(table="candles", paths=sorted(csv_dir.rglob("*.csv")))
+
+    with repo.get_session() as session:
+        remaining = session.execute(select(Candle.id)).scalars().all()
+    assert len(remaining) == 2
     repo.dispose()
 
 
