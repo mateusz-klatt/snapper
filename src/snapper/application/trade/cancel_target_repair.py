@@ -50,7 +50,7 @@ from snapper.core.types import TradeCommandStatusEnum
 from snapper.data import cancel_target_repair_reads as reads
 from snapper.data import repository as repository_module
 from snapper.data import repository_types as repository_types_module
-from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import is_open_ended_version
 from snapper.data.repository import _ORDER_LIFECYCLE_EVENT_TYPES
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ExecutionEvidenceRow
@@ -305,7 +305,7 @@ def _check_order_history(case: KrakenCase) -> str | None:
     """Check the order is spot, its history is consistent and it ended ``canceled``."""
     if any(version["leverage"] is not None for version in case.versions):
         return "not_kraken_spot"
-    active = [version for version in case.versions if version["known_to"] == KNOWN_TO_MAX]
+    active = [version for version in case.versions if is_open_ended_version(version["known_to"])]
     if len(active) != 1 or active[0] is not case.versions[-1]:
         return "order_versions_inconsistent"
     if active[0]["status"] != _CANCELED_ORDER_STATUS:
@@ -471,8 +471,17 @@ async def gather_evidence(
 
     Returns:
         The evidence; fields that need a missing cancel or target are empty.
+
+    Raises:
+        CancelTargetRepairRefusedError: When the cancel or its shard's
+            checkpoint has more than one active version.
     """
-    cancel = await reads.get_active_trade_command(repository, cancel_public_id)
+    try:
+        cancel = await reads.get_active_trade_command(repository, cancel_public_id)
+    except RuntimeError as error:
+        raise CancelTargetRepairRefusedError(
+            f"cancel {cancel_public_id} has several active versions"
+        ) from error
     if cancel is None:
         return CancelEvidence(cancel_public_id, None, None, False, [], [], [], [], [], None, [])
     client_order_id = cancel["client_order_id"]
@@ -513,9 +522,21 @@ async def gather_evidence(
         executions=executions,
         events=events,
         open_commands=await reads.get_open_commands_on_shard(repository, shard_key),
-        checkpoint=await reads.get_active_checkpoint(repository, shard_key),
+        checkpoint=await _active_checkpoint(repository, shard_key),
         shard_wallets=await reads.get_shard_wallets(repository, shard_key),
     )
+
+
+async def _active_checkpoint(
+    repository: SQLAlchemyRepository, shard_key: str
+) -> TradeProjectionCheckpointRow | None:
+    """Read a shard's active checkpoint, refusing the run when it is not unique."""
+    try:
+        return await reads.get_active_checkpoint(repository, shard_key)
+    except RuntimeError as error:
+        raise CancelTargetRepairRefusedError(
+            f"shard {shard_key} has several active checkpoints"
+        ) from error
 
 
 def terminal_fields(case: KrakenCase) -> VenueEventInsertRow:
@@ -842,35 +863,74 @@ def voted_digest(voted_dir: Path) -> str:
 
 
 @dataclass(slots=True)
-class _WriteRun:
-    """The write's own session, clock and sequence counter."""
+class WriteSession:
+    """One write run: its plan, session, clock, sequence and results so far.
 
+    Attributes:
+        plan: The recomputed plan, already matched to the vote.
+        session_id: The run's own session id, on every row it writes.
+        write_time: The run's single write time.
+        results: One result per applied line, appended as the run goes.
+        sequence: The last sequence number the run used.
+    """
+
+    plan: RepairPlan
     session_id: str
     write_time: datetime
+    results: list[JsonValue]
     sequence: int = 0
 
     def next_sequence(self) -> int:
-        """Return the next sequence number of the run."""
+        """Return the next sequence number of the run.
+
+        Returns:
+            The run's next sequence number, counting from 1.
+        """
         self.sequence += 1
         return self.sequence
 
 
-async def _record_terminal(
-    repository: SQLAlchemyRepository, line: PlanLine, run: _WriteRun
-) -> JsonObject:
-    """Recheck one Kraken line under the current state, then record its terminal once."""
+async def _recheck(
+    repository: SQLAlchemyRepository, line: PlanLine, action: RepairAction
+) -> Decision | None:
+    """Re-read one line and return its fresh decision when nothing has changed."""
     fresh = await gather_evidence(repository, line.evidence.cancel_public_id)
-    recheck = evaluate(fresh)
-    if recheck.action is not RepairAction.RECORD_TERMINAL or line_document(
-        fresh, recheck
-    ) != line_document(line.evidence, line.decision):
+    decision = evaluate(fresh)
+    if decision.action is not action or line_document(fresh, decision) != line.preview:
+        return None
+    return decision
+
+
+async def _record_terminal(
+    repository: SQLAlchemyRepository, line: PlanLine, run: WriteSession
+) -> JsonObject:
+    """Recheck one Kraken line, record its terminal once and read the row back.
+
+    An insert that reports success but whose row the run cannot read back by
+    client order id, event type and session id is reported as
+    ``recorded_unconfirmed``, which the command treats as a failure.
+    """
+    recheck = await _recheck(repository, line, RepairAction.RECORD_TERMINAL)
+    if recheck is None:
         return {"result": "changed_before_write"}
     row = terminal_fields(cast(KrakenCase, recheck.kraken))
+    sequence_id = run.next_sequence()
     row["timestamp"] = run.write_time
     row["session_id"] = run.session_id
-    row["sequence_id"] = run.next_sequence()
-    inserted = await repository.insert_order_terminal_once(row)
-    return {"result": "recorded" if inserted else "already_recorded"}
+    row["sequence_id"] = sequence_id
+    if not await repository.insert_order_terminal_once(row):
+        return {"result": "already_recorded", "sequence_id": sequence_id}
+    written = await reads.get_terminal_written_by_session(
+        repository, cast(str, row["client_order_id"]), run.session_id
+    )
+    if written is None:
+        return {"result": "recorded_unconfirmed", "sequence_id": sequence_id}
+    return {
+        "result": "recorded",
+        "sequence_id": sequence_id,
+        "venue_event_id": written["id"],
+        "venue_event_public_id": written["public_id"],
+    }
 
 
 def _first_failed_time(versions: Sequence[TradeCommandRow]) -> datetime | None:
@@ -882,77 +942,51 @@ def _first_failed_time(versions: Sequence[TradeCommandRow]) -> datetime | None:
 
 
 async def _fail_cancel(
-    repository: SQLAlchemyRepository, line: PlanLine, run: _WriteRun
+    repository: SQLAlchemyRepository, line: PlanLine, run: WriteSession
 ) -> JsonObject:
-    """Move one never-submitted Walutomat cancel to ``failed``."""
+    """Recheck one Walutomat line and move its cancel to ``failed``."""
+    if await _recheck(repository, line, RepairAction.FAIL_CANCEL) is None:
+        return {"result": "changed_before_write"}
     cancel = cast(TradeCommandRow, line.evidence.cancel)
     target = cast(TradeCommandRow, line.evidence.target)
     terminal_at = target["terminal_at"] or _first_failed_time(line.evidence.target_versions)
+    sequence_id = run.next_sequence()
     applied = await repository.advance_trade_command_lifecycle(
         public_id=cancel["public_id"],
         expected_status=cancel["status"],
         new_status=TradeCommandStatusEnum.FAILED,
         bus_time=run.write_time,
         session_id=run.session_id,
-        sequence_id=run.next_sequence(),
+        sequence_id=sequence_id,
         terminal_at=terminal_at,
         last_error=NEVER_SUBMITTED,
     )
-    return {"result": "failed" if applied else "lost_compare_and_set"}
+    return {"result": "failed" if applied else "lost_compare_and_set", "sequence_id": sequence_id}
 
 
-async def apply_plan(
-    repository: SQLAlchemyRepository, plan: RepairPlan, write_time: datetime
-) -> list[JsonValue]:
-    """Apply every actionable line of a voted plan, in order.
-
-    Args:
-        repository: Repository to write through.
-        plan: The recomputed plan, already matched to the vote.
-        write_time: The run's single write time.
-
-    Returns:
-        One result per line, for ``receipt.json``.
-
-    Raises:
-        CancelTargetRepairRefusedError: When any line is a refusal.
-    """
-    if any(line.decision.action is RepairAction.REFUSE for line in plan.lines):
-        raise CancelTargetRepairRefusedError("the plan holds a refused line; drop it and re-vote")
-    run = _WriteRun(session_id=str(uuid7()), write_time=write_time)
-    results: list[JsonValue] = []
-    for line in plan.lines:
-        outcome: JsonObject = {"result": "nothing_to_write"}
-        if line.decision.action is RepairAction.RECORD_TERMINAL:
-            outcome = await _record_terminal(repository, line, run)
-        elif line.decision.action is RepairAction.FAIL_CANCEL:
-            outcome = await _fail_cancel(repository, line, run)
-        results.append({"cancel_public_id": line.evidence.cancel_public_id, **outcome})
-    return results
-
-
-async def write_repair(
+async def prepare_write(
     repository: SQLAlchemyRepository,
     cancel_public_ids: Sequence[str],
     voted: tuple[Path, str],
     binding: tuple[JsonObject, JsonObject],
     write_time: datetime,
-) -> tuple[RepairPlan, list[JsonValue]]:
-    """Recompute the plan, match it to the vote, and apply it.
+) -> WriteSession:
+    """Recompute the plan, match it to the vote and open the write's session.
 
     Args:
-        repository: Repository to read and write.
+        repository: Repository to read from.
         cancel_public_ids: The cancels the vote covered.
         voted: The voted run's directory and the expected digest.
         binding: The database identity and the code revision.
         write_time: The run's single write time.
 
     Returns:
-        The recomputed plan and the per-line results.
+        The write session, with no line applied yet.
 
     Raises:
         CancelTargetRepairRefusedError: When the stored vote and the expected
-            digest disagree, or the recomputed plan differs from the vote.
+            digest disagree, the recomputed plan differs from the vote, or the
+            plan holds a refused line.
     """
     voted_dir, expect_digest = voted
     if voted_digest(voted_dir) != expect_digest:
@@ -963,4 +997,40 @@ async def write_repair(
         raise CancelTargetRepairRefusedError(
             "the recomputed plan differs from the vote; rerun the dry run and vote again"
         )
-    return plan, await apply_plan(repository, plan, write_time)
+    if any(line.decision.action is RepairAction.REFUSE for line in plan.lines):
+        raise CancelTargetRepairRefusedError("the plan holds a refused line; drop it and re-vote")
+    return WriteSession(plan=plan, session_id=str(uuid7()), write_time=write_time, results=[])
+
+
+async def apply_write(repository: SQLAlchemyRepository, session: WriteSession) -> None:
+    """Apply every line of a prepared write in order, recording each result as it lands.
+
+    Args:
+        repository: Repository to write through.
+        session: The prepared write; its results grow line by line, so a
+            failure leaves the results of the lines already applied.
+    """
+    for line in session.plan.lines:
+        outcome: JsonObject = {"result": "nothing_to_write"}
+        if line.decision.action is RepairAction.RECORD_TERMINAL:
+            outcome = await _record_terminal(repository, line, session)
+        elif line.decision.action is RepairAction.FAIL_CANCEL:
+            outcome = await _fail_cancel(repository, line, session)
+        session.results.append({"cancel_public_id": line.evidence.cancel_public_id, **outcome})
+
+
+def receipt_document(session: WriteSession) -> JsonObject:
+    """Render a write's receipt from what it applied so far.
+
+    Args:
+        session: The write session, complete or interrupted.
+
+    Returns:
+        The digest, the session id, the write time and every line result.
+    """
+    return {
+        "digest": session.plan.digest,
+        "session_id": session.session_id,
+        "write_time": session.write_time.isoformat(),
+        "results": list(session.results),
+    }

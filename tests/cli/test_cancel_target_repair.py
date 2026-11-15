@@ -3,6 +3,8 @@
 import asyncio
 import json
 import re
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -13,12 +15,16 @@ from click.testing import Result
 from typer.testing import CliRunner
 
 from snapper.application.trade.cancel_target_repair import CancelTargetRepairRefusedError
+from snapper.application.trade.cancel_target_repair import WriteSession
 from snapper.cli import cancel_target_repair as command_module
 from snapper.data.repository import SQLAlchemyRepository
 from tests.helpers.cancel_target_repair import SeededPair
 from tests.helpers.cancel_target_repair import seed_kraken_pair
 
 _DIGEST = re.compile(r"digest: ([0-9a-f]{64})")
+_SESSION = re.compile(r"write session: ([0-9a-f-]{36})")
+_STUB_SESSION_ID = "00000000-0000-7000-8000-0000000000ab"
+_STUB_WRITE_TIME = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
 
 
 def _app() -> typer.Typer:
@@ -50,6 +56,31 @@ def database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, Seed
 def _invoke(*arguments: str) -> Result:
     """Run the command with the given options."""
     return CliRunner().invoke(_app(), ["repair-cancel-targets", *arguments])
+
+
+def _stub_session() -> WriteSession:
+    """Build a prepared write over a stub plan, with no line applied."""
+    plan = MagicMock(preview=[], summary={}, digest="d" * 64)
+    return WriteSession(
+        plan=plan, session_id=_STUB_SESSION_ID, write_time=_STUB_WRITE_TIME, results=[]
+    )
+
+
+def _confirmed(pair: SeededPair, tmp_path: Path) -> Result:
+    """Run a confirmed write into ``tmp_path / "out"`` against a stub vote directory."""
+    voted = tmp_path / "voted"
+    voted.mkdir()
+    return _invoke(
+        "--cancel",
+        pair.cancel_id,
+        "--output-dir",
+        str(tmp_path / "out"),
+        "--confirm",
+        "--voted-preview",
+        str(voted),
+        "--expect-digest",
+        "d" * 64,
+    )
 
 
 def test_dry_run_then_confirm_records_the_terminal(
@@ -84,8 +115,21 @@ def test_dry_run_then_confirm_records_the_terminal(
         match.group(1).upper(),
     )
     assert write.exit_code == 0, write.output
+    session = _SESSION.search(write.output)
+    assert session is not None
     receipt = json.loads((written / "receipt.json").read_text())
-    assert receipt["results"] == [{"cancel_public_id": pair.cancel_id, "result": "recorded"}]
+    assert receipt["session_id"] == session.group(1)
+    assert receipt["digest"] == match.group(1)
+    assert datetime.fromisoformat(receipt["write_time"]).tzinfo is not None
+    [line] = receipt["results"]
+    assert (line["cancel_public_id"], line["result"], line["sequence_id"]) == (
+        pair.cancel_id,
+        "recorded",
+        1,
+    )
+    assert isinstance(line["venue_event_id"], int) and isinstance(
+        line["venue_event_public_id"], str
+    )
     assert db_url not in write.output
 
 
@@ -99,27 +143,56 @@ def test_a_write_that_skips_a_line_exits_one(
     Then: It exits 1 and still writes the receipt.
     """
     _, pair = database
-    plan = MagicMock(preview=[], summary={}, digest="d" * 64)
-    monkeypatch.setattr(
-        command_module,
-        "write_repair",
-        AsyncMock(return_value=(plan, [{"result": "changed_before_write"}])),
-    )
-    voted = tmp_path / "voted"
-    voted.mkdir()
-    result = _invoke(
-        "--cancel",
-        pair.cancel_id,
-        "--output-dir",
-        str(tmp_path / "out"),
-        "--confirm",
-        "--voted-preview",
-        str(voted),
-        "--expect-digest",
-        "d" * 64,
-    )
+    session = _stub_session()
+
+    async def skip(repository: SQLAlchemyRepository, prepared: WriteSession) -> None:
+        prepared.results.append(
+            {"cancel_public_id": pair.cancel_id, "result": "changed_before_write"}
+        )
+
+    monkeypatch.setattr(command_module, "prepare_write", AsyncMock(return_value=session))
+    monkeypatch.setattr(command_module, "apply_write", skip)
+    result = _confirmed(pair, tmp_path)
     assert result.exit_code == 1, result.output
-    assert (tmp_path / "out" / "receipt.json").exists()
+    receipt = json.loads((tmp_path / "out" / "receipt.json").read_text())
+    assert receipt["results"] == [
+        {"cancel_public_id": pair.cancel_id, "result": "changed_before_write"}
+    ]
+
+
+def test_a_write_that_raises_still_leaves_its_receipt(
+    database: tuple[str, SeededPair], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write interrupted after a committed line keeps a receipt of what it applied.
+
+    Given: A write that applies one line and then raises with secret text,
+    When: The confirmed run fails,
+    Then: It exits 1 naming the class only, the session id was printed first, and the
+        receipt holds the session id, the write time and the applied line.
+    """
+    _, pair = database
+    session = _stub_session()
+
+    async def fail_after_one(repository: SQLAlchemyRepository, prepared: WriteSession) -> None:
+        prepared.results.append({"cancel_public_id": pair.cancel_id, "result": "recorded"})
+        raise RuntimeError("secret text")
+
+    monkeypatch.setattr(command_module, "prepare_write", AsyncMock(return_value=session))
+    monkeypatch.setattr(command_module, "apply_write", fail_after_one)
+    result = _confirmed(pair, tmp_path)
+    assert result.exit_code == 1, result.output
+    assert "failed: RuntimeError" in result.output and "secret text" not in result.output
+    assert result.output.index(f"write session: {_STUB_SESSION_ID}") < result.output.index(
+        "failed: RuntimeError"
+    )
+    receipt = json.loads((tmp_path / "out" / "receipt.json").read_text())
+    assert receipt == {
+        "digest": "d" * 64,
+        "session_id": _STUB_SESSION_ID,
+        "write_time": _STUB_WRITE_TIME.isoformat(),
+        "results": [{"cancel_public_id": pair.cancel_id, "result": "recorded"}],
+    }
+    assert (tmp_path / "out" / "preview.json").exists()
 
 
 @pytest.mark.parametrize(

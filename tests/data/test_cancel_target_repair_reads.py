@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import AsyncIterator
+from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from tests.helpers.cancel_target_repair import CANCELED_AT
 from tests.helpers.cancel_target_repair import CREATED_AT
 from tests.helpers.cancel_target_repair import KRAKEN_SHARD
 from tests.helpers.cancel_target_repair import OTHER_WALLET
+from tests.helpers.cancel_target_repair import SESSION
 from tests.helpers.cancel_target_repair import WALLET
 from tests.helpers.cancel_target_repair import add_rows
 from tests.helpers.cancel_target_repair import checkpoint
@@ -151,3 +153,99 @@ async def test_command_versions_are_returned_in_id_order(
     )
     versions = await reads.get_trade_command_versions(repository, public_id)
     assert [version["status"] for version in versions] == ["dispatched", "accepted"]
+
+
+async def _seed_versions_closed_in_the_future(repository: SQLAlchemyRepository) -> str:
+    """Seed a command and a checkpoint, each with an active version and one closed ten years ahead.
+
+    Returns:
+        The command's public id.
+    """
+    public_id = "00000000-0000-7000-8000-0000000000e6"
+    closed_command = command(
+        public_id, command_type="create", status="accepted", client_order_id="c6"
+    )
+    closed_command.known_to = _FUTURE
+    closed_checkpoint = checkpoint(wallet_public_id=OTHER_WALLET)
+    closed_checkpoint.known_to = _FUTURE
+    await add_rows(
+        repository,
+        [
+            closed_command,
+            command(public_id, command_type="create", status="filled", client_order_id="c6"),
+            closed_checkpoint,
+            checkpoint(),
+        ],
+    )
+    return public_id
+
+
+def _every_version_open(known_to: datetime) -> bool:
+    """Accept every loaded version as open-ended, to reach the duplicate-row guards.
+
+    Returns:
+        Always True.
+    """
+    return known_to is not None
+
+
+@pytest.mark.asyncio
+async def test_versions_closed_in_the_future_are_never_active(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A finite known_to later than now passes the SQL range but is not an active version.
+
+    Given: A command and a checkpoint, each with an active version and a version
+        closed ten years ahead,
+    When: The active rows and the shard's open commands are read,
+    Then: Only the open-ended versions come back.
+    """
+    public_id = await _seed_versions_closed_in_the_future(repository)
+    found = await reads.get_active_trade_command(repository, public_id)
+    assert found is not None and found["status"] == "filled"
+    assert await reads.get_open_commands_on_shard(repository, KRAKEN_SHARD) == []
+    active = await reads.get_active_checkpoint(repository, KRAKEN_SHARD)
+    assert active is not None and active["wallet_public_id"] == WALLET
+
+
+@pytest.mark.asyncio
+async def test_several_active_rows_raise_instead_of_picking_one(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that finds more than one active row raises.
+
+    Given: The same rows, with the open-ended proof made to accept every version,
+    When: The active command and the active checkpoint are read,
+    Then: Both raise RuntimeError.
+    """
+    public_id = await _seed_versions_closed_in_the_future(repository)
+    monkeypatch.setattr(reads, "is_open_ended_version", _every_version_open)
+    with pytest.raises(RuntimeError, match="several active versions"):
+        await reads.get_active_trade_command(repository, public_id)
+    with pytest.raises(RuntimeError, match="several active checkpoints"):
+        await reads.get_active_checkpoint(repository, KRAKEN_SHARD)
+
+
+@pytest.mark.asyncio
+async def test_a_sessions_terminal_is_read_back_by_its_session_only(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The read-back finds the order_terminal a session wrote, and nothing for another session.
+
+    Given: An order_accepted and an order_terminal of one client order id, both by the
+        seeded session,
+    When: The terminal is read back by that session and by another one,
+    Then: The seeded session finds the terminal, and the other session finds None.
+    """
+    await add_rows(
+        repository,
+        [
+            venue_event("cid-t", event_type="order_accepted", status="open"),
+            venue_event("cid-t", event_type="order_terminal", status="canceled"),
+        ],
+    )
+    found = await reads.get_terminal_written_by_session(repository, "cid-t", SESSION)
+    assert found is not None
+    assert (found["event_type"], found["status"]) == ("order_terminal", "canceled")
+    other = "00000000-0000-7000-8000-0000000000a2"
+    assert await reads.get_terminal_written_by_session(repository, "cid-t", other) is None

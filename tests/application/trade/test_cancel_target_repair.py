@@ -67,6 +67,27 @@ async def _decision(repository: SQLAlchemyRepository, cancel_id: str) -> repair.
     return plan.lines[0].decision
 
 
+def _session(plan: repair.RepairPlan) -> repair.WriteSession:
+    """Open a write session over a plan, as prepare_write would."""
+    return repair.WriteSession(
+        plan=plan,
+        session_id="00000000-0000-7000-8000-0000000000ab",
+        write_time=WRITE_TIME,
+        results=[],
+    )
+
+
+async def _write(
+    repository: SQLAlchemyRepository, cancel_id: str, voted: Path, digest: str
+) -> repair.WriteSession:
+    """Prepare and apply a voted write of one cancel."""
+    session = await repair.prepare_write(
+        repository, [cancel_id], (voted, digest), (DATABASE, CODE), WRITE_TIME
+    )
+    await repair.apply_write(repository, session)
+    return session
+
+
 def _vote(tmp_path: Path, plan: repair.RepairPlan) -> Path:
     """Store a plan's preview and summary as a voted run's directory."""
     voted = tmp_path / "voted"
@@ -208,14 +229,26 @@ async def test_record_terminal_end_to_end_matches_the_reconciler(
     assert predicted["gap_seconds"] == pytest.approx(4.0)
 
     voted = _vote(tmp_path, plan)
-    written, results = await repair.write_repair(
-        repository, [pair.cancel_id], (voted, plan.digest), (DATABASE, CODE), WRITE_TIME
-    )
-    assert written.digest == plan.digest
-    assert results == [{"cancel_public_id": pair.cancel_id, "result": "recorded"}]
+    written = await _write(repository, pair.cancel_id, voted, plan.digest)
+    assert written.plan.digest == plan.digest
     terminals = await _terminals(repository, pair.client_order_id)
     assert len(terminals) == 1
     terminal = terminals[0]
+    assert written.results == [
+        {
+            "cancel_public_id": pair.cancel_id,
+            "result": "recorded",
+            "sequence_id": 1,
+            "venue_event_id": terminal.id,
+            "venue_event_public_id": terminal.public_id,
+        }
+    ]
+    receipt = repair.receipt_document(written)
+    assert (receipt["session_id"], receipt["write_time"]) == (
+        written.session_id,
+        WRITE_TIME.isoformat(),
+    )
+    assert terminal.session_id == written.session_id
     assert (terminal.status, terminal.shard_key, terminal.wallet_public_id) == (
         "canceled",
         KRAKEN_SHARD,
@@ -297,10 +330,10 @@ async def test_fail_cancel_end_to_end(repository: SQLAlchemyRepository, tmp_path
     plan = await _plan(repository, pair.cancel_id)
     assert plan.lines[0].decision.action is RepairAction.FAIL_CANCEL
     voted = _vote(tmp_path, plan)
-    _, results = await repair.write_repair(
-        repository, [pair.cancel_id], (voted, plan.digest), (DATABASE, CODE), WRITE_TIME
-    )
-    assert results == [{"cancel_public_id": pair.cancel_id, "result": "failed"}]
+    written = await _write(repository, pair.cancel_id, voted, plan.digest)
+    assert written.results == [
+        {"cancel_public_id": pair.cancel_id, "result": "failed", "sequence_id": 1}
+    ]
     assert await _status(repository, pair.cancel_id) == ("failed", "target_never_submitted")
     rerun = await _plan(repository, pair.cancel_id)
     assert rerun.lines[0].decision.action is RepairAction.ALREADY_FAILED
@@ -328,9 +361,12 @@ async def test_fail_cancel_takes_the_target_terminal_time_when_present(
     with patch.object(
         repository, "advance_trade_command_lifecycle", AsyncMock(return_value=False)
     ) as cas:
-        results = await repair.apply_plan(repository, plan, WRITE_TIME)
+        session = _session(plan)
+        await repair.apply_write(repository, session)
     assert cas.call_args.kwargs["terminal_at"] == CREATED_AT
-    assert results == [{"cancel_public_id": pair.cancel_id, "result": "lost_compare_and_set"}]
+    assert session.results == [
+        {"cancel_public_id": pair.cancel_id, "result": "lost_compare_and_set", "sequence_id": 1}
+    ]
 
 
 @pytest.mark.asyncio
@@ -835,7 +871,7 @@ async def test_a_stale_vote_and_a_changed_state_refuse(
     plan = await _plan(repository, pair.cancel_id)
     voted = _vote(tmp_path, plan)
     with pytest.raises(CancelTargetRepairRefusedError, match="does not match"):
-        await repair.write_repair(
+        await repair.prepare_write(
             repository, [pair.cancel_id], (voted, "0" * 64), (DATABASE, CODE), WRITE_TIME
         )
     await add_rows(
@@ -843,25 +879,34 @@ async def test_a_stale_vote_and_a_changed_state_refuse(
         [venue_event(pair.client_order_id, event_type="order_terminal", status="filled")],
     )
     with pytest.raises(CancelTargetRepairRefusedError, match="differs from the vote"):
-        await repair.write_repair(
+        await repair.prepare_write(
             repository, [pair.cancel_id], (voted, plan.digest), (DATABASE, CODE), WRITE_TIME
         )
+    assert [row.status for row in await _terminals(repository, pair.client_order_id)] == ["filled"]
 
 
 @pytest.mark.asyncio
 async def test_a_plan_with_a_refused_line_does_not_write(
-    repository: SQLAlchemyRepository,
+    repository: SQLAlchemyRepository, tmp_path: Path
 ) -> None:
     """A plan holding a refusal is refused whole.
 
-    Given: A plan of one valid cancel and one unknown cancel,
-    When: It is applied,
-    Then: The write refuses before anything is written.
+    Given: A voted plan of one valid cancel and one unknown cancel,
+    When: The write is prepared,
+    Then: It refuses before anything is written.
     """
     pair = await seed_kraken_pair(repository)
-    plan = await _plan(repository, pair.cancel_id, "00000000-0000-7000-8000-0000000000ff")
+    unknown = "00000000-0000-7000-8000-0000000000ff"
+    plan = await _plan(repository, pair.cancel_id, unknown)
+    voted = _vote(tmp_path, plan)
     with pytest.raises(CancelTargetRepairRefusedError, match="refused line"):
-        await repair.apply_plan(repository, plan, WRITE_TIME)
+        await repair.prepare_write(
+            repository,
+            [pair.cancel_id, unknown],
+            (voted, plan.digest),
+            (DATABASE, CODE),
+            WRITE_TIME,
+        )
     assert await _terminals(repository, pair.client_order_id) == []
 
 
@@ -888,8 +933,11 @@ async def test_a_change_before_the_insert_skips_the_line(
             )
         ],
     )
-    results = await repair.apply_plan(repository, plan, WRITE_TIME)
-    assert results == [{"cancel_public_id": pair.cancel_id, "result": "changed_before_write"}]
+    session = _session(plan)
+    await repair.apply_write(repository, session)
+    assert session.results == [
+        {"cancel_public_id": pair.cancel_id, "result": "changed_before_write"}
+    ]
     assert await _terminals(repository, pair.client_order_id) == []
 
 
@@ -905,9 +953,139 @@ async def test_a_terminal_recorded_concurrently_counts_as_already_recorded(
     """
     pair = await seed_kraken_pair(repository)
     plan = await _plan(repository, pair.cancel_id)
+    session = _session(plan)
     with patch.object(repository, "insert_order_terminal_once", AsyncMock(return_value=False)):
-        results = await repair.apply_plan(repository, plan, WRITE_TIME)
-    assert results == [{"cancel_public_id": pair.cancel_id, "result": "already_recorded"}]
+        await repair.apply_write(repository, session)
+    assert session.results == [
+        {"cancel_public_id": pair.cancel_id, "result": "already_recorded", "sequence_id": 1}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_insert_that_cannot_be_read_back_is_unconfirmed(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """An insert reported as done but not found by the read-back is not counted as recorded.
+
+    Given: A planned line whose record-once insert reports success but writes no row,
+    When: The plan is applied,
+    Then: The line reports recorded_unconfirmed with its sequence id.
+    """
+    pair = await seed_kraken_pair(repository)
+    plan = await _plan(repository, pair.cancel_id)
+    session = _session(plan)
+    with patch.object(repository, "insert_order_terminal_once", AsyncMock(return_value=True)):
+        await repair.apply_write(repository, session)
+    assert session.results == [
+        {"cancel_public_id": pair.cancel_id, "result": "recorded_unconfirmed", "sequence_id": 1}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_change_before_the_compare_and_set_skips_the_line(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The recheck before the compare-and-set skips a Walutomat line whose evidence changed.
+
+    Given: A planned fail_cancel line, then submit evidence for its target,
+    When: The stale plan is applied,
+    Then: The line reports changed_before_write and the cancel stays dispatched.
+    """
+    pair = await seed_walutomat_pair(repository)
+    plan = await _plan(repository, pair.cancel_id)
+    assert plan.lines[0].decision.action is RepairAction.FAIL_CANCEL
+    await add_rows(
+        repository,
+        [venue_event(pair.client_order_id, event_type="order_accepted", status="open")],
+    )
+    session = _session(plan)
+    await repair.apply_write(repository, session)
+    assert session.results == [
+        {"cancel_public_id": pair.cancel_id, "result": "changed_before_write"}
+    ]
+    assert await _status(repository, pair.cancel_id) == ("dispatched", None)
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_write_keeps_the_results_of_the_applied_lines(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A write that raises part-way keeps the results of the lines before the failure.
+
+    Given: A plan whose first line fails a Walutomat cancel and whose second line's
+        insert raises,
+    When: The plan is applied,
+    Then: The error propagates, the first line's result is kept and the second has none.
+    """
+    walutomat = await seed_walutomat_pair(repository)
+    kraken = await seed_kraken_pair(repository)
+    plan = await _plan(repository, walutomat.cancel_id, kraken.cancel_id)
+    assert [line.decision.action for line in plan.lines] == [
+        RepairAction.FAIL_CANCEL,
+        RepairAction.RECORD_TERMINAL,
+    ]
+    session = _session(plan)
+    failing_insert = AsyncMock(side_effect=RuntimeError("insert failed"))
+    with (
+        patch.object(repository, "insert_order_terminal_once", failing_insert),
+        pytest.raises(RuntimeError, match="insert failed"),
+    ):
+        await repair.apply_write(repository, session)
+    assert session.results == [
+        {"cancel_public_id": walutomat.cancel_id, "result": "failed", "sequence_id": 1}
+    ]
+    assert session.sequence == 2
+    receipt = repair.receipt_document(session)
+    assert receipt["results"] == session.results and receipt["digest"] == plan.digest
+
+
+@pytest.mark.asyncio
+async def test_prepare_write_opens_a_fresh_session_per_run(
+    repository: SQLAlchemyRepository, tmp_path: Path
+) -> None:
+    """Each prepared write gets its own session id and starts with no results.
+
+    Given: One voted plan,
+    When: The write is prepared twice,
+    Then: The sessions differ in id, carry the write time and hold no results.
+    """
+    pair = await seed_kraken_pair(repository)
+    plan = await _plan(repository, pair.cancel_id)
+    voted = _vote(tmp_path, plan)
+    sessions = [
+        await repair.prepare_write(
+            repository, [pair.cancel_id], (voted, plan.digest), (DATABASE, CODE), WRITE_TIME
+        )
+        for _ in range(2)
+    ]
+    assert sessions[0].session_id != sessions[1].session_id
+    assert all(item.write_time == WRITE_TIME and item.results == [] for item in sessions)
+    assert all(item.plan.digest == plan.digest for item in sessions)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("read", "message"),
+    [
+        ("get_active_trade_command", "several active versions"),
+        ("get_active_checkpoint", "several active checkpoints"),
+    ],
+)
+async def test_several_active_rows_refuse_the_run(
+    repository: SQLAlchemyRepository, read: str, message: str
+) -> None:
+    """A cancel or checkpoint with more than one active row refuses the whole run.
+
+    Given: A read that finds more than one active row,
+    When: The repair is planned,
+    Then: It refuses naming the duplicated row kind.
+    """
+    pair = await seed_kraken_pair(repository)
+    with (
+        patch.object(repair.reads, read, AsyncMock(side_effect=RuntimeError("several"))),
+        pytest.raises(CancelTargetRepairRefusedError, match=message),
+    ):
+        await _plan(repository, pair.cancel_id)
 
 
 @pytest.mark.asyncio
@@ -924,8 +1102,10 @@ async def test_already_done_lines_write_nothing(repository: SQLAlchemyRepository
         [venue_event(pair.client_order_id, event_type="order_terminal", status="canceled")],
     )
     plan = await _plan(repository, pair.cancel_id)
-    results = await repair.apply_plan(repository, plan, WRITE_TIME)
-    assert results == [{"cancel_public_id": pair.cancel_id, "result": "nothing_to_write"}]
+    session = _session(plan)
+    await repair.apply_write(repository, session)
+    assert session.results == [{"cancel_public_id": pair.cancel_id, "result": "nothing_to_write"}]
+    assert session.sequence == 0
 
 
 def test_refuse_duplicates_refuses_empty_and_repeated_lists() -> None:

@@ -26,10 +26,13 @@ import typer
 
 from snapper.application.trade.cancel_target_repair import CancelTargetRepairRefusedError
 from snapper.application.trade.cancel_target_repair import RepairPlan
+from snapper.application.trade.cancel_target_repair import WriteSession
+from snapper.application.trade.cancel_target_repair import apply_write
 from snapper.application.trade.cancel_target_repair import code_revision
 from snapper.application.trade.cancel_target_repair import plan_repair
+from snapper.application.trade.cancel_target_repair import prepare_write
+from snapper.application.trade.cancel_target_repair import receipt_document
 from snapper.application.trade.cancel_target_repair import refuse_duplicates
-from snapper.application.trade.cancel_target_repair import write_repair
 from snapper.application.updaters.historical.candle_repair import RepairRefusedError
 from snapper.application.updaters.historical.candle_repair import database_endpoint
 from snapper.application.updaters.historical.candle_repair import prepare_output_dir
@@ -114,6 +117,12 @@ def _write_plan_files(output_dir: Path, plan: RepairPlan) -> None:
     write_exclusive(output_dir / "summary.json", _document_bytes(plan.summary))
 
 
+def _write_receipt(output_dir: Path, session: WriteSession) -> None:
+    """Write the plan files and the receipt of a write, complete or interrupted."""
+    _write_plan_files(output_dir, session.plan)
+    write_exclusive(output_dir / "receipt.json", _document_bytes(receipt_document(session)))
+
+
 async def _dry_run(
     repository: SQLAlchemyRepository,
     cancel_ids: list[str],
@@ -154,20 +163,16 @@ async def execute(
                 "the digest and rerun with --confirm --voted-preview <dir> --expect-digest <digest>"
             )
             return 0
-        plan, results = await write_repair(
-            repository,
-            cancel_ids,
-            voted,
-            binding,
-            datetime.now(UTC),
-        )
-        _write_plan_files(output_dir, plan)
-        receipt: JsonObject = {"digest": plan.digest, "results": results}
-        write_exclusive(output_dir / "receipt.json", _document_bytes(receipt))
-        typer.echo(json.dumps(results, sort_keys=True))
+        session = await prepare_write(repository, cancel_ids, voted, binding, datetime.now(UTC))
+        typer.echo(f"write session: {session.session_id}")
+        try:
+            await apply_write(repository, session)
+        finally:
+            _write_receipt(output_dir, session)
+        typer.echo(json.dumps(session.results, sort_keys=True))
         complete = all(
             isinstance(result, dict) and result.get("result") in _WRITE_RESULTS_OK
-            for result in results
+            for result in session.results
         )
         return 0 if complete else 1
     finally:

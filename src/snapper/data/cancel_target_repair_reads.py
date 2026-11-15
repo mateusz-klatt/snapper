@@ -1,25 +1,30 @@
 """Read-only queries of the cancel-target repair (G3-C).
 
-Every query is clockless: an active row is the one whose ``known_to`` is
-:data:`~snapper.data.models.KNOWN_TO_MAX`, because ``where_active`` at a
-point in time misses rows stamped after it and cannot be evaluated at
-``KNOWN_TO_MAX`` itself. Orders, executions and venue events are read
-without joins, so a row whose instrument or symbol lineage is incomplete is
-still found. Nothing here writes; the repair writes only through
-``insert_order_terminal_once`` and ``advance_trade_command_lifecycle``.
+Active-row reads are clockless. ``where_active`` at a point in time misses a
+row stamped after it, so these queries bound only ``known_to > now`` in SQL,
+which no closed version passes, and then prove each loaded row open-ended
+with :func:`~snapper.data.models.is_open_ended_version`, the sanctioned
+exact comparison. A read that finds more than one active row raises, as
+``get_active_create_command_by_client_order_id`` does. Orders, executions and
+venue events are read without joins, so a row whose instrument or symbol
+lineage is incomplete is still found. Nothing here writes; the repair writes
+only through ``insert_order_terminal_once`` and
+``advance_trade_command_lifecycle``.
 """
 
 from collections.abc import Sequence
+from datetime import UTC
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy import union
 
-from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
 from snapper.data.models import Order
 from snapper.data.models import TradeCommand
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import VenueEvent
+from snapper.data.models import is_open_ended_version
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ExecutionEvidenceRow
 from snapper.data.repository_types import OrderVersionRow
@@ -51,18 +56,23 @@ async def get_active_trade_command(
 
     Returns:
         The active row, or ``None`` when the command has no active version.
+
+    Raises:
+        RuntimeError: When more than one version is active.
     """
     async with repository.session() as session:
         result = await session.execute(
             select(TradeCommand).where(
                 TradeCommand.public_id == public_id,
-                TradeCommand.known_to == KNOWN_TO_MAX,
+                TradeCommand.known_to > datetime.now(UTC),
             )
         )
-        command = result.scalars().first()
-    if command is None:
+        commands = [row for row in result.scalars().all() if is_open_ended_version(row.known_to)]
+    if len(commands) > 1:
+        raise RuntimeError("several active versions of one trade command")
+    if not commands:
         return None
-    return SQLAlchemyRepository._trade_command_to_row(command)
+    return SQLAlchemyRepository._trade_command_to_row(commands[0])
 
 
 async def get_trade_command_versions(
@@ -205,14 +215,18 @@ async def get_open_commands_on_shard(
             select(TradeCommand)
             .where(
                 TradeCommand.shard_key == shard_key,
-                TradeCommand.known_to == KNOWN_TO_MAX,
+                TradeCommand.known_to > datetime.now(UTC),
                 TradeCommand.command_type.in_(OPEN_COMMAND_TYPES),
                 TradeCommand.status.not_in(TERMINAL_COMMAND_STATUSES),
             )
             .order_by(TradeCommand.created_at, TradeCommand.id)
         )
         commands = result.scalars().all()
-    return [SQLAlchemyRepository._trade_command_to_row(command) for command in commands]
+    return [
+        SQLAlchemyRepository._trade_command_to_row(command)
+        for command in commands
+        if is_open_ended_version(command.known_to)
+    ]
 
 
 async def get_active_checkpoint(
@@ -226,19 +240,23 @@ async def get_active_checkpoint(
 
     Returns:
         The active checkpoint, or ``None`` when the shard has none.
+
+    Raises:
+        RuntimeError: When more than one checkpoint version is active.
     """
     async with repository.session() as session:
         result = await session.execute(
-            select(TradeProjectionCheckpoint)
-            .where(
+            select(TradeProjectionCheckpoint).where(
                 TradeProjectionCheckpoint.shard_key == shard_key,
-                TradeProjectionCheckpoint.known_to == KNOWN_TO_MAX,
+                TradeProjectionCheckpoint.known_to > datetime.now(UTC),
             )
-            .order_by(TradeProjectionCheckpoint.id.desc())
         )
-        checkpoint = result.scalars().first()
-    if checkpoint is None:
+        checkpoints = [row for row in result.scalars().all() if is_open_ended_version(row.known_to)]
+    if len(checkpoints) > 1:
+        raise RuntimeError("several active checkpoints of one shard")
+    if not checkpoints:
         return None
+    checkpoint = checkpoints[0]
     return {
         "public_id": checkpoint.public_id,
         "shard_key": checkpoint.shard_key,
@@ -282,3 +300,32 @@ async def get_shard_wallets(repository: SQLAlchemyRepository, shard_key: str) ->
         result = await session.execute(wallets)
         values = result.scalars().all()
     return sorted({str(value) for value in values})
+
+
+async def get_terminal_written_by_session(
+    repository: SQLAlchemyRepository, client_order_id: str, session_id: str
+) -> VenueEventRow | None:
+    """Read back the ``order_terminal`` a repair run wrote for one client order id.
+
+    Args:
+        repository: Repository whose session is used.
+        client_order_id: Client order id the terminal belongs to.
+        session_id: The repair run's session id.
+
+    Returns:
+        The written row, or ``None`` when that run wrote none.
+    """
+    async with repository.session() as session:
+        result = await session.execute(
+            select(VenueEvent)
+            .where(
+                VenueEvent.client_order_id == client_order_id,
+                VenueEvent.event_type == "order_terminal",
+                VenueEvent.session_id == session_id,
+            )
+            .order_by(VenueEvent.id)
+        )
+        event = result.scalars().first()
+    if event is None:
+        return None
+    return SQLAlchemyRepository._venue_event_to_row(event)
