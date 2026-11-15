@@ -453,9 +453,12 @@ from snapper.data.repository_types import ShadowCandleUpsertRow
 from snapper.data.repository_types import SignalRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
+from snapper.data.repository_types import SpotCommandVersionRow
 from snapper.data.repository_types import SpotExecutionWitnessRow
 from snapper.data.repository_types import SpotInstrumentIdentitySourceRow
+from snapper.data.repository_types import SpotNeverSubmittedAudit
 from snapper.data.repository_types import SpotNeverSubmittedCandidate
+from snapper.data.repository_types import SpotNeverSubmittedEventRow
 from snapper.data.repository_types import SpotOwnedOrderPopulation
 from snapper.data.repository_types import SpotOwnedOrderSourceRow
 from snapper.data.repository_types import SpotOwnedSubmitCommandRow
@@ -9952,6 +9955,90 @@ def _is_never_submitted_candidate(command: TradeCommand) -> bool:
         and command.acked_at is None
         and is_venue_order_id(command.client_order_id)
     )
+
+
+def _spot_owned_command_row(
+    command: TradeCommand, candidate: SpotNeverSubmittedCandidate | None
+) -> SpotOwnedSubmitCommandRow:
+    """Project one sentinel-tip command with its never-submitted facts, if any.
+
+    Args:
+        command: One sentinel-tip in-scope command.
+        candidate: Its never-submitted facts, or ``None`` when it is no candidate.
+
+    Returns:
+        The command row the owned-population builder reads.
+    """
+    return {
+        "public_id": str(command.public_id),
+        "status": str(command.status),
+        "exchange_order_id": command.exchange_order_id,
+        "row_id": command.id,
+        "command_type": command.command_type,
+        "client_order_id": command.client_order_id,
+        "venue_client_id": command.venue_client_id,
+        "wallet_public_id": str(command.wallet_public_id),
+        "mode": command.mode,
+        "exchange": command.exchange,
+        "acked_at": command.acked_at,
+        "candidate": candidate,
+    }
+
+
+def _events_linked_to(
+    command: TradeCommand, events: Sequence[VenueEvent]
+) -> tuple[SpotNeverSubmittedEventRow, ...]:
+    """Select, in id order, the venue events linked to one candidate.
+
+    Args:
+        command: One never-submitted candidate.
+        events: The batched events of every candidate, in id order, each once.
+
+    Returns:
+        The events whose client order id or venue client id is the candidate's
+        client order id, or whose command public id is its public id.
+    """
+    public_id = str(command.public_id)
+    return tuple(
+        {
+            "id": event.id,
+            "event_type": event.event_type,
+            "command_public_id": (
+                None if event.command_public_id is None else str(event.command_public_id)
+            ),
+            "client_order_id": event.client_order_id,
+            "exchange_order_id": event.exchange_order_id,
+            "status": event.status,
+            "error": event.error,
+            "received_at": event.received_at,
+        }
+        for event in events
+        if command.client_order_id in (event.client_order_id, event.venue_client_id)
+        or (event.command_public_id is not None and str(event.command_public_id) == public_id)
+    )
+
+
+def _never_submitted_audit(command: TradeCommand) -> SpotNeverSubmittedAudit:
+    """Read a candidate's unhashed review context from its sentinel-tip version.
+
+    Args:
+        command: One never-submitted candidate.
+
+    Returns:
+        Its timing, attempt count, last error and order parameters.
+    """
+    return {
+        "created_at": command.created_at,
+        "dispatched_at": command.dispatched_at,
+        "terminal_at": command.terminal_at,
+        "attempt_count": command.attempt_count,
+        "last_error": command.last_error,
+        "instrument": command.instrument,
+        "side": command.side,
+        "order_type": command.order_type,
+        "quantity": command.quantity,
+        "price": command.price,
+    }
 
 
 class SQLAlchemyRepository(Repository):
@@ -28332,6 +28419,8 @@ class SQLAlchemyRepository(Repository):
         """Read the exact scope's sentinel-tip ``create`` and ``submit`` commands and retired ids.
 
         Each command carries its never-submitted facts when it is a candidate.
+        The candidates' facts are read in three batched reads, so their cost
+        does not grow with the number of candidates.
         """
         result = await s.execute(
             select(TradeCommand)
@@ -28341,76 +28430,70 @@ class SQLAlchemyRepository(Repository):
             )
             .order_by(TradeCommand.id.asc())
         )
-        commands = [
-            await SQLAlchemyRepository._spot_owned_command_row(s, command)
-            for command in result.scalars().all()
-        ]
+        tips = list(result.scalars().all())
+        facts = await SQLAlchemyRepository._spot_never_submitted_facts(
+            s, [command for command in tips if _is_never_submitted_candidate(command)]
+        )
         retired = await SQLAlchemyRepository._spot_retired_command_public_ids(
             s, wallet_public_id, exchange, mode
         )
-        return {"commands": tuple(commands), "retired_public_ids": retired}
-
-    @staticmethod
-    async def _spot_owned_command_row(
-        s: AsyncSession, command: TradeCommand
-    ) -> SpotOwnedSubmitCommandRow:
-        """Project one sentinel-tip command, reading its never-submitted facts when a candidate."""
-        candidate = None
-        if _is_never_submitted_candidate(command):
-            candidate = await SQLAlchemyRepository._spot_never_submitted_candidate(s, command)
         return {
-            "public_id": str(command.public_id),
-            "status": str(command.status),
-            "exchange_order_id": command.exchange_order_id,
-            "row_id": command.id,
-            "command_type": command.command_type,
-            "client_order_id": command.client_order_id,
-            "venue_client_id": command.venue_client_id,
-            "wallet_public_id": str(command.wallet_public_id),
-            "mode": command.mode,
-            "exchange": command.exchange,
-            "acked_at": command.acked_at,
-            "candidate": candidate,
+            "commands": tuple(
+                _spot_owned_command_row(command, facts.get(str(command.public_id)))
+                for command in tips
+            ),
+            "retired_public_ids": retired,
         }
 
     @staticmethod
-    async def _spot_never_submitted_candidate(
-        s: AsyncSession, command: TradeCommand
-    ) -> SpotNeverSubmittedCandidate:
-        """Read a candidate's versions, linked venue events, Order count and audit context.
+    async def _spot_never_submitted_facts(
+        s: AsyncSession, candidates: Sequence[TradeCommand]
+    ) -> dict[str, SpotNeverSubmittedCandidate]:
+        """Read every candidate's versions, linked events, Order count and audit context.
 
-        Versions are read by public id with no scope or ``known_to`` filter, so
-        the whole history is bound. Venue events are read in every scope by
-        client order id, venue client id or command public id. Orders are
-        counted across every version, wallet and mode.
+        Three batched reads serve all candidates: every version of their public
+        ids, with no scope or ``known_to`` filter so the whole history is
+        bound; every venue event in any scope whose client order id or venue
+        client id is a candidate's client order id, or whose command public id
+        is a candidate's public id; and the number of Orders of any version,
+        wallet or mode per client order id. Each event is attributed to every
+        candidate it links to, in id order, once.
         """
+        if not candidates:
+            return {}
+        public_ids = [str(command.public_id) for command in candidates]
+        client_order_ids = [command.client_order_id for command in candidates]
         versions = await s.execute(
             select(
+                TradeCommand.public_id,
                 TradeCommand.id,
                 TradeCommand.status,
                 TradeCommand.exchange_order_id,
                 TradeCommand.acked_at,
                 TradeCommand.known_to,
             )
-            .where(TradeCommand.public_id == command.public_id)
+            .where(TradeCommand.public_id.in_(public_ids))
             .order_by(TradeCommand.id.asc())
         )
         events = await s.execute(
             select(VenueEvent)
             .where(
                 or_(
-                    VenueEvent.client_order_id == command.client_order_id,
-                    VenueEvent.venue_client_id == command.client_order_id,
-                    VenueEvent.command_public_id == command.public_id,
+                    VenueEvent.client_order_id.in_(client_order_ids),
+                    VenueEvent.venue_client_id.in_(client_order_ids),
+                    VenueEvent.command_public_id.in_(public_ids),
                 )
             )
             .order_by(VenueEvent.id.asc())
         )
-        order_row_count = await s.scalar(
-            select(func.count(Order.id)).where(Order.client_order_id == command.client_order_id)
+        counts = await s.execute(
+            select(Order.client_order_id, func.count(Order.id))
+            .where(Order.client_order_id.in_(client_order_ids))
+            .group_by(Order.client_order_id)
         )
-        return {
-            "versions": tuple(
+        version_rows: dict[str, list[SpotCommandVersionRow]] = {}
+        for public_id, row_id, status, exchange_order_id, acked_at, known_to in versions.all():
+            version_rows.setdefault(str(public_id), []).append(
                 {
                     "row_id": row_id,
                     "status": str(status),
@@ -28418,36 +28501,17 @@ class SQLAlchemyRepository(Repository):
                     "acked_at": acked_at,
                     "open_ended": is_open_ended_version(known_to),
                 }
-                for row_id, status, exchange_order_id, acked_at, known_to in versions.all()
-            ),
-            "venue_events": tuple(
-                {
-                    "id": event.id,
-                    "event_type": event.event_type,
-                    "command_public_id": (
-                        None if event.command_public_id is None else str(event.command_public_id)
-                    ),
-                    "client_order_id": event.client_order_id,
-                    "exchange_order_id": event.exchange_order_id,
-                    "status": event.status,
-                    "error": event.error,
-                    "received_at": event.received_at,
-                }
-                for event in events.scalars().all()
-            ),
-            "order_row_count": int(order_row_count or 0),
-            "audit": {
-                "created_at": command.created_at,
-                "dispatched_at": command.dispatched_at,
-                "terminal_at": command.terminal_at,
-                "attempt_count": command.attempt_count,
-                "last_error": command.last_error,
-                "instrument": command.instrument,
-                "side": command.side,
-                "order_type": command.order_type,
-                "quantity": command.quantity,
-                "price": command.price,
-            },
+            )
+        linked_events = list(events.scalars().all())
+        order_counts = {str(client_order_id): int(count) for client_order_id, count in counts.all()}
+        return {
+            str(command.public_id): {
+                "versions": tuple(version_rows.get(str(command.public_id), [])),
+                "venue_events": _events_linked_to(command, linked_events),
+                "order_row_count": order_counts.get(command.client_order_id, 0),
+                "audit": _never_submitted_audit(command),
+            }
+            for command in candidates
         }
 
     @staticmethod

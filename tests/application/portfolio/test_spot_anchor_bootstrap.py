@@ -219,6 +219,16 @@ _REFUSAL_CASES = [
     ),
     pytest.param(replace(_BASELINE, margin_signal=True), "margin_not_proven_cash", id="margin"),
     pytest.param(
+        replace(
+            _with_rows(
+                replace(_item(98, "USD", "90", order_id="M1"), submit_id=_EXCLUDED_CLIENT_ORDER_ID)
+            ),
+            ownership=_population(excluded_client_order_ids=frozenset({_EXCLUDED_CLIENT_ORDER_ID})),
+        ),
+        "never_submitted_command_on_venue",
+        id="never_submitted_on_venue",
+    ),
+    pytest.param(
         replace(_BASELINE, ownership=_population(commands=(_command("dispatched"),))),
         "own_submit_unresolved",
         id="own_submit",
@@ -916,16 +926,38 @@ def test_an_observation_built_without_ownership_fields_fails_closed() -> None:
 def test_a_page_row_under_an_excluded_command_refuses() -> None:
     """The venue showing activity under a never-submitted command's id contradicts the review.
 
-    Given: A page row whose ``submitId`` is the client order id of a command a
-        reviewed exclusion settles, and an otherwise sealable observation.
-    When: The refusals are computed.
-    Then: ``never_submitted_command_on_venue`` is returned.
+    Given: An external MARKET_FX row, whose order id lies outside ``S``, carrying
+        the client order id of a command a reviewed exclusion settles as its
+        ``submitId``, in an observation that would otherwise seal as external.
+    When: The refusals are computed and the anchor is built.
+    Then: ``never_submitted_command_on_venue`` is the only refusal and the seal
+        is refused.
     """
     observation = replace(
-        _with_rows(replace(_item(98, "USD", "90"), submit_id=_EXCLUDED_CLIENT_ORDER_ID)),
+        _with_rows(
+            replace(_item(98, "USD", "90", order_id="M1"), submit_id=_EXCLUDED_CLIENT_ORDER_ID)
+        ),
         ownership=_population(excluded_client_order_ids=frozenset({_EXCLUDED_CLIENT_ORDER_ID})),
     )
-    assert "never_submitted_command_on_venue" in _history_refusals(observation)
+    assert spot_anchor_bootstrap_refusals(observation) == ("never_submitted_command_on_venue",)
+    with pytest.raises(SpotAnchorNotCertifiableError) as caught:
+        build_spot_anchor(observation)
+    assert caught.value.refusals == ("never_submitted_command_on_venue",)
+
+
+def test_an_external_row_without_an_excluded_submit_id_still_seals() -> None:
+    """The cross-check leaves an unrelated external row to the classification.
+
+    Given: The same external row carrying another command's client order id, and
+        one excluded client order id.
+    When: The anchor is built.
+    Then: It seals as external activity.
+    """
+    observation = replace(
+        _with_rows(replace(_item(98, "USD", "90", order_id="M1"), submit_id=_CLIENT_ORDER_ID)),
+        ownership=_population(excluded_client_order_ids=frozenset({_EXCLUDED_CLIENT_ORDER_ID})),
+    )
+    assert build_spot_anchor(observation)["provenance"].endswith(":external_observed")
 
 
 def test_the_cross_check_never_masks_page_refusals_or_the_gate() -> None:

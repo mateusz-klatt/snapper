@@ -24,6 +24,7 @@ from uuid import uuid7
 
 import pytest
 from sqlalchemy import delete
+from sqlalchemy import event
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -867,20 +868,44 @@ async def test_only_never_submitted_candidates_carry_facts(
 async def test_retired_commands_are_found_within_the_scope(configured: _Scope) -> None:
     """A command without an open-ended version in scope is retired and refuses.
 
-    Given: A fully closed in-scope history; a closed in-scope version whose
-        open-ended successor moved to Kraken; a closed version with an open
+    Given: A fully closed in-scope history; closed in-scope versions whose
+        open-ended successors moved to Kraken, to another wallet, to the paper
+        mode, or to the cancel command type; a closed version with an open
         in-scope successor; and a closed history of another wallet.
     When: The population is read.
-    Then: Exactly the first two public ids are retired, sorted, and the gate
-        refuses.
+    Then: Exactly the fully closed and the four moved public ids are retired,
+        sorted, and the gate refuses.
     """
     closed_at: _VersionOverrides = {"known_to": _CLOSED_AT}
     fully_closed = _new_id()
     moved = _new_id()
+    moved_wallet = _new_id()
+    moved_mode = _new_id()
+    moved_type = _new_id()
     still_open = _new_id()
     other_wallet = _new_id()
+    successors: list[TradeCommand] = []
+    for public_id, successor in (
+        (moved_wallet, _CommandOverrides(wallet_public_id=configured.other_wallet)),
+        (moved_mode, _CommandOverrides(mode="paper")),
+        (moved_type, _CommandOverrides(command_type="cancel")),
+    ):
+        successors.append(
+            _command(configured, "dispatched", None, public_id=public_id, **closed_at)
+        )
+        successors.append(
+            _command(
+                configured,
+                "dispatched",
+                None,
+                public_id=public_id,
+                timestamp=_CLOSED_AT,
+                **successor,
+            )
+        )
     await _persist(
         configured,
+        *successors,
         _command(configured, "dispatched", None, public_id=fully_closed, **closed_at),
         _command(configured, "dispatched", None, public_id=moved, **closed_at),
         _command(
@@ -903,7 +928,9 @@ async def test_retired_commands_are_found_within_the_scope(configured: _Scope) -
         ),
     )
     population = await _population(configured)
-    assert population["retired_command_public_ids"] == tuple(sorted([fully_closed, moved]))
+    assert population["retired_command_public_ids"] == tuple(
+        sorted([fully_closed, moved, moved_wallet, moved_mode, moved_type])
+    )
     assert own_submit_unresolved(population) is True
 
 
@@ -984,3 +1011,88 @@ async def test_the_candidate_facts_share_the_population_snapshot(
     assert second is not None
     assert len(first["venue_events"]) == 1
     assert len(second["venue_events"]) == 2
+
+
+async def test_candidate_facts_are_batched_and_attributed_per_candidate(configured: _Scope) -> None:
+    """Several candidates share three reads, and each gets exactly its own facts.
+
+    Given: Two interlock-failed creates, an event linked to the first by client
+        order id and to the second by command public id, an event of the second
+        alone, and an Order carrying the first's client order id.
+    When: The population is read.
+    Then: Each candidate lists its own three versions, the shared event appears
+        once in each, the lone event only in the second, and the Order counts
+        only for the first.
+    """
+    first_id, first_client = _new_id(), _new_id()
+    second_id, second_client = _new_id(), _new_id()
+    shared = _venue_event(
+        configured,
+        "order_interlock_blocked",
+        client_order_id=first_client,
+        command_public_id=second_id,
+    )
+    lone = _venue_event(configured, "order_interlock_blocked", client_order_id=second_client)
+    instrument = _instrument(configured, "walutomat")
+    order = _order(configured, instrument.public_id, "WA-7")
+    order.client_order_id = first_client
+    await _persist(
+        configured,
+        *_candidate_history(configured, first_id, first_client),
+        *_candidate_history(configured, second_id, second_client),
+        shared,
+        lone,
+        instrument,
+        order,
+    )
+    population = await _population(configured)
+    by_id = {command["public_id"]: command["candidate"] for command in population["commands"]}
+    first, second = by_id[first_id], by_id[second_id]
+    assert first is not None
+    assert second is not None
+    assert [version["status"] for version in first["versions"]] == [
+        "created",
+        "dispatched",
+        "failed",
+    ]
+    assert [version["status"] for version in second["versions"]] == [
+        "created",
+        "dispatched",
+        "failed",
+    ]
+    assert [event["id"] for event in first["venue_events"]] == [shared.id]
+    assert [event["id"] for event in second["venue_events"]] == sorted([shared.id, lone.id])
+    assert first["order_row_count"] == 1
+    assert second["order_row_count"] == 0
+
+
+async def test_the_candidate_reads_do_not_grow_with_the_candidates(configured: _Scope) -> None:
+    """The population issues the same number of statements for one or three candidates.
+
+    Given: One interlock-failed create, then two more in the same scope.
+    When: The population is read before and after the two are added, counting
+        the statements sent to the database.
+    Then: Both reads send the same number of statements.
+    """
+    statements: list[str] = []
+
+    def count(*args: object) -> None:
+        """Record one statement sent through the engine."""
+        statements.append(str(args[2]))
+
+    await _persist(configured, *_candidate_history(configured, _new_id(), _new_id()))
+    event.listen(configured.repository.engine.sync_engine, "before_cursor_execute", count)
+    try:
+        await _population(configured)
+        one_candidate = len(statements)
+        await _persist(
+            configured,
+            *_candidate_history(configured, _new_id(), _new_id()),
+            *_candidate_history(configured, _new_id(), _new_id()),
+        )
+        statements.clear()
+        await _population(configured)
+        three_candidates = len(statements)
+    finally:
+        event.remove(configured.repository.engine.sync_engine, "before_cursor_execute", count)
+    assert three_candidates == one_candidate
