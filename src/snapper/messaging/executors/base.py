@@ -7313,10 +7313,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     ) -> None:
         """Apply one buffered frame while the drain holds ``holder.fill_lock``.
 
-        A frame that no longer correlates to ``holder``, because an earlier
-        frame in the same drain ended the order, is not booked under this
-        lock. A failure is logged and the drain moves on to the next frame,
-        as :meth:`_process_execution` does for a single frame.
+        A frame that no longer correlates to ``holder`` is not booked under
+        this lock. If an earlier frame in the same drain ended the order,
+        the frame goes back to the orphan buffer. If it now maps to another
+        tracked entry, a warning names it, so a fill left to reconciliation
+        leaves a trace. A failure is logged and the drain moves on to the
+        next frame, as :meth:`_process_execution` does for a single frame.
 
         Args:
             execution: One buffered execution frame.
@@ -7329,6 +7331,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 return
             exchange_order_id, client_order_id, original_order = resolved
             if self.pending_orders.get(client_order_id) is not holder:
+                logger.warning(
+                    f"[{exchange_name}] Buffered execution {execution.exec_id} for "
+                    f"{exchange_order_id} now correlates to {client_order_id}, not the order "
+                    f"being drained; not booked under the drain's lock, so reconciliation "
+                    f"must recover it"
+                )
                 return
             await self._apply_correlated_execution(
                 execution, exchange_order_id, client_order_id, original_order, exchange_name

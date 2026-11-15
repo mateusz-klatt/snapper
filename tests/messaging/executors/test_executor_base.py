@@ -1468,7 +1468,8 @@ async def test_buffered_frame_that_no_longer_belongs_to_the_held_order_is_not_bo
 
     Given: A drain holding one order's entry, and frames that now resolve elsewhere or nowhere,
     When: Each frame is applied,
-    Then: Neither is handled, and an unmapped frame goes back to the orphan buffer.
+    Then: Neither is handled, the re-mapped frame is warned about by exec id,
+        and the unmapped frame goes back to the orphan buffer.
     """
     ex, _published = _orphan_executor("held-1")
     held = ex.pending_orders["held-1"]
@@ -1489,10 +1490,13 @@ async def test_buffered_frame_that_no_longer_belongs_to_the_held_order_is_not_bo
 
     ex._apply_correlated_execution = record_correlated
     other = _orphan_trade("ex-other", "o1", cum_qty=0.1, last_qty=0.1, price=1.0)
-    await ex._apply_buffered_execution(other, held, "kraken")
     unmapped = _orphan_trade("ex-ended", "e1", cum_qty=0.1, last_qty=0.1, price=1.0)
-    await ex._apply_buffered_execution(unmapped, held, "kraken")
+    with patch.object(base_module.logger, "warning") as warning:
+        await ex._apply_buffered_execution(other, held, "kraken")
+        await ex._apply_buffered_execution(unmapped, held, "kraken")
     assert handled == []
+    assert warning.call_count == 1
+    assert "o1" in str(warning.call_args) and "other-1" in str(warning.call_args)
     assert [frame.exec_id for frame, _ in ex.orphaned_executions["ex-ended"]] == ["e1"]
 
 
