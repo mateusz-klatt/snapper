@@ -248,8 +248,10 @@ def plan_catchup_window(
     """Bound the finalized catch-up span for one scope this tick (R5).
 
     The window opens one minute after the later of the anchor ``t0`` and the last
-    persisted sample, and closes at the floored ``now`` minus the finalization
-    lag so no still-provisional minute is ever sampled.
+    persisted sample. It contains at most one catch-up chunk and never extends
+    past the floored ``now`` minus the finalization lag. Older backlogs therefore
+    advance through durable commits over successive ticks, rather than retaining
+    every missing day in memory before the first insert.
 
     Args:
         now: Current instant (the service's clock reading).
@@ -264,7 +266,10 @@ def plan_catchup_window(
     """
     resume_from = t0 if last_sample_minute is None else max(t0, last_sample_minute)
     start = resume_from + _MINUTE
-    end = _floor_to_minute(now) - finalization_lag
+    end = min(
+        _floor_to_minute(now) - finalization_lag,
+        start + (MAX_CATCHUP_CHUNK_MINUTES - 1) * _MINUTE,
+    )
     if start > end:
         return None
     return ChunkWindow(start=start, end=end)

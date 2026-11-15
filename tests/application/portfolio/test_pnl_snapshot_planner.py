@@ -290,6 +290,16 @@ class TestPlanCatchupWindow:
         assert window is not None
         assert window.end == _T0 + timedelta(minutes=8)
 
+    def test_old_backlog_selects_only_one_inclusive_day(self) -> None:
+        """A long backlog selects one inclusive day after the durable cursor.
+
+        Given: A persisted minute and one hundred days of finalized missing data.
+        When: The next tick's catch-up window is planned.
+        Then: It covers exactly the following 1440 minutes without reaching ahead.
+        """
+        window = plan_catchup_window(_T0 + timedelta(days=100), _M2, _T0)
+        assert window == ChunkWindow(start=_M3, end=_M2 + timedelta(days=1))
+
 
 class TestPlanCatchupChunks:
     """Budget-bounded catch-up chunking."""
