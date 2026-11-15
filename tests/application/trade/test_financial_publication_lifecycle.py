@@ -850,12 +850,14 @@ def _finalize_unowned_subscribers() -> None:
     The raw sockets prove each finalizer ran and closed its socket.
     """
     context = zmq.asyncio.Context()
-    sockets = [context.socket(zmq.SUB) for _ in range(3)]
-    subscribers = [ValidatedSubscriber(raw) for raw in sockets]
-    del subscribers
-    gc.collect()
-    assert all(raw.closed for raw in sockets)
-    context.destroy(linger=0)
+    try:
+        sockets = [context.socket(zmq.SUB) for _ in range(3)]
+        subscribers = [ValidatedSubscriber(raw) for raw in sockets]
+        del subscribers
+        gc.collect()
+        assert all(raw.closed for raw in sockets)
+    finally:
+        context.destroy(linger=0)
 
 
 async def test_late_actual_startup_return_cannot_spawn_unjoined_workers_after_shutdown(
