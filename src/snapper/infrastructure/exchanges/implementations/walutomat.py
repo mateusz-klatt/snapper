@@ -117,8 +117,8 @@ def _reject_unsupported_order_type(order_type: ExchangeOrderTypeEnum) -> None:
 
     Two types qualify. Stop orders have no venue concept at all. Market
     orders were previously left to the venue and failed there every single
-    time: the request body attaches ``limitPrice`` only when a price is
-    given, a market order carries none, and the venue requires the field,
+    time: the request body attached ``limitPrice`` only when a price was
+    given, a market order carried none, and the venue required the field,
     so every market submit came back ``INVALID_ARGUMENTS`` naming
     ``limitPrice`` as required — after a full dispatch round trip.
     Refusing locally turns a late, generic venue rejection into an
@@ -2453,7 +2453,8 @@ class WalutomatExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: If not connected or not authenticated, or the
                 venue answered ``success=false``.
-            ValueError: If the request is stop-typed or market-typed —
+            ValueError: If a limit request has no positive finite price,
+                or the request is stop-typed or market-typed —
                 Walutomat's FX market API has neither. Raised BEFORE any
                 network send, so the failure is provably-not-placed and
                 the executor's definitive-reject branch (publish
@@ -2461,9 +2462,9 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 park (#156).
 
                 The market case was previously left to the venue and it
-                failed there every single time: the body attaches
+                failed there every single time: the body attached
                 ``limitPrice`` only ``if request.price``, a market order
-                carries no price, and the venue requires the field, so
+                carried no price, and the venue required the field, so
                 every market submit came back
                 ``INVALID_ARGUMENTS {'key': 'limitPrice', 'value':
                 'required'}`` after a full dispatch round trip. Refusing
@@ -2480,6 +2481,8 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 the order MAY exist on the venue.
         """
         _reject_unsupported_order_type(request.type)
+        if request.price is None or not math.isfinite(request.price) or request.price <= 0:
+            raise ValueError("Walutomat limit orders require a positive finite price")
         client = self._require_authenticated()
         walutomat_rest_symbol = native_to_walutomat_rest(request.symbol)
         base_currency = request.symbol.split("-")[0]
@@ -2491,9 +2494,8 @@ class WalutomatExchangeClient(ExchangeClientBase):
             "volumeCurrency": base_currency,
             "dryRun": "false",
             "submitId": submit_id,
+            "limitPrice": f"{request.price:.4f}",
         }
-        if request.price:
-            body_params["limitPrice"] = f"{request.price:.4f}"
         body = urlencode(body_params)
         endpoint = "/api/v2.0.0/market_fx/orders"
         headers = self._get_auth_headers(endpoint, body)

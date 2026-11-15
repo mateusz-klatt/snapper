@@ -2890,39 +2890,51 @@ async def test_create_order_requires_connection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_order_without_price_does_not_send_limit(
+@pytest.mark.parametrize("price", (None, 0.0, -1.0, math.inf, -math.inf, math.nan))
+@pytest.mark.parametrize("side", (OrderSideEnum.BUY, OrderSideEnum.SELL))
+@pytest.mark.parametrize("connected", (False, True))
+async def test_create_order_requires_price_before_auth_or_send(
     monkeypatch: pytest.MonkeyPatch,
+    price: float | None,
+    side: OrderSideEnum,
+    connected: bool,
 ) -> None:
-    """Verify create_order omits limitPrice when price is None.
+    """Refuse an invalid limit price before an order can reach Walutomat.
 
-    Given: A connected client with credentials,
-    When: create_order() is called without price,
-    Then: Request body does not include limitPrice.
+    Given: A connected or disconnected client and a request without a usable limit price,
+    When: Either side attempts to create the order with an omitted, nonpositive or nonfinite price,
+    Then: A definitive local ValueError occurs before authentication, signing or HTTP.
+
+    Args:
+        monkeypatch: Scoped request-signing observer.
+        price: An omitted, nonpositive or nonfinite limit price.
+        side: Either order side must retain the caller's explicit price requirement.
+        connected: Whether an HTTP transport is already available.
     """
     client = WalutomatExchangeClient(
         api_key="key",
         private_key_data=_generate_private_key_pem(),
     )
-    stub_client = StubAsyncClient(
-        post_responses=[StubResponse({"success": True, "result": {"orderId": "abc"}})]
-    )
-    client._http_client = cast(httpx.AsyncClient, stub_client)
+    stub_client = StubAsyncClient()
+    if connected:
+        client._http_client = cast(httpx.AsyncClient, stub_client)
 
     def auth_headers(_endpoint: str, _body: str) -> dict[str, str]:
-        return {"X-API-Key": "key"}
+        """Fail if an invalid order reaches request signing."""
+        raise AssertionError("An invalid limit price must be refused before request signing")
 
     monkeypatch.setattr(client, "_get_auth_headers", auth_headers)
     request = ExchangeOrderRequest(
         symbol="EUR-PLN",
-        side=OrderSideEnum.BUY,
+        side=side,
         type=ExchangeOrderTypeEnum.LIMIT,
         amount=1.0,
-        client_order_id="coid-create-order-without-price-does-not-send-limit",
-        price=None,
+        client_order_id="coid-create-order-requires-price-before-auth-or-send",
+        price=price,
     )
-    await client.create_order(request)
-    encoded_body = stub_client.post_calls[0][1]["content"]
-    assert "limitPrice" not in encoded_body
+    with pytest.raises(ValueError, match="Walutomat limit orders require a positive finite price"):
+        await client.create_order(request)
+    assert stub_client.post_calls == []
 
 
 @pytest.mark.asyncio

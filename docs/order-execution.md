@@ -47,6 +47,13 @@ Kraken's [current xStocks availability rules](https://support.kraken.com/article
 separate EEA buy/sell/convert access from Pro/API order-book access. Account
 eligibility requires independent venue evidence.
 
+## Walutomat request validation
+
+Walutomat limit orders require an explicit positive finite price. The adapter
+refuses omitted, zero, negative and nonfinite prices locally before authentication,
+request signing or HTTP, so the order remains definitively unsubmitted. Market and
+stop orders are also refused locally; the adapter never invents a replacement price.
+
 ## Quantity and monetary evidence
 
 The Futures [instrument catalog](https://docs.kraken.com/api-reference/instrument-details/get-instruments)
