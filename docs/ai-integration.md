@@ -259,7 +259,29 @@ route to revoke one.
 
 ## Client configuration examples
 
-### Claude Code plugin (recommended)
+### Multi-CLI setup (`snapper-mcp integrate` and `snapper-mcp doctor`)
+
+`@mateusz-klatt/snapper-mcp` (`>= 0.16.0`) ships a unified installer and
+verifier that wires MCP tool access and interactive-only session wake across
+Claude Code, Codex, GitHub Copilot CLI, Antigravity, Kimi Code, Grok CLI, and
+Cursor CLI while keeping credentials in a mode-`0600` `config.json` file (never
+embedded in hook commands or process `argv`):
+
+```bash
+# Configure MCP + interactive wake for all supported coding CLIs
+npx -y @mateusz-klatt/snapper-mcp integrate all \
+  --base-url https://snapper.example.com/api/mcp \
+  --access-token "<copied-from-create-response>"
+
+# Verify client configs, wake hooks/watchers, and token shape/expiry
+npx -y @mateusz-klatt/snapper-mcp doctor
+
+# Configure MCP only (disable wake) or cleanly unwire Snapper-managed entries
+npx -y @mateusz-klatt/snapper-mcp integrate codex --no-wake
+npx -y @mateusz-klatt/snapper-mcp integrate all --remove
+```
+
+### Claude Code plugin (marketplace install)
 
 In any Claude Code session:
 
@@ -288,7 +310,7 @@ plugin's `userConfig` schema in
 Run `/mcp list` to confirm the `snapper` server is connected. The
 plugin pins the runtime to a specific `@mateusz-klatt/snapper-mcp`
 version — the manifest hardcodes the exact version string in
-`mcpServers.snapper.args` (currently `@0.15.0`), kept in lockstep
+`mcpServers.snapper.args` (currently `@0.16.0`), kept in lockstep
 with the plugin's own `version` field by the
 `integrations/snapper-mcp/test/plugin_manifest.test.ts` parity
 test so a bump to either side fails CI until both match. Future
