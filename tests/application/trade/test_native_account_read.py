@@ -505,6 +505,27 @@ async def test_public_identity_commit_failure_prevents_the_following_accounts_re
     assert await _counts(scenario) == (1, 0, 1, 0, 0, 0)
 
 
+async def _wait_for_blocked_entry(
+    read: asyncio.Task[BoundNativeAccountReadOutcome], entry: asyncio.Task[bool]
+) -> None:
+    """Race the blocked worker's entry against the read, naming whichever stops the test.
+
+    A read that finishes before its worker enters raises its own exception here, or
+    fails as finished early, instead of hiding behind the liveness bound. An entry
+    that times out fails as such. Only the real wait result can pass: the caller sets
+    ``entered`` only during cleanup, after this returns, to release the waiter thread.
+
+    Args:
+        read: The native account read under test.
+        entry: The thread waiting for the blocked worker to enter.
+    """
+    done, _ = await asyncio.wait({read, entry}, return_when=asyncio.FIRST_COMPLETED)
+    if entry not in done:
+        read.result()
+        pytest.fail("the read finished before its blocked worker entered")
+    assert entry.result(), "the blocked worker did not enter within the liveness bound"
+
+
 @pytest.mark.parametrize("storage_fails", (False, True))
 @pytest.mark.parametrize("after_identity", (False, True))
 async def test_cancelled_actual_worker_cannot_later_reauthorize_its_discarded_response(
@@ -538,9 +559,11 @@ async def test_cancelled_actual_worker_cannot_later_reauthorize_its_discarded_re
             scenario.repository, scenario.client, scenario.tracker
         )
     )
+    entry = asyncio.create_task(
+        asyncio.to_thread(scenario.adapter.entered.wait, _LIVENESS_TIMEOUT_S)
+    )
     try:
-        entered = await asyncio.to_thread(scenario.adapter.entered.wait, _LIVENESS_TIMEOUT_S)
-        assert entered, f"blocked worker never entered; read already finished: {task.done()}"
+        await _wait_for_blocked_entry(task, entry)
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
@@ -563,6 +586,8 @@ async def test_cancelled_actual_worker_cannot_later_reauthorize_its_discarded_re
         assert (proof is not None) is after_identity
     finally:
         scenario.adapter.release.set()
+        scenario.adapter.entered.set()
+        await asyncio.gather(entry, return_exceptions=True)
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
