@@ -50,9 +50,11 @@ an unconvertible nonzero flow is passed as ``NaN`` rather than silently zeroed o
 dropped.
 """
 
+import asyncio
 import json
 import math
 from bisect import bisect_left
+from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -501,11 +503,15 @@ class PnlSeriesReplayOptions:
     read and request prefix (avoiding a duplicate durable boundary read), and the
     snapshotter's per-exchange baseline watermark map that turns on R3 late-fill
     replay metadata. Both default to absent, which reproduces the plain series
-    build with no preloaded evidence and no replay metadata.
+    build with no preloaded evidence and no replay metadata. ``offload_valuation``
+    moves only the already-loaded synchronous valuation onto a worker, keeping
+    all asynchronous repository access on the caller's event loop. The
+    snapshotter opts in so a catch-up does not stall the live order handlers.
     """
 
     preloaded_evidence: _SeriesReadEvidence | None = None
     baseline_watermarks: Mapping[str, int] | None = None
+    offload_valuation: bool = False
 
 
 _NO_SERIES_REPLAY_OPTIONS: Final[PnlSeriesReplayOptions] = PnlSeriesReplayOptions()
@@ -5857,6 +5863,43 @@ def _series_instrument_ids(
     return opening_instrument_ids, instrument_ids
 
 
+async def _offload_series_valuation(
+    valuation: Callable[[], tuple[PnlTimelineResult, tuple[PnlFxRateSource, ...]]],
+) -> tuple[PnlTimelineResult, tuple[PnlFxRateSource, ...]]:
+    """Finish a running worker before propagating caller cancellation.
+
+    A worker cannot be stopped by cancelling its async waiter. Waiting for its
+    completion keeps request-local FX and timing contexts alive and prevents a
+    stopped snapshotter from leaving valuation work behind its service task.
+
+    Args:
+        valuation: Synchronous computation over already-loaded evidence only.
+
+    Returns:
+        The unchanged valuation and its FX-source identities.
+
+    Raises:
+        asyncio.CancelledError: After the worker finishes when its caller stops.
+    """
+    worker = asyncio.create_task(asyncio.to_thread(valuation))
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(worker)
+            break
+        except asyncio.CancelledError:
+            if worker.cancelled():
+                raise
+            cancelled = True
+        except Exception:
+            if cancelled:
+                raise asyncio.CancelledError from None
+            raise
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 @pnl_read_stage("series")
 async def build_wallet_pnl_series(
     repo: Repository,
@@ -5959,12 +6002,9 @@ async def build_wallet_pnl_series(
             anchor,
             anchor_load.execution_prefix,
         )
-        loaded_execution_rows = replay.loaded_execution_rows
-        replayed_execution_rows = replay.replayed_execution_rows
-        accrual_rows = replay.accrual_rows
         replay_metadata = (
             _derive_series_replay_metadata(
-                loaded_execution_rows, options.baseline_watermarks, to_time
+                replay.loaded_execution_rows, options.baseline_watermarks, to_time
             )
             if options.baseline_watermarks is not None
             else None
@@ -5977,7 +6017,7 @@ async def build_wallet_pnl_series(
             await repo.get_instrument_symbol_refs(instrument_ids, as_of) if instrument_ids else []
         )
         suffix_refs, untrusted_price_reasons_by_instrument = _partition_series_execution_price_refs(
-            replayed_execution_rows,
+            replay.replayed_execution_rows,
             refs,
         )
         opening_spans = {
@@ -6020,18 +6060,18 @@ async def build_wallet_pnl_series(
         trusted_instruments = set(quote_by_instrument)
         trusted_replayed_rows = [
             row
-            for row in replayed_execution_rows
+            for row in replay.replayed_execution_rows
             if row["instrument_public_id"] in trusted_instruments
         ]
         display_activity_spans = _series_display_activity_spans(
             anchor.opening,
-            replayed_execution_rows,
-            accrual_rows,
+            replay.replayed_execution_rows,
+            replay.accrual_rows,
         )
         display_identities = _instrument_display_identities(display_activity_spans, refs)
         mark_requirements = _mark_fx_minutes(
             mark_candles,
-            loaded_execution_rows,
+            replay.loaded_execution_rows,
             base_by_instrument,
             quote_by_instrument,
             valuation_ccy,
@@ -6041,7 +6081,7 @@ async def build_wallet_pnl_series(
         )
         event_requirements = _event_fx_minutes(
             trusted_replayed_rows,
-            accrual_rows,
+            replay.accrual_rows,
             base_by_instrument,
             quote_by_instrument,
             valuation_ccy,
@@ -6052,7 +6092,7 @@ async def build_wallet_pnl_series(
                 repo,
                 _MarkCarryRequest(
                     candles=mark_candles,
-                    execution_rows=loaded_execution_rows,
+                    execution_rows=replay.loaded_execution_rows,
                     base_by_instrument=base_by_instrument,
                     quote_by_instrument=quote_by_instrument,
                     refs=trusted_refs,
@@ -6085,82 +6125,96 @@ async def build_wallet_pnl_series(
         ),
         carry_valuation=policy.carry_valuation,
     )
-    with (
-        pnl_read_phase("series_valuation"),
-        pnl_fx_conversion_scope(mark_requirements, to_time),
-    ):
-        marks, mark_evidence = _series_mark_evidence(
-            mark_candles,
-            _MarkValuation(
-                quote_by_instrument,
-                valuation_ccy,
-                fx_evidence.book,
-                fx_evidence.planes_by_instrument,
-            ),
-            mark_carry,
-            anchor.marks,
-            carry_valuation=policy.carry_valuation,
-        )
-        reset_pnl_fx_execution_order()
-        executions = [
-            _to_timeline_execution(
-                row,
-                valuation_ccy,
-                fx_evidence.book,
-                base_asset=base_by_instrument.get(row["instrument_public_id"]),
-                price_currency=quote_by_instrument.get(row["instrument_public_id"]),
-                venues=fx_evidence.planes_by_instrument.get(row["instrument_public_id"], {}),
-            )
-            for row in loaded_execution_rows
-        ]
-        accruals = [
-            _to_timeline_accrual(
-                row,
-                valuation_ccy,
-                fx_evidence.book,
-                fx_evidence.planes_by_instrument.get(row["instrument_public_id"], {}),
-            )
-            for row in accrual_rows
-        ]
-        window = TimelineWindow(
-            from_time=from_time,
-            to_time=to_time,
-            granularity=granularity,
-            valuation_ccy=valuation_ccy,
-        )
-        result = _timed_build_pnl_timeline(
-            executions,
-            accruals,
-            marks,
-            window,
-            opening=anchor.opening,
-            lineage=replay.lineage,
-            untrusted_price_reasons_by_instrument=untrusted_price_reasons_by_instrument,
-            mark_evidence=mark_evidence,
-        )
-        _record_carry_timing(result.points, carry_valuation=policy.carry_valuation)
-        for global_reason in (
-            replay.fill_gap_reason,
-            replay.late_pre_activation_reason,
+
+    def value_series() -> tuple[PnlTimelineResult, tuple[PnlFxRateSource, ...]]:
+        """Value already-loaded evidence without touching the async repository.
+
+        Returns:
+            The unchanged timeline and its disclosed FX-source identities.
+        """
+        with (
+            pnl_read_phase("series_valuation"),
+            pnl_fx_conversion_scope(mark_requirements, to_time),
         ):
-            if global_reason is not None:
-                result = _withhold_series_for_global_reason(result, global_reason)
-        result = _with_instrument_display_identities(
-            result,
-            display_identities,
-        )
-        rate_sources = tuple(
-            PnlFxRateSource(
-                source_currency=second if first == valuation_ccy else first,
-                valuation_currency=valuation_ccy,
-                base_currency=base_currency,
-                quote_currency=quote_currency,
-                exchange=exchange,
+            marks, mark_evidence = _series_mark_evidence(
+                mark_candles,
+                _MarkValuation(
+                    quote_by_instrument,
+                    valuation_ccy,
+                    fx_evidence.book,
+                    fx_evidence.planes_by_instrument,
+                ),
+                mark_carry,
+                anchor.marks,
+                carry_valuation=policy.carry_valuation,
             )
-            for (first, second), (base_currency, quote_currency, exchange) in sorted(
-                fx_evidence.used_planes
+            reset_pnl_fx_execution_order()
+            executions = [
+                _to_timeline_execution(
+                    row,
+                    valuation_ccy,
+                    fx_evidence.book,
+                    base_asset=base_by_instrument.get(row["instrument_public_id"]),
+                    price_currency=quote_by_instrument.get(row["instrument_public_id"]),
+                    venues=fx_evidence.planes_by_instrument.get(row["instrument_public_id"], {}),
+                )
+                for row in replay.loaded_execution_rows
+            ]
+            accruals = [
+                _to_timeline_accrual(
+                    row,
+                    valuation_ccy,
+                    fx_evidence.book,
+                    fx_evidence.planes_by_instrument.get(row["instrument_public_id"], {}),
+                )
+                for row in replay.accrual_rows
+            ]
+            window = TimelineWindow(
+                from_time=from_time,
+                to_time=to_time,
+                granularity=granularity,
+                valuation_ccy=valuation_ccy,
             )
-        )
+            result = _timed_build_pnl_timeline(
+                executions,
+                accruals,
+                marks,
+                window,
+                opening=anchor.opening,
+                lineage=replay.lineage,
+                untrusted_price_reasons_by_instrument=untrusted_price_reasons_by_instrument,
+                mark_evidence=mark_evidence,
+            )
+            _record_carry_timing(result.points, carry_valuation=policy.carry_valuation)
+            for global_reason in (
+                replay.fill_gap_reason,
+                replay.late_pre_activation_reason,
+            ):
+                if global_reason is not None:
+                    result = _withhold_series_for_global_reason(result, global_reason)
+            result = _with_instrument_display_identities(
+                result,
+                display_identities,
+            )
+            rate_sources = tuple(
+                PnlFxRateSource(
+                    source_currency=second if first == valuation_ccy else first,
+                    valuation_currency=valuation_ccy,
+                    base_currency=base_currency,
+                    quote_currency=quote_currency,
+                    exchange=exchange,
+                )
+                for (first, second), (base_currency, quote_currency, exchange) in sorted(
+                    fx_evidence.used_planes
+                )
+            )
+        return result, rate_sources
+
+    result, rate_sources = (
+        await _offload_series_valuation(value_series)
+        if options.offload_valuation
+        else value_series()
+    )
     with pnl_read_phase("series_overlay"):
         return await _finalize_wallet_pnl_series(
             repo,

@@ -759,7 +759,9 @@ class PortfolioPnlSnapshotter:
                 allow_anchor_creation=False,
                 current_truth_horizon=True,
             ),
-            options=PnlSeriesReplayOptions(baseline_watermarks=dict(baseline)),
+            options=PnlSeriesReplayOptions(
+                baseline_watermarks=dict(baseline), offload_valuation=True
+            ),
         )
 
     async def _recompute_forward(
