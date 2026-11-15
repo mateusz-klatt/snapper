@@ -53,6 +53,7 @@ from tests.helpers.native_account_authority import NativeAuthorityDatabase
 from tests.helpers.native_account_authority import NativeAuthorityHttpAdapter
 from tests.helpers.native_account_authority import NativeAuthorityScenario
 from tests.helpers.native_account_authority import native_authority_scenario
+from tests.helpers.native_liveness import LIVENESS_TIMEOUT_S
 
 INVENTORY_PATHS: dict[InventoryReadPurpose, str] = {
     "kraken_futures.open_orders": "/derivatives/api/v3/openorders",
@@ -269,7 +270,7 @@ class MigratedInventoryHttpAdapter(NativeAuthorityHttpAdapter):
         self.observer.inventory_send(purpose)
         if self.block_purpose == purpose:
             self.inventory_entered.set()
-            if not self.inventory_release.wait(5):
+            if not self.inventory_release.wait(LIVENESS_TIMEOUT_S):
                 raise TimeoutError("Local inventory response release was not delivered")
         if self.fail_purpose == purpose:
             raise RequestsConnectionError("synthetic-inventory-transport-failure")

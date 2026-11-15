@@ -36,6 +36,7 @@ from snapper.infrastructure.exchanges.prepared_private_key import PreparedKeyTok
 from tests.application.trade.test_native_account_read import _counts
 from tests.application.trade.test_native_account_read import _id
 from tests.application.trade.test_native_account_read import _Scenario
+from tests.helpers.native_liveness import LIVENESS_TIMEOUT_S
 
 scenario = native_read_tests.scenario
 
@@ -303,7 +304,7 @@ async def test_actual_cancelled_accounts_worker_joins_before_link_revocation_and
         )
     )
     try:
-        assert await asyncio.to_thread(scenario.adapter.entered.wait, 2)
+        assert await asyncio.to_thread(scenario.adapter.entered.wait, LIVENESS_TIMEOUT_S)
         assert len(issued_links) == int(phase == "accounts")
         task.cancel("synthetic-linked-read-cancelled")
         await asyncio.sleep(0)

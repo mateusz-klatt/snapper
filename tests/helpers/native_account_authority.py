@@ -75,6 +75,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from tests.helpers.native_liveness import LIVENESS_TIMEOUT_S
 
 NATIVE_AUTHORITY_TEST_TIME = datetime(2026, 10, 23, 15, tzinfo=UTC)
 
@@ -225,7 +226,7 @@ class NativeAuthorityHttpAdapter(BaseAdapter):
             assert proofs >= 1
             if self.block_accounts:
                 self.accounts_entered.set()
-                if not self.accounts_release.wait(4):
+                if not self.accounts_release.wait(LIVENESS_TIMEOUT_S):
                     raise TimeoutError("Local accounts response release was not delivered")
             if self.fail_accounts:
                 raise RequestsConnectionError("Isolated accounts transport refused")

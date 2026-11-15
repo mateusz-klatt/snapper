@@ -50,6 +50,7 @@ from tests.helpers.futures_inventory_migrated import migrated_inventory_database
 from tests.helpers.futures_inventory_migrated import migrated_inventory_scenario
 from tests.helpers.native_account_authority import native_authority_uuid
 from tests.helpers.native_account_authority import rotate_native_credential
+from tests.helpers.native_liveness import LIVENESS_TIMEOUT_S
 
 pytestmark = pytest.mark.timeout(120)
 
@@ -343,7 +344,9 @@ async def test_migrated_pending_http_and_repeated_cancellation_join_actual_worke
         scenario.adapter.block_purpose = _ORDERS
         task = asyncio.create_task(_refresh(scenario))
         try:
-            assert await asyncio.to_thread(scenario.adapter.inventory_entered.wait, 3)
+            assert await asyncio.to_thread(
+                scenario.adapter.inventory_entered.wait, LIVENESS_TIMEOUT_S
+            )
             native = scenario.native
             pending = await read_current_futures_inventory(
                 native.repository, native.selection, _ORDERS, _POLICY
