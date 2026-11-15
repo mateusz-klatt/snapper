@@ -101,6 +101,34 @@ def _resolved_execution_number(
     return primary or secondary or 0.0
 
 
+def _is_empty_acknowledgement(
+    execution: ExecutionUpdate, resolved_size: float, resolved_fee: float
+) -> bool:
+    """Return whether an execution update carries no fill at all.
+
+    An empty acknowledgement resolves to a size of exactly zero and a fee of
+    exactly zero, and carries neither an exec id nor a trade id. Persisting it
+    would record a ``filled`` execution of size 0, which states the absence of a
+    fill as if it were one. Every other update keeps its established path: a
+    zero size with a fee or with a venue fill identity, and any non-finite or
+    negative value, whose truthiness keeps it out of this predicate.
+
+    Args:
+        execution: The venue execution update being persisted.
+        resolved_size: Fill size resolved from the caller's delta or the update.
+        resolved_fee: Fee resolved from the caller's value or the update.
+
+    Returns:
+        True when the update has no size, no fee and no venue fill identity.
+    """
+    return (
+        execution.exec_id is None
+        and execution.trade_id is None
+        and not resolved_size
+        and not resolved_fee
+    )
+
+
 def _matching_execution_decimal(
     resolved: float,
     raw_decimal: str | None,
@@ -1519,6 +1547,14 @@ class ExchangeClientBase(ABC):
         they are used instead of re-deriving from raw execution fields.
         This ensures DB records match published ExecutionData.
 
+        The venue's execution time is written to ``executed_at`` as well as
+        to ``timestamp``, as the futures and native fill writers already do,
+        so readers that ask for the execution time no longer find NULL on
+        spot rows. An empty acknowledgement (:func:`_is_empty_acknowledgement`)
+        writes no row: the venue-event path already suppresses its zero-size
+        ``fill_observed``, and a ``filled`` execution of size 0 would state the
+        absence of a fill as a fill.
+
         The exact ``counter_amount_decimal`` is retained ONLY when the resolved
         (executor-watermarked) fill size equals the venue's per-poll ``last_qty``
         — i.e. no earlier fill was absorbed into this delta. An absorbed publish
@@ -1568,6 +1604,12 @@ class ExchangeClientBase(ABC):
             execution.average_price,
         )
         resolved_fee = _resolved_execution_number(fee, execution.fee_usd_equiv, None)
+        if _is_empty_acknowledgement(execution, resolved_size, resolved_fee):
+            logger.debug(
+                f"Skipped the execution row for order {order_public_id}: an empty "
+                "acknowledgement carries no fill size, no fee and no venue fill identity"
+            )
+            return
         resolved_fee_asset = fee_asset if fee_asset is not None else "USD"
         resolved_status = status if status is not None else to_fill_status(execution)
         liq_map = {"m": "maker", "t": "taker"}
@@ -1589,6 +1631,7 @@ class ExchangeClientBase(ABC):
             await self.repository.insert_execution(
                 order_public_id=order_public_id,
                 timestamp=execution.timestamp,
+                executed_at=execution.timestamp,
                 side=execution.side.value,
                 status=resolved_status,
                 price=resolved_price,

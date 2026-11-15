@@ -451,6 +451,19 @@ class AppSettings:
         return self._bootstrap.trade_command_dispatch_ttl_s
 
     @property
+    def plan_recovery_auto_settle_enabled(self) -> bool:
+        """Return whether startup recovery automatically settles terminal-child plans.
+
+        Default ``False`` keeps ``PlanExecutorService`` startup recovery from
+        settling historical actionable rows before an operator previews and
+        confirms the digest-bound CLI settlement.
+
+        Returns:
+            True when automatic startup settlement is enabled, False otherwise.
+        """
+        return self._bootstrap.plan_recovery_auto_settle_enabled
+
+    @property
     def telemetry_recording_enabled(self) -> bool:
         """Return whether data-plane telemetry recording is enabled.
 

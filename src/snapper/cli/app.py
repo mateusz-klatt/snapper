@@ -43,6 +43,7 @@ Data Updates:
     - ``backfill-candles-from-trades``: Backfill calculated 1m candles from trades
     - ``backfill-synthesized-candles``: Backfill synthesized higher-timeframe candles
     - ``repair-candles``: Repair absent and false-zero 1m candles through guarded writers
+    - ``void-candles``: Void the active candles of retired Kraken instruments under the candle fence
     - ``check-candle-identities``: Check read-only that stored candle ids are deterministic
     - ``update-kraken-futures-funding-rates``: Backfill funding rates
 
@@ -148,6 +149,8 @@ from snapper.cli.candle_audit import audit_candles
 from snapper.cli.candle_identity_check import check_candle_identities
 from snapper.cli.candle_repair import REPAIR_CANDLES_CONTEXT
 from snapper.cli.candle_repair import repair_candles
+from snapper.cli.candle_void import VOID_CANDLES_CONTEXT
+from snapper.cli.candle_void import void_candles
 from snapper.cli.daily_partitions import daily_partitions_app
 from snapper.cli.dev_pat import dev_mint_pat
 from snapper.cli.execution_annulment import annulment_app
@@ -2507,7 +2510,8 @@ def restore_data(
     typer.echo(f"Restoring {table} from {len(paths)} file(s) (source={source})...")
     result = restorer.restore(table=table, paths=paths, source=source)
     typer.echo(
-        f"Done: {result.rows_inserted} inserted, {result.rows_skipped} skipped "
+        f"Done: {result.rows_inserted} inserted, {result.rows_skipped} exact duplicates skipped, "
+        f"{result.skipped_known_to_differs} skipped with different known_to "
         f"({result.files_processed} files)"
     )
     repo.dispose()
@@ -3020,6 +3024,7 @@ def notify() -> None:
 app.command(name="android-push-state")(android_push_state)
 app.command(name="dev-mint-pat")(dev_mint_pat)
 app.command(name="repair-candles", context_settings=REPAIR_CANDLES_CONTEXT)(repair_candles)
+app.command(name="void-candles", context_settings=VOID_CANDLES_CONTEXT)(void_candles)
 app.command(name="check-candle-identities")(check_candle_identities)
 app.command(name="retire-accruals")(retire_accruals)
 app.command(name="retire-trade-projection-checkpoints")(retire_trade_projection_checkpoints)

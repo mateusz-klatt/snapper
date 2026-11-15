@@ -10,6 +10,8 @@ trailing_stop).
 
 import asyncio
 import contextlib
+import copy
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -26,6 +28,10 @@ from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.evaluator import PlanEvaluator
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.plans.params import core_order_type_from_plan_params
+from snapper.application.plans.settlement import PlanSettlementSkipped
+from snapper.application.plans.settlement import extract_plan_child_ids
+from snapper.application.plans.settlement import inspect_plan_settlement
+from snapper.application.plans.settlement import settle_single_recovered_plan
 from snapper.application.plans.trailing_stop import TrailingStopEvaluator
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.process_manager.models import RegisterableProcess
@@ -136,6 +142,7 @@ class PlanExecutorService(RegisterableProcess):
         self.evaluators: dict[str, PlanEvaluator] = {}
         self._watermarks: dict[str, int] = {}
         self._last_tick_timestamps: dict[str, datetime | None] = {}
+        self._last_checkpoint_signatures: dict[str, tuple[JsonObject, int]] = {}
         self._client_order_id_index: dict[str, str] = {}
         self._runtime_symbol_index: dict[str, set[str]] = {}
         self._plan_locks: dict[str, asyncio.Lock] = {}
@@ -436,25 +443,33 @@ class PlanExecutorService(RegisterableProcess):
         with 100+ active plans.
         """
         rows = await self.repository.get_active_execution_plans()
-        recoverable_pids = [
-            row["public_id"] for row in rows if row["plan_type"] in _EVALUATOR_REGISTRY
-        ]
-        checkpoints_by_pid = await self.repository.get_latest_checkpoints_for_plans(
-            recoverable_pids
-        )
+        unsettled_rows: list[ExecutionPlanRow] = []
         for row in rows:
             plan_type = row["plan_type"]
-            evaluator_cls = _EVALUATOR_REGISTRY.get(plan_type)
-            if evaluator_cls is None:
+            if plan_type not in _EVALUATOR_REGISTRY:
                 logger.warning(
                     "No evaluator for plan_type={}, skipping plan {}",
                     plan_type,
                     row["public_id"],
                 )
                 continue
-            evaluator = evaluator_cls()
+            if self._auto_settle_recovered_plans_enabled() and await self._settle_recovered_plan(
+                row
+            ):
+                continue
+            unsettled_rows.append(row)
+        recoverable_pids = [row["public_id"] for row in unsettled_rows]
+        checkpoints_by_pid = await self.repository.get_latest_checkpoints_for_plans(
+            recoverable_pids
+        )
+        for row in unsettled_rows:
+            evaluator = _EVALUATOR_REGISTRY[row["plan_type"]]()
             checkpoint = checkpoints_by_pid.get(row["public_id"])
             if checkpoint is not None:
+                self._last_checkpoint_signatures[row["public_id"]] = (
+                    copy.deepcopy(checkpoint["state"]),
+                    checkpoint["last_venue_event_id"],
+                )
                 evaluator.restore_from_checkpoint(row, checkpoint["state"])
                 self._watermarks[row["public_id"]] = checkpoint["last_venue_event_id"]
                 self._last_tick_timestamps[row["public_id"]] = checkpoint["last_tick_timestamp"]
@@ -462,6 +477,70 @@ class PlanExecutorService(RegisterableProcess):
             if row["status"] == ExecutionPlanStatusEnum.CANCEL_REQUESTED:
                 await self._reemit_stranded_cancel(row)
         logger.info("Recovered {} plans from DB", len(self.plans))
+
+    def _auto_settle_recovered_plans_enabled(self) -> bool:
+        """Return True only when automatic recovery settlement is explicitly enabled.
+
+        Returns:
+            True when `settings.plan_recovery_auto_settle_enabled` is `True`.
+        """
+        return getattr(self.settings, "plan_recovery_auto_settle_enabled", False) is True
+
+    async def _settle_recovered_plan(self, row: ExecutionPlanRow) -> bool:
+        """Settle an actionable plan on startup when its child is terminal.
+
+        Args:
+            row: Recovered actionable execution plan row.
+
+        Returns:
+            True when the plan was settled to a terminal status and must not
+            be registered in memory, False otherwise.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return False
+        try:
+            decision = await inspect_plan_settlement(self.repository, row)
+        except Exception as exc:
+            logger.error(
+                "PlanExecutorService: recovery settlement check failed for plan {}: {}",
+                row["public_id"],
+                exc,
+            )
+            return False
+        if isinstance(decision, PlanSettlementSkipped):
+            if decision.skip_code == "plan_link_mismatch":
+                logger.warning(
+                    "PlanExecutorService: recovery settlement skipped for plan {} ({})",
+                    row["public_id"],
+                    decision.detail,
+                )
+            return False
+        now = datetime.now(UTC)
+        try:
+            settled = await settle_single_recovered_plan(
+                self.repository,
+                decision,
+                settled_at=now,
+                session_id=self.tracker.session_id,
+                sequence_id=self.tracker.next_sequence("plan_status"),
+            )
+        except Exception as exc:
+            logger.error(
+                "PlanExecutorService: failed to settle recovered plan {} to {}: {}",
+                row["public_id"],
+                decision.target_status,
+                exc,
+            )
+            return False
+        if not settled:
+            return False
+        logger.info(
+            "PlanExecutorService: settled recovered plan {} ({} -> {})",
+            row["public_id"],
+            row["status"],
+            decision.target_status,
+        )
+        return True
 
     async def _reemit_stranded_cancel(self, plan: ExecutionPlanRow) -> None:
         """Re-emit a cancel TradeCommand for a stranded cancel_requested plan.
@@ -564,7 +643,7 @@ class PlanExecutorService(RegisterableProcess):
                 result[cid] = None
         return result
 
-    def _extract_child_ids(self, params: dict[str, Any]) -> list[str]:
+    def _extract_child_ids(self, params: Mapping[str, object]) -> list[str]:
         """Extract all child client order IDs from plan params.
 
         Unions both the list format (child_client_order_ids) and the
@@ -572,19 +651,12 @@ class PlanExecutorService(RegisterableProcess):
         mixed-format plans (upgraded mid-lifecycle) never lose IDs.
 
         Args:
-            params: Plan params dict.
+            params: Plan params mapping.
 
         Returns:
             Deduplicated list of child client order ID strings (may be empty).
         """
-        result: set[str] = set()
-        ids = params.get("child_client_order_ids")
-        if isinstance(ids, list):
-            result.update(c for c in ids if isinstance(c, str))
-        single = params.get("child_client_order_id")
-        if isinstance(single, str):
-            result.add(single)
-        return list(result)
+        return extract_plan_child_ids(params)
 
     async def _emit_trade_command(
         self,
@@ -816,6 +888,7 @@ class PlanExecutorService(RegisterableProcess):
         self.evaluators.pop(public_id, None)
         self._watermarks.pop(public_id, None)
         self._last_tick_timestamps.pop(public_id, None)
+        self._last_checkpoint_signatures.pop(public_id, None)
         self._plan_locks.pop(public_id, None)
         if row is not None:
             params = row.get("params") or {}
@@ -1009,6 +1082,8 @@ class PlanExecutorService(RegisterableProcess):
         plan = self.plans.get(plan_public_id)
         if plan is None:
             return None
+        if await self._abort_dispatch_for_externally_settled_plan(plan_public_id):
+            return None
         if await self._fail_dispatch_for_missing_capabilities(plan_public_id, plan):
             return None
         if await self._cancel_dispatch_for_closed_cycle(plan_public_id, plan):
@@ -1017,6 +1092,38 @@ class PlanExecutorService(RegisterableProcess):
             await self._transition_plan(plan_public_id, ExecutionPlanStatusEnum.ACTIVE)
             return self.plans.get(plan_public_id)
         return plan
+
+    async def _abort_dispatch_for_externally_settled_plan(
+        self,
+        plan_public_id: str,
+    ) -> bool:
+        """Unregister and skip dispatch when durable DB state is already terminal.
+
+        Protects `bracket` and `trailing_stop` plans from firing duplicate child
+        orders on ticks if an operator settled the plan row via CLI while the
+        plan executor was still running.
+
+        Args:
+            plan_public_id: Public id of the plan about to emit commands.
+
+        Returns:
+            True when the durable plan is absent or terminal and was unregistered.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return False
+        current = await self.repository.get_execution_plan(
+            plan_public_id,
+            datetime.now(UTC),
+        )
+        if current is not None and current["status"] not in TERMINAL_EXECUTION_PLAN_STATUSES:
+            return False
+        logger.info(
+            "PlanExecutorService: skipping dispatch for externally settled plan {} (status={})",
+            plan_public_id,
+            None if current is None else current["status"],
+        )
+        self._unregister_plan(plan_public_id)
+        return True
 
     async def _fail_dispatch_for_missing_capabilities(
         self,
@@ -1768,18 +1875,21 @@ class PlanExecutorService(RegisterableProcess):
             logger.error("Cycle closure sweep failed: {}", exc)
 
     async def _write_checkpoints(self) -> None:
-        """Persist evaluator state for all active plans."""
+        """Persist evaluator state for active plans whose state or watermark changed."""
         now = datetime.now(UTC)
-        for public_id, evaluator in self.evaluators.items():
+        for public_id, evaluator in tuple(self.evaluators.items()):
             plan = self.plans.get(public_id)
             if plan is None:
                 continue
             state = evaluator.build_checkpoint_state(plan)
+            watermark = self._watermarks.get(public_id, 0)
+            if self._last_checkpoint_signatures.get(public_id) == (state, watermark):
+                continue
             try:
                 await self.repository.insert_execution_plan_checkpoint(
                     plan_public_id=public_id,
                     state=state,
-                    last_venue_event_id=self._watermarks.get(public_id, 0),
+                    last_venue_event_id=watermark,
                     checkpoint_at=now,
                     session_id=self.tracker.session_id,
                     sequence_id=self.tracker.next_sequence("plan_checkpoints"),
@@ -1788,6 +1898,9 @@ class PlanExecutorService(RegisterableProcess):
                 )
             except Exception as exc:
                 logger.error("Failed to checkpoint plan {}: {}", public_id, exc)
+                continue
+            if public_id in self.plans:
+                self._last_checkpoint_signatures[public_id] = (copy.deepcopy(state), watermark)
 
     def get_evaluator(self, plan_type: str) -> PlanEvaluator | None:
         """Instantiate an evaluator for the given plan type.
