@@ -13,14 +13,21 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import func
+from sqlalchemy import select
 
 from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.plans.service import _EVALUATOR_REGISTRY
 from snapper.application.plans.service import PlanExecutorService
+from snapper.application.plans.settlement import PlanChildOutcome
+from snapper.application.plans.settlement import PlanSettlementCandidate
+from snapper.application.plans.settlement import PlanSettlementSkipped
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import TradeService
+from snapper.data.models import ExecutionPlanCheckpoint
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import VenueEventInsertRow
@@ -4353,3 +4360,401 @@ class TestStrandedCancelEndedTarget:
         await service._reemit_stranded_cancel(_stranded_plan())
 
         repo.insert_trade_command.assert_not_called()
+
+
+class TestRecoverySettlementAndCheckpointDedup:
+    """Startup child-terminal settlement and unchanged-checkpoint deduplication."""
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_recover_plans_settles_terminal_children_and_seeds_checkpoint_signature(
+        self,
+        mock_repo_fn: MagicMock,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Settle terminal-child plans on recovery and skip unchanged checkpoints.
+
+        Given: A SQLite repository containing one `active` plan with a `filled`
+            child, one `cancel_requested` plan with an `order_interlock_blocked`
+            `failed` child, and one `armed` `trailing_stop` plan with a saved
+            checkpoint.
+        When: `PlanExecutorService._recover_plans()` runs followed by two
+            `_write_checkpoints()` cycles (with tick timestamp churn) and one
+            state-advancing tick.
+        Then: The two terminal-child plans are settled without registration or
+            stranded-cancel re-emission, the `trailing_stop` skips unchanged
+            checkpoint writes despite tick timestamp updates, and writes exactly
+            once when `peak_price` advances.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'recover_settle.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        base_time = datetime(2026, 11, 15, 10, 0, 0, tzinfo=UTC)
+        wallet_id = "01960000-0000-7000-8000-000000000101"
+        inst_id = "01960000-0000-7000-8000-000000000102"
+        try:
+            filled_plan_row: ExecutionPlanInsertRow = {
+                "plan_type": "manual_once",
+                "created_via": "api",
+                "instrument_public_id": inst_id,
+                "exchange": "kraken",
+                "mode": "live",
+                "shard_key": f"kraken.XRP-EUR.live.{wallet_id}",
+                "wallet_public_id": wallet_id,
+                "total_quantity": 5.0,
+                "side": "buy",
+                "params": {
+                    "order_type": "market",
+                    "side": "buy",
+                    "child_client_order_id": "cid-rec-fill",
+                    "native_instrument": "XRP-EUR",
+                },
+                "status": "active",
+                "created_at": base_time,
+                "session_id": "s-rec",
+                "sequence_id": 1,
+                "timestamp": base_time,
+            }
+            _id1, filled_pid = await repo.insert_execution_plan(filled_plan_row)
+            await repo.insert_trade_command(
+                {
+                    "command_type": "create",
+                    "shard_key": f"kraken.XRP-EUR.live.{wallet_id}",
+                    "exchange": "kraken",
+                    "instrument": "XRP-EUR",
+                    "mode": "live",
+                    "strategy_id": "manual_once",
+                    "client_order_id": "cid-rec-fill",
+                    "venue_client_id": "cid-rec-fill",
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": 5.0,
+                    "status": "filled",
+                    "created_at": base_time,
+                    "correlation_id": filled_pid,
+                    "session_id": "s-rec",
+                    "sequence_id": 2,
+                    "timestamp": base_time,
+                    "wallet_public_id": wallet_id,
+                    "plan_public_id": filled_pid,
+                }
+            )
+            await repo.insert_venue_event(
+                {
+                    "event_type": "fill_observed",
+                    "shard_key": f"kraken.XRP-EUR.live.{wallet_id}",
+                    "exchange": "kraken",
+                    "instrument": "XRP-EUR",
+                    "mode": "live",
+                    "client_order_id": "cid-rec-fill",
+                    "venue_client_id": "cid-rec-fill",
+                    "exchange_order_id": "EX-REC-1",
+                    "exec_id": "EXEC-REC-1",
+                    "side": "buy",
+                    "status": "filled",
+                    "fill_size": 5.0,
+                    "fill_price": 2.1,
+                    "cum_fill_size": 5.0,
+                    "liquidity_role": "taker",
+                    "received_at": base_time + timedelta(seconds=1),
+                    "session_id": "s-rec",
+                    "sequence_id": 3,
+                    "timestamp": base_time + timedelta(seconds=1),
+                    "wallet_public_id": wallet_id,
+                }
+            )
+
+            blocked_plan_row: ExecutionPlanInsertRow = {
+                "plan_type": "manual_once",
+                "created_via": "api",
+                "instrument_public_id": inst_id,
+                "exchange": "walutomat",
+                "mode": "live",
+                "shard_key": f"walutomat.EUR-PLN.live.{wallet_id}",
+                "wallet_public_id": wallet_id,
+                "total_quantity": 20.0,
+                "side": "buy",
+                "params": {
+                    "order_type": "limit",
+                    "side": "buy",
+                    "price": 4.3,
+                    "child_client_order_id": "cid-rec-block",
+                    "native_instrument": "EUR-PLN",
+                    "venue_order_type": "limit",
+                },
+                "status": "cancel_requested",
+                "created_at": base_time + timedelta(seconds=5),
+                "session_id": "s-rec",
+                "sequence_id": 4,
+                "timestamp": base_time + timedelta(seconds=5),
+            }
+            _id2, blocked_pid = await repo.insert_execution_plan(blocked_plan_row)
+            _cid_block, block_cmd_pid = await repo.insert_trade_command(
+                {
+                    "command_type": "create",
+                    "shard_key": f"walutomat.EUR-PLN.live.{wallet_id}",
+                    "exchange": "walutomat",
+                    "instrument": "EUR-PLN",
+                    "mode": "live",
+                    "strategy_id": "manual_once",
+                    "client_order_id": "cid-rec-block",
+                    "venue_client_id": "cid-rec-block",
+                    "side": "buy",
+                    "order_type": "limit",
+                    "quantity": 20.0,
+                    "price": 4.3,
+                    "status": "dispatched",
+                    "created_at": base_time + timedelta(seconds=5),
+                    "correlation_id": blocked_pid,
+                    "session_id": "s-rec",
+                    "sequence_id": 5,
+                    "timestamp": base_time + timedelta(seconds=5),
+                    "wallet_public_id": wallet_id,
+                    "plan_public_id": blocked_pid,
+                }
+            )
+            await repo.advance_trade_command_lifecycle(
+                public_id=block_cmd_pid,
+                expected_status="dispatched",
+                new_status="failed",
+                bus_time=base_time + timedelta(seconds=6),
+                session_id="s-rec",
+                sequence_id=6,
+                terminal_at=base_time + timedelta(seconds=6),
+                last_error="order_interlock_blocked",
+            )
+            await repo.insert_venue_event(
+                {
+                    "event_type": "order_interlock_blocked",
+                    "shard_key": f"walutomat.EUR-PLN.live.{wallet_id}",
+                    "exchange": "walutomat",
+                    "instrument": "EUR-PLN",
+                    "mode": "live",
+                    "client_order_id": "cid-rec-block",
+                    "venue_client_id": "cid-rec-block",
+                    "side": "buy",
+                    "status": "failed",
+                    "error": "order_interlock_blocked",
+                    "liquidity_role": "unknown",
+                    "received_at": base_time + timedelta(seconds=6),
+                    "session_id": "s-rec",
+                    "sequence_id": 6,
+                    "timestamp": base_time + timedelta(seconds=6),
+                    "wallet_public_id": wallet_id,
+                }
+            )
+
+            trail_plan_row: ExecutionPlanInsertRow = {
+                "plan_type": "trailing_stop",
+                "created_via": "api",
+                "instrument_public_id": inst_id,
+                "exchange": "kraken",
+                "mode": "live",
+                "shard_key": f"kraken.XRP-EUR.live.{wallet_id}",
+                "wallet_public_id": wallet_id,
+                "total_quantity": 5.0,
+                "side": "buy",
+                "params": {
+                    "entry_price": 2.0,
+                    "trailing_pct": 5.0,
+                    "native_instrument": "XRP-EUR",
+                },
+                "status": "armed",
+                "created_at": base_time + timedelta(seconds=10),
+                "session_id": "s-rec",
+                "sequence_id": 7,
+                "timestamp": base_time + timedelta(seconds=10),
+            }
+            _id3, trail_pid = await repo.insert_execution_plan(trail_plan_row)
+            await repo.insert_execution_plan_checkpoint(
+                plan_public_id=trail_pid,
+                state={"peak_price": 2.4, "current_stop": 2.28},
+                last_venue_event_id=9,
+                checkpoint_at=base_time + timedelta(seconds=12),
+                session_id="s-rec",
+                sequence_id=8,
+                bus_time=base_time + timedelta(seconds=12),
+            )
+
+            service = PlanExecutorService()
+            await service._recover_plans()
+
+            assert set(service.plans) == {trail_pid}
+            filled_settled = await repo.get_execution_plan(filled_pid, as_of=datetime.now(UTC))
+            blocked_settled = await repo.get_execution_plan(blocked_pid, as_of=datetime.now(UTC))
+            pending_cancel = await repo.has_pending_cancel_command(
+                "cid-rec-block", as_of=datetime.now(UTC)
+            )
+            assert filled_settled is not None and filled_settled["status"] == "completed"
+            assert filled_settled["filled_quantity"] == 5.0
+            assert blocked_settled is not None and blocked_settled["status"] == "failed"
+            assert pending_cancel is False
+
+            service._last_tick_timestamps[trail_pid] = datetime.now(UTC)
+            await service._write_checkpoints()
+            await service._write_checkpoints()
+
+            async with repo.session() as count_session:
+                count_before = int(
+                    (
+                        await count_session.execute(
+                            select(func.count()).select_from(ExecutionPlanCheckpoint)
+                        )
+                    ).scalar_one()
+                )
+            assert count_before == 1
+
+            await service._handle_tick(
+                "market.kraken.XRP-EUR.tick",
+                TickData(
+                    public_id="01960000-0000-7000-8000-000000000999",
+                    session_id="s-rec",
+                    sequence_id=99,
+                    instrument="XRP-EUR",
+                    exchange="kraken",
+                    timestamp=datetime.now(UTC),
+                    last=2.6,
+                    volume=100.0,
+                ),
+            )
+            await service._write_checkpoints()
+            await service._write_checkpoints()
+
+            async with repo.session() as count_session:
+                count_after = int(
+                    (
+                        await count_session.execute(
+                            select(func.count()).select_from(ExecutionPlanCheckpoint)
+                        )
+                    ).scalar_one()
+                )
+            assert count_after == 2
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_settle_recovered_plan_handles_errors_mismatch_and_drift(
+        self,
+        mock_repo_fn: MagicMock,
+        mock_settings: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fail soft during startup settlement when inspection or writes fail.
+
+        Given: A `PlanExecutorService` wired to a `SQLAlchemyRepository` mock.
+        When: `_settle_recovered_plan` encounters an inspection error, a
+            `plan_link_mismatch` skip, a write exception, and a concurrent
+            version drift (`settled is False`).
+        Then: Every failure path returns False cleanly without raising.
+        """
+        repo = MagicMock(spec=SQLAlchemyRepository)
+        mock_repo_fn.return_value = repo
+        service = PlanExecutorService()
+        plan = _cast(ExecutionPlanRow, _make_plan_row("plan-rec-edge"))
+        candidate = PlanSettlementCandidate(
+            plan_public_id="plan-rec-edge",
+            plan_type="manual_once",
+            exchange="kraken",
+            mode="live",
+            shard_key="kraken.BTC-USD.live",
+            current_status="active",
+            current_session_id="s1",
+            current_sequence_id=1,
+            current_filled_quantity=0.0,
+            target_status="completed",
+            filled_quantity=1.0,
+            last_error=None,
+            children=(
+                PlanChildOutcome(
+                    client_order_id="cid-1",
+                    command_public_id="cmd-1",
+                    command_status="filled",
+                    cumulative_fill_size=1.0,
+                    last_error=None,
+                ),
+            ),
+        )
+
+        monkeypatch.setattr(
+            "snapper.application.plans.service.inspect_plan_settlement",
+            AsyncMock(side_effect=RuntimeError("db down")),
+        )
+        assert await service._settle_recovered_plan(plan) is False
+
+        monkeypatch.setattr(
+            "snapper.application.plans.service.inspect_plan_settlement",
+            AsyncMock(
+                return_value=PlanSettlementSkipped(
+                    plan_public_id="plan-rec-edge",
+                    plan_type="manual_once",
+                    exchange="kraken",
+                    mode="live",
+                    current_status="active",
+                    skip_code="plan_link_mismatch",
+                    detail="child cid-1 links to plan 'other'",
+                )
+            ),
+        )
+        assert await service._settle_recovered_plan(plan) is False
+
+        monkeypatch.setattr(
+            "snapper.application.plans.service.inspect_plan_settlement",
+            AsyncMock(return_value=candidate),
+        )
+        monkeypatch.setattr(
+            "snapper.application.plans.service.settle_single_recovered_plan",
+            AsyncMock(side_effect=RuntimeError("write failed")),
+        )
+        assert await service._settle_recovered_plan(plan) is False
+
+        monkeypatch.setattr(
+            "snapper.application.plans.service.settle_single_recovered_plan",
+            AsyncMock(return_value=False),
+        )
+        assert await service._settle_recovered_plan(plan) is False
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_write_checkpoints_handles_watermark_change_and_concurrent_unregister(
+        self,
+        mock_repo_fn: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Rewrite checkpoints on watermark advance and drop unregistered plans.
+
+        Given: One registered `manual_once` plan in `PlanExecutorService`.
+        When: `_write_checkpoints` runs twice with unchanged state/watermark,
+            once after watermark advances, and once when `insert_execution_plan_checkpoint`
+            concurrently unregisters the plan.
+        Then: Checkpoints are written only on change, and concurrent
+            unregistration leaves `_last_checkpoint_signatures` empty.
+        """
+        mock_repo = AsyncMock()
+        mock_repo.insert_execution_plan_checkpoint = AsyncMock(return_value=(1, "cp-1"))
+        mock_repo_fn.return_value = mock_repo
+        service = PlanExecutorService()
+        service.plans["plan-1"] = _cast(ExecutionPlanRow, _make_plan_row("plan-1"))
+        service.evaluators["plan-1"] = ManualOnceEvaluator()
+
+        await service._write_checkpoints()
+        await service._write_checkpoints()
+        assert mock_repo.insert_execution_plan_checkpoint.await_count == 1
+
+        service._watermarks["plan-1"] = 42
+        await service._write_checkpoints()
+        assert mock_repo.insert_execution_plan_checkpoint.await_count == 2
+
+        service._watermarks["plan-1"] = 43
+
+        async def _unregister_on_write(**_kwargs: object) -> tuple[int, str]:
+            service._unregister_plan("plan-1")
+            return (3, "cp-3")
+
+        mock_repo.insert_execution_plan_checkpoint = AsyncMock(side_effect=_unregister_on_write)
+        await service._write_checkpoints()
+        assert "plan-1" not in service._last_checkpoint_signatures
