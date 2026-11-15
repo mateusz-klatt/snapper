@@ -1132,6 +1132,26 @@ on its own; always restart the feed. Roll it out cautiously:
 5. Revert instantly by setting `spot_candle_source=native` and restarting the
     feed. The default is `native`.
 
+In `trade_built` mode the live consumer reads
+`KrakenExchangeClient.subscribe_trade_built_stream`, which also yields
+completion marks and breaks. Minute completion and the higher-timeframe seal
+follow those marks while `spot_completion_follows_consumer` is on (the
+default), so a lagging consumer is never overtaken by its own flat bars or
+seals; see `docs/messaging.md`. To watch it, read `meta.venue.trade_candles` on
+the feed heartbeat:
+
+1. `state` is `progress`, and `completed_through` advances every minute.
+2. `producer_alive` is true. `last_tick_age_s` stays near one second; a warning
+    is logged at most once a minute when a live producer stops ticking for more
+    than 10 s.
+3. `queue_depth`, `consumer_lag_s` and `consumer_lag_max_s` show the backlog.
+    `overflows`, `discards` and `lost_bars` stay at 0 in normal operation.
+
+Rollback, without a restart: `spot_completion_follows_consumer=false` returns
+the sweep and the flush to the wall clock, and windows to processing-time
+authors, from the next call. `trade_built_max_consumer_lag_seconds=0`, the
+default, disables lag discards.
+
 ## Per-wallet executors
 
 Executor process configs are templates named `executor_<exchange>`.
