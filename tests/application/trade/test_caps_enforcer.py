@@ -9,7 +9,7 @@ Covers:
     - All four caps: max_order_quantity_per_instrument (both
       scalar and per-instrument JSON form), max_open_orders,
       max_daily_notional_usd (with and without prior rows; market
-      orders skipped with WARN), max_cancels_per_minute.
+      orders require retained USD evidence), max_cancels_per_minute.
     - ``caps == None`` admits every submission unchanged.
     - Per-user asyncio.Lock prevents TOCTOU: two concurrent
       submissions for the same user serialize across the
@@ -42,6 +42,37 @@ from snapper.data.repository_types import InstrumentSourceResolution
 from snapper.data.repository_types import UserRecentSubmitRow
 from snapper.data.repository_types import UserTradingCapsRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+
+
+@pytest.mark.parametrize("evidence", [False, None])
+@pytest.mark.parametrize("price", [None, 100.0])
+async def test_legacy_history_requires_explicit_usd_quote_evidence(
+    evidence: bool | None, price: float | None
+) -> None:
+    """Never treat native spelling or an absent quote fact as historical USD evidence.
+
+    Given: a prior EUR-quoted or unresolved command with no retained USD amount.
+    When: a capped new order is evaluated with missing or negative USD quote evidence.
+    Then: the history refuses without consulting today's FX or silently skipping a row.
+    """
+    row: UserRecentSubmitRow = {
+        "instrument": "OPAQUE-MARKET",
+        "exchange": "kraken",
+        "quantity": 1.0,
+        "price": price,
+        "submitted_notional_usd": None,
+    }
+    if evidence is not None:
+        row["legacy_usd_base_notional_is_proven"] = evidence
+    enforcer = TradingCapsEnforcer(
+        _stub_repo(_caps(max_daily_notional_usd=10000.0), recent_submits=[row]),
+        _stub_pricing(Decimal(1)),
+        now=lambda: _NOW,
+    )
+    with pytest.raises(CapsViolationError, match="prior_notional_unpriced"):
+        async with enforcer.guard(_submission()):
+            pytest.fail("Unknown historical USD must not become a zero contribution")
+
 
 _NOW = datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC)
 
@@ -340,6 +371,7 @@ async def test_notional_cap_rejects_when_sum_over_limit() -> None:
             "quantity": 2.0,
             "price": 4000.0,
             "submitted_notional_usd": None,
+            "legacy_usd_base_notional_is_proven": True,
         },
     ]
     enforcer = TradingCapsEnforcer(
@@ -372,6 +404,7 @@ async def test_notional_cap_admits_when_sum_within_limit() -> None:
             "quantity": 1.0,
             "price": 5000.0,
             "submitted_notional_usd": None,
+            "legacy_usd_base_notional_is_proven": True,
         },
     ]
     enforcer = TradingCapsEnforcer(
@@ -384,12 +417,12 @@ async def test_notional_cap_admits_when_sum_within_limit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_notional_cap_skips_market_orders_without_price() -> None:
-    """Prior market orders with ``price=None`` are skipped from sum.
+async def test_notional_cap_refuses_unpriced_market_history() -> None:
+    """Prior market orders without a retained USD amount cannot consume zero allowance.
 
     Given: a prior row with ``price=None``,
     When: the notional cap evaluates,
-    Then: that row contributes 0 to the rolling sum (documented enforcer emits a WARN log).
+    Then: admission fails closed without revaluing the historical command.
     """
     caps = _caps(max_daily_notional_usd=10_000.0)
     prior: list[UserRecentSubmitRow] = [
@@ -406,8 +439,9 @@ async def test_notional_cap_skips_market_orders_without_price() -> None:
         _stub_pricing(Decimal("100")),
         now=lambda: _NOW,
     )
-    async with enforcer.guard(_submission()) as guard:
-        assert isinstance(guard, Guard)
+    with pytest.raises(CapsViolationError, match="prior_notional_unpriced"):
+        async with enforcer.guard(_submission()):
+            pytest.fail("Unpriced live history must refuse admission")
 
 
 @pytest.mark.asyncio

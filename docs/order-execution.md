@@ -143,6 +143,16 @@ tests does not enable snapshot refresh or authorize a live order: the named
 refresh set, freshness monitoring, retention evidence and operator approval are
 separate gates.
 
+Legacy live submissions without a stored USD value permit `quantity × price`
+only when catalog versions at submission prove a USD quote on a known spot venue
+without derivative quantity, product or payoff evidence. Ambiguous or contract
+units refuse rather than reconstructing historical payoff.
+An unknown, conflicting or non-USD quote, or a missing price, refuses a capped
+new submission with `prior_notional_unpriced`. Native symbol spelling and today's
+FX rate cannot supply historical currency evidence. Cancel commands are excluded
+from the rolling sum; an admitted create later cancelled still counts within its
+original 24-hour window.
+
 A pure contract position fold uses arithmetic entry averaging for linear
 contracts and harmonic entry averaging for inverse contracts. It retains an
 unchanged payoff specification and realizes settlement P&L on the closed portion
