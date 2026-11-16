@@ -477,6 +477,8 @@ markers = [
 [tool.mypy]
 python_version = "3.14"
 platform = "linux"
+mypy_path = ["src", "proprietary/src"]
+explicit_package_bases = true
 strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true
