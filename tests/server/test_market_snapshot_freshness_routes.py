@@ -23,6 +23,8 @@ from snapper.server.dependencies import get_repository_dependency
 from snapper.server.metrics_routes import router
 
 _PATH = "/api/metrics/market-snapshots/freshness"
+_MAIN_ID = "feed0000-1234-4567-89ab-0123456789ab"
+_UNKNOWN_ID = "feed0000-1234-4567-89ab-0123456789ac"
 
 
 def _repository() -> MagicMock:
@@ -33,7 +35,7 @@ def _repository() -> MagicMock:
     """
     targets: list[MarketSnapshotRefreshTargetRow] = [
         {
-            "instrument_public_id": "main",
+            "instrument_public_id": _MAIN_ID,
             "native_symbol": "BTC/EUR",
             "exchange": "kraken",
             "base": "BTC",
@@ -51,7 +53,7 @@ def _repository() -> MagicMock:
     ]
     timestamp = datetime.now(UTC)
     rows: list[MarketSnapshotFreshnessRow] = [
-        {"instrument_public_id": "main", "timestamp": timestamp, "last_price": 100.0},
+        {"instrument_public_id": _MAIN_ID, "timestamp": timestamp, "last_price": 100.0},
         {"instrument_public_id": "fx", "timestamp": timestamp, "last_price": 1.2},
     ]
     repository = MagicMock(spec=Repository)
@@ -109,21 +111,25 @@ def test_read_permission_returns_expanded_scope_without_csrf(role: UserRole) -> 
     client = TestClient(_app(repository, _principal(role)))
 
     response = client.get(
-        _PATH, params=[("instrument_public_ids", "main"), ("fx_exchanges", "kraken")]
+        _PATH, params=[("instrument_public_ids", _MAIN_ID), ("fx_exchanges", "kraken")]
     )
 
     assert response.status_code == 200
     result = MarketSnapshotFreshnessResponse.model_validate_json(response.content)
     assert result.payload.freshness_ready
-    assert result.payload.requested_instrument_public_ids == ["main"]
+    assert result.payload.requested_instrument_public_ids == [_MAIN_ID]
     assert result.payload.configured_fx_exchanges == ["kraken"]
     assert result.payload.excluded_fx_instruments == []
     assert len(result.payload.scope_digest) == 64
-    assert [item.instrument_public_id for item in result.payload.instruments] == ["fx", "main"]
+    assert [item.instrument_public_id for item in result.payload.instruments] == sorted(
+        ["fx", _MAIN_ID]
+    )
     assert result.payload.unresolved_fx_currencies == []
     assert result.public_id != result.payload.public_id
-    repository.resolve_market_snapshot_refresh_targets.assert_awaited_once_with(["main"])
-    repository.get_active_market_snapshot_freshness.assert_awaited_once_with(["fx", "main"])
+    repository.resolve_market_snapshot_refresh_targets.assert_awaited_once_with([_MAIN_ID])
+    repository.get_active_market_snapshot_freshness.assert_awaited_once_with(
+        sorted(["fx", _MAIN_ID])
+    )
 
 
 def test_permission_denial_occurs_before_snapshot_reads() -> None:
@@ -137,7 +143,9 @@ def test_permission_denial_occurs_before_snapshot_reads() -> None:
     principal = _principal().model_copy(update={"permissions": []})
     client = TestClient(_app(repository, principal))
 
-    response = client.get(_PATH, params={"instrument_public_ids": "main", "fx_exchanges": "kraken"})
+    response = client.get(
+        _PATH, params={"instrument_public_ids": _MAIN_ID, "fx_exchanges": "kraken"}
+    )
 
     assert response.status_code == 403
     repository.resolve_market_snapshot_refresh_targets.assert_not_awaited()
@@ -154,7 +162,9 @@ def test_missing_authentication_refuses_before_snapshot_reads() -> None:
     repository = _repository()
     client = TestClient(_app(repository, None))
 
-    response = client.get(_PATH, params={"instrument_public_ids": "main", "fx_exchanges": "kraken"})
+    response = client.get(
+        _PATH, params={"instrument_public_ids": _MAIN_ID, "fx_exchanges": "kraken"}
+    )
 
     assert response.status_code == 401
     repository.resolve_market_snapshot_refresh_targets.assert_not_awaited()
@@ -182,6 +192,57 @@ def test_missing_or_blank_scope_never_becomes_all_instruments(supplied: bool) ->
     repository.get_active_market_snapshot_freshness.assert_not_awaited()
 
 
+@pytest.mark.parametrize("identity", ["not-uuid", "z" * 32, _MAIN_ID[:-1]])
+def test_malformed_uuid_returns_400_without_repository_queries(identity: str) -> None:
+    """Refuse malformed UUIDs before the database driver can bind the identity.
+
+    Given: An authorized caller supplies a nonblank malformed instrument UUID.
+    When: The real route validates the explicit requested scope.
+    Then: It returns 400 without either repository query or a driver error.
+    """
+    repository = _repository()
+    client = TestClient(_app(repository, _principal()))
+
+    response = client.get(
+        _PATH, params={"instrument_public_ids": identity, "fx_exchanges": "kraken"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Instrument identities must be valid UUIDs"
+    repository.resolve_market_snapshot_refresh_targets.assert_not_awaited()
+    repository.get_active_market_snapshot_freshness.assert_not_awaited()
+
+
+def test_equivalent_uuid_query_parameters_resolve_one_canonical_scope() -> None:
+    """Accept UUID aliases without losing identity matching or expanding the scope.
+
+    Given: Repeated query parameters spell one UUID in uppercase, compact and canonical forms.
+    When: The authorized caller requests freshness through the real route.
+    Then: Both repository queries and the response use canonical deduplicated identities.
+    """
+    repository = _repository()
+    client = TestClient(_app(repository, _principal()))
+
+    response = client.get(
+        _PATH,
+        params=[
+            ("instrument_public_ids", _MAIN_ID.upper()),
+            ("instrument_public_ids", _MAIN_ID.replace("-", "")),
+            ("instrument_public_ids", _MAIN_ID),
+            ("fx_exchanges", "kraken"),
+        ],
+    )
+
+    assert response.status_code == 200
+    result = MarketSnapshotFreshnessResponse.model_validate_json(response.content)
+    assert result.payload.requested_instrument_public_ids == [_MAIN_ID]
+    assert result.payload.freshness_ready
+    repository.resolve_market_snapshot_refresh_targets.assert_awaited_once_with([_MAIN_ID])
+    repository.get_active_market_snapshot_freshness.assert_awaited_once_with(
+        sorted(["fx", _MAIN_ID])
+    )
+
+
 def test_oversized_scope_is_rejected_by_query_validation() -> None:
     """Bound the raw repeated-query list before metadata expansion begins.
 
@@ -191,7 +252,7 @@ def test_oversized_scope_is_rejected_by_query_validation() -> None:
     """
     repository = _repository()
     client = TestClient(_app(repository, _principal()))
-    params = [("instrument_public_ids", "main")] * (MAX_REQUESTED_INSTRUMENTS + 1)
+    params = [("instrument_public_ids", _MAIN_ID)] * (MAX_REQUESTED_INSTRUMENTS + 1)
     params.append(("fx_exchanges", "kraken"))
 
     response = client.get(_PATH, params=params)
@@ -212,10 +273,11 @@ def test_unknown_requested_id_returns_400_before_snapshot_query() -> None:
     client = TestClient(_app(repository, _principal()))
 
     response = client.get(
-        _PATH, params={"instrument_public_ids": "unknown", "fx_exchanges": "kraken"}
+        _PATH, params={"instrument_public_ids": _UNKNOWN_ID, "fx_exchanges": "kraken"}
     )
 
     assert response.status_code == 400
+    repository.resolve_market_snapshot_refresh_targets.assert_awaited_once_with([_UNKNOWN_ID])
     repository.get_active_market_snapshot_freshness.assert_not_awaited()
 
 
@@ -228,18 +290,20 @@ def test_fresh_main_with_absent_fx_snapshot_returns_not_ready() -> None:
     """
     repository = _repository()
     rows: list[MarketSnapshotFreshnessRow] = [
-        {"instrument_public_id": "main", "timestamp": datetime.now(UTC), "last_price": 100.0}
+        {"instrument_public_id": _MAIN_ID, "timestamp": datetime.now(UTC), "last_price": 100.0}
     ]
     repository.get_active_market_snapshot_freshness.return_value = rows
     client = TestClient(_app(repository, _principal()))
 
-    response = client.get(_PATH, params={"instrument_public_ids": "main", "fx_exchanges": "kraken"})
+    response = client.get(
+        _PATH, params={"instrument_public_ids": _MAIN_ID, "fx_exchanges": "kraken"}
+    )
 
     assert response.status_code == 200
     result = MarketSnapshotFreshnessResponse.model_validate_json(response.content)
     assert not result.payload.freshness_ready
-    assert result.payload.instruments[0].instrument_public_id == "fx"
-    assert result.payload.instruments[0].reason == "missing_snapshot"
+    assert result.payload.instruments[1].instrument_public_id == "fx"
+    assert result.payload.instruments[1].reason == "missing_snapshot"
 
 
 @pytest.mark.parametrize("fx_exchange", [None, "", " ", "kraken ", "Kraken", "polygon"])
@@ -252,7 +316,7 @@ def test_missing_or_invalid_fx_configuration_never_queries(fx_exchange: str | No
     """
     repository = _repository()
     client = TestClient(_app(repository, _principal()))
-    params = {"instrument_public_ids": "main"}
+    params = {"instrument_public_ids": _MAIN_ID}
     if fx_exchange is not None:
         params["fx_exchanges"] = fx_exchange
 
@@ -272,7 +336,7 @@ def test_oversized_fx_parameter_list_never_queries() -> None:
     """
     repository = _repository()
     client = TestClient(_app(repository, _principal()))
-    params = [("instrument_public_ids", "main")]
+    params = [("instrument_public_ids", _MAIN_ID)]
     params.extend([("fx_exchanges", "kraken")] * (MAX_REQUESTED_INSTRUMENTS + 1))
 
     response = client.get(_PATH, params=params)
@@ -308,7 +372,7 @@ def test_response_audits_excluded_fx_metadata_without_reading_its_price() -> Non
     response = client.get(
         _PATH,
         params=[
-            ("instrument_public_ids", "main"),
+            ("instrument_public_ids", _MAIN_ID),
             ("fx_exchanges", "kraken"),
             ("fx_exchanges", "kraken"),
         ],
@@ -323,4 +387,6 @@ def test_response_audits_excluded_fx_metadata_without_reading_its_price() -> Non
     assert excluded.native_symbol == "C:EURUSD"
     assert (excluded.exchange, excluded.base, excluded.quote) == ("polygon", "EUR", "USD")
     assert excluded.reason == "fx_venue_not_selected"
-    repository.get_active_market_snapshot_freshness.assert_awaited_once_with(["fx", "main"])
+    repository.get_active_market_snapshot_freshness.assert_awaited_once_with(
+        sorted(["fx", _MAIN_ID])
+    )

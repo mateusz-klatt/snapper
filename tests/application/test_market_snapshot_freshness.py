@@ -10,21 +10,23 @@ from typing import Literal
 
 import pytest
 
-from snapper.application.market_snapshot_refresh.freshness import MAX_REFRESH_TARGETS
 from snapper.application.market_snapshot_refresh.freshness import MAX_REQUESTED_INSTRUMENTS
 from snapper.application.market_snapshot_refresh.freshness import load_market_snapshot_freshness
 from snapper.application.market_snapshot_refresh.freshness import (
     market_snapshot_refresh_scope_digest,
 )
+from snapper.core.market_snapshot_freshness import MAX_REFRESH_TARGETS
 from snapper.core.market_snapshot_freshness import FreshnessFailureReason
 from snapper.data.repository_types import MarketSnapshotFreshnessRow
 from snapper.data.repository_types import MarketSnapshotRefreshTargetRow
 
 _NOW = datetime(2026, 11, 16, 15, 0, tzinfo=UTC)
+_REQUESTED_ID = "feed0000-1234-4567-89ab-0123456789ab"
+_UNKNOWN_ID = "feed0000-1234-4567-89ab-0123456789ac"
 
 
 def _target(
-    identity: str = "requested",
+    identity: str = _REQUESTED_ID,
     *,
     exchange: str = "kraken",
     base: str = "BTC",
@@ -54,7 +56,7 @@ def _target(
 
 
 def _snapshot(
-    identity: str = "requested", timestamp: datetime | None = _NOW, price: float | None = 100.0
+    identity: str = _REQUESTED_ID, timestamp: datetime | None = _NOW, price: float | None = 100.0
 ) -> MarketSnapshotFreshnessRow:
     """Build snapshot evidence without replacing missing or invalid values.
 
@@ -135,7 +137,7 @@ async def test_inclusive_shared_time_boundaries(
     repository = _Repository([_target()], [_snapshot(timestamp=_NOW - timedelta(seconds=age))])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], now=lambda: _NOW, fx_exchanges=["kraken"]
+        repository, [_REQUESTED_ID], now=lambda: _NOW, fx_exchanges=["kraken"]
     )
 
     assert report.instruments[0].reason == expected_reason
@@ -156,7 +158,7 @@ async def test_fresh_timestamp_with_unusable_price_refuses(price: float | None) 
     repository = _Repository([_target()], [_snapshot(price=price)])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], now=lambda: _NOW, fx_exchanges=["kraken"]
+        repository, [_REQUESTED_ID], now=lambda: _NOW, fx_exchanges=["kraken"]
     )
 
     assert not report.freshness_ready
@@ -175,7 +177,7 @@ async def test_missing_snapshot_or_timestamp_refuses(include_row: bool) -> None:
     repository = _Repository([_target()], [_snapshot(timestamp=None)] if include_row else [])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], now=lambda: _NOW, fx_exchanges=["kraken"]
+        repository, [_REQUESTED_ID], now=lambda: _NOW, fx_exchanges=["kraken"]
     )
 
     assert not report.freshness_ready
@@ -196,7 +198,7 @@ async def test_naive_timestamp_refuses_without_datetime_exception() -> None:
     repository = _Repository([_target()], [_snapshot(timestamp=timestamp)])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], now=lambda: _NOW, fx_exchanges=["kraken"]
+        repository, [_REQUESTED_ID], now=lambda: _NOW, fx_exchanges=["kraken"]
     )
 
     assert not report.freshness_ready
@@ -206,11 +208,26 @@ async def test_naive_timestamp_refuses_without_datetime_exception() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ids", [[], [""], [" "], [" requested"], ["requested "]])
+@pytest.mark.parametrize(
+    "ids",
+    [
+        [],
+        [""],
+        [" "],
+        [" requested"],
+        ["requested "],
+        [f" {_REQUESTED_ID}"],
+        [f"{_REQUESTED_ID} "],
+        ["not-uuid"],
+        ["z" * 32],
+        [_REQUESTED_ID[:-1]],
+        [_REQUESTED_ID, "not-uuid"],
+    ],
+)
 async def test_invalid_scope_never_reads_repository(ids: list[str]) -> None:
     """Reject invalid explicit scopes before any repository access.
 
-    Given: An empty list or a blank or whitespace-padded instrument identity.
+    Given: An empty list, malformed UUID, blank or whitespace-padded identity.
     When: The caller requests a bounded freshness observation.
     Then: Input validation raises without either repository query running.
     """
@@ -235,7 +252,7 @@ async def test_oversized_requested_scope_never_resolves() -> None:
 
     with pytest.raises(ValueError, match="Request between"):
         await load_market_snapshot_freshness(
-            repository, ["requested"] * (MAX_REQUESTED_INSTRUMENTS + 1), fx_exchanges=["kraken"]
+            repository, [_REQUESTED_ID] * (MAX_REQUESTED_INSTRUMENTS + 1), fx_exchanges=["kraken"]
         )
 
     assert repository.target_queries == []
@@ -251,11 +268,14 @@ async def test_unknown_requested_identity_never_reads_snapshots() -> None:
     """
     repository = _Repository([_target()], [_snapshot()])
 
-    with pytest.raises(ValueError, match="Unknown or unsupported requested instruments: unknown"):
+    with pytest.raises(
+        ValueError, match=f"Unknown or unsupported requested instruments: {_UNKNOWN_ID}"
+    ):
         await load_market_snapshot_freshness(
-            repository, ["requested", "unknown"], fx_exchanges=["kraken"]
+            repository, [_REQUESTED_ID, _UNKNOWN_ID], fx_exchanges=["kraken"]
         )
 
+    assert repository.target_queries == [[_REQUESTED_ID, _UNKNOWN_ID]]
     assert repository.snapshot_queries == []
 
 
@@ -270,7 +290,7 @@ async def test_duplicate_resolver_identity_refuses() -> None:
     repository = _Repository([_target(), _target(exchange="walutomat")], [])
 
     with pytest.raises(ValueError, match="duplicate instrument identities"):
-        await load_market_snapshot_freshness(repository, ["requested"], fx_exchanges=["kraken"])
+        await load_market_snapshot_freshness(repository, [_REQUESTED_ID], fx_exchanges=["kraken"])
 
     assert repository.snapshot_queries == []
 
@@ -310,7 +330,7 @@ async def test_malformed_metadata_refuses_before_snapshot_read(
     repository = _Repository([target], [_snapshot()])
 
     with pytest.raises(ValueError, match="incomplete instrument metadata"):
-        await load_market_snapshot_freshness(repository, ["requested"], fx_exchanges=["kraken"])
+        await load_market_snapshot_freshness(repository, [_REQUESTED_ID], fx_exchanges=["kraken"])
 
     assert repository.snapshot_queries == []
     assert target[malformed_field] == invalid_value
@@ -328,7 +348,7 @@ async def test_expansion_limit_applies_before_snapshot_read() -> None:
     repository = _Repository(targets, [])
 
     with pytest.raises(ValueError, match="Expanded refresh scope exceeds"):
-        await load_market_snapshot_freshness(repository, ["0"], fx_exchanges=["kraken"])
+        await load_market_snapshot_freshness(repository, [_REQUESTED_ID], fx_exchanges=["kraken"])
 
     assert repository.snapshot_queries == []
 
@@ -344,7 +364,7 @@ async def test_missing_fx_metadata_cannot_report_fresh_main_as_ready() -> None:
     repository = _Repository([_target(quote="EUR")], [_snapshot()])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], now=lambda: _NOW, fx_exchanges=["kraken"]
+        repository, [_REQUESTED_ID], now=lambda: _NOW, fx_exchanges=["kraken"]
     )
 
     assert report.instruments[0].reason is None
@@ -368,17 +388,18 @@ async def test_both_fx_orientations_are_observed_including_absent_snapshot() -> 
     repository = _Repository(targets, [_snapshot(), _snapshot("direct", price=1.2)])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], now=lambda: _NOW, fx_exchanges=["kraken"]
+        repository, [_REQUESTED_ID], now=lambda: _NOW, fx_exchanges=["kraken"]
     )
 
     assert report.unresolved_fx_currencies == []
-    assert repository.snapshot_queries == [["direct", "inverse", "requested"]]
-    assert [item.instrument_public_id for item in report.instruments] == [
-        "direct",
-        "inverse",
-        "requested",
-    ]
-    assert report.instruments[1].reason == "missing_snapshot"
+    assert repository.snapshot_queries == [sorted(["direct", "inverse", _REQUESTED_ID])]
+    assert [item.instrument_public_id for item in report.instruments] == sorted(
+        ["direct", "inverse", _REQUESTED_ID]
+    )
+    assert (
+        next(item for item in report.instruments if item.instrument_public_id == "inverse").reason
+        == "missing_snapshot"
+    )
     assert not report.freshness_ready
 
 
@@ -400,7 +421,7 @@ async def test_fresh_fx_candidate_satisfies_dependency_resolution(inverse: bool)
     repository = _Repository([_target(quote="EUR"), fx], [_snapshot(), _snapshot("fx")])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], now=lambda: _NOW, fx_exchanges=["kraken"]
+        repository, [_REQUESTED_ID], now=lambda: _NOW, fx_exchanges=["kraken"]
     )
 
     assert report.freshness_ready
@@ -423,15 +444,15 @@ async def test_unselected_expanded_target_never_silently_disappears(exchange: st
     repository = _Repository(targets, [_snapshot(), _snapshot("fx")])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], now=lambda: _NOW, fx_exchanges=["kraken"]
+        repository, [_REQUESTED_ID], now=lambda: _NOW, fx_exchanges=["kraken"]
     )
 
     assert not report.freshness_ready
-    assert report.instruments[0].instrument_public_id == "requested"
+    assert report.instruments[0].instrument_public_id == _REQUESTED_ID
     assert report.excluded_fx_instruments[0].instrument_public_id == "fx"
     assert report.excluded_fx_instruments[0].reason == "fx_venue_not_selected"
     assert report.unresolved_fx_currencies == ["EUR"]
-    assert repository.snapshot_queries == [["requested"]]
+    assert repository.snapshot_queries == [[_REQUESTED_ID]]
 
 
 @pytest.mark.asyncio
@@ -446,7 +467,7 @@ async def test_non_forex_candidate_does_not_satisfy_currency_dependency() -> Non
     repository = _Repository(targets, [_snapshot(), _snapshot("not-fx")])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], now=lambda: _NOW, fx_exchanges=["kraken"]
+        repository, [_REQUESTED_ID], now=lambda: _NOW, fx_exchanges=["kraken"]
     )
 
     assert report.unresolved_fx_currencies == ["EUR"]
@@ -474,7 +495,7 @@ async def test_final_clock_is_read_after_snapshot_await() -> None:
     )
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], now=lambda: clock[0], fx_exchanges=["kraken"]
+        repository, [_REQUESTED_ID], now=lambda: clock[0], fx_exchanges=["kraken"]
     )
 
     assert report.checked_at == _NOW + timedelta(seconds=2)
@@ -484,23 +505,31 @@ async def test_final_clock_is_read_after_snapshot_await() -> None:
 
 
 @pytest.mark.asyncio
-async def test_duplicate_requested_ids_are_deduplicated_without_broadening_scope() -> None:
-    """Deduplicate requested identities while preserving an exact bounded scope.
+@pytest.mark.parametrize(
+    "ids",
+    [
+        [_REQUESTED_ID, _REQUESTED_ID],
+        [_REQUESTED_ID.upper(), f"{{{_REQUESTED_ID}}}", _REQUESTED_ID],
+        [_REQUESTED_ID.replace("-", ""), f"urn:uuid:{_REQUESTED_ID}"],
+    ],
+)
+async def test_requested_uuid_spellings_are_canonicalized_and_deduplicated(
+    ids: list[str],
+) -> None:
+    """Canonicalize requested UUIDs before either bounded repository read.
 
-    Given: The caller supplies the same explicit requested identity twice.
+    Given: The caller repeats one version-four UUID using equivalent accepted spellings.
     When: The service observes its fresh row with the default UTC clock.
-    Then: Each repository read sees one identity and the report is ready.
+    Then: Each repository read and the ready report contain only the canonical identity.
     """
     timestamp = datetime.now(UTC)
     repository = _Repository([_target()], [_snapshot(timestamp=timestamp)])
 
-    report = await load_market_snapshot_freshness(
-        repository, ["requested", "requested"], fx_exchanges=["kraken"]
-    )
+    report = await load_market_snapshot_freshness(repository, ids, fx_exchanges=["kraken"])
 
-    assert report.requested_instrument_public_ids == ["requested"]
-    assert repository.target_queries == [["requested"]]
-    assert repository.snapshot_queries == [["requested"]]
+    assert report.requested_instrument_public_ids == [_REQUESTED_ID]
+    assert repository.target_queries == [[_REQUESTED_ID]]
+    assert repository.snapshot_queries == [[_REQUESTED_ID]]
     assert report.checked_at >= timestamp
     assert report.freshness_ready
 
@@ -517,7 +546,7 @@ async def test_invalid_fx_configuration_never_reads_repository(fx_exchanges: lis
     repository = _Repository([_target()], [_snapshot()])
 
     with pytest.raises(ValueError, match="FX exchange"):
-        await load_market_snapshot_freshness(repository, ["requested"], fx_exchanges=fx_exchanges)
+        await load_market_snapshot_freshness(repository, [_REQUESTED_ID], fx_exchanges=fx_exchanges)
 
     assert repository.target_queries == []
     assert repository.snapshot_queries == []
@@ -535,7 +564,7 @@ async def test_oversized_fx_configuration_refuses_before_queries() -> None:
 
     with pytest.raises(ValueError, match="bounded nonempty FX exchange"):
         await load_market_snapshot_freshness(
-            repository, ["requested"], fx_exchanges=["kraken"] * (MAX_REQUESTED_INSTRUMENTS + 1)
+            repository, [_REQUESTED_ID], fx_exchanges=["kraken"] * (MAX_REQUESTED_INSTRUMENTS + 1)
         )
 
     assert repository.target_queries == []
@@ -558,12 +587,12 @@ async def test_polygon_is_explicitly_excluded_without_a_snapshot_read() -> None:
     repository = _Repository(targets, [_snapshot(), _snapshot("fx")])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], fx_exchanges=["kraken", "kraken"], now=lambda: _NOW
+        repository, [_REQUESTED_ID], fx_exchanges=["kraken", "kraken"], now=lambda: _NOW
     )
 
     assert report.freshness_ready
     assert report.configured_fx_exchanges == ["kraken"]
-    assert repository.snapshot_queries == [["fx", "requested"]]
+    assert repository.snapshot_queries == [sorted(["fx", _REQUESTED_ID])]
     excluded = report.excluded_fx_instruments[0]
     assert excluded.instrument_public_id == "polygon-fx"
     assert excluded.native_symbol == "EUR/USD"
@@ -587,12 +616,12 @@ async def test_excluded_only_fresh_fx_does_not_fulfil_configured_dependency() ->
     repository = _Repository(targets, [_snapshot(), _snapshot("polygon-fx")])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], fx_exchanges=["kraken"], now=lambda: _NOW
+        repository, [_REQUESTED_ID], fx_exchanges=["kraken"], now=lambda: _NOW
     )
 
     assert not report.freshness_ready
     assert report.unresolved_fx_currencies == ["EUR"]
-    assert repository.snapshot_queries == [["requested"]]
+    assert repository.snapshot_queries == [[_REQUESTED_ID]]
     assert report.excluded_fx_instruments[0].instrument_public_id == "polygon-fx"
 
 
@@ -612,11 +641,11 @@ async def test_inverse_orientation_on_unselected_venue_is_explicitly_excluded() 
     repository = _Repository(targets, [_snapshot(), _snapshot("direct")])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], fx_exchanges=["kraken"], now=lambda: _NOW
+        repository, [_REQUESTED_ID], fx_exchanges=["kraken"], now=lambda: _NOW
     )
 
     assert report.freshness_ready
-    assert repository.snapshot_queries == [["direct", "requested"]]
+    assert repository.snapshot_queries == [["direct", _REQUESTED_ID]]
     assert report.excluded_fx_instruments[0].instrument_public_id == "inverse"
     assert report.excluded_fx_instruments[0].native_symbol == "USD/EUR"
 
@@ -632,11 +661,11 @@ async def test_requested_main_on_other_supported_venue_remains_required() -> Non
     repository = _Repository([_target(exchange="walutomat", base="EUR", asset_type="forex")], [])
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], fx_exchanges=["kraken"], now=lambda: _NOW
+        repository, [_REQUESTED_ID], fx_exchanges=["kraken"], now=lambda: _NOW
     )
 
     assert not report.freshness_ready
-    assert repository.snapshot_queries == [["requested"]]
+    assert repository.snapshot_queries == [[_REQUESTED_ID]]
     assert report.instruments[0].reason == "missing_snapshot"
     assert report.excluded_fx_instruments == []
 
@@ -654,7 +683,7 @@ async def test_requested_forex_main_cannot_bypass_configured_fx_venue() -> None:
     )
 
     report = await load_market_snapshot_freshness(
-        repository, ["requested"], fx_exchanges=["kraken"], now=lambda: _NOW
+        repository, [_REQUESTED_ID], fx_exchanges=["kraken"], now=lambda: _NOW
     )
 
     assert report.instruments[0].reason is None
@@ -673,7 +702,7 @@ async def test_unsupported_requested_main_refuses_before_snapshot_query() -> Non
     repository = _Repository([_target(exchange="polygon")], [_snapshot()])
 
     with pytest.raises(ValueError, match="Unsupported requested instrument venues"):
-        await load_market_snapshot_freshness(repository, ["requested"], fx_exchanges=["kraken"])
+        await load_market_snapshot_freshness(repository, [_REQUESTED_ID], fx_exchanges=["kraken"])
 
     assert repository.snapshot_queries == []
 
@@ -693,7 +722,7 @@ async def test_expansion_ceiling_includes_excluded_fx_candidates() -> None:
     repository = _Repository(targets, [])
 
     with pytest.raises(ValueError, match="Expanded refresh scope exceeds"):
-        await load_market_snapshot_freshness(repository, ["requested"], fx_exchanges=["kraken"])
+        await load_market_snapshot_freshness(repository, [_REQUESTED_ID], fx_exchanges=["kraken"])
 
     assert repository.snapshot_queries == []
 
@@ -742,7 +771,7 @@ def test_scope_digest_binds_resolved_identity_metadata(
     Then: The digests differ even without any snapshot price or time inputs.
     """
     original = market_snapshot_refresh_scope_digest(
-        ["requested"], ["kraken"], {"requested": _target()}, {}
+        [_REQUESTED_ID], ["kraken"], {_REQUESTED_ID: _target()}, {}
     )
 
     changed_digest = market_snapshot_refresh_scope_digest(
@@ -765,13 +794,13 @@ def test_scope_digest_binds_configuration_and_exclusion_classification() -> None
     main = _target()
     fx = _target("fx", base="EUR", asset_type="forex")
     original = market_snapshot_refresh_scope_digest(
-        ["requested"], ["kraken"], {"requested": main, "fx": fx}, {}
+        [_REQUESTED_ID], ["kraken"], {_REQUESTED_ID: main, "fx": fx}, {}
     )
     different_config = market_snapshot_refresh_scope_digest(
-        ["requested"], ["kraken", "walutomat"], {"requested": main, "fx": fx}, {}
+        [_REQUESTED_ID], ["kraken", "walutomat"], {_REQUESTED_ID: main, "fx": fx}, {}
     )
     different_classification = market_snapshot_refresh_scope_digest(
-        ["requested"], ["kraken"], {"requested": main}, {"fx": fx}
+        [_REQUESTED_ID], ["kraken"], {_REQUESTED_ID: main}, {"fx": fx}
     )
 
     assert different_config != original
@@ -785,16 +814,16 @@ def test_scope_digest_binds_excluded_native_metadata() -> None:
     When: The shared helper hashes both complete classified universes.
     Then: The excluded candidate change produces a different scope digest.
     """
-    required = {"requested": _target()}
+    required = {_REQUESTED_ID: _target()}
     excluded = _target("polygon", exchange="polygon", base="EUR", asset_type="forex")
     original = market_snapshot_refresh_scope_digest(
-        ["requested"], ["kraken"], required, {"polygon": excluded}
+        [_REQUESTED_ID], ["kraken"], required, {"polygon": excluded}
     )
     changed = excluded.copy()
     changed["native_symbol"] = "C:EURUSD"
 
     revised = market_snapshot_refresh_scope_digest(
-        ["requested"], ["kraken"], required, {"polygon": changed}
+        [_REQUESTED_ID], ["kraken"], required, {"polygon": changed}
     )
 
     assert revised != original
@@ -810,13 +839,13 @@ async def test_report_scope_digest_excludes_prices_and_observation_times() -> No
     """
     repository = _Repository([_target()], [_snapshot()])
     first = await load_market_snapshot_freshness(
-        repository, ["requested"], fx_exchanges=["kraken"], now=lambda: _NOW
+        repository, [_REQUESTED_ID], fx_exchanges=["kraken"], now=lambda: _NOW
     )
     later = _NOW + timedelta(seconds=1)
     repository.snapshots = [_snapshot(timestamp=later, price=200.0)]
 
     second = await load_market_snapshot_freshness(
-        repository, ["requested"], fx_exchanges=["kraken"], now=lambda: later
+        repository, [_REQUESTED_ID], fx_exchanges=["kraken"], now=lambda: later
     )
 
     assert first.scope_digest == second.scope_digest

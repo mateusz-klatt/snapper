@@ -195,6 +195,7 @@ from snapper.core.command_material import TradeCommandMaterialChangedError
 from snapper.core.command_material import TradeCommandMaterialUnavailableError
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
+from snapper.core.market_snapshot_freshness import MAX_REFRESH_TARGETS
 from snapper.core.paired_execution import compute_paired_group_key
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
@@ -3478,7 +3479,7 @@ def _market_snapshot_refresh_target_query(
         instrument_public_ids: Explicit requested identities, never an implicit universe.
 
     Returns:
-        One clock-free query over active metadata and capability rows, without snapshots.
+        Active metadata bounded to the accepted scope limit plus one overflow witness.
     """
     available = (
         select(
@@ -3524,7 +3525,12 @@ def _market_snapshot_refresh_target_query(
             (Symbol.base == "USD") & (Symbol.quote.in_(quote_currencies)),
         ),
     )
-    return available.where(or_(requested, fx_dependency)).distinct().order_by(Instrument.public_id)
+    return (
+        available.where(or_(requested, fx_dependency))
+        .distinct()
+        .order_by(Instrument.public_id)
+        .limit(MAX_REFRESH_TARGETS + 1)
+    )
 
 
 def _market_snapshot_refresh_target_rows(
@@ -3537,7 +3543,12 @@ def _market_snapshot_refresh_target_rows(
 
     Returns:
         Deterministically ordered requested and dependency targets.
+
+    Raises:
+        ValueError: When the extra row proves that the complete scope exceeds the limit.
     """
+    if len(rows) > MAX_REFRESH_TARGETS:
+        raise ValueError(f"Expanded refresh scope exceeds {MAX_REFRESH_TARGETS} instruments")
     return [
         {
             "instrument_public_id": instrument_id,

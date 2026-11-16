@@ -10,7 +10,9 @@ from uuid import NAMESPACE_URL
 from uuid import uuid5
 
 import pytest
+from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
 
+from snapper.data import repository as repository_module
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Instrument
 from snapper.data.models import MarketSnapshot
@@ -252,6 +254,59 @@ async def test_refresh_resolves_both_fx_orientations_without_snapshots(
         "quote": "EUR",
         "asset_type": "crypto",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fx_count", [2, 3, 8])
+async def test_refresh_scope_limit_preserves_complete_boundary_or_refuses(
+    repositories: _Repositories, read_mode: str, monkeypatch: pytest.MonkeyPatch, fx_count: int
+) -> None:
+    """Bound returned metadata without silently dropping FX candidates from any venue.
+
+    Given: A small scope limit and complete metadata at or beyond that boundary.
+    When: Either concrete repository resolves the requested main and its FX candidates.
+    Then: The exact boundary remains complete and every overflowing scope raises.
+    """
+    monkeypatch.setattr(repository_module, "MAX_REFRESH_TARGETS", 3)
+    main = _seed_target(
+        repositories.sync,
+        _Target("main", base="BTC", quote="EUR", asset_type="crypto", native_symbol="BTC-EUR"),
+    )
+    expected = [main]
+    for index in range(fx_count):
+        expected.append(
+            _seed_target(
+                repositories.sync,
+                _Target(
+                    f"fx-{index}",
+                    native_symbol=f"EUR-USD-{index}",
+                    exchange="polygon" if index % 2 else "kraken",
+                ),
+            )
+        )
+    if fx_count > 2:
+        with pytest.raises(ValueError, match="Expanded refresh scope exceeds 3 instruments"):
+            await _resolve(repositories, read_mode, [main])
+    else:
+        rows = await _resolve(repositories, read_mode, [main])
+        assert [row["instrument_public_id"] for row in rows] == sorted(expected)
+
+
+def test_refresh_query_limits_database_result_to_one_overflow_witness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enforce the result ceiling in PostgreSQL before buffered results reach Python.
+
+    Given: A refresh target cap shared by SQL construction and row projection.
+    When: The actual metadata query is compiled for the production database dialect.
+    Then: SQL requests at most the cap plus one row needed to prove overflow.
+    """
+    monkeypatch.setattr(repository_module, "MAX_REFRESH_TARGETS", 3)
+    query = repository_module._market_snapshot_refresh_target_query([_identity("main")])
+    compiled = str(
+        query.compile(dialect=postgresql_dialect(), compile_kwargs={"literal_binds": True})
+    )
+    assert compiled.rstrip().endswith("LIMIT 4")
 
 
 @pytest.mark.asyncio

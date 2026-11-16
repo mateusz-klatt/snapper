@@ -4455,7 +4455,7 @@ Both repeated query parameters are required, with 1–100 values each:
 
 | Parameter | Description |
 | --------- | ----------- |
-| `instrument_public_ids` | Explicit venue-specific instrument identities; duplicates are deduplicated |
+| `instrument_public_ids` | Explicit venue-specific UUID identities; valid spellings are canonicalized and deduplicated before querying |
 | `fx_exchanges` | Explicit FX refresh venues from `kraken`, `kraken_futures`, `kraken_equities`, `walutomat`; no default |
 
 Requested instruments remain required regardless of the FX venue list. For
@@ -4464,8 +4464,8 @@ inverse USD forex candidates with market-data capability. Candidates on the
 configured FX venues become required; other candidates appear in
 `excluded_fx_instruments` with reason `fx_venue_not_selected`, without reading
 their prices. The complete metadata expansion is bounded to 1,000 instruments.
-Unknown requested instruments, unsupported venues and invalid scopes return
-400; missing required query parameters return 422.
+Malformed UUIDs, unknown requested instruments, unsupported venues and invalid
+scopes return 400; missing required query parameters return 422.
 
 `freshness_ready` requires every included snapshot to have a positive finite
 last price and an original timestamp between five seconds in the future and

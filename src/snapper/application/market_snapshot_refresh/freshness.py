@@ -15,16 +15,17 @@ from datetime import UTC
 from datetime import datetime
 from typing import Protocol
 from typing import TypedDict
+from uuid import UUID
 
 from snapper.application.pricing.usd_converter import MAX_FUTURE_SKEW_SECONDS
 from snapper.application.pricing.usd_converter import STALENESS_THRESHOLD_SECONDS
+from snapper.core.market_snapshot_freshness import MAX_REFRESH_TARGETS
 from snapper.core.market_snapshot_freshness import FreshnessFailureReason
 from snapper.core.market_snapshot_freshness import FxExclusionReason
 from snapper.data.repository_types import MarketSnapshotFreshnessRow
 from snapper.data.repository_types import MarketSnapshotRefreshTargetRow
 
 MAX_REQUESTED_INSTRUMENTS = 100
-MAX_REFRESH_TARGETS = 1000
 SNAPSHOT_REFRESH_EXCHANGES = frozenset({"kraken", "kraken_futures", "kraken_equities", "walutomat"})
 
 
@@ -170,16 +171,16 @@ def market_snapshot_refresh_scope_digest(
 
 
 def _requested_scope(instrument_public_ids: list[str]) -> list[str]:
-    """Validate and deduplicate the explicit scope before any repository read.
+    """Validate and canonicalize UUID scope before any repository read.
 
     Args:
         instrument_public_ids: Caller-supplied instrument identities.
 
     Returns:
-        Nonempty identities in their first-occurrence order.
+        Canonical UUID identities deduplicated in their first-occurrence order.
 
     Raises:
-        ValueError: When the request is empty, oversized or contains blank ids.
+        ValueError: When the request is empty, oversized or contains malformed identities.
     """
     if not instrument_public_ids or len(instrument_public_ids) > MAX_REQUESTED_INSTRUMENTS:
         raise ValueError(f"Request between 1 and {MAX_REQUESTED_INSTRUMENTS} instruments")
@@ -187,7 +188,11 @@ def _requested_scope(instrument_public_ids: list[str]) -> list[str]:
         raise ValueError(
             "Instrument identities must be nonempty and have no surrounding whitespace"
         )
-    return list(dict.fromkeys(instrument_public_ids))
+    try:
+        canonical = [str(UUID(value)) for value in instrument_public_ids]
+    except ValueError as exc:
+        raise ValueError("Instrument identities must be valid UUIDs") from exc
+    return list(dict.fromkeys(canonical))
 
 
 def _target_identity_is_explicit(target: MarketSnapshotRefreshTargetRow) -> bool:

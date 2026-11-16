@@ -1,6 +1,8 @@
-"""Shared refusal vocabulary for market-snapshot freshness observations."""
+"""Shared scope limits and refusal vocabulary for market-snapshot freshness observations."""
 
 from typing import Literal
+
+MAX_REFRESH_TARGETS = 1000
 
 type FreshnessFailureReason = Literal[
     "missing_snapshot",
