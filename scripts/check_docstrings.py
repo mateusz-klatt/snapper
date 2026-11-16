@@ -674,6 +674,11 @@ def print_results(result: ScanResult, root: Path) -> None:
 def main() -> int:
     """Entry point for check_docstrings script.
 
+    In the proprietary submodule only ``src`` and ``tests`` are scanned. That is the
+    scope the Makefile's ``PY_DIRS`` gives ruff, mypy, black and coverage. The
+    submodule's plans and evidence hold one-off scripts and records of runs, not
+    shipped source, and their bytes are pinned by the runs that used them.
+
     Returns:
         Exit code (0 for success, 1 for issues in strict mode).
     """
@@ -704,14 +709,14 @@ def main() -> int:
             enforce_google_sections=enforce_google_sections,
         )
 
-    proprietary_dir = root / "proprietary"
-    if proprietary_dir.exists():
-        scan_directory(
-            proprietary_dir,
-            result,
-            enforce_bdd=enforce_bdd,
-            enforce_google_sections=enforce_google_sections,
-        )
+    for proprietary_dir in (root / "proprietary" / "src", root / "proprietary" / "tests"):
+        if proprietary_dir.exists():
+            scan_directory(
+                proprietary_dir,
+                result,
+                enforce_bdd=enforce_bdd,
+                enforce_google_sections=enforce_google_sections,
+            )
 
     delegate_dir = root / "integrations" / "snapper-delegate"
     if delegate_dir.exists():
