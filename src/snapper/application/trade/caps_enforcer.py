@@ -88,6 +88,8 @@ class CapsViolationError(Exception):
         ``price_unavailable`` — USDConverter could not resolve
           the submission's USD notional. Maps to
           ``caps_price_unavailable``.
+        ``prior_notional_unpriced`` — retained live history has no USD value
+          and no safe legacy USD-quoted price evidence.
     """
 
     def __init__(
@@ -770,10 +772,10 @@ class TradingCapsEnforcer:
 
         1. ``submitted_notional_usd`` — the admission-time USD quote
            snapshotted on the row (covers market orders).
-        2. Legacy ``quantity × price`` when the snapshot is NULL but
-           a submit price exists (pre-snapshot limit orders).
-        3. Skip with a WARN log when the row carries neither (legacy
-           market orders — no submit-time valuation survives).
+        2. Legacy ``quantity × price`` when a submit price exists and
+           catalog versions at creation prove a known spot venue, USD quote
+           and no derivative quantity, product or payoff interpretation.
+        3. Refuse other unpriced history without historical revaluation.
 
         The CURRENT submission's ``new_notional`` was quoted by
         :meth:`_quote_submitted_notional` (fail-closed, since a cap is
@@ -791,21 +793,17 @@ class TradingCapsEnforcer:
         since = self._now() - ROLLING_NOTIONAL_WINDOW
         rows = await self._repository.get_user_recent_submits(user_public_id, since)
         prior_sum = Decimal("0")
-        skipped_unpriced = 0
         for r in rows:
             stored_notional = r["submitted_notional_usd"]
             if stored_notional is not None:
                 prior_sum += Decimal(str(stored_notional))
-            elif r["price"] is not None:
+            elif r["price"] is not None and r.get("legacy_usd_base_notional_is_proven", False):
                 prior_sum += Decimal(str(r["quantity"])) * Decimal(str(r["price"]))
             else:
-                skipped_unpriced += 1
-        if skipped_unpriced > 0:
-            logger.warning(
-                "caps_enforcer: notional sum skipped "
-                f"{skipped_unpriced} row(s) missing both submitted "
-                f"notional and price for user={user_public_id}"
-            )
+                raise CapsViolationError(
+                    "prior_notional_unpriced",
+                    detail="Prior live submission has no evidenced USD notional",
+                )
         total = prior_sum + new_notional
         if total > Decimal(str(limit)):
             raise CapsViolationError(

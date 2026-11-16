@@ -20,9 +20,13 @@ import pytest
 
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Instrument
+from snapper.data.models import InstrumentSpec
+from snapper.data.models import Symbol
 from snapper.data.models import TradeCommand
 from snapper.data.models import UserTradingCaps
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 
 _NOW = datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC)
 
@@ -327,3 +331,325 @@ async def test_count_user_rolling_cancels_includes_all_statuses(
         "user-cancels", since=_NOW - timedelta(seconds=60)
     )
     assert count == 2
+
+
+async def _legacy_catalog(repo: SQLAlchemyRepository, quote: str | None) -> None:
+    """Persist venue-bound catalog evidence predating the historical submission."""
+    async with repo.session() as session:
+        session.add(
+            Symbol(
+                public_id="legacy-symbol",
+                native_symbol="OPAQUE-MARKET",
+                base="BTC",
+                quote=quote,
+                asset_type="index" if quote is None else "crypto",
+                created_at=_NOW - timedelta(hours=2),
+                timestamp=_NOW - timedelta(hours=2),
+                known_to=KNOWN_TO_MAX,
+                session_id="test",
+                sequence_id=1,
+            )
+        )
+        session.add(
+            Instrument(
+                public_id="legacy-instrument",
+                symbol_public_id="legacy-symbol",
+                exchange="kraken",
+                timestamp=_NOW - timedelta(hours=2),
+                known_to=KNOWN_TO_MAX,
+                session_id="test",
+                sequence_id=1,
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.parametrize("quote,expected", [("USD", True), ("EUR", False), (None, False)])
+async def test_legacy_quote_evidence_comes_from_catalog_not_native_spelling(
+    repo: SQLAlchemyRepository, quote: str | None, expected: bool
+) -> None:
+    """Prove legacy quote currency through temporal venue identity and metadata.
+
+    Given: an opaque instrument label whose historical catalog quote is USD, EUR or missing.
+    When: recent live submissions are projected for the rolling cap.
+    Then: only explicit historical USD evidence enables the legacy price fallback.
+    """
+    await _legacy_catalog(repo, quote)
+    await _insert_trade_command(repo, user_public_id="user", instrument="OPAQUE-MARKET")
+    rows = await repo.get_user_recent_submits("user", _NOW - timedelta(hours=24))
+    assert len(rows) == 1
+    assert rows[0]["legacy_usd_base_notional_is_proven"] is expected
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "symbol_future",
+        "instrument_future",
+        "symbol_closed",
+        "instrument_closed",
+        "venue",
+        "missing",
+    ],
+)
+async def test_legacy_quote_needs_evidence_active_at_command_creation(
+    repo: SQLAlchemyRepository, change: str
+) -> None:
+    """Refuse catalog evidence from another venue or outside the submission instant.
+
+    Given: a USD catalog identity whose only evidence is missing or temporally ineligible.
+    When: a historical live command is projected.
+    Then: its missing USD value cannot borrow that unrelated currency interpretation.
+    """
+    if change != "missing":
+        await _legacy_catalog(repo, "USD")
+        async with repo.session() as session:
+            symbol = await session.get(Symbol, 1)
+            instrument = await session.get(Instrument, 1)
+            assert symbol is not None and instrument is not None
+            if change == "symbol_future":
+                symbol.timestamp = _NOW + timedelta(seconds=1)
+            elif change == "instrument_future":
+                instrument.timestamp = _NOW + timedelta(seconds=1)
+            elif change == "symbol_closed":
+                symbol.known_to = _NOW
+            elif change == "instrument_closed":
+                instrument.known_to = _NOW
+            else:
+                instrument.exchange = "walutomat"
+            await session.commit()
+    await _insert_trade_command(repo, user_public_id="user", instrument="OPAQUE-MARKET")
+    rows = await repo.get_user_recent_submits("user", _NOW - timedelta(hours=24))
+    assert rows[0]["legacy_usd_base_notional_is_proven"] is False
+
+
+@pytest.mark.parametrize("old_quote,new_quote", [("EUR", "USD"), ("USD", "EUR")])
+async def test_legacy_quote_is_not_reinterpreted_using_current_catalog(
+    repo: SQLAlchemyRepository, old_quote: str, new_quote: str
+) -> None:
+    """Preserve the quote dimension at submission even after a catalog version changes.
+
+    Given: a historical instrument quote that changes one second after order creation.
+    When: the current command is counted after that metadata change.
+    Then: the old quote alone determines whether the legacy fallback is evidenced in USD.
+    """
+    await _legacy_catalog(repo, old_quote)
+    async with repo.session() as session:
+        old = await session.get(Symbol, 1)
+        assert old is not None
+        old.known_to = _NOW + timedelta(seconds=1)
+        session.add(
+            Symbol(
+                public_id=old.public_id,
+                native_symbol=old.native_symbol,
+                base="BTC",
+                quote=new_quote,
+                asset_type="crypto",
+                created_at=old.created_at,
+                timestamp=old.known_to,
+                known_to=KNOWN_TO_MAX,
+                session_id="test",
+                sequence_id=2,
+            )
+        )
+        await session.commit()
+    await _insert_trade_command(repo, user_public_id="user", instrument="OPAQUE-MARKET")
+    rows = await repo.get_user_recent_submits("user", _NOW - timedelta(hours=24))
+    assert rows[0]["legacy_usd_base_notional_is_proven"] is (old_quote == "USD")
+
+
+async def test_cancel_command_is_excluded_while_cancelled_create_counts(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Exclude a cancellation intent while retaining its already-admitted create exposure.
+
+    Given: one cancelled live create command and its separate cancel command.
+    When: rolling-cap membership is read.
+    Then: only the create contributes, without counting the cancellation twice.
+    """
+    await _insert_trade_command(
+        repo,
+        user_public_id="user",
+        command_type="create",
+        status=TradeCommandStatusEnum.CANCELLED,
+        quantity=2,
+    )
+    await _insert_trade_command(
+        repo,
+        user_public_id="user",
+        command_type="cancel",
+        status=TradeCommandStatusEnum.CANCELLED,
+        quantity=99,
+    )
+    rows = await repo.get_user_recent_submits("user", _NOW - timedelta(hours=24))
+    assert [row["quantity"] for row in rows] == [2]
+
+
+@pytest.mark.parametrize(
+    "signal",
+    [
+        "venue",
+        "quantity",
+        "kind",
+        "payoff",
+        "native",
+        "multiplier",
+        "native_multiplier",
+        "unit_multiplier",
+        "source",
+    ],
+)
+async def test_usd_quote_cannot_prove_legacy_contract_notional(
+    repo: SQLAlchemyRepository, signal: str
+) -> None:
+    """Refuse derivative or unknown units rather than treating contracts as base assets.
+
+    Given: a USD-quoted instrument with contract quantity, product, payoff or venue evidence.
+    When: its NULL-USD history is projected for the capped admission.
+    Then: quantity times price is not certified as its historical USD exposure.
+    """
+    await _legacy_catalog(repo, "USD")
+    exchange = "kraken_futures" if signal == "venue" else "kraken"
+    async with repo.session() as session:
+        instrument = await session.get(Instrument, 1)
+        assert instrument is not None
+        instrument.exchange = exchange
+        session.add(
+            InstrumentSpec(
+                public_id="legacy-spec",
+                instrument_public_id=instrument.public_id,
+                timestamp=_NOW - timedelta(hours=1),
+                known_to=KNOWN_TO_MAX,
+                session_id="test",
+                sequence_id=1,
+                quantity_unit="contract_count" if signal == "quantity" else "base_asset",
+                native_order_quantity_unit=(
+                    "contract_count" if signal in {"native", "native_multiplier"} else "base_asset"
+                ),
+                contract_size=(
+                    Decimal(10)
+                    if signal in {"multiplier", "native_multiplier"}
+                    else Decimal(1) if signal == "unit_multiplier" else None
+                ),
+                instrument_kind="future" if signal == "kind" else "spot",
+                contract_payoff_model="linear" if signal == "payoff" else None,
+                contract_value_currency="BTC" if signal == "payoff" else None,
+                settlement_currency="USD" if signal == "payoff" else None,
+                spec_source=FUTURES_SPEC_SOURCE if signal == "source" else None,
+                spec_version="historical-source" if signal == "source" else None,
+                spec_observed_at=_NOW - timedelta(hours=1) if signal == "source" else None,
+            )
+        )
+        await session.commit()
+    await _insert_trade_command(
+        repo, user_public_id="user", instrument="OPAQUE-MARKET", exchange=exchange
+    )
+    rows = await repo.get_user_recent_submits("user", _NOW - timedelta(hours=24))
+    assert rows[0]["legacy_usd_base_notional_is_proven"] is False
+
+
+@pytest.mark.parametrize("contract_first", [False, True])
+async def test_new_specification_does_not_change_legacy_quantity_interpretation(
+    repo: SQLAlchemyRepository, contract_first: bool
+) -> None:
+    """Resolve spot versus contract units at creation without current catalog reinterpretation.
+
+    Given: contract quantity evidence that starts before or after the prior submission.
+    When: the historical command is projected after the specification is present.
+    Then: only the evidence available at creation determines whether base math is safe.
+    """
+    await _legacy_catalog(repo, "USD")
+    async with repo.session() as session:
+        session.add(
+            InstrumentSpec(
+                public_id="contract-spec",
+                instrument_public_id="legacy-instrument",
+                timestamp=(
+                    _NOW - timedelta(seconds=1) if contract_first else _NOW + timedelta(seconds=1)
+                ),
+                known_to=KNOWN_TO_MAX,
+                session_id="test",
+                sequence_id=1,
+                quantity_unit="contract_count",
+                contract_size=Decimal(10),
+            )
+        )
+        await session.commit()
+    await _insert_trade_command(repo, user_public_id="user", instrument="OPAQUE-MARKET")
+    rows = await repo.get_user_recent_submits("user", _NOW - timedelta(hours=24))
+    assert rows[0]["legacy_usd_base_notional_is_proven"] is (not contract_first)
+
+
+async def test_conflicting_temporal_catalog_evidence_cannot_certify_usd_history(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Fail closed when overlapping catalog histories disagree on the order's currency.
+
+    Given: one native venue identity with overlapping USD and EUR interpretations.
+    When: its historical command is read for the rolling cap.
+    Then: a matching USD row cannot hide contradictory historical currency evidence.
+    """
+    await _legacy_catalog(repo, "USD")
+    async with repo.session() as session:
+        original = await session.get(Symbol, 1)
+        assert original is not None
+        original.known_to = _NOW + timedelta(seconds=1)
+        session.add(
+            Symbol(
+                public_id="other-symbol",
+                native_symbol="OPAQUE-MARKET",
+                base="BTC",
+                quote="EUR",
+                asset_type="crypto",
+                timestamp=_NOW - timedelta(seconds=1),
+                known_to=_NOW + timedelta(seconds=1),
+                created_at=_NOW - timedelta(seconds=1),
+                session_id="test",
+                sequence_id=1,
+            )
+        )
+        session.add(
+            Instrument(
+                public_id="other-instrument",
+                symbol_public_id="other-symbol",
+                exchange="kraken",
+                timestamp=_NOW - timedelta(seconds=1),
+                known_to=KNOWN_TO_MAX,
+                session_id="test",
+                sequence_id=1,
+            )
+        )
+        await session.commit()
+    await _insert_trade_command(repo, user_public_id="user", instrument="OPAQUE-MARKET")
+    rows = await repo.get_user_recent_submits("user", _NOW - timedelta(hours=24))
+    assert rows[0]["legacy_usd_base_notional_is_proven"] is False
+
+
+async def test_explicit_spot_base_units_without_contract_evidence_remain_supported(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Retain correctly dimensioned USD spot history with explicit unit evidence.
+
+    Given: a known spot venue with USD quote and base-native quantity without contract evidence.
+    When: the historical command is projected for the rolling cap.
+    Then: explicit base-unit metadata retains the historical spot fallback.
+    """
+    await _legacy_catalog(repo, "USD")
+    async with repo.session() as session:
+        session.add(
+            InstrumentSpec(
+                public_id="spot-spec",
+                instrument_public_id="legacy-instrument",
+                timestamp=_NOW - timedelta(seconds=1),
+                known_to=KNOWN_TO_MAX,
+                session_id="test",
+                sequence_id=1,
+                quantity_unit="base_asset",
+                native_order_quantity_unit="base_asset",
+                instrument_kind="spot",
+            )
+        )
+        await session.commit()
+    await _insert_trade_command(repo, user_public_id="user", instrument="OPAQUE-MARKET")
+    rows = await repo.get_user_recent_submits("user", _NOW - timedelta(hours=24))
+    assert rows[0]["legacy_usd_base_notional_is_proven"] is True

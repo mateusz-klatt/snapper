@@ -121,8 +121,37 @@ dated contracts. A cached price cannot extend certification or preserve a
 revoked specification. Missing derivative semantics never use spot arithmetic.
 Legacy spot valuation is limited to known spot sources; unknown venues or
 unrecognized quantity and product dimensions are refused.
-The implemented profile requires positive prices and USD quotes; it does not
-provide general commodity, option, margin or collateral valuation.
+The implemented profile requires positive finite prices. Non-USD quote exposure
+is converted using current market-data-enabled, non-paper forex snapshots against
+USD. Direct and inverse rates are normalized before selecting the newest usable
+plane; equally recent conflicting normalized rates refuse admission. USD quotes
+do not perform an FX lookup. Neither P&L candles nor carried FX rates support this
+oracle. General commodity, option, margin and collateral valuation remain outside
+this profile.
+
+Both marks must be at most 300 seconds old and at most 5 seconds ahead of the
+final clock, with inclusive boundaries and timezone-aware timestamps. The main
+price has a 60-second cache; its metadata and every FX leg are reread on each
+conversion. Freshness, certification and contract expiry are checked again after
+all awaited reads, including cached and USD-only calls. Missing or unsafe FX
+evidence reports `caps_price_unavailable`, retaining structured FX reason codes.
+
+Admission stores the converted value in `submitted_notional_usd`, rounded up to
+whole cents by the existing cap enforcer. The rolling 24-hour cap uses that
+stored USD value; current FX rates never revalue old submissions. Passing converter
+tests does not enable snapshot refresh or authorize a live order: the named
+refresh set, freshness monitoring, retention evidence and operator approval are
+separate gates.
+
+Legacy live submissions without a stored USD value permit `quantity × price`
+only when catalog versions at submission prove a USD quote on a known spot venue
+without derivative quantity, product, multiplier, monetary-field or provenance evidence. Ambiguous or contract
+units refuse rather than reconstructing historical payoff.
+An unknown, conflicting or non-USD quote, or a missing price, refuses a capped
+new submission with `prior_notional_unpriced`. Native symbol spelling and today's
+FX rate cannot supply historical currency evidence. Cancel commands are excluded
+from the rolling sum; an admitted create later cancelled still counts within its
+original 24-hour window.
 
 A pure contract position fold uses arithmetic entry averaging for linear
 contracts and harmonic entry averaging for inverse contracts. It retains an

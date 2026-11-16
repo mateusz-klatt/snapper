@@ -2270,14 +2270,12 @@ class UserRecentSubmitRow(TypedDict):
     Projects only the fields the enforcer needs to compute rolling
     24h USD notional accounting. ``TradeCommand`` stores
     ``instrument`` as the native symbol (e.g., ``"BTC-USD"``) plus
-    ``exchange``; these are carried so the enforcer can optionally
-    resolve to ``instrument_public_id`` for converter lookups on
-    market orders where ``price`` is NULL.
+    ``exchange``. Legacy quote evidence uses catalog versions active at
+    command creation, never the native spelling or today's FX rate.
     Sum precedence in the enforcer: ``submitted_notional_usd`` (the
     admission-time USD quote snapshotted by the caps enforcer) when
-    non-NULL, else the legacy ``quantity × price`` product, else the
-    row is skipped with a WARN log (historical market orders that
-    predate the notional snapshot carry neither value).
+    non-NULL, else legacy ``quantity × price`` only with explicit USD quote
+    evidence and a retained price. All other unpriced history fails closed.
     """
 
     instrument: str
@@ -2285,6 +2283,7 @@ class UserRecentSubmitRow(TypedDict):
     quantity: float
     price: float | None
     submitted_notional_usd: float | None
+    legacy_usd_base_notional_is_proven: NotRequired[bool]
 
 
 class VenueEventRow(TypedDict):
@@ -2660,6 +2659,18 @@ class InstrumentValuationMetadataRow(TypedDict):
     base: str
     quote: str
     spec: InstrumentSpecRow | None
+
+
+class UsdFxSnapshotCandidateRow(TypedDict):
+    """Current forex identity and original direct or inverse USD price evidence."""
+
+    snapshot_public_id: str
+    instrument_public_id: str
+    exchange: str
+    base: str
+    quote: str
+    last_price: float | None
+    timestamp: datetime
 
 
 class SpotAssetPrecisionEvidenceRow(TypedDict):

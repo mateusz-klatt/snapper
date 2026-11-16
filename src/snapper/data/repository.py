@@ -482,6 +482,7 @@ from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.data.repository_types import UnderlyingAssetRow
 from snapper.data.repository_types import UnwitnessedExecutionRow
+from snapper.data.repository_types import UsdFxSnapshotCandidateRow
 from snapper.data.repository_types import UserActiveTokenInsertRow
 from snapper.data.repository_types import UserActiveTokenVerificationRow
 from snapper.data.repository_types import UserAlertDefaultRow
@@ -3895,6 +3896,20 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_active_usd_fx_snapshot_candidates(
+        self, currency: str
+    ) -> list[UsdFxSnapshotCandidateRow]:
+        """Read every active, non-paper market-data forex plane against USD.
+
+        Args:
+            currency: Quote currency requiring current USD conversion evidence.
+
+        Returns:
+            Both pair orientations with current snapshots and original raw rates.
+        """
+        ...
+
+    @abstractmethod
     async def get_active_market_snapshot_price(
         self, instrument_public_id: str
     ) -> tuple[float | None, datetime] | None:
@@ -7195,9 +7210,8 @@ class Repository(ABC):
     ) -> list[UserRecentSubmitRow]:
         """Return user's LIVE submit commands since a cut-off timestamp.
 
-        Used by the ``max_daily_notional_usd`` cap: the enforcer
-        sums ``quantity × price`` over these rows to get the
-        rolling 24h USD commitment. Excludes rows whose
+        Used by the ``max_daily_notional_usd`` cap to sum persisted USD
+        values with quote evidence for safe legacy fallback. Excludes rows whose
         current status is ``rejected`` AND every ``mode='paper'``
         row — paper commands carry a simulator reference price on
         the ``price`` column, and simulated notional must not
@@ -11291,6 +11305,63 @@ class SQLAlchemyRepository(Repository):
                 "spec": self._instrument_spec_row(spec) if spec is not None else None,
             }
             return metadata
+
+    async def get_active_usd_fx_snapshot_candidates(
+        self, currency: str
+    ) -> list[UsdFxSnapshotCandidateRow]:
+        """Join current forex metadata, venue capability and snapshot evidence.
+
+        Args:
+            currency: Quote currency paired directly or inversely with USD.
+
+        Returns:
+            All current eligible planes without choosing a venue or price in SQL.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                select(
+                    MarketSnapshot.public_id,
+                    Instrument.public_id,
+                    Instrument.exchange,
+                    Symbol.base,
+                    Symbol.quote,
+                    MarketSnapshot.last_price,
+                    MarketSnapshot.timestamp,
+                )
+                .select_from(Instrument)
+                .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
+                .join(
+                    SymbolExchangeCapability,
+                    (SymbolExchangeCapability.symbol_public_id == Symbol.public_id)
+                    & (SymbolExchangeCapability.exchange == Instrument.exchange),
+                )
+                .join(MarketSnapshot, MarketSnapshot.instrument_public_id == Instrument.public_id)
+                .where(
+                    Instrument.known_to == KNOWN_TO_MAX,
+                    Instrument.exchange != "paper",
+                    Symbol.known_to == KNOWN_TO_MAX,
+                    Symbol.asset_type == "forex",
+                    SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
+                    SymbolExchangeCapability.can_market_data.is_(True),
+                    MarketSnapshot.known_to == KNOWN_TO_MAX,
+                    or_(
+                        (Symbol.base == currency) & (Symbol.quote == "USD"),
+                        (Symbol.base == "USD") & (Symbol.quote == currency),
+                    ),
+                )
+            )
+            return [
+                UsdFxSnapshotCandidateRow(
+                    snapshot_public_id=row[0],
+                    instrument_public_id=row[1],
+                    exchange=row[2],
+                    base=row[3],
+                    quote=cast(str, row[4]),
+                    last_price=row[5],
+                    timestamp=row[6],
+                )
+                for row in result.all()
+            ]
 
     async def get_active_market_snapshot_price(
         self, instrument_public_id: str
@@ -23415,9 +23486,51 @@ class SQLAlchemyRepository(Repository):
         Projects ``submitted_notional_usd`` (the admission-time USD
         quote the caps enforcer snapshotted) so market orders whose
         ``price`` column is NULL still count against the rolling sum;
-        the enforcer falls back to ``quantity × price`` for legacy
-        rows that predate the snapshot column.
+        the enforcer falls back to ``quantity × price`` only when catalog
+        versions at command creation prove a USD quote. Missing or conflicting
+        quote evidence never borrows today's interpretation.
         """
+        unsafe_spec = (
+            select(InstrumentSpec.id)
+            .where(
+                InstrumentSpec.instrument_public_id == Instrument.public_id,
+                InstrumentSpec.timestamp <= TradeCommand.created_at,
+                InstrumentSpec.known_to > TradeCommand.created_at,
+                or_(
+                    InstrumentSpec.quantity_unit.not_in(("base_asset",)),
+                    InstrumentSpec.native_order_quantity_unit.not_in(("base_asset",)),
+                    InstrumentSpec.contract_size.is_not(None),
+                    InstrumentSpec.instrument_kind.not_in(("spot", "etf")),
+                    InstrumentSpec.contract_payoff_model.is_not(None),
+                    InstrumentSpec.contract_value_currency.is_not(None),
+                    InstrumentSpec.settlement_currency.is_not(None),
+                    InstrumentSpec.spec_source == FUTURES_SPEC_SOURCE,
+                ),
+            )
+            .correlate(Instrument, TradeCommand)
+            .exists()
+        )
+        quote_versions = (
+            select(Symbol.quote)
+            .select_from(Instrument)
+            .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
+            .where(
+                Symbol.native_symbol == TradeCommand.instrument,
+                Instrument.exchange == TradeCommand.exchange,
+                Symbol.timestamp <= TradeCommand.created_at,
+                Symbol.known_to > TradeCommand.created_at,
+                Instrument.timestamp <= TradeCommand.created_at,
+                Instrument.known_to > TradeCommand.created_at,
+            )
+            .correlate(TradeCommand)
+        )
+        spot_venue = Instrument.exchange.in_(("kraken", "walutomat", "polygon"))
+        legacy_usd_base_notional_is_proven = (
+            quote_versions.where(Symbol.quote == "USD", spot_venue, ~unsafe_spec).exists()
+            & ~quote_versions.where(
+                or_(Symbol.quote.is_(None), Symbol.quote != "USD", ~spot_venue, unsafe_spec)
+            ).exists()
+        )
         async with self.session() as s:
             result = await s.execute(
                 select(
@@ -23426,6 +23539,7 @@ class SQLAlchemyRepository(Repository):
                     TradeCommand.quantity,
                     TradeCommand.price,
                     TradeCommand.submitted_notional_usd,
+                    legacy_usd_base_notional_is_proven.label("legacy_usd_base_notional_is_proven"),
                 ).where(
                     TradeCommand.user_public_id == user_public_id,
                     TradeCommand.command_type.in_(("create", "submit", "replace")),
@@ -23446,6 +23560,7 @@ class SQLAlchemyRepository(Repository):
                         if r.submitted_notional_usd is not None
                         else None
                     ),
+                    "legacy_usd_base_notional_is_proven": r.legacy_usd_base_notional_is_proven,
                 }
                 for r in result.all()
             ]
