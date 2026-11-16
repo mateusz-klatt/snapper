@@ -382,6 +382,7 @@ def _worker(options: Options) -> int:
         try:
             recorder.stream.close()
         except BaseException as error:
+            return_code = 1
             report["query_log_close_error_type"] = type(error).__name__
         (options.output / "status.json").write_text(json.dumps(report, indent=2) + "\n")
         try:
