@@ -4445,6 +4445,43 @@ Current notify-sidecar outbox counters (per-status row counts —
 *not* a rolling window), aggregated across providers without a provider breakdown.
 `sent` records provider acceptance, not device delivery. Returns `NotificationMetricsResponse`.
 
+### GET /api/metrics/market-snapshots/freshness
+
+Observe current snapshot freshness for an explicit refresh scope. Requires
+`read:system_status` and returns `MarketSnapshotFreshnessResponse`. This read
+does not collect prices or write snapshots.
+
+Both repeated query parameters are required, with 1–100 values each:
+
+| Parameter | Description |
+| --------- | ----------- |
+| `instrument_public_ids` | Explicit venue-specific UUID identities; valid spellings are canonicalized and deduplicated before querying |
+| `fx_exchanges` | Explicit FX refresh venues from `kraken`, `kraken_futures`, `kraken_equities`, `walutomat`; no default |
+
+Requested instruments remain required regardless of the FX venue list. For
+their non-USD quote currencies, the resolver also discovers current direct and
+inverse USD forex candidates with market-data capability. Candidates on the
+configured FX venues become required; other candidates appear in
+`excluded_fx_instruments` with reason `fx_venue_not_selected`, without reading
+their prices. The complete metadata expansion is bounded to 1,000 instruments.
+Malformed UUIDs, unknown requested instruments, unsupported venues and invalid
+scopes return 400; missing required query parameters return 422.
+
+`freshness_ready` requires every included snapshot to have a positive finite
+last price and an original timestamp between five seconds in the future and
+300 seconds in the past, inclusively, at `checked_at`. The clock is read after
+both repository reads. Missing configured FX dependencies are listed in
+`unresolved_fx_currencies`; missing, stale, future, invalid-time and invalid-price
+evidence appears on individual instruments. No financial price values are
+included in the response.
+
+`scope_digest` is SHA256 of canonical requested identities, configured FX venues
+and classified resolved metadata. Ordering and duplicates do not change it;
+prices and observation times are excluded. It binds a freshness observation to
+the resolved refresh scope. Freshness readiness does not certify FX consistency,
+contract valuation or order admission: the converter independently validates
+eligible evidence, including fresh FX planes outside this refresh selection.
+
 ### GET /api/metrics/system
 
 Most recent `SystemMetricsSnapshot` from the in-memory ring

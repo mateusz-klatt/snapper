@@ -430,6 +430,25 @@ class MarketSnapshotRow(TypedDict):
     high: float | None
 
 
+class MarketSnapshotRefreshTargetRow(TypedDict):
+    """Current venue identity selected for an explicitly bounded snapshot refresh."""
+
+    instrument_public_id: str
+    native_symbol: str
+    exchange: str
+    base: str
+    quote: str
+    asset_type: str
+
+
+class MarketSnapshotFreshnessRow(TypedDict):
+    """Current snapshot evidence, retaining requested identities without a row."""
+
+    instrument_public_id: str
+    timestamp: datetime | None
+    last_price: float | None
+
+
 class SignalRow(TypedDict):
     """Row dict returned by get_signals."""
 
