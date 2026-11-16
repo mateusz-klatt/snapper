@@ -39,6 +39,7 @@ from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPE
 
 CACHE_TTL_SECONDS = 60
 STALENESS_THRESHOLD_SECONDS = 300
+MAX_FUTURE_SKEW_SECONDS = 5
 
 
 class PriceUnavailableError(Exception):
