@@ -7,8 +7,12 @@ production image. WSL does not run it against production.
 Require an independent 600-second container lifetime, a bounded memory/CPU limit,
 the existing private `DB_URL` supplied through the established owner workflow,
 and no application entrypoint or writer lifecycle. The script's parent gives its
-worker 580 seconds, then terminates and reaps that owned process group within
+worker 580 seconds, including application imports, then terminates and reaps that owned process group within
 ten seconds. Nothing installs a scheduler, timer or service.
+
+Use `snapperf_profile_20261116.py` as the standard-library-only launcher and keep
+`snapperf_profile_worker_20261116.py` beside it. Application imports happen only
+inside the already bounded child. Copy both files from the exact reviewed branch.
 
 All database connections start with read-only transactions, a 60-second
 statement timeout, a one-second lock timeout and application name
