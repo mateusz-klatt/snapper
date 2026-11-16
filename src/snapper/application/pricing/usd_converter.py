@@ -26,6 +26,7 @@ from datetime import datetime
 from decimal import Decimal
 from decimal import DecimalException
 
+from snapper.core import market_snapshot_freshness
 from snapper.core.contract_valuation import ContractValuation
 from snapper.core.contract_valuation import InverseContractValuation
 from snapper.core.contract_valuation import LinearContractValuation
@@ -38,8 +39,8 @@ from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPE
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 
 CACHE_TTL_SECONDS = 60
-STALENESS_THRESHOLD_SECONDS = 300
-MAX_FUTURE_SKEW_SECONDS = 5
+STALENESS_THRESHOLD_SECONDS = market_snapshot_freshness.STALENESS_THRESHOLD_SECONDS
+MAX_FUTURE_SKEW_SECONDS = market_snapshot_freshness.MAX_FUTURE_SKEW_SECONDS
 
 
 class PriceUnavailableError(Exception):

@@ -200,6 +200,7 @@ from snapper.core.paired_execution import compute_paired_group_key
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
 from snapper.core.types import TERMINAL_EXECUTION_PLAN_STATUSES
+from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AllExchange
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
@@ -3461,6 +3462,7 @@ def _candle_key_batches(keys: Sequence[CandleVersionKey]) -> list[Sequence[Candl
 
 type _MarketSnapshotRefreshProjection = tuple[str, str, str, str, str | None, str]
 type _MarketSnapshotFreshnessProjection = tuple[str, datetime, float | None]
+type _SelectedKrakenAliasProjection = tuple[str, str, str, str, str | None, str, str, str, int]
 
 _MARKET_SNAPSHOT_REFRESH_EXCHANGES: Final[tuple[str, ...]] = (
     ExchangeEnum.KRAKEN.value,
@@ -3562,6 +3564,29 @@ def _market_snapshot_refresh_target_rows(
     ]
 
 
+def _market_snapshot_active_rows_query(
+    instrument_public_ids: list[str],
+) -> Select[tuple[MarketSnapshot]]:
+    """Select exact open-ended versions for a bounded atomic refresh write.
+
+    Future observation timestamps must remain visible to the strict newer-than
+    write guard. The unique active instrument index bounds this result to one
+    row per explicitly requested identity.
+
+    Args:
+        instrument_public_ids: Explicit identities from a validated refresh scope.
+
+    Returns:
+        Full active ORM versions without filtering their observation timestamps.
+    """
+    if not instrument_public_ids or len(instrument_public_ids) > MAX_REFRESH_TARGETS:
+        raise ValueError("Active snapshot lookup requires a bounded explicit scope")
+    return select(MarketSnapshot).where(
+        MarketSnapshot.instrument_public_id.in_(instrument_public_ids),
+        MarketSnapshot.known_to == KNOWN_TO_MAX,
+    )
+
+
 def _market_snapshot_freshness_query(
     instrument_public_ids: list[str],
 ) -> Select[*_MarketSnapshotFreshnessProjection]:
@@ -3580,6 +3605,62 @@ def _market_snapshot_freshness_query(
     ).where(
         MarketSnapshot.instrument_public_id.in_(sorted(set(instrument_public_ids))),
         MarketSnapshot.known_to == KNOWN_TO_MAX,
+    )
+
+
+def _selected_kraken_ticker_aliases_query(
+    instrument_public_ids: list[str],
+) -> Select[*_SelectedKrakenAliasProjection]:
+    """Select exact current alias versions for an explicit bounded Kraken scope.
+
+    Args:
+        instrument_public_ids: Validated distinct selected instrument identities.
+
+    Returns:
+        A current metadata projection including one extra ambiguity witness row.
+
+    Raises:
+        ValueError: If the requested scope is empty or exceeds the target bound.
+    """
+    if not instrument_public_ids or len(instrument_public_ids) > MAX_REFRESH_TARGETS:
+        raise ValueError("Current Kraken aliases require a bounded explicit scope")
+    return (
+        select(
+            Instrument.public_id,
+            Symbol.public_id,
+            Symbol.native_symbol,
+            Symbol.base,
+            Symbol.quote,
+            Symbol.asset_type,
+            SymbolAlias.public_id,
+            SymbolAlias.exchange_symbol,
+            SymbolAlias.id,
+        )
+        .select_from(Instrument)
+        .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
+        .join(
+            SymbolExchangeCapability,
+            (SymbolExchangeCapability.symbol_public_id == Symbol.public_id)
+            & (SymbolExchangeCapability.exchange == Instrument.exchange),
+        )
+        .join(
+            SymbolAlias,
+            (SymbolAlias.symbol_public_id == Symbol.public_id)
+            & (SymbolAlias.exchange == Instrument.exchange),
+        )
+        .where(
+            Instrument.public_id.in_(instrument_public_ids),
+            Instrument.exchange == ExchangeEnum.KRAKEN.value,
+            Instrument.known_to == KNOWN_TO_MAX,
+            Symbol.known_to == KNOWN_TO_MAX,
+            Symbol.quote.is_not(None),
+            SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
+            SymbolExchangeCapability.can_market_data.is_(True),
+            SymbolAlias.known_to == KNOWN_TO_MAX,
+            SymbolAlias.channel == AliasChannelEnum.WS.value,
+        )
+        .order_by(Instrument.public_id, SymbolAlias.public_id)
+        .limit(len(instrument_public_ids) + 1)
     )
 
 

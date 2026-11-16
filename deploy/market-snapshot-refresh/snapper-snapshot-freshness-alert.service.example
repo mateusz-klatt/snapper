@@ -1,0 +1,16 @@
+[Unit]
+Description=Report a failed Snapper freshness unit through the existing host alert path
+
+[Service]
+Type=oneshot
+User=REPLACE_EXISTING_MONITOR_USER
+Environment=SNAPPER_ALERT_EMAIL=root
+ExecStart=/REPLACE_REVIEWED_TEMPLATE_PATH/snapshot-freshness-alert.sh monitor_unit_failed
+TimeoutStartSec=10s
+TimeoutStopSec=2s
+KillMode=control-group
+Restart=no
+UMask=0077
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal

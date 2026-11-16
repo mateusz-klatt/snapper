@@ -1,0 +1,20 @@
+[Unit]
+Description=Observe the explicitly frozen Snapper market snapshot scope
+After=network-online.target
+Wants=network-online.target
+OnFailure=snapper-snapshot-freshness-alert.service
+
+[Service]
+Type=oneshot
+User=REPLACE_EXISTING_MONITOR_USER
+WorkingDirectory=/REPLACE_EXACT_RELEASE_ROOT
+ExecStart=/REPLACE_EXISTING_VENV/bin/python -m snapper.cli.market_snapshot_freshness_monitor --endpoint https://snapper.ch/api/metrics/market-snapshots/freshness --token-file /REPLACE_EXISTING_PRIVATE_BEARER_FILE --instrument-public-id REPLACE_MAIN_UUID --fx-exchange kraken --scope-digest REPLACE_REVIEWED_SCOPE_SHA256 --alert-hook /REPLACE_REVIEWED_TEMPLATE_PATH/snapshot-freshness-alert.sh
+TimeoutStartSec=20s
+TimeoutStopSec=5s
+KillMode=control-group
+Restart=no
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal

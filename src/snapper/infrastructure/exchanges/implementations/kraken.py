@@ -37,6 +37,7 @@ from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from functools import cached_property
 from time import monotonic
 from typing import Any
 from typing import Final
@@ -52,6 +53,7 @@ from kraken.spot import User
 from loguru import logger
 from pydantic import ValidationError
 
+from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
@@ -124,6 +126,7 @@ from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBrea
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreakReason
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleItem
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleMark
+from snapper.infrastructure.market_data.ticker_symbol_codec import TickerSymbolCodec
 from snapper.infrastructure.symbols.functions import ccxt_to_native
 from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
 from snapper.infrastructure.symbols.functions import is_kraken_bitnomial_product
@@ -695,13 +698,14 @@ class KrakenExchangeClient(ExchangeClientBase):
     gracefully and automatic retry with exponential backoff for rate limits.
 
     Attributes:
-        settings: Application settings instance.
+        settings: Lazily loaded application settings, replaceable by the owning publisher.
         api_key: Kraken API key for authenticated requests.
         api_secret: Kraken API secret for request signing.
         sandbox: Whether to use sandbox/demo environment.
     """
 
     balance_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
+    _ticker_symbol_codec: TickerSymbolCodec | None = None
     position_observation_capability: CapabilityStatus = CapabilityStatus.SUPPORTED
     """Observe unambiguous Kraken margin positions and fail closed otherwise."""
     position_capability: CapabilityStatus = CapabilityStatus.NOT_APPLICABLE
@@ -711,6 +715,19 @@ class KrakenExchangeClient(ExchangeClientBase):
     :attr:`position_observation_capability`: the account observer can see the
     evidence, while cash-only spot reconciliation remains fail-closed around it.
     """
+
+    @cached_property
+    def settings(self) -> AppSettings:
+        """Load fallback settings only when a settings-dependent operation needs them.
+
+        Public ticker collection does not need application bootstrap settings.
+        Publishers may assign their DB-backed instance before or after this
+        first read, preserving the ordinary assignable instance attribute.
+
+        Returns:
+            Cached fallback settings unless an owning caller assigned its own instance.
+        """
+        return get_settings()
 
     def __init__(
         self,
@@ -736,7 +753,6 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker(
             dark_recovery_channels=frozenset({"ticker", "trade"})
         )
-        self.settings = get_settings()
         self.api_key = api_key
         self.api_secret = api_secret
         self.sandbox = sandbox
@@ -2279,6 +2295,38 @@ class KrakenExchangeClient(ExchangeClientBase):
         observed_at = datetime.now(UTC)
         return [_parse_native_position_entry(position, observed_at) for position in positions_data]
 
+    def configure_ticker_symbol_codec(self, codec: TickerSymbolCodec) -> None:
+        """Bind selected ticker translation before any WebSocket subscription exists.
+
+        Args:
+            codec: Prevalidated selected-symbol conversion and parsing boundary.
+
+        Raises:
+            RuntimeError: If the client already owns a codec or a WebSocket lifecycle.
+        """
+        if (
+            self._ticker_symbol_codec is not None
+            or self._ws_client is not None
+            or self._subscription_cache
+        ):
+            raise RuntimeError("Ticker symbol codec must be bound to a fresh Kraken client")
+        self._ticker_symbol_codec = codec
+
+    def _ticker_wire_symbols(self, symbols: list[str]) -> list[str]:
+        """Translate ticker requests through the selected codec or established defaults.
+
+        Args:
+            symbols: Requested native subscription symbols.
+
+        Returns:
+            Exact wire symbols under the configured translation policy.
+        """
+        if self._ticker_symbol_codec is not None:
+            return self._ticker_symbol_codec.to_wire_symbols(symbols)
+        if symbols == ["*"]:
+            return ["*"]
+        return [native_to_kraken_websocket(symbol) for symbol in symbols]
+
     def subscribe_ticks(
         self, symbols: list[str], *, req_id: int | None = None
     ) -> AsyncIterator[TickerUpdate]:
@@ -2294,6 +2342,8 @@ class KrakenExchangeClient(ExchangeClientBase):
         Raises:
             Exception: If subscription fails.
         """
+        if self._ticker_symbol_codec is not None:
+            self._ticker_symbol_codec.to_wire_symbols(symbols)
         return self._subscribe_ticks_impl(symbols, req_id=req_id)
 
     async def _subscribe_ticks_impl(
@@ -2314,10 +2364,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         try:
             await self._ensure_ws_connected()
             assert self._ws_client is not None, _WS_CLIENT_CONNECTED_MSG
-            if symbols == ["*"]:
-                ws_symbols = ["*"]
-            else:
-                ws_symbols = [native_to_kraken_websocket(symbol) for symbol in symbols]
+            ws_symbols = self._ticker_wire_symbols(symbols)
             logger.info(f"Subscribing to ticks: {symbols} -> {ws_symbols}")
             async with self._ws_client as ws:
                 params = KrakenTickerSubscribeParamsSchema(symbol=ws_symbols).as_params()
@@ -3556,7 +3603,11 @@ class KrakenExchangeClient(ExchangeClientBase):
         if capture is not None:
             self._capture_raw_ticker_frames(data, capture)
             return
-        ticker_list = parse_kraken_ticker_list(data)
+        ticker_list = (
+            self._ticker_symbol_codec.parse_ticks(data)
+            if self._ticker_symbol_codec is not None
+            else parse_kraken_ticker_list(data)
+        )
         for ticker_data in ticker_list:
             _enqueue_or_drop_oldest(self._tick_queue, ticker_data, "tick")
 

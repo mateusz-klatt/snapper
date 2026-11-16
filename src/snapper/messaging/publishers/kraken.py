@@ -251,13 +251,10 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
 
         The trade-built candle aggregator reads
         ``trade_built_finalize_grace_seconds`` from ``settings`` on every tick.
-        The client's own ``__init__`` seeds a bootstrap ``get_settings()`` that
-        carries no ``SettingsService``, so that DB-backed read raises
-        ``RuntimeError`` and — because the aggregator runs as an unsupervised
-        ``create_task`` — silently kills the task, stalling Spot candle
-        production while trades keep flowing. Injecting the publisher's
-        DB-backed settings keeps the live grace readable so trade-built candles
-        are emitted.
+        The client's lazy fallback ``get_settings()`` carries no
+        ``SettingsService``, so that DB-backed read would raise ``RuntimeError``.
+        Assigning the publisher's DB-backed settings bypasses the fallback and
+        keeps the live grace readable so trade-built candles are emitted.
 
         Returns:
             Configured KrakenExchangeClient for public data, wired to the
