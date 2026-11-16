@@ -4,20 +4,29 @@ This throwaway branch is never merged. The production owner runs the reviewed
 script once after 21:00 UTC, in an isolated container using the verified
 production image. WSL does not run it against production.
 
-Require an independent 600-second container lifetime, a bounded memory/CPU limit,
+Require an independent 600-second bound on the exact container/cgroup lifetime,
+a bounded memory/CPU limit,
 the existing private `DB_URL` supplied through the established owner workflow,
 and no application entrypoint or writer lifecycle. The script's parent gives its
-worker 580 seconds, including application imports, then terminates and reaps that owned process group within
-ten seconds. Nothing installs a scheduler, timer or service.
+worker 580 seconds, including application imports. One absolute shutdown deadline
+allows at most ten further seconds, checks the process group even after normal
+leader exit and records leader-reaped/group-empty evidence honestly. A nonempty
+group refuses success. Killing only an attached Docker CLI is not a container
+lifetime bound. Nothing installs a scheduler, timer or service.
 
 Use `snapperf_profile_20261116.py` as the standard-library-only launcher and keep
-`snapperf_profile_worker_20261116.py` beside it. Application imports happen only
-inside the already bounded child. Copy both files from the exact reviewed branch.
+`snapperf_profile_bootstrap_20261116.py` and
+`snapperf_profile_worker_20261116.py` beside it. The bootstrap installs class-only
+exception reporting and disables logging sinks before importing application code
+inside the already bounded child. Copy all three files from the exact reviewed branch.
 
 All database connections start with read-only transactions, a 60-second
 statement timeout, a one-second lock timeout and application name
 `snapperf-profile`. The script verifies those settings. A second statement guard
-refuses DML, DDL and advisory locks. It never calls `_tick_once`, reconciliation,
+refuses DML, DDL, advisory locks and selected side-effect SQL function families.
+It permits only the exact audited `SET TRANSACTION ISOLATION LEVEL REPEATABLE
+READ, READ ONLY`, alongside read statements. It is a guard for the frozen workload,
+not a sandbox for arbitrary SQL. It never calls `_tick_once`, reconciliation,
 sample writers, anchor creation or credential readers.
 
 The owner first uses `--list-scopes --output NEW_DIRECTORY` to obtain only hashed
@@ -38,15 +47,20 @@ The script measures scope preparation, a **chunk-bounded** persisted read, the
 real `_series` call, causal prior peak and `_plan_chunk`, including its per-minute
 observation/evidence reads. It stops before reconciliation or inserts. The bounded
 persisted read deliberately does not reproduce the production loop's full-suffix
-preload; that cost remains a separate limitation. The real offload/join behavior
+preload or the earliest late-fill/self-heal suffix; those costs remain separate
+limitations. The real offload/join behavior
 is retained, and cProfile statistics include the offloaded valuation worker.
 
 Artifacts contain code hashes, hashed scopes, UTC window boundaries, phase/SQL
-timings and aggregate counts. SQL logs store a hash and sanitized first 80
-characters, with no parameters or rows. The cProfile top 30 contains function
+timings and aggregate counts. SQL logs store only a hash, phase, ordinal, duration
+and outcome, with no SQL text, literals, parameters or rows. This conservative
+change from the original prefix request needs the owner's acceptance before
+execution. The cProfile top 30 contains function
 metadata only. Exceptions retain their class rather than their text. Artifacts
 use a new owner-only directory; existing receipts are never overwritten.
 
-Offline verification covered source pinning, scope hashing, SQL value/parameter
-redaction, pre-driver DML refusal and termination/reaping of a synthetic owned
-worker. No production execution or performance acceptance is claimed.
+Offline verification covered source pinning, scope hashing, hash-only SQL logs,
+exact read-only transaction admission, generic SET/side-effect refusal, actual
+entrypoint source-mismatch/import/render failures, and cleanup of a TERM-resistant
+descendant after its leader exits. Status and query-log closure are attempted before
+optional profiler rendering. No production execution or performance acceptance is claimed.

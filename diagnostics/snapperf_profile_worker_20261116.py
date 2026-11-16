@@ -69,6 +69,11 @@ _FORBIDDEN_SQL = re.compile(
     r"\b(?:INSERT|UPDATE|DELETE|MERGE|CALL|DO|COPY|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|LOCK|REFRESH|pg_advisory\w*)\b",
     re.IGNORECASE,
 )
+_READ_ONLY_TRANSACTION_SQL = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+_SIDE_EFFECT_SQL = re.compile(
+    r"\b(?:set_config|pg_notify|pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_rotate_logfile|dblink_exec|lo_import|lo_export|lo_create|lo_unlink|nextval|setval)\s*\(",
+    re.IGNORECASE,
+)
 
 
 class SafetyRefusalError(RuntimeError):
@@ -112,13 +117,6 @@ def _scope_hash(wallet: str, epoch: str) -> str:
     ]
 
 
-def _sql_prefix(statement: str) -> str:
-    """Keep at most 80 normalized SQL characters while stripping quoted values."""
-    redacted = re.sub(r"'(?:''|[^'])*'", "'?'", statement)
-    redacted = re.sub(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", "?", redacted)
-    return " ".join(redacted.split())[:80]
-
-
 class Recorder:
     """Write per-statement metadata without retaining parameters, rows or errors."""
 
@@ -127,7 +125,7 @@ class Recorder:
         self.phase = "setup"
         self.phases: dict[str, float] = {}
         self.statements = 0
-        self.started: dict[int, tuple[float, str, str, str]] = {}
+        self.started: dict[int, tuple[float, str, str]] = {}
         self.stream: TextIO = (output / "queries.ndjson").open("x", encoding="utf-8")
 
     @contextmanager
@@ -146,14 +144,17 @@ class Recorder:
         """Reject DML, DDL and side-effect locks before the driver sees a statement."""
         statement = cast(str, args[2])
         context = cast(ExecutionContext, args[4])
-        if not statement.lstrip().upper().startswith(
-            ("SELECT", "WITH", "SHOW")
-        ) or _FORBIDDEN_SQL.search(statement):
+        audited_transaction = " ".join(statement.split()).upper() == _READ_ONLY_TRANSACTION_SQL
+        if not audited_transaction and (
+            not statement.lstrip().upper().startswith(("SELECT", "WITH", "SHOW"))
+            or _FORBIDDEN_SQL.search(statement)
+            or _SIDE_EFFECT_SQL.search(statement)
+        ):
             raise SafetyRefusalError("Only audited read statements are permitted")
         if self.statements >= 20000:
             raise SafetyRefusalError("Statement-count ceiling exceeded")
         digest = hashlib.sha256(statement.encode()).hexdigest()
-        self.started[id(context)] = (time.monotonic(), self.phase, digest, _sql_prefix(statement))
+        self.started[id(context)] = (time.monotonic(), self.phase, digest)
 
     def after(self, *args: object) -> None:
         """Record a completed driver operation without touching its result rows."""
@@ -169,13 +170,12 @@ class Recorder:
         pending = self.started.pop(id(context), None)
         if pending is None:
             return
-        started, phase, digest, prefix = pending
+        started, phase, digest = pending
         self.statements += 1
         row = dict(
             sequence=self.statements,
             phase=phase,
             sql_sha256=digest,
-            sql_prefix=prefix,
             elapsed_seconds=time.monotonic() - started,
             outcome=outcome,
         )
@@ -362,8 +362,8 @@ def _worker(options: Options) -> int:
     timeline_module._offload_series_valuation = offload
     started = time.monotonic()
     try:
-        report["source_sha256"] = _source_identity()
         profiles[0].enable()
+        report["source_sha256"] = _source_identity()
         asyncio.run(_profile(options, recorder, report))
         return_code = 0
     except BaseException as error:
@@ -373,20 +373,28 @@ def _worker(options: Options) -> int:
     finally:
         profiles[0].disable()
         timeline_module._offload_series_valuation = original
-        output = io.StringIO()
-        stats = pstats.Stats(profiles[0], stream=output)
-        for profile in profiles[1:]:
-            stats.add(profile)
-        stats.strip_dirs().sort_stats("cumulative").print_stats(30)
-        (options.output / "profile-top30.txt").write_text(output.getvalue())
         report.update(
             elapsed_seconds=time.monotonic() - started,
             phases_seconds=recorder.phases,
             sql_statements=recorder.statements,
             finished_at=datetime.now(UTC).isoformat(),
         )
-        recorder.stream.close()
+        try:
+            recorder.stream.close()
+        except BaseException as error:
+            report["query_log_close_error_type"] = type(error).__name__
         (options.output / "status.json").write_text(json.dumps(report, indent=2) + "\n")
+        try:
+            output = io.StringIO()
+            stats = pstats.Stats(profiles[0], stream=output)
+            for profile in profiles[1:]:
+                stats.add(profile)
+            stats.strip_dirs().sort_stats("cumulative").print_stats(30)
+            (options.output / "profile-top30.txt").write_text(output.getvalue())
+        except BaseException as error:
+            return_code = 1
+            report["profile_render_error_type"] = type(error).__name__
+            (options.output / "status.json").write_text(json.dumps(report, indent=2) + "\n")
     return return_code
 
 
