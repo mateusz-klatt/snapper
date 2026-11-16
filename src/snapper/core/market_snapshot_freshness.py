@@ -8,5 +8,6 @@ type FreshnessFailureReason = Literal[
     "future_timestamp",
     "stale_snapshot",
     "invalid_price",
-    "unsupported_exchange",
 ]
+
+type FxExclusionReason = Literal["fx_venue_not_selected"]

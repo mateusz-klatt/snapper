@@ -41,6 +41,7 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.api.schemas.db_stats import DbStatsData
 from snapper.api.schemas.db_stats import DbStatsResponse
 from snapper.api.schemas.db_stats import TableStatsItem
+from snapper.api.schemas.market_snapshot_freshness import ExcludedMarketSnapshotFxInstrument
 from snapper.api.schemas.market_snapshot_freshness import MarketSnapshotFreshnessData
 from snapper.api.schemas.market_snapshot_freshness import MarketSnapshotFreshnessItem
 from snapper.api.schemas.market_snapshot_freshness import MarketSnapshotFreshnessResponse
@@ -803,18 +804,20 @@ async def get_market_snapshot_freshness(
     instrument_public_ids: Annotated[
         list[str], Query(min_length=1, max_length=MAX_REQUESTED_INSTRUMENTS)
     ],
+    fx_exchanges: Annotated[list[str], Query(min_length=1, max_length=MAX_REQUESTED_INSTRUMENTS)],
 ) -> MarketSnapshotFreshnessResponse:
     """Observe freshness across an explicit scope and all of its FX candidates.
 
-    Repeated ``instrument_public_ids`` query parameters are required. Missing
-    scope never expands to a realm-wide read. Freshness readiness is not an
-    FX-consistency check or trading admission decision.
+    Repeated ``instrument_public_ids`` and ``fx_exchanges`` query parameters are
+    required. Missing scope never expands to a realm-wide read. FX refresh
+    selection does not restrict the converter or grant trading permission.
 
     Args:
         request: Request supplying the REST provenance tracker.
         _principal: Authenticated caller with READ_SYSTEM_STATUS.
         repo: Repository providing bounded current metadata and snapshot reads.
         instrument_public_ids: Explicit operator-selected instrument identities.
+        fx_exchanges: Explicit supported FX refresh venues, without a default.
 
     Returns:
         Envelope containing full dependency freshness and unresolved FX quotes.
@@ -823,7 +826,9 @@ async def get_market_snapshot_freshness(
         HTTPException: 400 when the requested scope is invalid or unresolved.
     """
     try:
-        report = await load_market_snapshot_freshness(repo, instrument_public_ids)
+        report = await load_market_snapshot_freshness(
+            repo, instrument_public_ids, fx_exchanges=fx_exchanges
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     tracker: SequenceTracker = request.app.state.rest_tracker
@@ -834,20 +839,36 @@ async def get_market_snapshot_freshness(
         public_id=payload_pid,
         timestamp=payload_ts,
         requested_instrument_public_ids=report.requested_instrument_public_ids,
+        configured_fx_exchanges=report.configured_fx_exchanges,
+        scope_digest=report.scope_digest,
         checked_at=report.checked_at,
         freshness_ready=report.freshness_ready,
         unresolved_fx_currencies=report.unresolved_fx_currencies,
         instruments=[
             MarketSnapshotFreshnessItem(
                 instrument_public_id=item.instrument_public_id,
+                native_symbol=item.native_symbol,
                 exchange=item.exchange,
                 base=item.base,
                 quote=item.quote,
+                asset_type=item.asset_type,
                 snapshot_timestamp=item.snapshot_timestamp,
                 age_seconds=item.age_seconds,
                 reason=item.reason,
             )
             for item in report.instruments
+        ],
+        excluded_fx_instruments=[
+            ExcludedMarketSnapshotFxInstrument(
+                instrument_public_id=item.instrument_public_id,
+                native_symbol=item.native_symbol,
+                exchange=item.exchange,
+                base=item.base,
+                quote=item.quote,
+                asset_type=item.asset_type,
+                reason=item.reason,
+            )
+            for item in report.excluded_fx_instruments
         ],
     )
     envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(tracker)

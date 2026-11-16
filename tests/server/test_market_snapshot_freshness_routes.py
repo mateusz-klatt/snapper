@@ -108,12 +108,17 @@ def test_read_permission_returns_expanded_scope_without_csrf(role: UserRole) -> 
     repository = _repository()
     client = TestClient(_app(repository, _principal(role)))
 
-    response = client.get(_PATH, params=[("instrument_public_ids", "main")])
+    response = client.get(
+        _PATH, params=[("instrument_public_ids", "main"), ("fx_exchanges", "kraken")]
+    )
 
     assert response.status_code == 200
     result = MarketSnapshotFreshnessResponse.model_validate_json(response.content)
     assert result.payload.freshness_ready
     assert result.payload.requested_instrument_public_ids == ["main"]
+    assert result.payload.configured_fx_exchanges == ["kraken"]
+    assert result.payload.excluded_fx_instruments == []
+    assert len(result.payload.scope_digest) == 64
     assert [item.instrument_public_id for item in result.payload.instruments] == ["fx", "main"]
     assert result.payload.unresolved_fx_currencies == []
     assert result.public_id != result.payload.public_id
@@ -132,7 +137,7 @@ def test_permission_denial_occurs_before_snapshot_reads() -> None:
     principal = _principal().model_copy(update={"permissions": []})
     client = TestClient(_app(repository, principal))
 
-    response = client.get(_PATH, params={"instrument_public_ids": "main"})
+    response = client.get(_PATH, params={"instrument_public_ids": "main", "fx_exchanges": "kraken"})
 
     assert response.status_code == 403
     repository.resolve_market_snapshot_refresh_targets.assert_not_awaited()
@@ -149,7 +154,7 @@ def test_missing_authentication_refuses_before_snapshot_reads() -> None:
     repository = _repository()
     client = TestClient(_app(repository, None))
 
-    response = client.get(_PATH, params={"instrument_public_ids": "main"})
+    response = client.get(_PATH, params={"instrument_public_ids": "main", "fx_exchanges": "kraken"})
 
     assert response.status_code == 401
     repository.resolve_market_snapshot_refresh_targets.assert_not_awaited()
@@ -167,7 +172,10 @@ def test_missing_or_blank_scope_never_becomes_all_instruments(supplied: bool) ->
     repository = _repository()
     client = TestClient(_app(repository, _principal()))
 
-    response = client.get(_PATH, params={"instrument_public_ids": ""} if supplied else {})
+    params = {"fx_exchanges": "kraken"}
+    if supplied:
+        params["instrument_public_ids"] = ""
+    response = client.get(_PATH, params=params)
 
     assert response.status_code == (400 if supplied else 422)
     repository.resolve_market_snapshot_refresh_targets.assert_not_awaited()
@@ -184,6 +192,7 @@ def test_oversized_scope_is_rejected_by_query_validation() -> None:
     repository = _repository()
     client = TestClient(_app(repository, _principal()))
     params = [("instrument_public_ids", "main")] * (MAX_REQUESTED_INSTRUMENTS + 1)
+    params.append(("fx_exchanges", "kraken"))
 
     response = client.get(_PATH, params=params)
 
@@ -202,7 +211,9 @@ def test_unknown_requested_id_returns_400_before_snapshot_query() -> None:
     repository = _repository()
     client = TestClient(_app(repository, _principal()))
 
-    response = client.get(_PATH, params={"instrument_public_ids": "unknown"})
+    response = client.get(
+        _PATH, params={"instrument_public_ids": "unknown", "fx_exchanges": "kraken"}
+    )
 
     assert response.status_code == 400
     repository.get_active_market_snapshot_freshness.assert_not_awaited()
@@ -222,10 +233,94 @@ def test_fresh_main_with_absent_fx_snapshot_returns_not_ready() -> None:
     repository.get_active_market_snapshot_freshness.return_value = rows
     client = TestClient(_app(repository, _principal()))
 
-    response = client.get(_PATH, params={"instrument_public_ids": "main"})
+    response = client.get(_PATH, params={"instrument_public_ids": "main", "fx_exchanges": "kraken"})
 
     assert response.status_code == 200
     result = MarketSnapshotFreshnessResponse.model_validate_json(response.content)
     assert not result.payload.freshness_ready
     assert result.payload.instruments[0].instrument_public_id == "fx"
     assert result.payload.instruments[0].reason == "missing_snapshot"
+
+
+@pytest.mark.parametrize("fx_exchange", [None, "", " ", "kraken ", "Kraken", "polygon"])
+def test_missing_or_invalid_fx_configuration_never_queries(fx_exchange: str | None) -> None:
+    """Require explicit supported FX configuration in addition to the main scope.
+
+    Given: A valid requested main instrument but absent or invalid FX venue parameters.
+    When: The authorized caller requests the freshness endpoint.
+    Then: It returns 422 or 400 before metadata or snapshot reads can start.
+    """
+    repository = _repository()
+    client = TestClient(_app(repository, _principal()))
+    params = {"instrument_public_ids": "main"}
+    if fx_exchange is not None:
+        params["fx_exchanges"] = fx_exchange
+
+    response = client.get(_PATH, params=params)
+
+    assert response.status_code == (422 if fx_exchange is None else 400)
+    repository.resolve_market_snapshot_refresh_targets.assert_not_awaited()
+    repository.get_active_market_snapshot_freshness.assert_not_awaited()
+
+
+def test_oversized_fx_parameter_list_never_queries() -> None:
+    """Bound raw repeated FX parameters before route-level policy evaluation.
+
+    Given: An otherwise valid request with too many repeated FX exchange parameters.
+    When: FastAPI validates the explicit query lists.
+    Then: It returns 422 without performing either bounded repository operation.
+    """
+    repository = _repository()
+    client = TestClient(_app(repository, _principal()))
+    params = [("instrument_public_ids", "main")]
+    params.extend([("fx_exchanges", "kraken")] * (MAX_REQUESTED_INSTRUMENTS + 1))
+
+    response = client.get(_PATH, params=params)
+
+    assert response.status_code == 422
+    repository.resolve_market_snapshot_refresh_targets.assert_not_awaited()
+    repository.get_active_market_snapshot_freshness.assert_not_awaited()
+
+
+def test_response_audits_excluded_fx_metadata_without_reading_its_price() -> None:
+    """Expose unselected Polygon FX metadata while reading only configured required rows.
+
+    Given: Fresh Kraken main and FX prices plus an eligible Polygon metadata candidate.
+    When: The reader explicitly selects Kraken FX twice in repeated parameters.
+    Then: Configuration is deduplicated and Polygon appears only in the exclusion audit.
+    """
+    repository = _repository()
+    targets: list[MarketSnapshotRefreshTargetRow] = (
+        repository.resolve_market_snapshot_refresh_targets.return_value
+    )
+    targets.append(
+        {
+            "instrument_public_id": "polygon-fx",
+            "native_symbol": "C:EURUSD",
+            "exchange": "polygon",
+            "base": "EUR",
+            "quote": "USD",
+            "asset_type": "forex",
+        }
+    )
+    client = TestClient(_app(repository, _principal()))
+
+    response = client.get(
+        _PATH,
+        params=[
+            ("instrument_public_ids", "main"),
+            ("fx_exchanges", "kraken"),
+            ("fx_exchanges", "kraken"),
+        ],
+    )
+
+    assert response.status_code == 200
+    result = MarketSnapshotFreshnessResponse.model_validate_json(response.content)
+    assert result.payload.freshness_ready
+    assert result.payload.configured_fx_exchanges == ["kraken"]
+    excluded = result.payload.excluded_fx_instruments[0]
+    assert excluded.instrument_public_id == "polygon-fx"
+    assert excluded.native_symbol == "C:EURUSD"
+    assert (excluded.exchange, excluded.base, excluded.quote) == ("polygon", "EUR", "USD")
+    assert excluded.reason == "fx_venue_not_selected"
+    repository.get_active_market_snapshot_freshness.assert_awaited_once_with(["fx", "main"])
