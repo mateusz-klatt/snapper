@@ -23281,8 +23281,13 @@ class SQLAlchemyRepository(Repository):
                 InstrumentSpec.known_to > TradeCommand.created_at,
                 or_(
                     InstrumentSpec.quantity_unit.not_in(("base_asset",)),
+                    InstrumentSpec.native_order_quantity_unit.not_in(("base_asset",)),
+                    InstrumentSpec.contract_size.is_not(None),
                     InstrumentSpec.instrument_kind.not_in(("spot", "etf")),
                     InstrumentSpec.contract_payoff_model.is_not(None),
+                    InstrumentSpec.contract_value_currency.is_not(None),
+                    InstrumentSpec.settlement_currency.is_not(None),
+                    InstrumentSpec.spec_source == FUTURES_SPEC_SOURCE,
                 ),
             )
             .correlate(Instrument, TradeCommand)

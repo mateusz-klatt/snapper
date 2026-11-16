@@ -145,7 +145,7 @@ separate gates.
 
 Legacy live submissions without a stored USD value permit `quantity × price`
 only when catalog versions at submission prove a USD quote on a known spot venue
-without derivative quantity, product or payoff evidence. Ambiguous or contract
+without derivative quantity, product, multiplier, monetary-field or provenance evidence. Ambiguous or contract
 units refuse rather than reconstructing historical payoff.
 An unknown, conflicting or non-USD quote, or a missing price, refuses a capped
 new submission with `prior_notional_unpriced`. Native symbol spelling and today's

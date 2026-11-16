@@ -26,6 +26,7 @@ from snapper.data.models import Symbol
 from snapper.data.models import TradeCommand
 from snapper.data.models import UserTradingCaps
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 
 _NOW = datetime(2026, 4, 18, 12, 0, 0, tzinfo=UTC)
 
@@ -484,7 +485,20 @@ async def test_cancel_command_is_excluded_while_cancelled_create_counts(
     assert [row["quantity"] for row in rows] == [2]
 
 
-@pytest.mark.parametrize("signal", ["venue", "quantity", "kind", "payoff"])
+@pytest.mark.parametrize(
+    "signal",
+    [
+        "venue",
+        "quantity",
+        "kind",
+        "payoff",
+        "native",
+        "multiplier",
+        "native_multiplier",
+        "unit_multiplier",
+        "source",
+    ],
+)
 async def test_usd_quote_cannot_prove_legacy_contract_notional(
     repo: SQLAlchemyRepository, signal: str
 ) -> None:
@@ -509,11 +523,21 @@ async def test_usd_quote_cannot_prove_legacy_contract_notional(
                 session_id="test",
                 sequence_id=1,
                 quantity_unit="contract_count" if signal == "quantity" else "base_asset",
-                contract_size=Decimal(10),
+                native_order_quantity_unit=(
+                    "contract_count" if signal in {"native", "native_multiplier"} else "base_asset"
+                ),
+                contract_size=(
+                    Decimal(10)
+                    if signal in {"multiplier", "native_multiplier"}
+                    else Decimal(1) if signal == "unit_multiplier" else None
+                ),
                 instrument_kind="future" if signal == "kind" else "spot",
                 contract_payoff_model="linear" if signal == "payoff" else None,
                 contract_value_currency="BTC" if signal == "payoff" else None,
                 settlement_currency="USD" if signal == "payoff" else None,
+                spec_source=FUTURES_SPEC_SOURCE if signal == "source" else None,
+                spec_version="historical-source" if signal == "source" else None,
+                spec_observed_at=_NOW - timedelta(hours=1) if signal == "source" else None,
             )
         )
         await session.commit()
@@ -599,3 +623,33 @@ async def test_conflicting_temporal_catalog_evidence_cannot_certify_usd_history(
     await _insert_trade_command(repo, user_public_id="user", instrument="OPAQUE-MARKET")
     rows = await repo.get_user_recent_submits("user", _NOW - timedelta(hours=24))
     assert rows[0]["legacy_usd_base_notional_is_proven"] is False
+
+
+async def test_explicit_spot_base_units_without_contract_evidence_remain_supported(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Retain correctly dimensioned USD spot history with explicit unit evidence.
+
+    Given: a known spot venue with USD quote and base-native quantity without contract evidence.
+    When: the historical command is projected for the rolling cap.
+    Then: explicit base-unit metadata retains the historical spot fallback.
+    """
+    await _legacy_catalog(repo, "USD")
+    async with repo.session() as session:
+        session.add(
+            InstrumentSpec(
+                public_id="spot-spec",
+                instrument_public_id="legacy-instrument",
+                timestamp=_NOW - timedelta(seconds=1),
+                known_to=KNOWN_TO_MAX,
+                session_id="test",
+                sequence_id=1,
+                quantity_unit="base_asset",
+                native_order_quantity_unit="base_asset",
+                instrument_kind="spot",
+            )
+        )
+        await session.commit()
+    await _insert_trade_command(repo, user_public_id="user", instrument="OPAQUE-MARKET")
+    rows = await repo.get_user_recent_submits("user", _NOW - timedelta(hours=24))
+    assert rows[0]["legacy_usd_base_notional_is_proven"] is True
