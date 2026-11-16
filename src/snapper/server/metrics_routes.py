@@ -41,6 +41,9 @@ from snapper.api.schemas.base import StrictDataSchema
 from snapper.api.schemas.db_stats import DbStatsData
 from snapper.api.schemas.db_stats import DbStatsResponse
 from snapper.api.schemas.db_stats import TableStatsItem
+from snapper.api.schemas.market_snapshot_freshness import MarketSnapshotFreshnessData
+from snapper.api.schemas.market_snapshot_freshness import MarketSnapshotFreshnessItem
+from snapper.api.schemas.market_snapshot_freshness import MarketSnapshotFreshnessResponse
 from snapper.api.schemas.retention import RetentionPolicyResult
 from snapper.api.schemas.retention import RetentionRunData
 from snapper.api.schemas.retention import RetentionRunResponse
@@ -63,6 +66,8 @@ from snapper.api.schemas.system_metrics import TracemallocStateResponse
 from snapper.application.db_stats.snapshotter import DbStatsSnapshot
 from snapper.application.db_stats.snapshotter import DbStatsSnapshotter
 from snapper.application.db_stats.snapshotter import TableStats
+from snapper.application.market_snapshot_refresh.freshness import MAX_REQUESTED_INSTRUMENTS
+from snapper.application.market_snapshot_refresh.freshness import load_market_snapshot_freshness
 from snapper.application.retention.scheduler import RetentionScheduler
 from snapper.application.retention.service import RetentionPolicyRunResult
 from snapper.application.retention.service import RetentionRunSummary
@@ -784,4 +789,72 @@ def _build_table_stats_item(row: TableStats) -> TableStatsItem:
         archivable=row.archivable,
         is_stale=row.is_stale,
         last_sampled_at=row.last_sampled_at,
+    )
+
+
+@router.get("/market-snapshots/freshness")
+async def get_market_snapshot_freshness(
+    request: Request,
+    _principal: Annotated[
+        AuthPrincipal,
+        Depends(require_permission(Permission.READ_SYSTEM_STATUS)),
+    ],
+    repo: Annotated[Repository, Depends(get_repository_dependency)],
+    instrument_public_ids: Annotated[
+        list[str], Query(min_length=1, max_length=MAX_REQUESTED_INSTRUMENTS)
+    ],
+) -> MarketSnapshotFreshnessResponse:
+    """Observe freshness across an explicit scope and all of its FX candidates.
+
+    Repeated ``instrument_public_ids`` query parameters are required. Missing
+    scope never expands to a realm-wide read. Freshness readiness is not an
+    FX-consistency check or trading admission decision.
+
+    Args:
+        request: Request supplying the REST provenance tracker.
+        _principal: Authenticated caller with READ_SYSTEM_STATUS.
+        repo: Repository providing bounded current metadata and snapshot reads.
+        instrument_public_ids: Explicit operator-selected instrument identities.
+
+    Returns:
+        Envelope containing full dependency freshness and unresolved FX quotes.
+
+    Raises:
+        HTTPException: 400 when the requested scope is invalid or unresolved.
+    """
+    try:
+        report = await load_market_snapshot_freshness(repo, instrument_public_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    tracker: SequenceTracker = request.app.state.rest_tracker
+    payload_sid, payload_seq, payload_ts, payload_pid = _next_provenance(tracker)
+    payload = MarketSnapshotFreshnessData(
+        session_id=payload_sid,
+        sequence_id=payload_seq,
+        public_id=payload_pid,
+        timestamp=payload_ts,
+        requested_instrument_public_ids=report.requested_instrument_public_ids,
+        checked_at=report.checked_at,
+        freshness_ready=report.freshness_ready,
+        unresolved_fx_currencies=report.unresolved_fx_currencies,
+        instruments=[
+            MarketSnapshotFreshnessItem(
+                instrument_public_id=item.instrument_public_id,
+                exchange=item.exchange,
+                base=item.base,
+                quote=item.quote,
+                snapshot_timestamp=item.snapshot_timestamp,
+                age_seconds=item.age_seconds,
+                reason=item.reason,
+            )
+            for item in report.instruments
+        ],
+    )
+    envelope_sid, envelope_seq, envelope_ts, envelope_pid = _next_provenance(tracker)
+    return MarketSnapshotFreshnessResponse(
+        session_id=envelope_sid,
+        sequence_id=envelope_seq,
+        public_id=envelope_pid,
+        timestamp=envelope_ts,
+        payload=payload,
     )

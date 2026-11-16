@@ -396,6 +396,8 @@ from snapper.data.repository_types import InstrumentUnderlyingRow
 from snapper.data.repository_types import InstrumentValuationMetadataRow
 from snapper.data.repository_types import MarketDataCoverageRow
 from snapper.data.repository_types import MarketDataFreshnessRow
+from snapper.data.repository_types import MarketSnapshotFreshnessRow
+from snapper.data.repository_types import MarketSnapshotRefreshTargetRow
 from snapper.data.repository_types import MarketSnapshotRow
 from snapper.data.repository_types import MarketSnapshotUpsertRow
 from snapper.data.repository_types import MarketViewInsertRow
@@ -3456,6 +3458,146 @@ def _candle_key_batches(keys: Sequence[CandleVersionKey]) -> list[Sequence[Candl
     ]
 
 
+type _MarketSnapshotRefreshProjection = tuple[str, str, str, str, str | None, str]
+type _MarketSnapshotFreshnessProjection = tuple[str, datetime, float | None]
+
+_MARKET_SNAPSHOT_REFRESH_EXCHANGES: Final[tuple[str, ...]] = (
+    ExchangeEnum.KRAKEN.value,
+    ExchangeEnum.KRAKEN_FUTURES.value,
+    ExchangeEnum.KRAKEN_EQUITIES.value,
+    ExchangeEnum.WALUTOMAT.value,
+)
+
+
+def _market_snapshot_refresh_target_query(
+    instrument_public_ids: list[str],
+) -> Select[*_MarketSnapshotRefreshProjection]:
+    """Resolve requested venue identities and their USD dependency closure atomically.
+
+    Args:
+        instrument_public_ids: Explicit requested identities, never an implicit universe.
+
+    Returns:
+        One clock-free query over active metadata and capability rows, without snapshots.
+    """
+    available = (
+        select(
+            Instrument.public_id,
+            Symbol.native_symbol,
+            Instrument.exchange,
+            Symbol.base,
+            Symbol.quote,
+            Symbol.asset_type,
+        )
+        .select_from(Instrument)
+        .join(Symbol, Instrument.symbol_public_id == Symbol.public_id)
+        .join(
+            SymbolExchangeCapability,
+            (SymbolExchangeCapability.symbol_public_id == Symbol.public_id)
+            & (SymbolExchangeCapability.exchange == Instrument.exchange),
+        )
+        .where(
+            Instrument.known_to == KNOWN_TO_MAX,
+            Symbol.known_to == KNOWN_TO_MAX,
+            SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
+            SymbolExchangeCapability.can_market_data.is_(True),
+            Instrument.exchange != ExchangeEnum.PAPER.value,
+            func.trim(Symbol.native_symbol) != "",
+            func.trim(Symbol.base) != "",
+            Symbol.quote.is_not(None),
+            func.trim(Symbol.quote) != "",
+        )
+    )
+    requested = and_(
+        Instrument.public_id.in_(sorted(set(instrument_public_ids))),
+        Instrument.exchange.in_(_MARKET_SNAPSHOT_REFRESH_EXCHANGES),
+    )
+    quote_currencies = (
+        available.with_only_columns(Symbol.quote)
+        .where(requested, Symbol.quote != "USD")
+        .correlate(None)
+    )
+    fx_dependency = and_(
+        Symbol.asset_type == "forex",
+        or_(
+            (Symbol.base.in_(quote_currencies)) & (Symbol.quote == "USD"),
+            (Symbol.base == "USD") & (Symbol.quote.in_(quote_currencies)),
+        ),
+    )
+    return available.where(or_(requested, fx_dependency)).distinct().order_by(Instrument.public_id)
+
+
+def _market_snapshot_refresh_target_rows(
+    rows: Sequence[Row[*_MarketSnapshotRefreshProjection]],
+) -> list[MarketSnapshotRefreshTargetRow]:
+    """Project validated current metadata into typed refresh identities.
+
+    Args:
+        rows: Query results whose currency fields were required to be non-null.
+
+    Returns:
+        Deterministically ordered requested and dependency targets.
+    """
+    return [
+        {
+            "instrument_public_id": instrument_id,
+            "native_symbol": native_symbol,
+            "exchange": exchange,
+            "base": base,
+            "quote": cast(str, quote),
+            "asset_type": asset_type,
+        }
+        for instrument_id, native_symbol, exchange, base, quote, asset_type in rows
+    ]
+
+
+def _market_snapshot_freshness_query(
+    instrument_public_ids: list[str],
+) -> Select[*_MarketSnapshotFreshnessProjection]:
+    """Select active snapshot evidence for exactly the requested identities.
+
+    Args:
+        instrument_public_ids: Explicit identities whose current evidence is required.
+
+    Returns:
+        A clock-free active-row query without excluding future observation timestamps.
+    """
+    return select(
+        MarketSnapshot.instrument_public_id,
+        MarketSnapshot.timestamp,
+        MarketSnapshot.last_price,
+    ).where(
+        MarketSnapshot.instrument_public_id.in_(sorted(set(instrument_public_ids))),
+        MarketSnapshot.known_to == KNOWN_TO_MAX,
+    )
+
+
+def _market_snapshot_freshness_rows(
+    instrument_public_ids: list[str],
+    rows: Sequence[Row[*_MarketSnapshotFreshnessProjection]],
+) -> list[MarketSnapshotFreshnessRow]:
+    """Retain missing evidence alongside present snapshots in identity order.
+
+    Args:
+        instrument_public_ids: Explicit identities, possibly duplicated or unresolved.
+        rows: Current snapshot evidence returned by the bounded query.
+
+    Returns:
+        One result per distinct requested identity, using nulls when evidence is missing.
+    """
+    evidence = {
+        instrument_id: (timestamp, last_price) for instrument_id, timestamp, last_price in rows
+    }
+    return [
+        {
+            "instrument_public_id": instrument_id,
+            "timestamp": evidence.get(instrument_id, (None, None))[0],
+            "last_price": evidence.get(instrument_id, (None, None))[1],
+        }
+        for instrument_id in sorted(set(instrument_public_ids))
+    ]
+
+
 class Repository(ABC):
     """Abstract base class defining the repository interface.
 
@@ -3751,6 +3893,34 @@ class Repository(ABC):
             ``(last_price, snapshot_timestamp)`` of the active
             MarketSnapshot row, or ``None`` when no active row exists.
             ``last_price`` may itself be NULL (venue never traded).
+        """
+        ...
+
+    @abstractmethod
+    async def resolve_market_snapshot_refresh_targets(
+        self, instrument_public_ids: list[str]
+    ) -> list[MarketSnapshotRefreshTargetRow]:
+        """Resolve requested supported instruments plus every capable non-paper USD FX leg.
+
+        Args:
+            instrument_public_ids: Explicit requested identities; empty selects nothing.
+
+        Returns:
+            Active target identities without requiring existing snapshot evidence.
+        """
+        ...
+
+    @abstractmethod
+    async def get_active_market_snapshot_freshness(
+        self, instrument_public_ids: list[str]
+    ) -> list[MarketSnapshotFreshnessRow]:
+        """Read current snapshot evidence while retaining every requested identity.
+
+        Args:
+            instrument_public_ids: Explicit requested identities; empty selects nothing.
+
+        Returns:
+            Sorted distinct identities with null evidence for missing current snapshots.
         """
         ...
 
@@ -11134,6 +11304,42 @@ class SQLAlchemyRepository(Repository):
             if row is None:
                 return None
             return (row.last_price, row.timestamp)
+
+    async def resolve_market_snapshot_refresh_targets(
+        self, instrument_public_ids: list[str]
+    ) -> list[MarketSnapshotRefreshTargetRow]:
+        """Read supported requested targets and their complete current USD dependency set.
+
+        Args:
+            instrument_public_ids: Explicit requested identities; empty selects nothing.
+
+        Returns:
+            Sorted distinct targets, retaining FX candidates even without snapshots.
+        """
+        if not instrument_public_ids:
+            return []
+        async with self.session() as session:
+            result = await session.execute(
+                _market_snapshot_refresh_target_query(instrument_public_ids)
+            )
+            return _market_snapshot_refresh_target_rows(result.all())
+
+    async def get_active_market_snapshot_freshness(
+        self, instrument_public_ids: list[str]
+    ) -> list[MarketSnapshotFreshnessRow]:
+        """Read current snapshot evidence without dropping missing requested identities.
+
+        Args:
+            instrument_public_ids: Explicit requested identities; empty selects nothing.
+
+        Returns:
+            One sorted result per requested identity, including null missing evidence.
+        """
+        if not instrument_public_ids:
+            return []
+        async with self.session() as session:
+            result = await session.execute(_market_snapshot_freshness_query(instrument_public_ids))
+            return _market_snapshot_freshness_rows(instrument_public_ids, result.all())
 
     async def revise_instrument(
         self,
@@ -39291,6 +39497,40 @@ class DatabaseRepository:
     def get_session(self) -> SyncSession:
         """Create and return a new database session."""
         return self.session_factory()
+
+    def resolve_market_snapshot_refresh_targets(
+        self, instrument_public_ids: list[str]
+    ) -> list[MarketSnapshotRefreshTargetRow]:
+        """Read supported requested targets and their complete current USD dependency set.
+
+        Args:
+            instrument_public_ids: Explicit requested identities; empty selects nothing.
+
+        Returns:
+            Sorted distinct targets, retaining FX candidates even without snapshots.
+        """
+        if not instrument_public_ids:
+            return []
+        with self.get_session() as session:
+            result = session.execute(_market_snapshot_refresh_target_query(instrument_public_ids))
+            return _market_snapshot_refresh_target_rows(result.all())
+
+    def get_active_market_snapshot_freshness(
+        self, instrument_public_ids: list[str]
+    ) -> list[MarketSnapshotFreshnessRow]:
+        """Read current snapshot evidence without dropping missing requested identities.
+
+        Args:
+            instrument_public_ids: Explicit requested identities; empty selects nothing.
+
+        Returns:
+            One sorted result per requested identity, including null missing evidence.
+        """
+        if not instrument_public_ids:
+            return []
+        with self.get_session() as session:
+            result = session.execute(_market_snapshot_freshness_query(instrument_public_ids))
+            return _market_snapshot_freshness_rows(instrument_public_ids, result.all())
 
     def create_all(self) -> None:
         """Create all database tables from model metadata."""
