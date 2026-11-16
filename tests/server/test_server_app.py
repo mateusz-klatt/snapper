@@ -1672,8 +1672,10 @@ class TestCreateApp:
         with (
             patch("snapper.server.app.os.path.exists", return_value=True),
             patch.object(FastAPI, "mount") as mock_mount,
+            patch("snapper.server.app.StaticFiles") as mock_static_files,
         ):
             create_app()
+        mock_static_files.assert_called_once_with(directory="frontend/dist", html=True)
         mount_paths = [call.args[0] for call in mock_mount.call_args_list]
         assert "/" in mount_paths
         assert "/api/mcp" in mount_paths
@@ -3552,14 +3554,25 @@ class TestAppCoverageImprovement:
         data = response.json()
         assert data["payload"]["status"] == "error"
 
-    def test_root_dashboard_endpoint(self) -> None:
+    def test_root_dashboard_endpoint(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Verify root endpoint returns HTML dashboard.
 
-        Given: Running application with static files,
-        When: GET / is called,
+        Given: A temporary frontend/dist created before application construction,
+        When: GET / is called through a client bound to that application,
         Then: Response is 200 with HTML content type.
         """
-        response = self.client.get("/")
+        dist_dir = tmp_path / "frontend" / "dist"
+        dist_dir.mkdir(parents=True)
+        (dist_dir / "index.html").write_text(
+            "<html><body>Snapper UI</body></html>", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        app = create_app()
+        client = TestClient(app)
+        try:
+            response = client.get("/")
+        finally:
+            client.close()
         assert response.status_code == 200
         assert "text/html" in response.headers.get("content-type", "")
 
