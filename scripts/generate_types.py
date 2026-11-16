@@ -887,7 +887,7 @@ def _collect_top_level_enums(
     lines: list[str],
     generated_enums: set[str],
 ) -> None:
-    """Emit Swift enums for top-level string enum definitions.
+    """Emit Swift enums for named string enum and singleton const definitions.
 
     Args:
         definitions: JSON Schema definitions dict.
@@ -895,11 +895,17 @@ def _collect_top_level_enums(
         generated_enums: Mutable set of already-generated enum names.
     """
     for name, type_schema in definitions.items():
-        if type_schema.get("type") == "string" and "enum" in type_schema:
-            if name not in generated_enums:
-                lines.extend(generate_swift_enum(name, type_schema["enum"]))
-                lines.append("")
-                generated_enums.add(name)
+        if type_schema.get("type") != "string" or name in generated_enums:
+            continue
+        if "enum" in type_schema:
+            values = type_schema["enum"]
+        elif isinstance(type_schema.get("const"), str):
+            values = [type_schema["const"]]
+        else:
+            continue
+        lines.extend(generate_swift_enum(name, values))
+        lines.append("")
+        generated_enums.add(name)
 
 
 def _collect_inline_enums(
