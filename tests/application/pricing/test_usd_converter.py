@@ -2,8 +2,8 @@
 
 Covers:
     - USD quote: happy path returns ``quantity × last_price``.
-    - Non-USD quote: raises :class:`PriceUnavailableError` with
-      ``quote_currency_not_usd``.
+    - Non-USD quote without FX evidence: raises :class:`PriceUnavailableError`
+      with ``fx_snapshot_missing``.
     - Missing instrument: ``instrument_not_found``.
     - Missing snapshot: ``snapshot_missing``.
     - Null last_price: ``last_price_null``.
@@ -126,15 +126,15 @@ async def test_usd_quote_happy_path(repo: SQLAlchemyRepository) -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_usd_quote_raises_quote_currency_not_usd(
+async def test_non_usd_quote_without_fx_snapshot_is_unavailable(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Non-USD quote raises ``quote_currency_not_usd``.
+    """Non-USD quote without independently evidenced FX fails closed.
 
     Given: an EUR-quoted Symbol + Instrument + fresh snapshot,
     When: ``to_usd`` runs,
     Then: :class:`PriceUnavailableError` with
-        ``reason='quote_currency_not_usd'`` is raised.
+        ``reason='fx_snapshot_missing'`` is raised.
     """
     inst_id = "inst-btc-eur"
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="EUR")
@@ -143,7 +143,7 @@ async def test_non_usd_quote_raises_quote_currency_not_usd(
     one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError) as exc:
         await conv.to_usd(inst_id, one_unit)
-    assert exc.value.reason_code == "quote_currency_not_usd"
+    assert exc.value.reason_code == "fx_snapshot_missing"
 
 
 @pytest.mark.asyncio
@@ -415,7 +415,7 @@ async def test_price_unavailable_error_carries_context(
     one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError) as exc:
         await conv.to_usd(inst_id, one_unit)
-    assert exc.value.reason_code == "quote_currency_not_usd"
+    assert exc.value.reason_code == "fx_snapshot_missing"
     assert exc.value.instrument_public_id == inst_id
     assert "EUR" in exc.value.detail
     assert inst_id in str(exc.value)

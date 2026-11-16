@@ -6,8 +6,8 @@ base-denominated multiplier; inverse contracts use quote-denominated value per
 contract independently of the current underlying price. Missing derivative
 semantics never fall back to spot arithmetic.
 
-Scope: one-hop conversion only.
-Non-USD quotes remain unavailable without an independently evidenced FX leg.
+Non-USD quotes require an independently evidenced current direct or inverse
+forex snapshot against USD. FX evidence is reread on every conversion.
 Contract notional is exposure, not collateral, initial margin or account equity.
 
 Cache + staleness:
@@ -34,11 +34,13 @@ from snapper.data.repository import Repository
 from snapper.data.repository import is_effective_unit_certified
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentValuationMetadataRow
+from snapper.data.repository_types import UsdFxSnapshotCandidateRow
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_ETL_VERSION
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 
 CACHE_TTL_SECONDS = 60
 STALENESS_THRESHOLD_SECONDS = 300
+MAX_FUTURE_SKEW_SECONDS = 5
 
 
 class PriceUnavailableError(Exception):
@@ -54,8 +56,10 @@ class PriceUnavailableError(Exception):
         ``last_price_null``: MarketSnapshot row exists but
           ``last_price`` is NULL (venue never reported a trade).
         ``price_stale``: snapshot timestamp is older than 300s.
-        ``quote_currency_not_usd``: one-hop scope
-          non-USD quote instruments are rejected.
+        ``fx_snapshot_missing``: no eligible current forex snapshot against USD.
+        ``fx_price_stale``: no FX rate satisfies the age and clock-skew bounds.
+        ``fx_price_invalid``: no positive finite FX rate or final USD value.
+        ``fx_plane_conflict``: newest FX planes disagree after normalization.
         ``last_price_invalid``: price is nonpositive or nonfinite.
         ``invalid_quantity``: quantity is not a nonnegative finite Decimal.
         ``contract_valuation_unavailable``: payoff, currency or unit evidence
@@ -85,6 +89,74 @@ class _CacheEntry:
     snapshot_timestamp: datetime
     cached_at: datetime
     valuation_metadata: InstrumentValuationMetadataRow
+
+
+@dataclass(frozen=True)
+class _FxRate:
+    """Normalized USD-per-quote rate retaining raw price and orientation evidence."""
+
+    candidate: UsdFxSnapshotCandidateRow
+    rate: Decimal
+
+
+def _assert_timestamp_fresh(
+    timestamp: datetime, now: datetime, instrument_public_id: str, reason: str
+) -> None:
+    """Refuse naive, expired and excessively future-dated snapshot evidence."""
+    try:
+        if timestamp.utcoffset() is None:
+            raise ValueError("Snapshot timestamp must be timezone-aware")
+        age = (now - timestamp).total_seconds()
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise PriceUnavailableError(reason, instrument_public_id, "invalid timestamp") from exc
+    if not -MAX_FUTURE_SKEW_SECONDS <= age <= STALENESS_THRESHOLD_SECONDS:
+        raise PriceUnavailableError(reason, instrument_public_id, f"snapshot age={age}s")
+
+
+def _normalized_fx_rate(candidate: UsdFxSnapshotCandidateRow) -> _FxRate | None:
+    """Normalize a positive raw FX price before comparison across orientations."""
+    try:
+        raw = Decimal(str(candidate["last_price"]))
+        if not raw.is_finite() or raw <= 0:
+            return None
+        rate = Decimal(1) / raw if candidate["base"] == "USD" else raw
+        if not rate.is_finite() or rate <= 0:
+            return None
+        return _FxRate(candidate, rate)
+    except DecimalException:
+        return None
+
+
+def _select_fx_rate(
+    rows: list[UsdFxSnapshotCandidateRow],
+    now: datetime,
+    instrument_public_id: str,
+    currency: str,
+) -> _FxRate:
+    """Select the newest usable plane, refusing disagreeing normalized rates."""
+    if not rows:
+        raise PriceUnavailableError(
+            "fx_snapshot_missing", instrument_public_id, f"quote={currency}"
+        )
+    normalized = [rate for row in rows if (rate := _normalized_fx_rate(row)) is not None]
+    if not normalized:
+        raise PriceUnavailableError("fx_price_invalid", instrument_public_id)
+    fresh: list[_FxRate] = []
+    for rate in normalized:
+        try:
+            _assert_timestamp_fresh(
+                rate.candidate["timestamp"], now, instrument_public_id, "fx_price_stale"
+            )
+        except PriceUnavailableError:
+            continue
+        fresh.append(rate)
+    if not fresh:
+        raise PriceUnavailableError("fx_price_stale", instrument_public_id)
+    newest = max(rate.candidate["timestamp"] for rate in fresh)
+    planes = [rate for rate in fresh if rate.candidate["timestamp"] == newest]
+    if len({rate.rate for rate in planes}) != 1:
+        raise PriceUnavailableError("fx_plane_conflict", instrument_public_id)
+    return min(planes, key=lambda rate: rate.candidate["snapshot_public_id"])
 
 
 def _require_contract_evidence(
@@ -231,33 +303,48 @@ class USDConverter:
             PriceUnavailableError: on any of the reasons listed in
                 the class's module docstring.
         """
+        entry = await self._price_entry(instrument_public_id)
+        currency = entry.valuation_metadata["quote"]
+        rows = (
+            await self._repository.get_active_usd_fx_snapshot_candidates(currency)
+            if currency != "USD"
+            else []
+        )
+        now = self._now()
+        self._assert_fresh(entry, now, instrument_public_id)
+        notional = self._notional(entry, quantity, now, instrument_public_id)
+        if currency == "USD":
+            return notional
+        try:
+            rate = _select_fx_rate(rows, now, instrument_public_id, currency)
+            result = notional * rate.rate
+            if not result.is_finite():
+                raise ValueError("USD notional must be finite")
+            return result
+        except (DecimalException, ValueError) as exc:
+            raise PriceUnavailableError("fx_price_invalid", instrument_public_id) from exc
+
+    async def _price_entry(self, instrument_public_id: str) -> _CacheEntry:
+        """Coalesce cold loads while keeping metadata and FX awaits outside the lock."""
         now = self._now()
         cached = self._cache.get(instrument_public_id)
-        if cached is not None and (now - cached.cached_at).total_seconds() < CACHE_TTL_SECONDS:
-            self._assert_fresh(cached, now, instrument_public_id)
-            return await self._value_cached(cached, quantity, now, instrument_public_id)
+        if cached is None or (now - cached.cached_at).total_seconds() >= CACHE_TTL_SECONDS:
+            async with self._cache_lock:
+                now = self._now()
+                cached = self._cache.get(instrument_public_id)
+                if cached is None or (now - cached.cached_at).total_seconds() >= CACHE_TTL_SECONDS:
+                    return await self._load_and_cache(instrument_public_id, now)
+        return await self._value_cached(cached, instrument_public_id)
 
-        async with self._cache_lock:
-            cached = self._cache.get(instrument_public_id)
-            if cached is not None and (now - cached.cached_at).total_seconds() < CACHE_TTL_SECONDS:
-                self._assert_fresh(cached, now, instrument_public_id)
-                return await self._value_cached(cached, quantity, now, instrument_public_id)
-            entry = await self._load_and_cache(instrument_public_id, now)
-        return self._notional(entry, quantity, now, instrument_public_id)
-
-    async def _value_cached(
-        self, entry: _CacheEntry, quantity: Decimal, now: datetime, instrument_public_id: str
-    ) -> Decimal:
+    async def _value_cached(self, entry: _CacheEntry, instrument_public_id: str) -> _CacheEntry:
         """Refresh current identity and payoff evidence while retaining the cached price.
 
         Args:
             entry: Cached price and original instrument identity.
-            quantity: Requested nonnegative Decimal amount.
-            now: Current evidence evaluation time.
             instrument_public_id: Exact venue-specific identity to reread.
 
         Returns:
-            Current-evidence USD exposure using the cached market price.
+            Cached main price with current identity and payoff evidence.
 
         Raises:
             PriceUnavailableError: If identity or payoff evidence is no longer valid.
@@ -276,8 +363,7 @@ class USDConverter:
             raise PriceUnavailableError("instrument_definition_changed", instrument_public_id)
         if _requires_contract_valuation(original) and not _requires_contract_valuation(current):
             raise PriceUnavailableError("contract_valuation_unavailable", instrument_public_id)
-        entry = replace(entry, valuation_metadata=current)
-        return self._notional(entry, quantity, now, instrument_public_id)
+        return replace(entry, valuation_metadata=current)
 
     @staticmethod
     def _notional(
@@ -318,13 +404,7 @@ class USDConverter:
     @staticmethod
     def _assert_fresh(entry: _CacheEntry, now: datetime, instrument_public_id: str) -> None:
         """Raise if the cached snapshot is beyond the staleness window."""
-        age = (now - entry.snapshot_timestamp).total_seconds()
-        if age > STALENESS_THRESHOLD_SECONDS:
-            raise PriceUnavailableError(
-                "price_stale",
-                instrument_public_id,
-                f"age={age:.0f}s > {STALENESS_THRESHOLD_SECONDS}s",
-            )
+        _assert_timestamp_fresh(entry.snapshot_timestamp, now, instrument_public_id, "price_stale")
 
     async def _load_and_cache(self, instrument_public_id: str, now: datetime) -> _CacheEntry:
         """Read the CURRENT Instrument quote + MarketSnapshot, validate, cache.
@@ -340,12 +420,6 @@ class USDConverter:
         quote = await self._repository.get_active_instrument_quote_currency(instrument_public_id)
         if quote is None:
             raise PriceUnavailableError("instrument_not_found", instrument_public_id)
-        if quote != "USD":
-            raise PriceUnavailableError(
-                "quote_currency_not_usd",
-                instrument_public_id,
-                f"quote={quote} (one-hop conversion only)",
-            )
         row = await self._repository.get_active_market_snapshot_price(instrument_public_id)
         if row is None:
             raise PriceUnavailableError("snapshot_missing", instrument_public_id)
@@ -371,13 +445,7 @@ class USDConverter:
             cached_at=now,
             valuation_metadata=metadata,
         )
-        age = (now - ts).total_seconds()
-        if age > STALENESS_THRESHOLD_SECONDS:
-            raise PriceUnavailableError(
-                "price_stale",
-                instrument_public_id,
-                f"age={age:.0f}s > {STALENESS_THRESHOLD_SECONDS}s",
-            )
+        self._assert_fresh(entry, self._now(), instrument_public_id)
         self._cache[instrument_public_id] = entry
         return entry
 

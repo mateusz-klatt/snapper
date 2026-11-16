@@ -19,6 +19,9 @@ from snapper.data.models import InstrumentSpec
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import InstrumentSpecRow
+from snapper.data.repository_types import InstrumentValuationMetadataRow
+from snapper.data.repository_types import UsdFxSnapshotCandidateRow
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_ETL_VERSION
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 
@@ -612,4 +615,134 @@ async def test_invalid_snapshot_boundary_values_are_refused(
         AsyncMock(return_value=(price, _NOW)),
     )
     with pytest.raises(PriceUnavailableError, match="last_price_invalid"):
+        await USDConverter(repo, now=lambda: _NOW).to_usd(_INSTRUMENT, Decimal(1))
+
+
+@pytest.mark.parametrize("model", ["linear", "inverse"])
+async def test_contract_quote_payoff_is_applied_before_fx(model: str) -> None:
+    """Convert the evidenced quote-currency payoff rather than assuming spot size.
+
+    Given: a certified EUR-quoted linear or inverse contract and EUR-USD at 1.25.
+    When: two contracts are converted through the public oracle.
+    Then: contract exposure is computed in EUR first and FX is applied once.
+    """
+    repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    spec = _spec(model)
+    spec.contract_size = Decimal(3)
+    spec.contract_value_currency = "BTC" if model == "linear" else "EUR"
+    spec.settlement_currency = "EUR" if model == "linear" else "BTC"
+    await _market(repo, spec)
+    async with repo.session() as session:
+        symbol = await session.get(Symbol, 1)
+        assert symbol is not None
+        symbol.quote = "EUR"
+        await session.commit()
+    candidate: UsdFxSnapshotCandidateRow = {
+        "snapshot_public_id": "fx-snapshot",
+        "instrument_public_id": "fx-instrument",
+        "exchange": "kraken",
+        "base": "EUR",
+        "quote": "USD",
+        "last_price": 1.25,
+        "timestamp": _NOW,
+    }
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr(
+            repo, "get_active_usd_fx_snapshot_candidates", AsyncMock(return_value=[candidate])
+        )
+        result = await USDConverter(repo, now=lambda: _NOW).to_usd(_INSTRUMENT, Decimal(2))
+    assert result == (Decimal(750_000) if model == "linear" else Decimal("7.5"))
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("boundary", ["expiry", "certification"])
+@pytest.mark.parametrize("stage", ["usd_metadata", "eur_metadata", "eur_fx"])
+async def test_contract_guards_use_clock_after_last_repository_await(
+    cached: bool, boundary: str, stage: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recheck derivative safety after awaited reads on cold and cached main paths.
+
+    Given: fresh marks and evidence whose certification or maturity expires in one second.
+    When: metadata or FX work advances the clock by two seconds during conversion.
+    Then: the final clock refuses the expired contract even on the USD-only path.
+    """
+    repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    spec = _spec("inverse")
+    if boundary == "expiry":
+        spec.expiry_at = _NOW + timedelta(seconds=1)
+    else:
+        spec.spec_observed_at = _NOW - timedelta(hours=12) + timedelta(seconds=1)
+    is_eur = stage != "usd_metadata"
+    if is_eur:
+        spec.contract_value_currency = "EUR"
+    await _market(repo, spec)
+    if is_eur:
+        async with repo.session() as session:
+            symbol = await session.get(Symbol, 1)
+            assert symbol is not None
+            symbol.quote = "EUR"
+            await session.commit()
+    candidate: UsdFxSnapshotCandidateRow = {
+        "snapshot_public_id": "fx-snapshot",
+        "instrument_public_id": "fx-instrument",
+        "exchange": "kraken",
+        "base": "EUR",
+        "quote": "USD",
+        "last_price": 1.25,
+        "timestamp": _NOW,
+    }
+    monkeypatch.setattr(
+        repo, "get_active_usd_fx_snapshot_candidates", AsyncMock(return_value=[candidate])
+    )
+    clock = [_NOW]
+    converter = USDConverter(repo, now=lambda: clock[0])
+    if cached:
+        assert await converter.to_usd(_INSTRUMENT, Decimal(1)) == (Decimal("1.25") if is_eur else 1)
+    original = repo.get_active_instrument_valuation_metadata
+
+    async def delayed_metadata(identity: str) -> InstrumentValuationMetadataRow | None:
+        metadata = await original(identity)
+        clock[0] += timedelta(seconds=2)
+        return metadata
+
+    async def delayed_fx(currency: str) -> list[UsdFxSnapshotCandidateRow]:
+        assert currency == "EUR"
+        clock[0] += timedelta(seconds=2)
+        return [candidate]
+
+    if stage == "eur_fx":
+        monkeypatch.setattr(repo, "get_active_usd_fx_snapshot_candidates", delayed_fx)
+    else:
+        monkeypatch.setattr(repo, "get_active_instrument_valuation_metadata", delayed_metadata)
+    reason = "contract_expired" if boundary == "expiry" else "contract_valuation_unavailable"
+    with pytest.raises(PriceUnavailableError, match=reason):
+        await converter.to_usd(_INSTRUMENT, Decimal(1))
+
+
+async def test_native_unit_is_checked_independently_of_certification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse malformed payoff units even if a certificate boundary reports success.
+
+    Given: repository evidence with an unsupported native unit and a positive certificate.
+    When: the cap oracle attempts contract valuation.
+    Then: the explicit native-unit guard still refuses spot or contract arithmetic.
+    """
+    repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    await _market(repo, _spec("linear"))
+    metadata = await repo.get_active_instrument_valuation_metadata(_INSTRUMENT)
+    assert metadata is not None and metadata["spec"] is not None
+    metadata["spec"]["native_order_quantity_unit"] = "unsupported"
+
+    def certificate(spec: InstrumentSpecRow, now: datetime) -> bool:
+        assert spec["unit_certified"] and now == _NOW
+        return True
+
+    monkeypatch.setattr(
+        "snapper.application.pricing.usd_converter.is_effective_unit_certified", certificate
+    )
+    monkeypatch.setattr(
+        repo, "get_active_instrument_valuation_metadata", AsyncMock(return_value=metadata)
+    )
+    with pytest.raises(PriceUnavailableError, match="contract_valuation_unavailable"):
         await USDConverter(repo, now=lambda: _NOW).to_usd(_INSTRUMENT, Decimal(1))

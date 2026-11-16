@@ -2643,6 +2643,18 @@ class InstrumentValuationMetadataRow(TypedDict):
     spec: InstrumentSpecRow | None
 
 
+class UsdFxSnapshotCandidateRow(TypedDict):
+    """Current forex identity and original direct or inverse USD price evidence."""
+
+    snapshot_public_id: str
+    instrument_public_id: str
+    exchange: str
+    base: str
+    quote: str
+    last_price: float | None
+    timestamp: datetime
+
+
 class SpotAssetPrecisionEvidenceRow(TypedDict):
     """Active precision evidence for one exact venue asset identity."""
 

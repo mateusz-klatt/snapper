@@ -479,6 +479,7 @@ from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.data.repository_types import UnderlyingAssetRow
 from snapper.data.repository_types import UnwitnessedExecutionRow
+from snapper.data.repository_types import UsdFxSnapshotCandidateRow
 from snapper.data.repository_types import UserActiveTokenInsertRow
 from snapper.data.repository_types import UserActiveTokenVerificationRow
 from snapper.data.repository_types import UserAlertDefaultRow
@@ -3738,6 +3739,20 @@ class Repository(ABC):
 
         Returns:
             The current identity with an optional current specification, or null.
+        """
+        ...
+
+    @abstractmethod
+    async def get_active_usd_fx_snapshot_candidates(
+        self, currency: str
+    ) -> list[UsdFxSnapshotCandidateRow]:
+        """Read every active, non-paper market-data forex plane against USD.
+
+        Args:
+            currency: Quote currency requiring current USD conversion evidence.
+
+        Returns:
+            Both pair orientations with current snapshots and original raw rates.
         """
         ...
 
@@ -11110,6 +11125,63 @@ class SQLAlchemyRepository(Repository):
                 "spec": self._instrument_spec_row(spec) if spec is not None else None,
             }
             return metadata
+
+    async def get_active_usd_fx_snapshot_candidates(
+        self, currency: str
+    ) -> list[UsdFxSnapshotCandidateRow]:
+        """Join current forex metadata, venue capability and snapshot evidence.
+
+        Args:
+            currency: Quote currency paired directly or inversely with USD.
+
+        Returns:
+            All current eligible planes without choosing a venue or price in SQL.
+        """
+        async with self.session() as session:
+            result = await session.execute(
+                select(
+                    MarketSnapshot.public_id,
+                    Instrument.public_id,
+                    Instrument.exchange,
+                    Symbol.base,
+                    Symbol.quote,
+                    MarketSnapshot.last_price,
+                    MarketSnapshot.timestamp,
+                )
+                .select_from(Instrument)
+                .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
+                .join(
+                    SymbolExchangeCapability,
+                    (SymbolExchangeCapability.symbol_public_id == Symbol.public_id)
+                    & (SymbolExchangeCapability.exchange == Instrument.exchange),
+                )
+                .join(MarketSnapshot, MarketSnapshot.instrument_public_id == Instrument.public_id)
+                .where(
+                    Instrument.known_to == KNOWN_TO_MAX,
+                    Instrument.exchange != "paper",
+                    Symbol.known_to == KNOWN_TO_MAX,
+                    Symbol.asset_type == "forex",
+                    SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
+                    SymbolExchangeCapability.can_market_data.is_(True),
+                    MarketSnapshot.known_to == KNOWN_TO_MAX,
+                    or_(
+                        (Symbol.base == currency) & (Symbol.quote == "USD"),
+                        (Symbol.base == "USD") & (Symbol.quote == currency),
+                    ),
+                )
+            )
+            return [
+                UsdFxSnapshotCandidateRow(
+                    snapshot_public_id=row[0],
+                    instrument_public_id=row[1],
+                    exchange=row[2],
+                    base=row[3],
+                    quote=cast(str, row[4]),
+                    last_price=row[5],
+                    timestamp=row[6],
+                )
+                for row in result.all()
+            ]
 
     async def get_active_market_snapshot_price(
         self, instrument_public_id: str
