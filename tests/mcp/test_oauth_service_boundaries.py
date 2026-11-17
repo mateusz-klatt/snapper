@@ -1037,3 +1037,41 @@ async def test_authority_interval_is_rechecked_after_query_time(
                 monkeypatch.setattr(authority_module, "where_active_now", crossing_now)
             with pytest.raises(MCPOAuthError):
                 await oauth_case.harness.service.verify_access_token(tokens.access_token)
+
+
+@pytest.mark.parametrize("authority", ["owner", "operator"])
+@pytest.mark.asyncio
+async def test_denial_authority_refusals_are_typed_and_leave_request_pending(
+    oauth_case: OAuthCase, authority: str
+) -> None:
+    """Report a typed refusal after rolling back a denial with stale authority.
+
+    Given a pending request whose owner role or operator membership loses authority.
+    When that owner attempts to deny the request.
+    Then access_denied is reported with the request pending and no grant, code or delegate written.
+    """
+    pending = await oauth_case.harness.service.create_authorization_request(_request())
+    owner_id = oauth_case.owner.user_public_id
+    statement = (
+        update(User).where(User.public_id == owner_id).values(role=UserRole.VIEWER.value)
+        if authority == "owner"
+        else update(UserOperatorMembership)
+        .where(UserOperatorMembership.user_public_id == owner_id)
+        .values(known_to=datetime.now(UTC))
+    )
+    async with oauth_case.harness.repository.session() as session:
+        await session.execute(statement)
+        await session.commit()
+    try:
+        with pytest.raises(MCPOAuthError, match="access_denied"):
+            await oauth_case.harness.service.deny_authorization_request(
+                OAuthConsentDenialCommand(pending.raw_request_id, oauth_case.owner)
+            )
+    finally:
+        request = await oauth_case.harness.store.get_pending_authorization_request(
+            pending.raw_request_id, now=datetime.now(UTC)
+        )
+        assert request is not None and request.decision is None and request.resolved_at is None
+        async with oauth_case.harness.repository.session() as session:
+            for model in (OAuthGrant, OAuthAuthorizationCode, OAuthRefreshToken, AiDelegate):
+                assert list((await session.execute(select(model))).scalars()) == []

@@ -293,15 +293,18 @@ class MCPOAuthService:
         Raises:
             MCPOAuthError: If protocol identity, state or current authority is invalid.
         """
-        async with self.store.begin_write_transaction() as session:
-            tx = OAuthTransaction(session)
-            request, _client = await self._pending(tx, command.raw_request_id)
-            owner = await lock_oauth_owner(
-                session, command.owner, permissions_for_oauth_scopes(request.scopes)
-            )
-            await lock_oauth_operator(session, owner, command.operator_public_id)
-            await tx.resolve_request(request, "denied", datetime.now(UTC))
-            await session.commit()
+        try:
+            async with self.store.begin_write_transaction() as session:
+                tx = OAuthTransaction(session)
+                request, _client = await self._pending(tx, command.raw_request_id)
+                owner = await lock_oauth_owner(
+                    session, command.owner, permissions_for_oauth_scopes(request.scopes)
+                )
+                await lock_oauth_operator(session, owner, command.operator_public_id)
+                await tx.resolve_request(request, "denied", datetime.now(UTC))
+                await session.commit()
+        except PermissionError as error:
+            raise MCPOAuthError("access_denied") from error
 
     def _mint_tokens(
         self, identity: OAuthDelegateIdentity, scopes: tuple[str, ...], client_id: str
