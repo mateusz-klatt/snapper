@@ -273,6 +273,7 @@ from snapper.data.models import PairedExecutionGroup
 from snapper.data.models import PairedExecutionHalt
 from snapper.data.models import PairedExecutionLeg
 from snapper.data.models import PortfolioDriftEpisode
+from snapper.data.models import PortfolioPnlCorrectionFrontier
 from snapper.data.models import PortfolioPnlPoint
 from snapper.data.models import PortfolioReconciliationMethodConfig
 from snapper.data.models import PortfolioReconciliationObservation
@@ -309,6 +310,19 @@ from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.models import WalletUserReadGrant
 from snapper.data.models import is_open_ended_version
+from snapper.data.pnl_correction_state import MAX_CORRECTION_CHUNK_MINUTES
+from snapper.data.pnl_correction_state import PnlCorrectionChunk
+from snapper.data.pnl_correction_state import PnlCorrectionEdit
+from snapper.data.pnl_correction_state import PnlCorrectionEvidence
+from snapper.data.pnl_correction_state import PnlCorrectionFrontier
+from snapper.data.pnl_correction_state import PnlCorrectionKey
+from snapper.data.pnl_correction_state import PnlCorrectionRequest
+from snapper.data.pnl_correction_state import PnlCorrectionSampleVersion
+from snapper.data.pnl_correction_state import PortfolioPnlCorrectionConflictError
+from snapper.data.pnl_correction_state import advance_correction_frontier
+from snapper.data.pnl_correction_state import correction_watermarks
+from snapper.data.pnl_correction_state import start_correction_frontier
+from snapper.data.pnl_correction_state import validate_correction_minute
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import PNL_SAMPLE_DIAGNOSTIC_REQUIRED_KEYS
 from snapper.data.repository_types import PNL_SAMPLE_MAX_DIAGNOSTIC_RECORDS
@@ -5617,6 +5631,75 @@ class Repository(ABC):
 
         Returns:
             Rows ordered by ``(base, quote, exchange, open_at, instrument)``.
+        """
+        ...
+
+    @abstractmethod
+    async def get_portfolio_pnl_correction_frontier(
+        self, scope: PortfolioPnlSampleScope
+    ) -> PnlCorrectionFrontier | None:
+        """Read explicit continuation for this epoch and the current algorithm.
+
+        Args:
+            scope: Exact anchor-bound sample identity.
+
+        Returns:
+            A durable checkpoint, including completed state, or honest absence.
+        """
+        ...
+
+    @abstractmethod
+    async def get_portfolio_pnl_correction_evidence(
+        self, scope: PortfolioPnlSampleScope, start: datetime, end: datetime
+    ) -> PnlCorrectionEvidence:
+        """Read physical versions and honest absence for a complete bounded chunk.
+
+        Args:
+            scope: Exact anchor-bound sample identity.
+            start: Inclusive first minute, strictly after the anchor.
+            end: Inclusive last minute, at most one day after the start.
+
+        Returns:
+            All active sample versions, regardless of their epoch or algorithm,
+            and the scalar causal-peak input for the current epoch/version.
+        """
+        ...
+
+    @abstractmethod
+    async def invalidate_portfolio_pnl_correction(
+        self,
+        scope: PortfolioPnlSampleScope,
+        request: PnlCorrectionRequest,
+        expected: PnlCorrectionFrontier | None,
+    ) -> PnlCorrectionFrontier:
+        """CAS-create or rewind correction control without changing financial rows.
+
+        Args:
+            scope: Exact anchor-bound sample identity.
+            request: Explicit invalidation and its evidence horizon.
+            expected: Previously read checkpoint, or absence for initial creation.
+
+        Returns:
+            The committed new correction generation.
+        """
+        ...
+
+    @abstractmethod
+    async def commit_portfolio_pnl_correction_chunk(
+        self,
+        scope: PortfolioPnlSampleScope,
+        expected: PnlCorrectionFrontier,
+        chunk: PnlCorrectionChunk,
+    ) -> PnlCorrectionFrontier:
+        """Commit financial edits and continuation/baseline/peak in one CAS transaction.
+
+        Args:
+            scope: Exact anchor-bound sample identity.
+            expected: The generation and revision against which the chunk was planned.
+            chunk: Bounded edits and the resulting causal peak, possibly no writes.
+
+        Returns:
+            The committed checkpoint; any conflict rolls back the complete chunk.
         """
         ...
 
@@ -18283,7 +18366,7 @@ class SQLAlchemyRepository(Repository):
         ]
 
     async def _begin_portfolio_pnl_sample_write_transaction(
-        self, s: AsyncSession, scope: PortfolioPnlSampleScope
+        self, s: AsyncSession, scope: PortfolioPnlSampleScope, *, bounded: bool = False
     ) -> None:
         """Begin the periodic sample writer under a per-scope advisory lock.
 
@@ -18295,6 +18378,8 @@ class SQLAlchemyRepository(Repository):
         """
         if self.dialect_name == "postgresql":
             await s.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+            if bounded:
+                await self._bound_pnl_correction_transaction(s)
             lock_scope = "|".join((scope.wallet_public_id, scope.mode, scope.valuation_ccy))
             await s.execute(
                 text(
@@ -18576,6 +18661,594 @@ class SQLAlchemyRepository(Repository):
             except Exception:
                 await s.rollback()
                 raise
+
+    @staticmethod
+    async def _bound_pnl_correction_transaction(s: AsyncSession) -> None:
+        """Cap this transaction's SQL and lock waits without relaxing a shorter limit.
+
+        Args:
+            s: The transaction before its first sample advisory lock.
+        """
+        await s.execute(
+            text(
+                "SELECT set_config('statement_timeout', CASE WHEN "
+                "current_setting('statement_timeout')::interval = interval '0' OR "
+                "current_setting('statement_timeout')::interval > interval '20 seconds' "
+                "THEN '20s' ELSE current_setting('statement_timeout') END, true), "
+                "set_config('lock_timeout', CASE WHEN "
+                "current_setting('lock_timeout')::interval = interval '0' OR "
+                "current_setting('lock_timeout')::interval > interval '1 second' "
+                "THEN '1s' ELSE current_setting('lock_timeout') END, true)"
+            )
+        )
+
+    @staticmethod
+    def _pnl_correction_key(scope: PortfolioPnlSampleScope) -> PnlCorrectionKey:
+        """Bind continuation to the canonical sample scope and real algorithm version.
+
+        Args:
+            scope: Normalized sample scope already tied to an active anchor.
+
+        Returns:
+            The exact five-part checkpoint identity.
+        """
+        return PnlCorrectionKey(
+            scope.wallet_public_id,
+            scope.mode,
+            scope.valuation_ccy,
+            scope.epoch_public_id,
+            PNL_SAMPLE_CALC_VERSION,
+        )
+
+    @staticmethod
+    def _pnl_correction_filters(key: PnlCorrectionKey) -> list[ColumnElement[bool]]:
+        """Build all five equality predicates for the composite checkpoint key.
+
+        Args:
+            key: Canonical checkpoint identity.
+
+        Returns:
+            Identity predicates without a sample-derived progress heuristic.
+        """
+        model = PortfolioPnlCorrectionFrontier
+        return [
+            model.wallet_public_id == key.wallet_public_id,
+            model.mode == key.mode,
+            model.valuation_ccy == key.valuation_ccy,
+            model.epoch_public_id == key.epoch_public_id,
+            model.calc_version == key.calc_version,
+        ]
+
+    @staticmethod
+    def _pnl_correction_watermarks(payload: str) -> dict[str, int]:
+        """Decode persisted control data, refusing corruption rather than resetting it.
+
+        Args:
+            payload: A checkpoint's serialized venue sequence map.
+
+        Returns:
+            Validated watermark evidence.
+
+        Raises:
+            ValueError: When persisted control data is malformed.
+        """
+        value: object = json.loads(
+            payload,
+            object_pairs_hook=SQLAlchemyRepository._portfolio_pnl_json_object,
+            parse_constant=SQLAlchemyRepository._reject_portfolio_pnl_json_constant,
+        )
+        if not isinstance(value, dict) or any(
+            not isinstance(key, str) or not isinstance(sequence, int)
+            for key, sequence in value.items()
+        ):
+            raise ValueError("P&L correction has malformed persisted watermarks")
+        return correction_watermarks(value)
+
+    @classmethod
+    def _pnl_correction_from_model(
+        cls, model: PortfolioPnlCorrectionFrontier
+    ) -> PnlCorrectionFrontier:
+        """Copy a database checkpoint into an independent typed snapshot.
+
+        Args:
+            model: A checkpoint selected by its exact key.
+
+        Returns:
+            Its explicit state, without borrowing any sample row's version.
+        """
+        key = PnlCorrectionKey(
+            model.wallet_public_id,
+            model.mode,
+            model.valuation_ccy,
+            model.epoch_public_id,
+            model.calc_version,
+        )
+        return PnlCorrectionFrontier(
+            key=key,
+            generation=model.generation,
+            revision=model.revision,
+            window_start=model.window_start,
+            next_minute=model.next_minute,
+            tip=model.tip,
+            as_of=model.as_of,
+            baseline_watermarks=cls._pnl_correction_watermarks(model.baseline_watermarks_json),
+            pending_watermarks=cls._pnl_correction_watermarks(model.pending_watermarks_json),
+            prior_peak=model.prior_peak,
+            repair_from=model.repair_from,
+        )
+
+    @staticmethod
+    def _pnl_correction_values(frontier: PnlCorrectionFrontier) -> dict[str, object]:
+        """Serialize continuation and causal state together for one CAS write.
+
+        Args:
+            frontier: The state derived from the actual locked checkpoint.
+
+        Returns:
+            All mutable control columns for the same transaction.
+        """
+        return {
+            "generation": frontier.generation,
+            "revision": frontier.revision,
+            "window_start": frontier.window_start,
+            "next_minute": frontier.next_minute,
+            "tip": frontier.tip,
+            "as_of": frontier.as_of,
+            "baseline_watermarks_json": json.dumps(
+                dict(frontier.baseline_watermarks), sort_keys=True
+            ),
+            "pending_watermarks_json": json.dumps(
+                dict(frontier.pending_watermarks), sort_keys=True
+            ),
+            "prior_peak": frontier.prior_peak,
+            "repair_from": frontier.repair_from,
+        }
+
+    async def _read_pnl_correction(
+        self, s: AsyncSession, key: PnlCorrectionKey
+    ) -> PnlCorrectionFrontier | None:
+        """Read one checkpoint inside the caller's transaction.
+
+        Args:
+            s: Active session, fenced for any subsequent mutation.
+            key: All scope and algorithm identity fields.
+
+        Returns:
+            The actual checkpoint, or honest absence.
+        """
+        result = await s.execute(
+            select(PortfolioPnlCorrectionFrontier).where(*self._pnl_correction_filters(key))
+        )
+        model = result.scalars().one_or_none()
+        return self._pnl_correction_from_model(model) if model is not None else None
+
+    @staticmethod
+    def _guard_pnl_correction_revision(
+        key: PnlCorrectionKey,
+        actual: PnlCorrectionFrontier | None,
+        expected: PnlCorrectionFrontier | None,
+    ) -> None:
+        """Refuse stale, cross-scope or unexpectedly missing checkpoint claims.
+
+        Args:
+            key: The repository's canonical checkpoint key.
+            actual: State loaded under the writer fence.
+            expected: The caller's previously observed claim.
+
+        Raises:
+            PortfolioPnlCorrectionConflictError: When any CAS identity disagrees.
+        """
+        if expected is None and actual is None:
+            return
+        if (
+            expected is None
+            or actual is None
+            or expected.key != key
+            or expected.generation != actual.generation
+            or expected.revision != actual.revision
+        ):
+            raise PortfolioPnlCorrectionConflictError("P&L correction checkpoint CAS lost")
+
+    async def _write_pnl_correction(
+        self,
+        s: AsyncSession,
+        actual: PnlCorrectionFrontier | None,
+        frontier: PnlCorrectionFrontier,
+    ) -> None:
+        """Insert or CAS-update a checkpoint without committing the caller's session.
+
+        Args:
+            s: The same fenced transaction as the chunk's financial edits.
+            actual: The checkpoint observed in that transaction.
+            frontier: Desired next state, including peak and baseline.
+
+        Raises:
+            PortfolioPnlCorrectionConflictError: When a final revision CAS loses.
+        """
+        key = frontier.key
+        if actual is None:
+            s.add(
+                PortfolioPnlCorrectionFrontier(
+                    wallet_public_id=key.wallet_public_id,
+                    mode=key.mode,
+                    valuation_ccy=key.valuation_ccy,
+                    epoch_public_id=key.epoch_public_id,
+                    calc_version=key.calc_version,
+                    **self._pnl_correction_values(frontier),
+                )
+            )
+            return
+        result = await s.execute(
+            update(PortfolioPnlCorrectionFrontier)
+            .where(
+                *self._pnl_correction_filters(key),
+                PortfolioPnlCorrectionFrontier.generation == actual.generation,
+                PortfolioPnlCorrectionFrontier.revision == actual.revision,
+            )
+            .values(**self._pnl_correction_values(frontier))
+        )
+        if cast(CursorResult[tuple[object, ...]], result).rowcount != 1:
+            raise PortfolioPnlCorrectionConflictError("P&L correction final checkpoint CAS lost")
+
+    async def get_portfolio_pnl_correction_frontier(
+        self, scope: PortfolioPnlSampleScope
+    ) -> PnlCorrectionFrontier | None:
+        """Read exact continuation, retaining completed and zero-write progress.
+
+        Args:
+            scope: A sample scope whose epoch and algorithm must stay separate.
+
+        Returns:
+            The explicit checkpoint, never an estimate from persisted samples.
+        """
+        canonical = self._normalize_portfolio_pnl_sample_scope(scope)
+        async with self.session() as s:
+            if self.dialect_name == "postgresql":
+                await self._bound_pnl_correction_transaction(s)
+            return await self._read_pnl_correction(s, self._pnl_correction_key(canonical))
+
+    async def invalidate_portfolio_pnl_correction(
+        self,
+        scope: PortfolioPnlSampleScope,
+        request: PnlCorrectionRequest,
+        expected: PnlCorrectionFrontier | None,
+    ) -> PnlCorrectionFrontier:
+        """Create or rewind correction control under the existing sample writer fence.
+
+        Args:
+            scope: The active anchor-bound scope.
+            request: Explicit earliest invalidation and complete evidence prefix.
+            expected: Absence or the precise previously read generation/revision.
+
+        Returns:
+            The committed new generation, with unfinished work retained.
+
+        Raises:
+            PortfolioPnlCorrectionConflictError: For any stale checkpoint claim.
+            PortfolioPnlSampleScopeError: If the invalidation targets the anchor.
+        """
+        canonical = self._normalize_portfolio_pnl_sample_scope(scope)
+        validate_correction_minute(request.start)
+        request = replace(
+            request,
+            baseline_watermarks=correction_watermarks(request.baseline_watermarks),
+            pending_watermarks=correction_watermarks(request.pending_watermarks),
+        )
+        if request.start <= canonical.anchor_point_time:
+            raise PortfolioPnlSampleScopeError("P&L correction must start after its anchor")
+        key = self._pnl_correction_key(canonical)
+        async with self.session() as s:
+            await self._begin_portfolio_pnl_sample_write_transaction(s, canonical, bounded=True)
+            await self._verify_portfolio_pnl_sample_scope_anchor(s, canonical)
+            actual = await self._read_pnl_correction(s, key)
+            self._guard_pnl_correction_revision(key, actual, expected)
+            frontier = start_correction_frontier(key, request, actual)
+            peak = await self._read_pnl_correction_peak(s, canonical, frontier.window_start)
+            if peak != frontier.prior_peak:
+                raise PortfolioPnlCorrectionConflictError(
+                    "P&L correction initial causal peak changed"
+                )
+            await self._write_pnl_correction(s, actual, frontier)
+            await s.commit()
+            return frontier
+
+    async def _apply_pnl_correction_edit(
+        self,
+        s: AsyncSession,
+        scope: PortfolioPnlSampleScope,
+        edit: PnlCorrectionEdit,
+        bus_time: datetime,
+    ) -> None:
+        """Apply one checked financial mutation without opening another transaction.
+
+        Args:
+            s: Fenced session which owns both financial data and continuation.
+            scope: Canonical anchor-bound write scope.
+            edit: One bounded insert, replacement or retraction.
+            bus_time: The generation's evidence clock for an honest SCD2 close.
+
+        Raises:
+            PortfolioPnlCorrectionConflictError: When the exact planned row changed.
+        """
+        existing = edit.expected_row
+        if existing is None:
+            row = cast(PortfolioPnlSampleRow, edit.replacement)
+            s.add(
+                PortfolioPnlPoint(
+                    **self._portfolio_pnl_sample_orm_kwargs(row), known_to=KNOWN_TO_MAX
+                )
+            )
+            return
+        if existing.row["epoch_public_id"] != scope.epoch_public_id:
+            raise PortfolioPnlSampleSupersedeError("P&L correction cannot supersede another epoch")
+        close_time = max(
+            existing.row["timestamp"],
+            edit.replacement["timestamp"] if edit.replacement is not None else bus_time,
+        )
+        await self._close_pnl_correction_sample(s, existing, close_time)
+        if edit.replacement is not None:
+            values = self._portfolio_pnl_sample_orm_kwargs(edit.replacement)
+            values.update(
+                public_id=existing.row["public_id"], timestamp=close_time, known_to=KNOWN_TO_MAX
+            )
+            s.add(PortfolioPnlPoint(**values))
+
+    @staticmethod
+    async def _close_pnl_correction_sample(
+        s: AsyncSession, existing: PnlCorrectionSampleVersion, close_time: datetime
+    ) -> None:
+        """CAS-close the exact active internal version before replacement or retraction.
+
+        Args:
+            s: The chunk's transaction, without an intermediate commit.
+            existing: The exact version whose full snapshot was compared.
+            close_time: Processing time clamped above that version's timestamp.
+
+        Raises:
+            PortfolioPnlCorrectionConflictError: If the version was already closed.
+        """
+        result = await s.execute(
+            update(PortfolioPnlPoint)
+            .where(
+                PortfolioPnlPoint.id == existing.row_id,
+                PortfolioPnlPoint.public_id == existing.row["public_id"],
+                PortfolioPnlPoint.timestamp == existing.row["timestamp"],
+                PortfolioPnlPoint.known_to == KNOWN_TO_MAX,
+            )
+            .values(known_to=close_time)
+        )
+        if cast(CursorResult[tuple[object, ...]], result).rowcount != 1:
+            raise PortfolioPnlCorrectionConflictError("P&L correction financial close CAS lost")
+
+    async def commit_portfolio_pnl_correction_chunk(
+        self,
+        scope: PortfolioPnlSampleScope,
+        expected: PnlCorrectionFrontier,
+        chunk: PnlCorrectionChunk,
+    ) -> PnlCorrectionFrontier:
+        """Commit all chunk edits and continuation under the same generation fence.
+
+        Args:
+            scope: Exact anchor-bound sample identity.
+            expected: The checkpoint against which the caller planned this chunk.
+            chunk: Bounded financial mutations and explicit resulting causal peak.
+
+        Returns:
+            Committed continuation; a zero-write plan advances it just as explicitly.
+
+        Raises:
+            PortfolioPnlCorrectionConflictError: On a stale generation or row CAS.
+        """
+        canonical = self._normalize_portfolio_pnl_sample_scope(scope)
+        key = self._pnl_correction_key(canonical)
+        chunk = self._normalize_pnl_correction_chunk(chunk)
+        for edit in chunk.edits:
+            if edit.replacement is not None:
+                self._validate_portfolio_pnl_sample(edit.replacement, canonical)
+                if edit.replacement["point_time"] != edit.point_time:
+                    raise ValueError("P&L correction edit and sample minute must agree")
+        async with self.session() as s:
+            await self._begin_portfolio_pnl_sample_write_transaction(s, canonical, bounded=True)
+            await self._verify_portfolio_pnl_sample_scope_anchor(s, canonical)
+            actual = await self._read_pnl_correction(s, key)
+            self._guard_pnl_correction_revision(key, actual, expected)
+            current = cast(PnlCorrectionFrontier, actual)
+            frontier = advance_correction_frontier(current, chunk)
+            if chunk.evidence.prior_peak != current.prior_peak:
+                raise PortfolioPnlCorrectionConflictError(
+                    "P&L correction checkpoint causal peak changed; rewind required"
+                )
+            observed = await self._read_pnl_correction_evidence(
+                s, canonical, chunk.evidence.start, chunk.end
+            )
+            if observed != chunk.evidence:
+                raise PortfolioPnlCorrectionConflictError("P&L correction chunk evidence changed")
+            self._validate_pnl_correction_preservation(chunk)
+            expected_rows = {version.row["point_time"]: version for version in observed.versions}
+            for edit in chunk.edits:
+                if edit.expected_row != expected_rows.get(edit.point_time):
+                    raise PortfolioPnlCorrectionConflictError(
+                        "P&L correction edit has a stale version"
+                    )
+                await self._apply_pnl_correction_edit(s, canonical, edit, current.as_of)
+            await s.flush()
+            peak = await self._read_pnl_correction_peak(
+                s, canonical, chunk.end + timedelta(minutes=1)
+            )
+            if peak != chunk.prior_peak:
+                raise PortfolioPnlCorrectionConflictError(
+                    "P&L correction resulting causal peak disagrees"
+                )
+            await self._write_pnl_correction(s, actual, frontier)
+            await s.commit()
+            return frontier
+
+    @classmethod
+    def _normalize_pnl_correction_chunk(cls, chunk: PnlCorrectionChunk) -> PnlCorrectionChunk:
+        """Copy mutable edit payloads before any database await.
+
+        Args:
+            chunk: The caller-owned plan and originally observed versions.
+
+        Returns:
+            A plan with normalized independent sample dictionaries.
+        """
+        edits = tuple(
+            replace(
+                edit,
+                expected_row=(
+                    cls._copy_pnl_correction_version(edit.expected_row)
+                    if edit.expected_row is not None
+                    else None
+                ),
+                replacement=(
+                    cls._normalize_portfolio_pnl_sample(edit.replacement)
+                    if edit.replacement is not None
+                    else None
+                ),
+            )
+            for edit in chunk.edits
+        )
+        versions = tuple(cls._copy_pnl_correction_version(v) for v in chunk.evidence.versions)
+        return replace(chunk, edits=edits, evidence=replace(chunk.evidence, versions=versions))
+
+    @staticmethod
+    def _copy_pnl_correction_version(
+        version: PnlCorrectionSampleVersion,
+    ) -> PnlCorrectionSampleVersion:
+        """Copy the original payload without changing its physical token or contents.
+
+        Args:
+            version: An originally observed physical sample version.
+
+        Returns:
+            An independent payload snapshot with the same exact internal row id.
+        """
+        return PnlCorrectionSampleVersion(version.row_id, version.row.copy())
+
+    @staticmethod
+    def _validate_pnl_correction_preservation(chunk: PnlCorrectionChunk) -> None:
+        """Require explicit repair evidence when an old-version row remains untouched.
+
+        Args:
+            chunk: A plan whose full active-set evidence has already been checked.
+
+        Raises:
+            ValueError: If a foreign epoch/version is silently acknowledged as reconciled.
+        """
+        edited = {edit.point_time for edit in chunk.edits}
+        withheld = set(chunk.withheld_minutes)
+        for version in chunk.evidence.versions:
+            row = version.row
+            if (
+                row["epoch_public_id"] != chunk.evidence.key.epoch_public_id
+                or row["calc_version"] != chunk.evidence.key.calc_version
+            ) and row["point_time"] not in edited | withheld:
+                raise ValueError(
+                    "P&L correction must repair or explicitly retain old-version evidence"
+                )
+
+    async def _read_pnl_correction_peak(
+        self, s: AsyncSession, scope: PortfolioPnlSampleScope, before: datetime
+    ) -> float | None:
+        """Read only a scalar causal dependency under the caller's SQL budget.
+
+        This does not load a suffix or materialize the historical prefix. It
+        verifies the actual peak consumed by planning, not every prefix row's
+        physical identity. The statement timeout bounds its database work.
+
+        Args:
+            s: The chunk reader or fenced financial transaction.
+            scope: Exact anchor-bound identity and current calculation version.
+            before: Strict upper point-time boundary for the causal peak.
+
+        Returns:
+            Maximum complete-sample equity, or absence without a fabricated zero.
+        """
+        query = PortfolioPnlSampleQuery(
+            scope.wallet_public_id,
+            scope.mode,
+            scope.valuation_ccy,
+            scope.epoch_public_id,
+            PNL_SAMPLE_CALC_VERSION,
+        )
+        result = await s.execute(
+            select(
+                func.max(PortfolioPnlPoint.cash_usd + PortfolioPnlPoint.position_value_usd)
+            ).where(
+                *self._portfolio_pnl_sample_query_filters(query),
+                PortfolioPnlPoint.valuation_status == "complete",
+                PortfolioPnlPoint.point_time > scope.anchor_point_time,
+                PortfolioPnlPoint.point_time < before,
+            )
+        )
+        return result.scalar()
+
+    async def _read_pnl_correction_evidence(
+        self, s: AsyncSession, scope: PortfolioPnlSampleScope, start: datetime, end: datetime
+    ) -> PnlCorrectionEvidence:
+        """Read the entire active uniqueness set, including foreign epoch/version rows.
+
+        Args:
+            s: The bounded read or fenced write session.
+            scope: Wallet, mode and currency binding the active uniqueness key.
+            start: First admitted minute.
+            end: Last admitted minute.
+
+        Returns:
+            Originally observed physical versions and the scalar causal input.
+        """
+        result = await s.execute(
+            select(PortfolioPnlPoint)
+            .where(
+                *self._portfolio_pnl_sample_scope_filters(scope),
+                PortfolioPnlPoint.point_time >= start,
+                PortfolioPnlPoint.point_time <= end,
+            )
+            .order_by(PortfolioPnlPoint.point_time)
+            .limit(MAX_CORRECTION_CHUNK_MINUTES + 1)
+        )
+        versions = tuple(
+            PnlCorrectionSampleVersion(model.id, self._portfolio_pnl_sample_to_row(model))
+            for model in result.scalars()
+        )
+        if len(versions) > MAX_CORRECTION_CHUNK_MINUTES:
+            raise ValueError("P&L correction evidence exceeds its fixed row bound")
+        for version in versions:
+            validate_correction_minute(version.row["point_time"])
+        return PnlCorrectionEvidence(
+            self._pnl_correction_key(scope),
+            start,
+            end,
+            versions,
+            await self._read_pnl_correction_peak(s, scope, start),
+        )
+
+    async def get_portfolio_pnl_correction_evidence(
+        self, scope: PortfolioPnlSampleScope, start: datetime, end: datetime
+    ) -> PnlCorrectionEvidence:
+        """Read all physical versions/absence and the peak for a bounded plan.
+
+        Args:
+            scope: Exact anchor-bound sample identity.
+            start: Inclusive first minute, strictly after the anchor.
+            end: Inclusive last minute, covering no more than 1,440 minutes.
+
+        Returns:
+            Evidence whose complete active set must still match at commit.
+
+        Raises:
+            ValueError: For an unbounded or invalid evidence window.
+        """
+        canonical = self._normalize_portfolio_pnl_sample_scope(scope)
+        validate_correction_minute(start)
+        validate_correction_minute(end)
+        if start <= canonical.anchor_point_time or not start <= end < start + timedelta(days=1):
+            raise ValueError("P&L correction evidence requires a bounded post-anchor window")
+        async with self.session() as s:
+            if self.dialect_name == "postgresql":
+                await self._bound_pnl_correction_transaction(s)
+            return await self._read_pnl_correction_evidence(s, canonical, start, end)
 
     async def get_portfolio_pnl_samples(
         self,

@@ -1686,6 +1686,46 @@ class PortfolioPnlPoint(TemporalMixin, Base):
     contributions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class PortfolioPnlCorrectionFrontier(Base):
+    """Mutable continuation control, separate from immutable financial evidence.
+
+    Sample writes and this row's revision advance share one fenced transaction.
+    Completed rows remain present so an invalidation racing the last chunk cannot
+    be mistaken for an initial creation. Each epoch and calculation version has
+    its own identity; no sample row is repurposed as a control cursor.
+    """
+
+    __tablename__ = "portfolio_pnl_correction_frontiers"
+    __table_args__ = (
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_pnl_correction_mode"),
+        CheckConstraint("generation >= 1 AND revision >= 1", name="ck_pnl_correction_revision"),
+        CheckConstraint("window_start <= tip AND tip <= as_of", name="ck_pnl_correction_window"),
+        CheckConstraint(
+            "next_minute IS NULL OR (window_start <= next_minute AND next_minute <= tip)",
+            name="ck_pnl_correction_next",
+        ),
+        CheckConstraint(
+            "repair_from IS NULL OR (window_start <= repair_from AND repair_from <= tip)",
+            name="ck_pnl_correction_repair",
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(8), primary_key=True)
+    valuation_ccy: Mapped[str] = mapped_column(String(16), primary_key=True)
+    epoch_public_id: Mapped[str] = mapped_column(UUIDColumn(), primary_key=True)
+    calc_version: Mapped[str] = mapped_column(String(16), primary_key=True)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    window_start: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    next_minute: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    tip: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    as_of: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    baseline_watermarks_json: Mapped[str] = mapped_column(Text, nullable=False)
+    pending_watermarks_json: Mapped[str] = mapped_column(Text, nullable=False)
+    prior_peak: Mapped[float | None] = mapped_column(Float, nullable=True)
+    repair_from: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+
+
 class FxConversionElection(TemporalMixin, Base):
     """Bitemporal decision selecting one exact-coverage conversion plane.
 
