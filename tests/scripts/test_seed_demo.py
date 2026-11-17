@@ -651,6 +651,7 @@ WALLET_SCOPED_SCHEMA_TABLES = frozenset(
         "paired_execution_halts",
         "paired_execution_legs",
         "portfolio_drift_episodes",
+        "portfolio_pnl_correction_frontiers",
         "portfolio_pnl_points",
         "portfolio_reconciliation_method_configs",
         "portfolio_reconciliation_observations",
@@ -743,6 +744,11 @@ existing immutable witness.
 populated subset. They retain authenticated source ownership and product READ
 evidence; the demo must neither invent those observations nor rewrite their
 certified wallet identity.
+
+``portfolio_pnl_correction_frontiers`` is deliberately EXCLUDED from the
+populated subset. Only an actual correction creates its continuation, repair
+obligation and execution-detection baseline; screenshot data must not invent
+completed or pending financial work.
 """
 
 

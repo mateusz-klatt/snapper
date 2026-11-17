@@ -42,3 +42,74 @@ tick or a fixed bound on all historical inputs.
 Release acceptance remains separate from local tests: the exact source needs
 the full quality gate and independent review, and the runtime owner controls
 deployment and the explicit snapshotter enablement.
+
+## Correction continuation repository foundation
+
+Migration `0069` adds `portfolio_pnl_correction_frontiers`, a mutable control
+table keyed by wallet, mode, valuation currency, anchor epoch and calculation
+version. It does not rewrite existing financial samples. The current
+snapshotter is not wired to this foundation: its correction loop remains as
+described above. A later integration must impose a per-tick scheduling budget;
+this repository contract alone is not a wall-clock limit for a tick.
+
+Each correction checkpoint carries a generation, a revision, an explicit next
+minute, its target and knowledge horizon, the detector's durable and pending
+execution watermarks, and the causal peak. A new invalidation changes the
+generation and revision; successful chunk advancement changes the revision.
+Completed checkpoints remain present so an invalidation racing completion
+cannot be mistaken for first creation. A restart reads the checkpoint instead
+of inferring progress from the last sample or its calculation version.
+
+Before planning a chunk, the bounded evidence reader returns its complete
+active sample set and scalar prior peak. The set includes rows from other
+epochs or calculation versions occupying the same wallet/mode/currency
+minutes. Each observation retains the original internal row ID and payload:
+SCD2 replacements reuse public IDs, so neither a public ID nor identical
+contents is a sufficient physical version token. The reader accepts at most
+1,440 exact minutes and refuses excess or off-grid rows rather than silently
+truncating the evidence.
+
+Chunk commit acquires the existing sample writer fence and verifies the active
+anchor, checkpoint generation/revision, complete presence/absence set and
+planned prior peak against both the checkpoint and the current fenced prefix.
+It then applies the validated inserts, replacements and
+retractions and checks the resulting causal peak. Those edits and the updated
+continuation, peak and baseline commit in one transaction. A conflict or an
+exception rolls back the whole chunk, including edits preceding the failure.
+There is no per-minute peak query: scalar prefix checks run at chunk
+boundaries, under the transaction's database limits.
+
+An empty edit list can advance explicit scan progress. Withheld minutes are
+different from fully reconciled unchanged minutes: their earliest boundary is
+retained as `repair_from`, including after scan completion or a new generation, and the old
+execution-detection baseline remains unconsumed. A new generation must revisit
+that pending suffix. Its chunks must explicitly acknowledge successful repair;
+starting a generation or silently scanning it again does not clear the obligation.
+The caller certifies that retained rows were semantically recomputed. When a
+chunk acknowledges an outstanding repair inside its admitted range, the
+repository also checks its post-edit occupancy: every non-withheld minute from
+that repair boundary through the chunk end must have a sample of the current
+epoch and calculation version. A missing result refuses the entire transaction
+without advancing its checkpoint or consuming its baseline. This is an
+occupancy check, not proof that the caller recomputed a retained value correctly.
+Initial sparse chunks and chunks which do not acknowledge outstanding repair
+retain their existing zero-edit progress semantics.
+
+A newly withheld minute may retract its exact observed prior row and retain its
+repair obligation in the same transaction. It cannot simultaneously insert or
+replace a row. The caller applies the planner's policy for whether an existing
+row must be retracted or preserved; the repository does not invent that decision.
+An old epoch/version left unchanged must be explicitly
+retained for repair, rather than acknowledged as reconciled. No missing point
+is converted to a zero or used as an implicit progress marker.
+
+A foreign-epoch row can be retained as withheld, but this primitive cannot
+retire it. Snapshotter integration must define a separately reviewed way to
+handle that boundary before activation; retaining it indefinitely would also
+retain the repair obligation and prevent baseline advancement.
+
+PostgreSQL correction transactions cap statement timeouts at 20 seconds and
+lock waits at one second, preserving any shorter existing limits. The settings
+are transaction-local. SQLite uses the same `BEGIN IMMEDIATE` sample fence.
+These limits do not constitute a hard in-flight deadline for a complete chunk
+or authorize applying the migration or enabling the snapshotter in production.
