@@ -85,9 +85,28 @@ retained as `repair_from`, including after scan completion or a new generation, 
 execution-detection baseline remains unconsumed. A new generation must revisit
 that pending suffix. Its chunks must explicitly acknowledge successful repair;
 starting a generation or silently scanning it again does not clear the obligation.
+The caller certifies that retained rows were semantically recomputed. When a
+chunk acknowledges an outstanding repair inside its admitted range, the
+repository also checks its post-edit occupancy: every non-withheld minute from
+that repair boundary through the chunk end must have a sample of the current
+epoch and calculation version. A missing result refuses the entire transaction
+without advancing its checkpoint or consuming its baseline. This is an
+occupancy check, not proof that the caller recomputed a retained value correctly.
+Initial sparse chunks and chunks which do not acknowledge outstanding repair
+retain their existing zero-edit progress semantics.
+
+A newly withheld minute may retract its exact observed prior row and retain its
+repair obligation in the same transaction. It cannot simultaneously insert or
+replace a row. The caller applies the planner's policy for whether an existing
+row must be retracted or preserved; the repository does not invent that decision.
 An old epoch/version left unchanged must be explicitly
 retained for repair, rather than acknowledged as reconciled. No missing point
 is converted to a zero or used as an implicit progress marker.
+
+A foreign-epoch row can be retained as withheld, but this primitive cannot
+retire it. Snapshotter integration must define a separately reviewed way to
+handle that boundary before activation; retaining it indefinitely would also
+retain the repair obligation and prevent baseline advancement.
 
 PostgreSQL correction transactions cap statement timeouts at 20 seconds and
 lock waits at one second, preserving any shorter existing limits. The settings

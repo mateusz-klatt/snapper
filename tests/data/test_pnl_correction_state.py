@@ -223,7 +223,7 @@ def test_withheld_evidence_cannot_be_outside_the_chunk_or_also_mutated(has_edit:
     edits = (PnlCorrectionEdit(samples._M1, None, samples._complete_sample()),) if has_edit else ()
     chunk = _chunk(samples._M1, edits, None)
     minute = samples._M1 if has_edit else samples._M2
-    with pytest.raises(ValueError, match="have no edit"):
+    with pytest.raises(ValueError, match="permit only observed-row retractions"):
         advance_correction_frontier(_frontier(), replace(chunk, withheld_minutes=(minute,)))
 
 

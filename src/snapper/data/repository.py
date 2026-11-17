@@ -19064,6 +19064,7 @@ class SQLAlchemyRepository(Repository):
             if observed != chunk.evidence:
                 raise PortfolioPnlCorrectionConflictError("P&L correction chunk evidence changed")
             self._validate_pnl_correction_preservation(chunk)
+            self._validate_pnl_correction_repair_coverage(current, chunk)
             expected_rows = {version.row["point_time"]: version for version in observed.versions}
             for edit in chunk.edits:
                 if edit.expected_row != expected_rows.get(edit.point_time):
@@ -19147,6 +19148,60 @@ class SQLAlchemyRepository(Repository):
                 raise ValueError(
                     "P&L correction must repair or explicitly retain old-version evidence"
                 )
+
+    @classmethod
+    def _validate_pnl_correction_repair_coverage(
+        cls, current: PnlCorrectionFrontier, chunk: PnlCorrectionChunk
+    ) -> None:
+        """Refuse an acknowledged outstanding repair whose non-withheld result is absent.
+
+        The caller still certifies semantic recomputation of unchanged rows.
+        This check proves only occupancy, using already fenced physical evidence
+        and validated edits; it performs no additional database reads.
+
+        Args:
+            current: Actual checkpoint loaded under the sample writer fence.
+            chunk: Plan whose complete original evidence has been revalidated.
+
+        Raises:
+            ValueError: If the acknowledged suffix contains an unclassified hole.
+        """
+        minute = current.repair_from
+        if not chunk.reconciles_repair or minute is None:
+            return
+        if not chunk.evidence.start <= minute <= chunk.end:
+            return
+        covered = cls._pnl_correction_result_minutes(chunk)
+        withheld = set(chunk.withheld_minutes)
+        while minute <= chunk.end:
+            if minute not in covered and minute not in withheld:
+                raise ValueError(
+                    "P&L repair acknowledgement requires a current sample or explicit withheld minute"
+                )
+            minute += timedelta(minutes=1)
+
+    @staticmethod
+    def _pnl_correction_result_minutes(chunk: PnlCorrectionChunk) -> set[datetime]:
+        """Derive current-version post-edit occupancy from a bounded physical witness.
+
+        Args:
+            chunk: Revalidated original versions and canonical validated edits.
+
+        Returns:
+            Minutes which retain or produce a sample of this exact epoch/version.
+        """
+        key = chunk.evidence.key
+        minutes = {
+            version.row["point_time"]
+            for version in chunk.evidence.versions
+            if version.row["epoch_public_id"] == key.epoch_public_id
+            and version.row["calc_version"] == key.calc_version
+        }
+        for edit in chunk.edits:
+            minutes.discard(edit.point_time)
+            if edit.replacement is not None:
+                minutes.add(edit.point_time)
+        return minutes
 
     async def _read_pnl_correction_peak(
         self, s: AsyncSession, scope: PortfolioPnlSampleScope, before: datetime

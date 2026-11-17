@@ -13,6 +13,8 @@ from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy import text
 
+from snapper.application.portfolio.pnl_snapshot_planner import MinuteInputs
+from snapper.application.portfolio.pnl_snapshot_planner import plan_chunk_samples
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import PortfolioPnlCorrectionFrontier
 from snapper.data.models import PortfolioPnlPoint
@@ -26,6 +28,7 @@ from snapper.data.repository import PortfolioPnlSampleScopeError
 from snapper.data.repository import PortfolioPnlSampleSupersedeError
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PortfolioPnlSampleRow
+from tests.application.portfolio import test_pnl_snapshot_planner as planner
 from tests.data import test_pnl_timeline_sample_repository as samples
 
 
@@ -289,12 +292,264 @@ async def test_withheld_zero_edit_completion_keeps_baseline_and_pending_repair(
     retry = await repository.invalidate_portfolio_pnl_correction(
         samples._scope(), replace(request, start=samples._M2), still_pending
     )
-    reconciled = replace(await _plan(repository, retry, samples._M3), reconciles_repair=True)
+    rows = (samples._complete_sample(samples._M2), samples._complete_sample(samples._M3))
+    reconciled = replace(await _plan(repository, retry, samples._M3, rows), reconciles_repair=True)
     done = await repository.commit_portfolio_pnl_correction_chunk(
         samples._scope(), retry, reconciled
     )
     assert done.repair_from is None
     assert done.baseline_watermarks == {"kraken": 6}
+
+
+@pytest.mark.parametrize("has_insert", [False, True])
+async def test_acknowledged_repair_with_missing_result_refuses_all_progress(
+    repository: SQLAlchemyRepository, has_insert: bool
+) -> None:
+    """A repair certificate cannot consume its baseline while a non-withheld minute is absent.
+
+    Args:
+        repository: Isolated real sample/control repository.
+        has_insert: Whether an earlier minute has a valid proposed financial insert.
+    """
+    initial = await _start(repository)
+    withheld = replace(
+        await _plan(repository, initial, samples._M3), withheld_minutes=(samples._M2,)
+    )
+    scanned = await repository.commit_portfolio_pnl_correction_chunk(
+        samples._scope(), initial, withheld
+    )
+    request = PnlCorrectionRequest(samples._M2, samples._M3, samples._M5, {}, {"kraken": 6}, None)
+    retry = await repository.invalidate_portfolio_pnl_correction(samples._scope(), request, scanned)
+    rows = (samples._complete_sample(samples._M2),) if has_insert else ()
+    invalid = replace(await _plan(repository, retry, samples._M3, rows), reconciles_repair=True)
+    async with repository.session() as session:
+        before = (await session.execute(select(PortfolioPnlPoint.__table__))).all()
+    with pytest.raises(ValueError, match="repair acknowledgement"):
+        await repository.commit_portfolio_pnl_correction_chunk(samples._scope(), retry, invalid)
+    async with repository.session() as session:
+        assert (await session.execute(select(PortfolioPnlPoint.__table__))).all() == before
+    assert await repository.get_portfolio_pnl_correction_frontier(samples._scope()) == retry
+
+
+async def test_real_planner_unchanged_rows_allow_zero_edit_repair_acknowledgement(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A successful current planner output may certify unchanged rows without rewriting money.
+
+    Args:
+        repository: Isolated real sample/control repository.
+    """
+    inputs = tuple(
+        MinuteInputs(
+            planner._complete_point(minute),
+            {"kraken": planner._attempt(minute=minute)},
+            planner._crypto_evidence(),
+        )
+        for minute in (samples._M2, samples._M3)
+    )
+    planned = plan_chunk_samples(inputs, frozenset({"kraken"}), (), None)
+    assert len(planned.samples) == 2 and planned.withheld == ()
+    rows = tuple(
+        samples._mutate(
+            planner._to_row(row),
+            wallet_public_id=samples._WALLET,
+            epoch_public_id=samples._EPOCH,
+            timestamp=samples._M5,
+        )
+        for row in planned.samples
+    )
+    await repository.record_portfolio_pnl_samples(rows, samples._scope())
+    initial = await _start(repository)
+    withheld = replace(
+        await _plan(repository, initial, samples._M3),
+        prior_peak=planned.peak,
+        withheld_minutes=(samples._M2,),
+    )
+    scanned = await repository.commit_portfolio_pnl_correction_chunk(
+        samples._scope(), initial, withheld
+    )
+    request = PnlCorrectionRequest(samples._M2, samples._M3, samples._M5, {}, {"kraken": 6}, None)
+    retry = await repository.invalidate_portfolio_pnl_correction(samples._scope(), request, scanned)
+    acknowledged = replace(
+        await _plan(repository, retry, samples._M3),
+        prior_peak=planned.peak,
+        reconciles_repair=True,
+    )
+    async with repository.session() as session:
+        before = (await session.execute(select(PortfolioPnlPoint.__table__))).all()
+    done = await repository.commit_portfolio_pnl_correction_chunk(
+        samples._scope(), retry, acknowledged
+    )
+    assert done.repair_from is None and done.baseline_watermarks == {"kraken": 6}
+    async with repository.session() as session:
+        assert (await session.execute(select(PortfolioPnlPoint.__table__))).all() == before
+
+
+async def test_real_planner_withheld_retraction_keeps_repair_and_baseline(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A newly untrusted minute closes its old row and retains its explicit repair obligation.
+
+    Args:
+        repository: Isolated real sample/control repository.
+    """
+    row = samples._complete_sample(samples._M2)
+    await repository.record_portfolio_pnl_samples([row], samples._scope())
+    inputs = tuple(
+        MinuteInputs(planner._untrusted_point(minute), {}, planner._crypto_evidence())
+        for minute in (samples._M2, samples._M3)
+    )
+    planned = plan_chunk_samples(inputs, frozenset({"kraken"}), (), None)
+    assert planned.samples == () and planned.withheld[0].reason_codes == ("fill_evidence_gap",)
+    initial = await _start(repository)
+    first = replace(await _plan(repository, initial, samples._M3), withheld_minutes=(samples._M2,))
+    scanned = await repository.commit_portfolio_pnl_correction_chunk(
+        samples._scope(), initial, first
+    )
+    request = PnlCorrectionRequest(samples._M2, samples._M3, samples._M5, {}, {"kraken": 6}, None)
+    retry = await repository.invalidate_portfolio_pnl_correction(samples._scope(), request, scanned)
+    plan = await _plan(repository, retry, samples._M3)
+    retraction = PnlCorrectionEdit(samples._M2, plan.evidence.versions[0], None)
+    withheld = replace(
+        plan,
+        edits=(retraction,),
+        prior_peak=planned.peak,
+        withheld_minutes=tuple(minute.point_time for minute in planned.withheld),
+        reconciles_repair=True,
+    )
+    done = await repository.commit_portfolio_pnl_correction_chunk(samples._scope(), retry, withheld)
+    assert done.repair_from == samples._M2 and done.baseline_watermarks == {"kraken": 1}
+    assert (
+        await repository.get_portfolio_pnl_samples(samples._query(), samples._M1, samples._M3) == []
+    )
+    async with repository.session() as session:
+        stored = (
+            await session.execute(
+                select(PortfolioPnlPoint).where(PortfolioPnlPoint.point_kind == "sample")
+            )
+        ).scalar_one()
+        assert repository._portfolio_pnl_sample_to_row(stored) == row
+        assert stored.known_to == samples._M5
+
+
+@pytest.mark.parametrize("had_row", [False, True])
+async def test_withheld_minute_still_refuses_inserts_and_replacements(
+    repository: SQLAlchemyRepository, had_row: bool
+) -> None:
+    """The retraction exception cannot stamp a fresh value onto a withheld minute.
+
+    Args:
+        repository: Isolated real sample/control repository.
+        had_row: Whether the invalid edit replaces an existing row instead of inserting.
+    """
+    row = samples._complete_sample(samples._M2)
+    if had_row:
+        await repository.record_portfolio_pnl_samples([row], samples._scope())
+    initial = await _start(repository)
+    invalid = replace(
+        await _plan(repository, initial, samples._M3, (row,)),
+        withheld_minutes=(samples._M2,),
+    )
+    async with repository.session() as session:
+        before = (await session.execute(select(PortfolioPnlPoint.__table__))).all()
+    with pytest.raises(ValueError, match="only observed-row retractions"):
+        await repository.commit_portfolio_pnl_correction_chunk(samples._scope(), initial, invalid)
+    async with repository.session() as session:
+        assert (await session.execute(select(PortfolioPnlPoint.__table__))).all() == before
+    assert await repository.get_portfolio_pnl_correction_frontier(samples._scope()) == initial
+
+
+async def test_acknowledgement_without_an_outstanding_repair_preserves_sparse_progress(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Acknowledgement does not impose an unrelated occupancy rule on initial sparse chunks.
+
+    Args:
+        repository: Isolated real sample/control repository.
+    """
+    initial = await _start(repository)
+    plan = replace(await _plan(repository, initial, samples._M3), reconciles_repair=True)
+    done = await repository.commit_portfolio_pnl_correction_chunk(samples._scope(), initial, plan)
+    assert done.next_minute is None and done.repair_from is None
+    assert done.baseline_watermarks == {"kraken": 5}
+
+
+@pytest.mark.parametrize("repair_after_chunk", [False, True])
+async def test_acknowledgement_outside_the_outstanding_boundary_cannot_clear_it(
+    repository: SQLAlchemyRepository, repair_after_chunk: bool
+) -> None:
+    """An acknowledgement is scoped to its admitted outstanding repair, not arbitrary progress.
+
+    Args:
+        repository: Isolated real sample/control repository.
+        repair_after_chunk: Whether the repair is ahead of this chunk rather than behind it.
+    """
+    initial = await _start(repository)
+    end = samples._M3 if repair_after_chunk else samples._M1
+    first = replace(await _plan(repository, initial, end), withheld_minutes=(end,))
+    pending = await repository.commit_portfolio_pnl_correction_chunk(
+        samples._scope(), initial, first
+    )
+    if repair_after_chunk:
+        request = PnlCorrectionRequest(
+            samples._M1, samples._M3, samples._M5, {}, {"kraken": 6}, None
+        )
+        pending = await repository.invalidate_portfolio_pnl_correction(
+            samples._scope(), request, pending
+        )
+    stop = samples._M1 if repair_after_chunk else samples._M3
+    plan = replace(await _plan(repository, pending, stop), reconciles_repair=True)
+    done = await repository.commit_portfolio_pnl_correction_chunk(samples._scope(), pending, plan)
+    assert done.repair_from == end and done.baseline_watermarks == {"kraken": 1}
+
+
+@pytest.mark.parametrize("foreign_epoch", [False, True])
+async def test_acknowledgement_with_foreign_rows_keeps_the_explicit_withheld_obligation(
+    repository: SQLAlchemyRepository, foreign_epoch: bool
+) -> None:
+    """Only this key's post-edit rows cover repair; foreign evidence remains retained for repair.
+
+    Args:
+        repository: Isolated real sample/control repository.
+        foreign_epoch: Whether the observed row belongs to another epoch or calculation version.
+    """
+    await repository.record_portfolio_pnl_samples(
+        [samples._complete_sample(samples._M2)], samples._scope()
+    )
+    async with repository.session() as session:
+        old = (
+            await session.execute(
+                select(PortfolioPnlPoint).where(PortfolioPnlPoint.point_kind == "sample")
+            )
+        ).scalar_one()
+        if foreign_epoch:
+            old.epoch_public_id = samples._OTHER_EPOCH
+        else:
+            old.calc_version = "legacy"
+        await session.commit()
+    initial = await _start(repository)
+    first = replace(
+        await _plan(repository, initial, samples._M3),
+        prior_peak=None,
+        withheld_minutes=(samples._M2,),
+    )
+    scanned = await repository.commit_portfolio_pnl_correction_chunk(
+        samples._scope(), initial, first
+    )
+    request = PnlCorrectionRequest(samples._M2, samples._M3, samples._M5, {}, {"kraken": 6}, None)
+    retry = await repository.invalidate_portfolio_pnl_correction(samples._scope(), request, scanned)
+    plan = replace(
+        await _plan(repository, retry, samples._M3, (samples._complete_sample(samples._M3),)),
+        withheld_minutes=(samples._M2,),
+        reconciles_repair=True,
+    )
+    before = plan.evidence.versions[0]
+    done = await repository.commit_portfolio_pnl_correction_chunk(samples._scope(), retry, plan)
+    after = await repository.get_portfolio_pnl_correction_evidence(
+        samples._scope(), samples._M2, samples._M3
+    )
+    assert after.versions[0] == before
+    assert done.repair_from == samples._M2 and done.baseline_watermarks == {"kraken": 1}
 
 
 async def test_earlier_peak_change_invalidates_plan_without_current_chunk_changes(

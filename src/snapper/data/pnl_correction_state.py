@@ -39,9 +39,9 @@ class PnlCorrectionKey:
 class PnlCorrectionFrontier:
     """Durable progress and causal state for one correction generation.
 
-    ``baseline_watermarks`` remains unchanged until the generation completes.
+    ``baseline_watermarks`` remains unchanged until the generation is reconciled.
     ``pending_watermarks`` is the evidence prefix being reconciled. A null next
-    minute means completed, never an instruction to infer progress from samples.
+    minute means scan completion; ``repair_from`` retains any unresolved work.
     ``prior_peak`` is the causal peak strictly before the next admitted minute.
     """
 
@@ -121,6 +121,9 @@ class PnlCorrectionChunk:
     legitimate transaction and must still CAS-advance the explicit checkpoint.
     Repair acknowledgement is explicit; scan completion alone cannot consume
     an outstanding withheld obligation from an earlier chunk or generation.
+    The caller certifies semantic recomputation. The repository additionally
+    verifies post-edit occupancy for the acknowledged outstanding repair suffix;
+    presence alone does not prove that a retained row was correctly recomputed.
     """
 
     end: datetime
@@ -286,10 +289,7 @@ def advance_correction_frontier(
             raise ValueError("P&L correction edit lies outside the admitted chunk")
         if edit.expected_row is None and edit.replacement is None:
             raise ValueError("P&L correction absence is not a retraction")
-    for minute in chunk.withheld_minutes:
-        validate_correction_minute(minute)
-        if not start <= minute <= chunk.end or minute in minutes:
-            raise ValueError("Withheld P&L minutes must be inside the chunk and have no edit")
+    _validate_correction_withheld(chunk, start)
     repair_from = _remaining_correction_repair(current, chunk, start)
     complete = chunk.end == current.tip
     return replace(
@@ -305,6 +305,28 @@ def advance_correction_frontier(
         prior_peak=chunk.prior_peak,
         repair_from=repair_from,
     )
+
+
+def _validate_correction_withheld(chunk: PnlCorrectionChunk, start: datetime) -> None:
+    """Allow withheld minutes to close observed rows while retaining their repair obligation.
+
+    Args:
+        chunk: The admitted plan, including its explicit withheld classification.
+        start: The actual checkpoint's next minute.
+
+    Raises:
+        ValueError: For an out-of-window minute or a simultaneous insert/replacement.
+    """
+    edits = {edit.point_time: edit for edit in chunk.edits}
+    for minute in chunk.withheld_minutes:
+        validate_correction_minute(minute)
+        edit = edits.get(minute)
+        if not start <= minute <= chunk.end or (
+            edit is not None and (edit.expected_row is None or edit.replacement is not None)
+        ):
+            raise ValueError(
+                "Withheld P&L minutes must be inside the chunk and permit only observed-row retractions"
+            )
 
 
 def _remaining_correction_repair(
