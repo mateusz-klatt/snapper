@@ -26,6 +26,7 @@ from sqlalchemy import Select
 from sqlalchemy import and_
 from sqlalchemy import func
 from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.api.schemas.ai_delegates import DelegateCapsBody
@@ -33,6 +34,8 @@ from snapper.api.schemas.ai_delegates import DelegateCapsUpdateBody
 from snapper.api.schemas.ai_delegates import DelegateCreateBody
 from snapper.api.schemas.ai_delegates import DelegateCreatedPayload
 from snapper.api.schemas.ai_delegates import DelegateRead
+from snapper.application.ai_delegates.oauth_authority import lock_oauth_operator
+from snapper.application.ai_delegates.oauth_authority import lock_oauth_owner
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.domain.roles import AI_REVIEW_PRINCIPAL_ROLES
@@ -52,6 +55,9 @@ from snapper.data.repository import Repository
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
+from snapper.mcp.oauth.scopes import permissions_for_oauth_scopes
+from snapper.mcp.oauth.scopes import validate_initial_oauth_scopes
+from snapper.mcp.oauth.transaction import OAuthTransaction
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
@@ -70,6 +76,10 @@ credentials that later need individual revocation on compromise.
 Deactivated delegates drop out of the count (``is_active=True``
 only) so rotations stay unbounded.
 """
+
+
+class OAuthGrantReplacementRequiredError(ValueError):
+    """Require explicit consent to replace a different resource or scope set."""
 
 
 class DelegateNotFoundError(Exception):
@@ -130,6 +140,7 @@ class OAuthDelegateRequest:
     scopes: tuple[str, ...]
     operator_public_id: str | None = None
     label: str = "chatgpt"
+    replace_existing_grant: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -367,76 +378,24 @@ class DelegateService:
         )
 
     async def get_or_create_oauth_delegate(
-        self,
-        owner: AuthPrincipal,
-        request: OAuthDelegateRequest,
+        self, owner: AuthPrincipal, request: OAuthDelegateRequest
     ) -> OAuthDelegateIdentity:
-        """Return one idempotent OAuth delegate and active grant binding.
+        """Resolve one live binding with one outer commit and no legacy PAT.
 
         Args:
-            owner: Authenticated resource owner authorizing the connector.
-            request: Client, resource, scope, operator, and first-use label.
+            owner: Authenticated owner whose token and live authority must both permit delegation.
+            request: Exact client/resource/scope binding and explicit replacement policy.
 
         Returns:
-            Existing or newly created OAuth delegate identity and grant.
-
-        Raises:
-            ValueError: If client, resource, or scope is empty.
-            InvalidOwnerPrincipalError: If the owner lacks a stable identity.
-            DelegateOperatorBindingError: If the requested operator is invalid.
-            DelegateProliferationError: If creating a new identity exceeds cap.
+            The dedicated delegate and grant after the outer commit succeeds.
         """
-        self._guard_owner(owner.user_public_id)
-        if not request.client_id or not request.resource:
-            raise ValueError("OAuth delegate client and resource must be non-empty")
-        if not request.scopes or any(not scope.strip() for scope in request.scopes):
-            raise ValueError("OAuth delegate requires non-empty scopes")
-        body = DelegateCreateBody(
-            label=request.label,
-            caps=DelegateCapsBody(),
-            operator_public_id=request.operator_public_id,
-        )
-        bound_operator_public_id = self._resolve_operator_binding(owner, body)
-        async with (
-            self._get_owner_lock(owner.user_public_id),
-            self.repository.session() as session,
-        ):
-            existing = await self._load_oauth_delegate(
-                session,
-                owner_public_id=owner.user_public_id,
-                operator_public_id=bound_operator_public_id,
-                client_id=request.client_id,
-            )
-            if existing is not None:
-                return existing
-            await self._guard_proliferation(session, owner.user_public_id)
-            now = datetime.now(UTC)
-            identity = await self._create_delegate_identity(
-                session,
-                _DelegateIdentityCreateRequest(
-                    owner=owner,
-                    body=body,
-                    bound_operator_public_id=bound_operator_public_id,
-                    now=now,
-                ),
-            )
-            grant = OAuthGrant(
-                public_id=str(uuid.uuid7()),
-                owner_user_public_id=owner.user_public_id,
-                delegate_user_public_id=identity.user_row.public_id,
-                client_id=request.client_id,
-                resource=request.resource,
-                scopes=list(dict.fromkeys(request.scopes)),
-                operator_public_id=bound_operator_public_id,
-                created_at=now,
-            )
-            session.add(grant)
+        self._validate_oauth_request(request)
+        async with self.repository.session() as session:
+            await self._begin_oauth_write(session)
+            await OAuthTransaction(session).client(request.client_id, active_only=False)
+            identity = await self.resolve_oauth_delegate_in_tx(session, owner, request)
             await session.commit()
-            return OAuthDelegateIdentity(
-                delegate=identity.delegate,
-                principal=identity.principal,
-                grant_public_id=grant.public_id,
-            )
+            return identity
 
     async def _create_delegate_identity(
         self,
@@ -514,54 +473,37 @@ class DelegateService:
         )
 
     async def get_oauth_delegate_by_grant(
-        self,
-        grant_public_id: str,
-        client_id: str,
+        self, grant_public_id: str, client_id: str
     ) -> OAuthDelegateIdentity | None:
-        """Load an active OAuth grant and its active delegate principal.
+        """Project live authority and atomically retire all families of a dead binding.
 
         Args:
-            grant_public_id: Stable grant identity from the access JWT.
-            client_id: Exact client identity from the access JWT.
+            grant_public_id: Exact OAuth grant identity.
+            client_id: Exact registered client identity.
 
         Returns:
-            Active delegate and grant projection, otherwise ``None``.
+            The currently authorized delegate, or None for an invalid binding.
         """
         async with self.repository.session() as session:
-            grant = (
-                await session.execute(
-                    select(OAuthGrant).where(
-                        OAuthGrant.public_id == grant_public_id,
-                        OAuthGrant.client_id == client_id,
-                        OAuthGrant.revoked_at.is_(None),
-                    )
-                )
-            ).scalar_one_or_none()
+            await self._begin_oauth_write(session)
+            tx = OAuthTransaction(session)
+            await tx.client(client_id, active_only=False)
+            grant = await tx.grant(grant_public_id, client_id, lock=False)
             if grant is None:
                 return None
-            identity = await self._load_oauth_delegate_rows(
-                session,
-                grant.delegate_user_public_id,
-                grant.operator_public_id,
-            )
-            if identity is None:
+            try:
+                identity = await self.project_oauth_grant_in_tx(session, grant)
+            except PermissionError:
                 return None
-            return OAuthDelegateIdentity(
-                delegate=identity.delegate,
-                principal=identity.principal,
-                grant_public_id=grant.public_id,
-            )
+            await session.commit()
+            return identity
 
+    @staticmethod
     async def _load_oauth_delegate(
-        self,
-        session: AsyncSession,
-        *,
-        owner_public_id: str,
-        operator_public_id: str,
-        client_id: str,
-    ) -> OAuthDelegateIdentity | None:
-        """Load an active OAuth binding or retire one with a dead delegate."""
-        grant = (
+        session: AsyncSession, *, owner_public_id: str, operator_public_id: str, client_id: str
+    ) -> OAuthGrant | None:
+        """Inspect the active binding only after the existing owner row is locked."""
+        return (
             await session.execute(
                 select(OAuthGrant)
                 .where(
@@ -571,30 +513,16 @@ class DelegateService:
                     OAuthGrant.revoked_at.is_(None),
                 )
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
-        if grant is None:
-            return None
-        identity = await self._load_oauth_delegate_rows(
-            session,
-            grant.delegate_user_public_id,
-            operator_public_id,
-        )
-        if identity is None:
-            grant.revoked_at = datetime.now(UTC)
-            await session.flush()
-            return None
-        return OAuthDelegateIdentity(
-            delegate=identity.delegate,
-            principal=identity.principal,
-            grant_public_id=grant.public_id,
-        )
 
     async def _load_oauth_delegate_rows(
         self,
         session: AsyncSession,
         user_public_id: str,
         operator_public_id: str,
+        owner_public_id: str,
     ) -> _DelegateIdentityBundle | None:
         """Project one active delegate's identity rows for OAuth reuse."""
         now = datetime.now(UTC)
@@ -624,15 +552,21 @@ class DelegateService:
                 )
                 .where(
                     User.public_id == user_public_id,
+                    User.role == UserRole.AI_DELEGATE.value,
+                    User.created_by_user_public_id == owner_public_id,
                     User.is_active,
                     user_ts,
                     user_known_to,
                 )
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).first()
         if row is None:
             return None
         user_row, caps_row, membership_row = row
+        if min(user_row.known_to, caps_row.known_to, membership_row.known_to) <= datetime.now(UTC):
+            raise PermissionError("OAuth delegate authority changed during its lock wait")
         principal = AuthPrincipal(
             username=user_row.username,
             role=UserRole.AI_DELEGATE,
@@ -1230,6 +1164,149 @@ class DelegateService:
         """
         random_secret = secrets.token_urlsafe(32).encode("utf-8")
         return bcrypt.hashpw(random_secret, bcrypt.gensalt()).decode("utf-8")
+
+    @staticmethod
+    async def _begin_oauth_write(session: AsyncSession) -> None:
+        """Select isolation before reads; helpers never own transaction boundaries."""
+        dialect = session.get_bind().dialect.name
+        statement = (
+            "BEGIN IMMEDIATE"
+            if dialect == "sqlite"
+            else "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+        )
+        await session.execute(text(statement))
+
+    @staticmethod
+    def _validate_oauth_request(request: OAuthDelegateRequest) -> None:
+        """Validate identity and the initial read-only ceiling before inserting rows."""
+        if not request.client_id.strip() or not request.resource.strip():
+            raise ValueError("OAuth delegate client and resource must be non-empty")
+        validate_initial_oauth_scopes(request.scopes)
+
+    async def resolve_oauth_delegate_in_tx(
+        self, session: AsyncSession, owner: AuthPrincipal, request: OAuthDelegateRequest
+    ) -> OAuthDelegateIdentity:
+        """Resolve authority and binding without a nested session, commit, or PAT.
+
+        Args:
+            session: Caller-owned transaction with isolation selected before decision reads.
+            owner: Authenticated owner whose token and live authority must both permit delegation.
+            request: Exact client/resource/scope binding and explicit replacement policy.
+
+        Returns:
+            The exact live or newly created binding, pending the caller commit.
+        """
+        self._guard_owner(owner.user_public_id)
+        self._validate_oauth_request(request)
+        current = await lock_oauth_owner(
+            session, owner, permissions_for_oauth_scopes(request.scopes)
+        )
+        operator = await lock_oauth_operator(session, current, request.operator_public_id)
+        grant = await self._load_oauth_delegate(
+            session,
+            owner_public_id=current.user_public_id,
+            operator_public_id=operator,
+            client_id=request.client_id,
+        )
+        identity = await self._reuse_oauth_binding(session, grant, request)
+        if identity is None:
+            await self._guard_proliferation(session, current.user_public_id)
+            identity = await self._create_delegate_identity(
+                session,
+                _DelegateIdentityCreateRequest(
+                    owner=current,
+                    body=DelegateCreateBody(
+                        label=request.label, caps=DelegateCapsBody(), operator_public_id=operator
+                    ),
+                    bound_operator_public_id=operator,
+                    now=datetime.now(UTC),
+                ),
+            )
+        elif grant is not None and grant.revoked_at is None:
+            return OAuthDelegateIdentity(identity.delegate, identity.principal, grant.public_id)
+        new_grant = OAuthGrant(
+            public_id=str(uuid.uuid7()),
+            owner_user_public_id=current.user_public_id,
+            delegate_user_public_id=identity.user_row.public_id,
+            client_id=request.client_id,
+            resource=request.resource,
+            scopes=list(dict.fromkeys(request.scopes)),
+            operator_public_id=operator,
+            created_at=datetime.now(UTC),
+        )
+        session.add(new_grant)
+        await session.flush()
+        return OAuthDelegateIdentity(identity.delegate, identity.principal, new_grant.public_id)
+
+    async def _reuse_oauth_binding(
+        self, session: AsyncSession, grant: OAuthGrant | None, request: OAuthDelegateRequest
+    ) -> _DelegateIdentityBundle | None:
+        """Reuse exact live bindings or explicitly retire the old grant and all families."""
+        if grant is None:
+            return None
+        exact = grant.resource == request.resource and set(grant.scopes) == set(request.scopes)
+        if not exact and not request.replace_existing_grant:
+            raise OAuthGrantReplacementRequiredError("OAuth binding requires explicit replacement")
+        identity = await self._load_oauth_delegate_rows(
+            session,
+            grant.delegate_user_public_id,
+            grant.operator_public_id,
+            grant.owner_user_public_id,
+        )
+        if identity is None or not exact:
+            await OAuthTransaction(session).revoke_grant(grant.public_id, datetime.now(UTC))
+            await session.flush()
+        return identity
+
+    async def project_oauth_grant_in_tx(
+        self, session: AsyncSession, grant: OAuthGrant
+    ) -> OAuthDelegateIdentity | None:
+        """Check current owner, operator, delegate role and creator in the caller's transaction.
+
+        Args:
+            session: Caller-owned transaction with isolation selected before decision reads.
+            grant: Persisted grant whose complete current authority linkage must be revalidated.
+
+        Returns:
+            The live delegate, or None after retiring a dead delegate binding.
+        """
+        owner_row = (
+            await session.execute(
+                select(User).where(
+                    User.public_id == grant.owner_user_public_id,
+                    *where_active_now(User),
+                )
+            )
+        ).scalar_one_or_none()
+        if owner_row is None:
+            raise PermissionError("OAuth grant owner is no longer current")
+        try:
+            owner_role = UserRole(owner_row.role)
+        except ValueError as error:
+            raise PermissionError("OAuth owner role is not recognized") from error
+        owner = AuthPrincipal(
+            username=owner_row.username,
+            role=owner_role,
+            user_public_id=owner_row.public_id,
+            is_active=owner_row.is_active,
+            operator_public_ids=[grant.operator_public_id],
+            primary_operator_public_id=grant.operator_public_id,
+        )
+        current = await lock_oauth_owner(session, owner, permissions_for_oauth_scopes(grant.scopes))
+        await lock_oauth_operator(session, current, grant.operator_public_id)
+        locked = await OAuthTransaction(session).grant(grant.public_id, grant.client_id)
+        if locked is None:
+            return None
+        identity = await self._load_oauth_delegate_rows(
+            session,
+            locked.delegate_user_public_id,
+            locked.operator_public_id,
+            locked.owner_user_public_id,
+        )
+        if identity is None:
+            await OAuthTransaction(session).revoke_grant(locked.public_id, datetime.now(UTC))
+            return None
+        return OAuthDelegateIdentity(identity.delegate, identity.principal, locked.public_id)
 
 
 _uuid7 = uuid7

@@ -75,6 +75,24 @@ _ALLOWED_FINDINGS: tuple[AllowedFinding, ...] = (
     AllowedFinding(
         FindingSignature(
             "backend",
+            "src/snapper/application/ai_delegates/service.py",
+            "role-comparison",
+            "User.role == UserRole.AI_DELEGATE.value",
+        ),
+        "OAuth user-domain identity projection requires the dedicated delegate class; tool capabilities still use effective permissions",
+    ),
+    AllowedFinding(
+        FindingSignature(
+            "backend",
+            "src/snapper/mcp/oauth/service.py",
+            "role-comparison",
+            "claims.role == principal.role",
+        ),
+        "OAuth session-integrity check binds signed token purpose to the exact dedicated delegate identity, without granting a capability",
+    ),
+    AllowedFinding(
+        FindingSignature(
+            "backend",
             "src/snapper/auth/client_compatibility.py",
             "role-comparison",
             "role is UserRole.AUDITOR",

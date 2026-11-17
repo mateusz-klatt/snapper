@@ -11,6 +11,9 @@ SNAPPER_REVIEW_WRITE = "snapper.review.write"
 SNAPPER_RESEARCH_WRITE = "snapper.research.write"
 OFFLINE_ACCESS = "offline_access"
 
+INITIAL_OAUTH_RESOURCE_SCOPES = frozenset({SNAPPER_READ})
+INITIAL_OAUTH_SCOPE_CEILING = INITIAL_OAUTH_RESOURCE_SCOPES | {OFFLINE_ACCESS}
+
 VALID_OAUTH_SCOPES = frozenset(
     {
         SNAPPER_READ,
@@ -77,3 +80,31 @@ def permissions_for_oauth_scopes(scopes: Iterable[str]) -> frozenset[Permission]
             raise ValueError(f"Unknown MCP OAuth scope: {scope}")
         permissions.update(mapped)
     return frozenset(permissions)
+
+
+def validate_initial_oauth_scopes(
+    scopes: Iterable[str],
+    *,
+    allowed_client_scopes: Iterable[str] | None = None,
+) -> tuple[str, ...]:
+    """Validate the dormant service's initial read-only scope ceiling.
+
+    Args:
+        scopes: Exact case-sensitive requested scope names.
+        allowed_client_scopes: Optional registered client's additional ceiling.
+
+    Returns:
+        Valid scope names with first-occurrence order and no duplicates.
+
+    Raises:
+        ValueError: If a scope is deferred, resource-less, or client-disallowed.
+    """
+    normalized = tuple(dict.fromkeys(scopes))
+    requested = frozenset(normalized)
+    if not requested <= INITIAL_OAUTH_SCOPE_CEILING:
+        raise ValueError("MCP OAuth scopes exceed the initial read-only ceiling")
+    if not requested & INITIAL_OAUTH_RESOURCE_SCOPES:
+        raise ValueError("MCP OAuth requires a protected-resource scope")
+    if allowed_client_scopes is not None and not requested <= frozenset(allowed_client_scopes):
+        raise ValueError("MCP OAuth scopes exceed the registered client ceiling")
+    return normalized

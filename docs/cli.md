@@ -2149,6 +2149,13 @@ This command only creates the dormant client row. It does not enable
 `MCP_OAUTH_ENABLED`, publish OAuth metadata, or add authorize/token/revoke
 routes. Existing delegate PAT clients are unchanged.
 
+The internal OAuth service remains dormant. Its first-release scope ceiling is
+`snapper.read` with optional `offline_access`; authorization-code exchange and
+refresh rotation validate the exact resource, client and current delegate
+binding inside one transaction. Reuse of a consumed refresh token revokes its
+grant and every refresh family on that grant. This foundation does not make a
+browser connector available before the HTTP authorization and consent flow ships.
+
 ### `dev-mint-pat`
 
 Mints a long-lived AI delegate JWT into `data/dev-pat.json`
