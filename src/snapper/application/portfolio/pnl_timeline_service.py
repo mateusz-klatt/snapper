@@ -175,7 +175,7 @@ _timed_build_pnl_timeline = pnl_read_core(build_pnl_timeline)
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.15"
+PNL_TIMELINE_CALC_VERSION = "5A.16"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, mark resolution, or public point
@@ -185,6 +185,11 @@ to API reads; a point with exact evidence is bit-identical to ``5A.13``. ``5A.15
 lets any bucket absorb the last-place rounding of unrealized values on those reads,
 so a point withheld only by that rounding now publishes; published points are
 unchanged.
+
+``5A.16`` adds bounded faithful multi-bucket recovery after every historical
+flow-publication pass has failed. The request shares a deterministic candidate
+budget and reuses completed projections for unchanged exact inputs. Existing
+published flow bits remain unchanged; newly representable points may publish.
 """
 
 PNL_ANCHOR_CALC_VERSION: Final[str] = "5A.13"

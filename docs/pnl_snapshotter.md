@@ -113,3 +113,36 @@ lock waits at one second, preserving any shorter existing limits. The settings
 are transaction-local. SQLite uses the same `BEGIN IMMEDIATE` sample fence.
 These limits do not constitute a hard in-flight deadline for a complete chunk
 or authorize applying the migration or enabling the snapshotter in production.
+
+## Faithful flow recovery and the 5C.4 transition
+
+Timeline version `5A.16` and sample version `5C.4` share bounded faithful
+multi-bucket recovery after every historical total/absorber pass fails. The
+activation anchor stays at `5A.13`. Both publication dimensions must choose
+the same faithful total; exact and zero buckets never move. The request admits
+at most 64 ordered keys, 12 binary choices per dimension and 262144 actual
+candidate-key visits across all raw minutes and the three flow families.
+Completed positive and negative projections reuse only the last immutable
+exact-unit/key-order input per family. Budget interruption retains the legacy
+reason without treating an unfinished search as an impossible representation.
+
+The sample-version change makes stale-epoch recomputation revisit previously
+withheld interior minutes that have no row. It does not relabel existing
+history: only a recomputed replacement receives `5C.4`. A disabled snapshotter
+cannot heal old samples. The current overlay reads only the selected sample
+version, so old `5C.3` rows may be retained as evidence while remaining absent
+from a `5C.4` overlay.
+
+This source change does not establish bounded replay or safe runtime enablement.
+A release must account for temporarily missing overlay coverage, retained-row
+peak/drawdown semantics, repair visibility, foreign-epoch refusal and actual
+in-flight resource bounds. The continuation repository primitive remains
+dormant until its orchestration and serving contracts are independently proven.
+
+A standalone writer-disabled release may publish reconstructed live P&L while
+all sample writers remain off. With zero qualifying `5C.4` rows, persisted
+equity/cash/position/drawdown overlay fields stay null and `sampled` stays false;
+these values are unavailable, not reconstructed equity. Runtime preflight must
+verify both writer settings and the absence of qualifying rows. Enabling a
+writer or repairing history requires a separate bounded-replay admission; the
+version bump alone does not authorize either operation.

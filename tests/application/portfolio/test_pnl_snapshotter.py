@@ -1224,6 +1224,58 @@ class TestCatchupAndCorrections:
         assert all(row[0]["epoch_public_id"] == _EPOCH for row in repo.superseded)
 
     @pytest.mark.asyncio
+    async def test_5c3_recomputation_recovers_an_interior_missing_minute(self) -> None:
+        """Recompute versioned rows and an interior hole through ordinary writes.
+
+        Given: Two old 5C.3 rows separated by a formerly withheld minute,
+        When: The enabled writer actually recomputes the stale epoch,
+        Then: The hole is inserted and only recomputed replacements carry 5C.4.
+        """
+        stale_rows = [_persisted_sample(_minute(offset), status="complete") for offset in (1, 3)]
+        for row in stale_rows:
+            row["calc_version"] = "5C.3"
+        repo = _FakeRepo(
+            credentials=[_cred("kraken")],
+            anchor=_anchor(),
+            latest=stale_rows[-1],
+            persisted=stale_rows,
+        )
+        snap = _snapshotter(repo, _minute(5))
+
+        with _patched_series(seq=7):
+            await snap._tick_once()
+
+        assert [row[0]["point_time"] for row in repo.superseded] == [_minute(1), _minute(3)]
+        inserted = [row for batch in repo.recorded for row in batch]
+        assert _minute(2) in {row["point_time"] for row in inserted}
+        assert all(row["calc_version"] == "5C.4" for row in inserted)
+        assert all(row[0]["calc_version"] == "5C.4" for row in repo.superseded)
+        assert all(row["calc_version"] == "5C.3" for row in stale_rows)
+
+    @pytest.mark.asyncio
+    async def test_disabled_writer_does_not_heal_or_restamp_5c3_rows(self) -> None:
+        """Retain old evidence while the writer is disabled.
+
+        Given: A stale 5C.3 sample and a disabled snapshotter,
+        When: Its ordinary lifecycle starts and stops,
+        Then: No insertion, supersede or historical version rewrite occurs.
+        """
+        stale = _persisted_sample(_minute(1), status="complete")
+        stale["calc_version"] = "5C.3"
+        repo = _FakeRepo(
+            credentials=[_cred("kraken")], anchor=_anchor(), latest=stale, persisted=[stale]
+        )
+        snap = PortfolioPnlSnapshotter(repo=cast(Repository, repo), disabled=True)
+
+        await snap.start()
+        await snap.stop()
+
+        assert repo.recorded == []
+        assert repo.superseded == []
+        assert repo.retracted == []
+        assert stale["calc_version"] == "5C.3"
+
+    @pytest.mark.asyncio
     async def test_late_fill_recomputes_forward_under_cas(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

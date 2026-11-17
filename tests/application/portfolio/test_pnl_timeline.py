@@ -19,10 +19,12 @@ from datetime import timezone
 import pytest
 
 from snapper.api.schemas.pnl_timeline import PnlIncompletenessReasonData
+from snapper.application.portfolio import pnl_timeline
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.exact_sum import ExactSum
 from snapper.application.portfolio.exact_sum import exact_units_of
 from snapper.application.portfolio.exact_sum import faithful_roundings
+from snapper.application.portfolio.pnl_faithful_recovery import FaithfulRecoveryBudget
 from snapper.application.portfolio.pnl_timeline import AttributionKey
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import OpeningPool
@@ -441,6 +443,114 @@ class TestMachineReadableIncompletenessReasons:
 
 class TestAttribution:
     """Prove composite origin/strategy allocation and fail-closed lineage."""
+
+    def _faithful_fee_fixture(
+        self,
+    ) -> tuple[tuple[TimelineExecution, ...], dict[str, TimelineExecutionLineage]]:
+        """Return six exact fee deltas with manual, plan and system ownership."""
+        unit = math.ulp(20.0)
+        deltas = (32.0, 0.875 * unit, 120.0, 1.875 * unit, -132.0, 2.875 * unit)
+        executions = tuple(
+            _exec("I1", index, index - 7, "buy", 0.0, 100.0, fee=-delta)
+            for index, delta in enumerate(deltas, start=1)
+        )
+        owners = (
+            TimelineExecutionLineage("rest", None, None, "live", None),
+            TimelineExecutionLineage("strategy", "plan-1", "signal-1", "live", "dca"),
+            TimelineExecutionLineage("strategy", None, "signal-2", "live", "rebalance"),
+        )
+        return executions, {
+            execution.order_public_id: owners[index // 2]
+            for index, execution in enumerate(executions)
+        }
+
+    @pytest.mark.parametrize("granularity", ["1m", "5m", "1h", "1d"])
+    def test_faithful_multi_bucket_fee_split_publishes_every_endpoint(
+        self, granularity: str
+    ) -> None:
+        """Publish a coherent multi-bucket split through every downsampling endpoint.
+
+        Given: Three exact buckets whose faithful split moves two buckets,
+        When: The complete 24-hour timeline is built and downsampled,
+        Then: Every published point preserves the same total and ownership.
+
+        Each bucket has two faithful choices, but no single-bucket adjustment
+        reaches either faithful total. Both dimensions must choose the same
+        total, including endpoints selected by downsampling.
+        """
+        executions, lineage = self._faithful_fee_fixture()
+
+        result = build_pnl_timeline(
+            executions, (), {}, _window(0, 1440, granularity), lineage=lineage
+        )
+
+        assert result.points[-1].point_time == _m(1440)
+        for point in result.points:
+            assert point.valuation_status == "complete"
+            assert point.fee_pnl == 20.00000000000002
+            assert [(bucket.origin, bucket.strategy_name) for bucket in point.attribution] == [
+                ("manual", None),
+                ("plan", "dca"),
+                ("system", "rebalance"),
+            ]
+            assert {
+                (bucket.origin, bucket.strategy_name): bucket.fee_pnl
+                for bucket in point.attribution
+            } == {
+                ("manual", None): 32.00000000000001,
+                ("plan", "dca"): 120.00000000000001,
+                ("system", "rebalance"): -132.0,
+            }
+            _assert_exact_attribution_sums(point)
+
+    @pytest.mark.parametrize("granularity", ["1m", "5m"])
+    def test_partial_budget_retains_the_same_legacy_reason_at_idle_endpoints(
+        self, monkeypatch: pytest.MonkeyPatch, granularity: str
+    ) -> None:
+        """Retain historical refusal after an interrupted paired search.
+
+        Given: A Class W family with only 21 of its required 22 visits,
+        When: Idle raw points and a downsampled endpoint repeat the same state,
+        Then: Every refusal has the same legacy reason and no partial publication.
+        """
+
+        def budget_factory() -> FaithfulRecoveryBudget:
+            """Give this build an allowance below its first successful split."""
+            return FaithfulRecoveryBudget(21)
+
+        monkeypatch.setattr(pnl_timeline, "FaithfulRecoveryBudget", budget_factory)
+        executions, lineage = self._faithful_fee_fixture()
+        result = build_pnl_timeline(executions, (), {}, _window(0, 5, granularity), lineage=lineage)
+        assert result.points[-1].point_time == _m(5)
+        for point in result.points:
+            assert point.valuation_status == "incomplete"
+            assert _reason_rows(point) == [
+                ("attribution_sum_unrepresentable", "untrusted", "global", None)
+            ]
+
+    def test_legacy_success_remains_available_after_recovery_exhaustion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keep successful historical passes independent of recovery allowance.
+
+        Given: An initially unrecoverable family and a zero recovery allowance,
+        When: A later ordinary fee makes a historical absorber pass succeed,
+        Then: That later point publishes with its original faithful total.
+        """
+
+        def budget_factory() -> FaithfulRecoveryBudget:
+            """Disable only the new search, preserving historical publication."""
+            return FaithfulRecoveryBudget(0)
+
+        monkeypatch.setattr(pnl_timeline, "FaithfulRecoveryBudget", budget_factory)
+        executions, lineage = self._faithful_fee_fixture()
+        later = _exec("I1", 7, 1, "buy", 0.0, 100.0, fee=0.875 * math.ulp(20.0))
+        lineage[later.order_public_id] = TimelineExecutionLineage("rest", None, None, "live", None)
+        result = build_pnl_timeline((*executions, later), (), {}, _window(0, 1), lineage=lineage)
+        assert result.points[0].valuation_status == "incomplete"
+        assert result.points[1].valuation_status == "complete"
+        assert result.points[1].fee_pnl == 20.0 + 4 * math.ulp(20.0)
+        _assert_exact_attribution_sums(result.points[1])
 
     def _lineage(self) -> dict[str, TimelineExecutionLineage]:
         """Return manual, system, and non-manual plan lineage for one cycle."""
@@ -2851,6 +2961,57 @@ def _exact(units: int) -> ExactSum:
 
 class TestPublishedFlowFamily:
     """The publication rule: conservation, faithful totals, neighbour finals."""
+
+    def test_point_publication_never_recovers_a_conservation_failure(self) -> None:
+        """Preserve the corruption refusal before bounded recovery.
+
+        Given: A family whose exact aggregate has no matching instrument units,
+        When: Point publication receives otherwise finite cumulative values,
+        Then: It retains the reconciliation failure and spends no recovery visits.
+        """
+        empty = _empty_exact_cumulatives()
+        corrupt = _ExactCumulatives({}, {}, _exact(exact_units_of(1.0)))
+        cumulatives = _PointCumulatives(
+            realized_by_instrument={},
+            fee_by_instrument={},
+            accrual_by_instrument={},
+            realized_by_attribution={},
+            fee_by_attribution={},
+            accrual_by_attribution={},
+            realized_total=1.0,
+            fee_total=0.0,
+            accrual_total=0.0,
+            realized_exact=corrupt,
+            fee_exact=empty,
+            accrual_exact=empty,
+        )
+        result = pnl_timeline._published_point_flows(cumulatives, ["I1"], [("manual", None)])
+        assert result == "instrument_reconciliation_failed"
+        assert cumulatives.flow_recoveries[0].budget.remaining_key_visits == 262_144
+
+    @pytest.mark.parametrize("extra_zero_keys", [0, 63])
+    def test_recovery_snapshots_absent_zero_keys_only_inside_its_size_bound(
+        self, extra_zero_keys: int
+    ) -> None:
+        """Bound signature construction while preserving every admitted zero key.
+
+        Given: Empty exact maps and complete ordered publication keys,
+        When: Their total count is either admitted or greater than 64,
+        Then: Recovery preserves admitted zeros and refuses oversized work untouched.
+        """
+        keys: list[AttributionKey] = [("manual", None)]
+        keys.extend(("system", f"zero-{index}") for index in range(extra_zero_keys))
+        recovery = pnl_timeline._new_flow_recoveries()[0]
+        projection = pnl_timeline._recover_flow_family(
+            _empty_exact_cumulatives(), ["I1"], keys, recovery
+        )
+        if extra_zero_keys:
+            assert projection is None
+            assert recovery.budget.remaining_key_visits == 262_144
+        else:
+            assert projection is not None
+            assert projection.by_instrument == {"I1": 0.0}
+            assert projection.by_attribution == {("manual", None): 0.0}
 
     def test_a_conservation_violation_fails_with_suspicion(self) -> None:
         """A bucket the key list cannot see is corruption, not rounding."""

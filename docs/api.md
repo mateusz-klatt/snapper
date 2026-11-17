@@ -1671,9 +1671,24 @@ cumulatives include that conversion. A minute whose own close is non-positive,
 non-finite or conflicting stays `incomplete`, and no candle is ever written to
 represent a carried value. On these reads, a point whose unrealized buckets can
 only reconcile by moving one bucket by one unit in the last place publishes instead
-of being withheld. Responses report `calc_version` `5A.15`. Setting
+of being withheld. Responses report `calc_version` `5A.16`. Setting
 `PNL_CARRY_VALUATION_ENABLED=false` returns both routes to exact-minute valuation
 without a new image.
+
+**Flow publication.** After both historical total/absorber passes fail, the
+engine may recover a faithfully rounded realized, fee or accrual split by
+changing multiple inexact buckets. Both instrument and attribution breakdowns
+must sum exactly, in their existing key order, to the same faithful aggregate.
+Exact and zero buckets are fixed. Recovery admits at most 64 keys across both
+dimensions and 12 binary choices per dimension. For each faithful aggregate,
+at most 4096 tuples per dimension are considered. All raw minutes and all three
+families share at most 262144
+candidate-key visits per build. Completed results, including refusals, reuse
+only the last immutable exact-unit/key-order signature per family. A resource
+abort retains the historical incompleteness reason and is not cached as a
+mathematical impossibility. Existing successfully published flow bits remain
+unchanged. The version identifies the response contract; consumers requiring
+fresh validation must inspect a fresh response and its version.
 
 ### POST /api/execution-plans
 

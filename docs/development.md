@@ -979,8 +979,9 @@ retain their canonical restrictions. Bounded carry and conflicting rows cannot
 prove an exact event minute; conversions still require an exact close on the
 one elected plane.
 
-The `pnl-fiat-v3` election policy and `5C.3` sample calculation version identify
-this rule. Both requirement and decision digests distinguish the event subset
+The `pnl-fiat-v3` election policy introduced with sample calculation version
+`5C.3` identifies this rule; `5C.4` retains it and adds bounded faithful flow
+publication recovery. Both requirement and decision digests distinguish the event subset
 within the combined minute requirements, using the existing manifest digest
 column and identity indexes without a schema migration.
 
