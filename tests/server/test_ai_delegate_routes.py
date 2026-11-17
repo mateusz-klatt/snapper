@@ -76,7 +76,9 @@ async def repo() -> SQLAlchemyRepository:
     return r
 
 
-async def _seed_owner(repo: SQLAlchemyRepository, public_id: str, username: str) -> None:
+async def _seed_owner(
+    repo: SQLAlchemyRepository, public_id: str, username: str, *, with_membership: bool = False
+) -> None:
     """Insert the operator that will own the delegates under test."""
     seed_time = datetime(2026, 1, 1, tzinfo=UTC)
     async with repo.session() as s:
@@ -95,6 +97,18 @@ async def _seed_owner(repo: SQLAlchemyRepository, public_id: str, username: str)
                 created_at=seed_time,
             )
         )
+        if with_membership:
+            s.add(
+                UserOperatorMembership(
+                    user_public_id=public_id,
+                    operator_public_id="operator-1",
+                    is_primary=True,
+                    timestamp=seed_time,
+                    known_to=KNOWN_TO_MAX,
+                    session_id="seed",
+                    sequence_id=2,
+                )
+            )
         await s.commit()
 
 
@@ -273,7 +287,9 @@ class TestCreateDelegate:
         When the connector resolves that binding twice,
         Then both calls return one delegate and grant with no active-token row.
         """
-        await _seed_owner(repo, public_id="owner-oauth", username="oauth-owner")
+        await _seed_owner(
+            repo, public_id="owner-oauth", username="oauth-owner", with_membership=True
+        )
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
         request = OAuthDelegateRequest(
             client_id="chatgpt-client",
@@ -340,7 +356,9 @@ class TestCreateDelegate:
         When the same client reconnects under the same owner and operator,
         Then a new delegate and grant are created while the old grant is revoked.
         """
-        await _seed_owner(repo, public_id="owner-oauth-replace", username="oauth-replace")
+        await _seed_owner(
+            repo, public_id="owner-oauth-replace", username="oauth-replace", with_membership=True
+        )
         service = DelegateService(repository=repo, token_manager=_fresh_manager())
         owner = _make_owner_principal("owner-oauth-replace")
         request = OAuthDelegateRequest(
