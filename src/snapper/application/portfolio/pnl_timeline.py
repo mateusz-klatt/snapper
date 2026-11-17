@@ -158,6 +158,10 @@ from snapper.application.portfolio.exact_sum import ExactSum
 from snapper.application.portfolio.exact_sum import exact_units_of
 from snapper.application.portfolio.exact_sum import faithful_roundings
 from snapper.application.portfolio.exact_sum import project_units
+from snapper.application.portfolio.pnl_faithful_recovery import MAX_RECOVERY_KEYS
+from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowInput
+from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowRecovery
+from snapper.application.portfolio.pnl_faithful_recovery import FaithfulRecoveryBudget
 from snapper.core.numeric import is_positive_finite
 
 ValuationStatus = Literal["complete", "incomplete"]
@@ -1661,6 +1665,20 @@ def _combined_instrument_weights(
     return dict(combined)
 
 
+type _FlowRecovery = FaithfulFlowRecovery[str, AttributionKey]
+type _FlowRecoveries = tuple[_FlowRecovery, _FlowRecovery, _FlowRecovery]
+
+
+def _new_flow_recoveries() -> _FlowRecoveries:
+    """Give three families separate terminal entries and one request allowance."""
+    budget = FaithfulRecoveryBudget()
+    return (
+        FaithfulFlowRecovery[str, AttributionKey](budget),
+        FaithfulFlowRecovery[str, AttributionKey](budget),
+        FaithfulFlowRecovery[str, AttributionKey](budget),
+    )
+
+
 @dataclass(frozen=True)
 class _PointCumulatives:
     """Immutable cumulative flows supplied to one point valuation.
@@ -1684,6 +1702,7 @@ class _PointCumulatives:
     realized_exact: _ExactCumulatives
     fee_exact: _ExactCumulatives
     accrual_exact: _ExactCumulatives
+    flow_recoveries: _FlowRecoveries = field(default_factory=_new_flow_recoveries)
 
 
 @dataclass(frozen=True)
@@ -1853,6 +1872,37 @@ def _raw_point_flows(
     )
 
 
+def _ordered_exact_units[KeyT: Hashable](
+    accumulators: Mapping[KeyT, ExactSum], keys: Sequence[KeyT]
+) -> tuple[tuple[KeyT, int], ...]:
+    """Snapshot every ordered publication key, including absent exact-zero keys."""
+    return tuple(
+        (key, accumulators[key].exact_units() if key in accumulators else 0) for key in keys
+    )
+
+
+def _recover_flow_family(
+    exact: _ExactCumulatives,
+    instrument_keys: Sequence[str],
+    attribution_keys: Sequence[AttributionKey],
+    recovery: _FlowRecovery,
+) -> _PublishedFlowFamily | None:
+    """Try faithful recovery only after the complete historical family search."""
+    if len(instrument_keys) + len(attribution_keys) > MAX_RECOVERY_KEYS:
+        return None
+    request = FaithfulFlowInput(
+        exact.total.exact_units(),
+        _ordered_exact_units(exact.by_instrument, instrument_keys),
+        _ordered_exact_units(exact.by_attribution, attribution_keys),
+    )
+    projection = recovery.recover(request)
+    if projection is None:
+        return None
+    return _PublishedFlowFamily(
+        projection.total, dict(projection.instruments), dict(projection.attributions)
+    )
+
+
 def _published_point_flows(
     cumulatives: _PointCumulatives,
     instrument_keys: Sequence[str],
@@ -1861,6 +1911,10 @@ def _published_point_flows(
     PnlIncompletenessReason
 ):
     """Choose representable projections for all three families, or refuse.
+
+    Every historical total/widen pass runs before bounded faithful recovery.
+    An interrupted recovery retains the historical reason and cannot publish
+    or cache a partially recovered family. Conservation failures never recover.
 
     Args:
         cumulatives: The point's cumulative snapshot with exact families.
@@ -1872,14 +1926,19 @@ def _published_point_flows(
         the first family's exact withhold reason.
     """
     families: list[_PublishedFlowFamily] = []
-    for exact in (
-        cumulatives.realized_exact,
-        cumulatives.fee_exact,
-        cumulatives.accrual_exact,
+    for index, exact in enumerate(
+        (cumulatives.realized_exact, cumulatives.fee_exact, cumulatives.accrual_exact)
     ):
         family = _published_flow_family(exact, instrument_keys, attribution_keys)
         if isinstance(family, str):
-            return family
+            if family not in ("instrument_sum_unrepresentable", "attribution_sum_unrepresentable"):
+                return family
+            recovered = _recover_flow_family(
+                exact, instrument_keys, attribution_keys, cumulatives.flow_recoveries[index]
+            )
+            if recovered is None:
+                return family
+            family = recovered
         families.append(family)
     return families[0], families[1], families[2]
 
@@ -2578,6 +2637,7 @@ class _TimelineBuildState:
     fee_total: ExactSum = field(default_factory=ExactSum)
     accrual_total: ExactSum = field(default_factory=ExactSum)
     carried_event_inputs: tuple[PnlCarriedInput, ...] = ()
+    flow_recoveries: _FlowRecoveries = field(default_factory=_new_flow_recoveries)
 
 
 @dataclass(frozen=True)
@@ -3204,6 +3264,7 @@ def _point_valuation_context(
                 by_attribution=state.accrual_by_attribution,
                 total=state.accrual_total,
             ),
+            flow_recoveries=state.flow_recoveries,
         ),
         activation_time=state.activation_time,
         global_reasons=global_reasons,

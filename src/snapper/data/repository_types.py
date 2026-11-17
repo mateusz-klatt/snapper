@@ -899,8 +899,9 @@ class PnlTimelineAppliedAnnulment(TypedDict):
     fold has just recomputed and compared it: an audit consumer (the anchor
     payload, and the A3 series-level disclosure) must be able to state WHICH
     row content was repudiated without re-reading the ledger. ``correction_time``
-    travels with it because a knowledge-horizon read is only allowed to see
-    corrections whose ``correction_time`` it has already passed.
+    travels with it as display metadata. Historical eligibility instead uses
+    ``ExecutionAnnulmentVisibility.observed_at <= as_of``; a current read uses
+    committed visibility. The display clock is not the target execution time.
     """
 
     public_id: str
@@ -1292,8 +1293,15 @@ class PortfolioPnlAnchorWriteEvidence(TypedDict):
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
 
 
-PNL_SAMPLE_CALC_VERSION = "5C.3"
+PNL_SAMPLE_CALC_VERSION = "5C.4"
 """Algorithm version stamped on every persisted Phase-5B sample point.
+
+``5C.4`` uses bounded faithful multi-bucket flow recovery after the historical
+passes fail. Its stale-version replay can revisit formerly withheld interior
+minutes; only an actual recomputation may restamp a row. Old rows remain on
+their original version until that happens. A disabled snapshotter cannot heal
+them. A writer-disabled release can honestly leave overlay fields unavailable;
+writer activation separately requires bounded replay and safe overlay semantics.
 
 ``5C.3`` protects every general-consumer event minute during FX plane election
 when an eligible oriented plane proves the full event subset exactly. The
