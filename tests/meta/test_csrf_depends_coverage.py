@@ -38,8 +38,19 @@ CSRF_EXEMPT: Final[frozenset[tuple[str, str]]] = frozenset(
         ("POST", "/api/auth/logout"),
         ("POST", "/api/auth/refresh"),
         ("POST", "/api/auth/ws_token"),
+        ("POST", "/api/mcp/token"),
+        ("POST", "/api/mcp/revoke"),
+        ("POST", "/api/mcp/register"),
+        ("PUT", "/api/mcp/register"),
+        ("DELETE", "/api/mcp/register"),
     }
 )
+"""Auth bootstrap routes, plus the OAuth protocol endpoints.
+
+``/api/mcp/token`` and ``/api/mcp/revoke`` authenticate the OAuth client with
+its own credentials in a form body or Basic header and never read the cookie
+session, so CSRF does not apply. ``/api/mcp/register`` always answers 404.
+"""
 
 
 def _route_has_csrf_dependency(route: FastAPIRouteView) -> bool:

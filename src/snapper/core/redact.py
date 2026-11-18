@@ -20,6 +20,7 @@ _SENSITIVE_KEYS = frozenset(
         "ws_token",
         "refresh_token",
         "access_token",
+        "oauth_request",
     }
 )
 

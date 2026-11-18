@@ -33,8 +33,11 @@ class TestPublicTransportContract:
             assert response.json()["error_code"] == "method_not_allowed"
 
     def test_endpoint_relative_discovery_is_not_treated_as_sse(self) -> None:
-        """A future discovery route reaches auth instead of the root GET gate."""
+        """Discovery is an OAuth route, hidden while OAuth is off, never the SSE gate.
+
+        With ``MCP_OAUTH_ENABLED`` off (the default), every OAuth route answers 404
+        rather than reaching the MCP bearer gate or the root GET gate (405).
+        """
         client = _build_client()
         response = client.get("/api/mcp/.well-known/oauth-protected-resource")
-        assert response.status_code == 401
-        assert response.json()["error_code"] == "missing_bearer_token"
+        assert response.status_code == 404
