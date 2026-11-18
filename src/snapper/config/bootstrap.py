@@ -330,6 +330,11 @@ class BootstrapSettingsLoader(BaseSettings):
                 "MASTER_PASSWORD must be explicitly set when SNAPPER_ENV is "
                 f"{self.snapper_env!r}; refusing the development placeholder"
             )
+        if self.mcp_oauth_dcr_enabled:
+            raise ValueError(
+                "MCP_OAUTH_DCR_ENABLED=true is unsupported: dynamic client registration "
+                "is not implemented; provision the client with the operator CLI"
+            )
         return self
 
     @property

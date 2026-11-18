@@ -288,7 +288,7 @@ async def test_end_to_end_consent_pkce_exchange_refresh_live_access_and_pat_isol
             auth_method="client_secret_basic",
             raw_refresh_token=exchanged.refresh_token,
             resource=_RESOURCE,
-            scopes=(SNAPPER_READ,),
+            scopes=(SNAPPER_READ, OFFLINE_ACCESS),
         )
     )
     assert rotated.refresh_token is not None

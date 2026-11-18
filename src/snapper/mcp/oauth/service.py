@@ -39,8 +39,10 @@ from snapper.mcp.oauth.contracts import OAuthCodeExchangeCommand
 from snapper.mcp.oauth.contracts import OAuthConsentApprovalCommand
 from snapper.mcp.oauth.contracts import OAuthConsentDenialCommand
 from snapper.mcp.oauth.contracts import OAuthPendingAuthorization
+from snapper.mcp.oauth.contracts import OAuthPendingDescription
 from snapper.mcp.oauth.contracts import OAuthRefreshExchangeCommand
 from snapper.mcp.oauth.contracts import OAuthRefreshReuseDetectedError
+from snapper.mcp.oauth.contracts import OAuthRevocationCommand
 from snapper.mcp.oauth.contracts import OAuthTokenExchangeResult
 from snapper.mcp.oauth.contracts import OAuthVerifiedAccess
 from snapper.mcp.oauth.scopes import OFFLINE_ACCESS
@@ -201,6 +203,36 @@ class MCPOAuthService:
         ):
             raise MCPOAuthError("invalid_request")
         return request, client
+
+    async def describe_authorization_request(self, raw_request_id: str) -> OAuthPendingDescription:
+        """Describe one pending request for the consent page without mutating anything.
+
+        The opaque request credential is the only binding before consent: requests
+        are created by the client redirect, before any Snapper login. Approval and
+        denial re-check the full live owner and operator authority.
+
+        Args:
+            raw_request_id: Opaque pending request credential.
+
+        Returns:
+            Client name, requested scopes, resource and remaining lifetime.
+
+        Raises:
+            MCPOAuthError: If the request is unknown, resolved, expired or no longer valid.
+        """
+        async with self.repository.session() as session:
+            tx = OAuthTransaction(session)
+            now = datetime.now(UTC)
+            request = await tx.request(raw_request_id, now, lock=False)
+            if request is None:
+                raise MCPOAuthError("invalid_request")
+            client = await tx.client(request.client_id, lock=False)
+            if client is None or request.redirect_uri not in client.redirect_uris:
+                raise MCPOAuthError("invalid_request")
+            self._resource(request.resource)
+            scopes = self._scopes(tuple(request.scopes), client)
+            remaining = max(1, int((request.expires_at - now).total_seconds()))
+            return OAuthPendingDescription(client.client_name, scopes, request.resource, remaining)
 
     async def approve_authorization_request(
         self, command: OAuthConsentApprovalCommand
@@ -504,10 +536,7 @@ class MCPOAuthService:
                 return OAuthRefreshReuseDetectedError("invalid_grant")
             if predecessor.expires_at <= datetime.now(UTC):
                 raise MCPOAuthError("invalid_grant")
-            raw_refresh, successor = self._refresh_row(
-                grant.public_id, scopes, predecessor.family_public_id
-            )
-            successor.expires_at = min(successor.expires_at, predecessor.expires_at)
+            raw_refresh, successor = self._successor(grant.public_id, scopes, predecessor)
             await tx.rotate_refresh(predecessor, successor, datetime.now(UTC))
             minted = self._mint_tokens(identity, scopes, client.client_id)
             result = OAuthTokenExchangeResult(
@@ -515,6 +544,21 @@ class MCPOAuthService:
             )
             await session.commit()
             return result
+
+    def _successor(
+        self, grant_id: str, scopes: tuple[str, ...], predecessor: OAuthRefreshToken
+    ) -> tuple[str | None, OAuthRefreshToken | None]:
+        """Build a same-family successor only while ``offline_access`` is still granted.
+
+        ``offline_access`` is the only authority to issue a refresh token. A valid
+        narrowing that drops it is terminal: the predecessor is consumed and the
+        exchange returns an access token alone.
+        """
+        if OFFLINE_ACCESS not in scopes:
+            return None, None
+        raw_refresh, successor = self._refresh_row(grant_id, scopes, predecessor.family_public_id)
+        successor.expires_at = min(successor.expires_at, predecessor.expires_at)
+        return raw_refresh, successor
 
     async def _classify_lost_refresh(self, command: OAuthRefreshExchangeCommand) -> MCPOAuthError:
         """Reauthenticate and classify only in a new transaction after complete loser rollback."""
@@ -531,6 +575,41 @@ class MCPOAuthService:
             await tx.revoke_grant(grant.public_id, datetime.now(UTC))
             await session.commit()
             return OAuthRefreshReuseDetectedError("invalid_grant")
+
+    async def revoke_token(self, command: OAuthRevocationCommand) -> None:
+        """Revoke the whole grant behind one credential owned by the authenticated client.
+
+        Revocation targets the grant and every refresh family attached to it, so
+        no per-``jti`` state is needed. A refresh token is identified by its hash;
+        an access token only by a valid signature with the exact issuer and
+        audience. Unknown, invalid, already revoked or other-client credentials
+        change nothing and still succeed, as RFC 7009 requires.
+
+        Args:
+            command: Client authentication and the credential to revoke.
+
+        Raises:
+            MCPOAuthError: ``invalid_client`` when client authentication fails.
+        """
+        async with self.store.begin_write_transaction() as session:
+            tx = OAuthTransaction(session)
+            client = await self._client(
+                tx, command.client_id, command.client_secret, command.auth_method
+            )
+            grant_id = await self._revocation_grant(tx, command.raw_token)
+            if grant_id is not None and await tx.grant(grant_id, client.client_id, lock=False):
+                await tx.revoke_grant(grant_id, datetime.now(UTC))
+            await session.commit()
+
+    async def _revocation_grant(self, tx: OAuthTransaction, raw_token: str) -> str | None:
+        """Resolve a refresh hash or a verified access JWT to its signed grant identity."""
+        refresh = await tx.refresh(raw_token, lock=False)
+        if refresh is not None:
+            return refresh.grant_public_id
+        claims = self.token_manager.verify_mcp_oauth_access_token(
+            raw_token, issuer=self.config.issuer, audience=self.config.resource
+        )
+        return claims.grant_id if claims is not None else None
 
     async def verify_access_token(self, raw_token: str) -> OAuthVerifiedAccess:
         """Perform an uncached live JWT/client/grant/current-permission intersection.
