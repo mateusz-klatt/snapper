@@ -48,6 +48,7 @@ from snapper.mcp.oauth.contracts import OAuthCodeExchangeCommand
 from snapper.mcp.oauth.contracts import OAuthConsentApprovalCommand
 from snapper.mcp.oauth.contracts import OAuthRefreshExchangeCommand
 from snapper.mcp.oauth.contracts import OAuthRefreshReuseDetectedError
+from snapper.mcp.oauth.contracts import OAuthRevocationCommand
 from snapper.mcp.oauth.contracts import OAuthTokenExchangeResult
 from snapper.mcp.oauth.scopes import OFFLINE_ACCESS
 from snapper.mcp.oauth.scopes import SNAPPER_READ
@@ -523,6 +524,141 @@ async def test_terminal_access_only_refresh_race_still_detects_replay(
         await asyncio.gather(
             *[task for task in [first, second] if task is not None], return_exceptions=True
         )
+
+
+def _revoke(raw: str) -> OAuthRevocationCommand:
+    """Return one authentic client revocation for the dedicated test grant."""
+    return OAuthRevocationCommand(_CLIENT_ID, _CLIENT_SECRET, "client_secret_basic", raw)
+
+
+async def _grant_rows(frame: PGFrame, owner_id: str) -> tuple[OAuthGrant, list[OAuthRefreshToken]]:
+    """Read one owner's grant and every refresh row attached to it after both commits."""
+    async with frame.repository.session() as session:
+        grant = (
+            await session.execute(
+                select(OAuthGrant).where(OAuthGrant.owner_user_public_id == owner_id)
+            )
+        ).scalar_one()
+        rows = list(
+            (
+                await session.execute(
+                    select(OAuthRefreshToken).where(
+                        OAuthRefreshToken.grant_public_id == grant.public_id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return grant, rows
+
+
+async def _cancel_all(tasks: list[asyncio.Task[object] | None]) -> None:
+    """Cancel and drain unfinished tasks so a failed ordering never leaks a transaction."""
+    for task in tasks:
+        if task is not None and not task.done():
+            task.cancel()
+    await asyncio.gather(*[task for task in tasks if task is not None], return_exceptions=True)
+
+
+async def test_revocation_waiting_on_a_rotation_revokes_its_committed_successor(
+    pg_frame: PGFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Order 1: rotation holds its locks first; revocation waits, then retires the successor.
+
+    Given a rotation paused after its real compare-and-swap claim, still uncommitted.
+    When a second pool revokes the predecessor and enters an actual PostgreSQL lock wait,
+    and the rotation is then released and commits.
+    Then the revocation completes, the grant and BOTH rows are revoked, and the
+    successor refresh token and its access token are unusable.
+    """
+    owner_id, tokens = await _tokens(pg_frame)
+    assert tokens.refresh_token is not None
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = OAuthTransaction.rotate_refresh
+
+    async def hold_rotation(
+        tx: OAuthTransaction,
+        predecessor: OAuthRefreshToken,
+        successor: OAuthRefreshToken | None,
+        now: datetime,
+    ) -> None:
+        """Pause only after the rotation's real claim, before its commit."""
+        await original(tx, predecessor, successor, now)
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(OAuthTransaction, "rotate_refresh", hold_rotation)
+    rotation = asyncio.create_task(
+        pg_frame.first.exchange_refresh_token(_refresh(tokens.refresh_token))
+    )
+    revocation: asyncio.Task[object] | None = None
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        revocation = asyncio.create_task(
+            pg_frame.second.revoke_token(_revoke(tokens.refresh_token))
+        )
+        await _wait_for_native_lock(pg_frame)
+        release.set()
+        rotated = await asyncio.wait_for(rotation, 10)
+        await asyncio.wait_for(revocation, 10)
+        assert rotated.refresh_token is not None
+        grant, rows = await _grant_rows(pg_frame, owner_id)
+        assert grant.revoked_at is not None
+        assert len(rows) == 2 and all(row.revoked_at is not None for row in rows)
+        with pytest.raises(MCPOAuthError):
+            await pg_frame.first.exchange_refresh_token(_refresh(rotated.refresh_token))
+        with pytest.raises(MCPOAuthError):
+            await pg_frame.first.verify_access_token(rotated.access_token)
+    finally:
+        release.set()
+        await _cancel_all([rotation, revocation])
+
+
+async def test_rotation_waiting_on_a_revocation_creates_no_successor(
+    pg_frame: PGFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Order 2: revocation holds its locks first; the waiting rotation then refuses.
+
+    Given a revocation paused after revoking the grant and its rows, still uncommitted.
+    When a second pool refreshes the same token and enters an actual PostgreSQL lock wait,
+    and the revocation is then released and commits.
+    Then the rotation fails with invalid_grant and no successor row is ever created.
+    """
+    owner_id, tokens = await _tokens(pg_frame)
+    assert tokens.refresh_token is not None
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = OAuthTransaction.revoke_grant
+
+    async def hold_revocation(tx: OAuthTransaction, grant_public_id: str, now: datetime) -> bool:
+        """Pause only after the real grant and family revocation, before its commit."""
+        revoked = await original(tx, grant_public_id, now)
+        entered.set()
+        await release.wait()
+        return revoked
+
+    monkeypatch.setattr(OAuthTransaction, "revoke_grant", hold_revocation)
+    revocation = asyncio.create_task(pg_frame.first.revoke_token(_revoke(tokens.refresh_token)))
+    rotation: asyncio.Task[object] | None = None
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        rotation = asyncio.create_task(
+            pg_frame.second.exchange_refresh_token(_refresh(tokens.refresh_token))
+        )
+        await _wait_for_native_lock(pg_frame)
+        release.set()
+        await asyncio.wait_for(revocation, 10)
+        with pytest.raises(MCPOAuthError, match="invalid_grant"):
+            await asyncio.wait_for(rotation, 10)
+        grant, rows = await _grant_rows(pg_frame, owner_id)
+        assert grant.revoked_at is not None
+        assert len(rows) == 1
+        assert rows[0].revoked_at is not None and rows[0].used_at is None
+        with pytest.raises(MCPOAuthError):
+            await pg_frame.first.verify_access_token(tokens.access_token)
+    finally:
+        release.set()
+        await _cancel_all([revocation, rotation])
 
 
 @pytest.mark.parametrize("change", ["role", "membership", "scd2_role"])
