@@ -2161,8 +2161,9 @@ refresh scope keeps the predecessor's scopes; an empty, resource-free or
 widened refresh scope is refused before any mutation. Revoking either an
 access or a refresh token revokes the whole grant owned by the authenticated
 client; unknown, invalid or other-client tokens change nothing. An expired
-access token can no longer be verified, so revoking it is a no-op; an expired
-refresh token still identifies its own grant, so revoking it revokes that grant. Setting
+access token can no longer be verified, and an expired or individually
+revoked refresh token is no longer live, so revoking either is a no-op. A used
+but unexpired refresh token still revokes its own client's grant. Setting
 `MCP_OAUTH_DCR_ENABLED=true` fails startup, because dynamic client
 registration is not supported. This foundation does not make a browser
 connector available before the HTTP authorization and consent flow ships.

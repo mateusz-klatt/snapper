@@ -356,25 +356,48 @@ async def test_revocation_with_an_expired_access_token_is_a_no_op(
     assert not await _grant_revoked(oauth_case)
 
 
+@pytest.mark.parametrize("change", ["expired", "family_revoked"])
 @pytest.mark.asyncio
-async def test_revocation_with_an_expired_own_refresh_token_revokes_its_grant(
-    oauth_case: OAuthCase,
+async def test_revocation_with_a_dead_refresh_token_is_a_no_op(
+    oauth_case: OAuthCase, change: str
 ) -> None:
-    """An expired refresh row still identifies the authenticated client's own grant.
+    """Expired or individually revoked refresh rows revoke nothing (matrix row 4).
 
-    The hash proves possession and the grant lookup proves ownership, so an explicit
-    revocation is honoured; an expired refresh token can never be exchanged.
-
-    Given a refresh row whose expiry has passed.
-    When its own client revokes it.
-    Then the grant and its families are revoked.
+    Given a live grant whose refresh row has expired or was revoked on its own.
+    When its own client revokes that refresh token.
+    Then the call succeeds and the grant and its access token stay live.
     """
     tokens = await _tokens(oauth_case)
     assert tokens.refresh_token is not None
+    values = (
+        {"expires_at": datetime.now(UTC) - timedelta(seconds=1)}
+        if change == "expired"
+        else {"revoked_at": datetime.now(UTC)}
+    )
     async with oauth_case.harness.repository.session() as session:
-        await session.execute(
-            update(OAuthRefreshToken).values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
-        )
+        await session.execute(update(OAuthRefreshToken).values(**values))
         await session.commit()
     await oauth_case.harness.service.revoke_token(_revocation(tokens.refresh_token))
+    assert not await _grant_revoked(oauth_case)
+    assert await oauth_case.harness.service.verify_access_token(tokens.access_token)
+
+
+@pytest.mark.asyncio
+async def test_revocation_with_a_used_own_refresh_token_revokes_its_grant(
+    oauth_case: OAuthCase,
+) -> None:
+    """A consumed, unexpired predecessor still lets its own client revoke the grant.
+
+    Given a refresh token already rotated once.
+    When its own client revokes the consumed predecessor.
+    Then the grant and every family are revoked, including the live successor.
+    """
+    tokens = await _tokens(oauth_case)
+    assert tokens.refresh_token is not None
+    rotated = await oauth_case.harness.service.exchange_refresh_token(
+        _refresh(tokens.refresh_token)
+    )
+    await oauth_case.harness.service.revoke_token(_revocation(tokens.refresh_token))
     assert await _grant_revoked(oauth_case)
+    with pytest.raises(MCPOAuthError):
+        await oauth_case.harness.service.verify_access_token(rotated.access_token)

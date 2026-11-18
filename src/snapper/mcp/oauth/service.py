@@ -602,10 +602,17 @@ class MCPOAuthService:
             await session.commit()
 
     async def _revocation_grant(self, tx: OAuthTransaction, raw_token: str) -> str | None:
-        """Resolve a refresh hash or a verified access JWT to its signed grant identity."""
+        """Resolve a live refresh hash or a verified access JWT to its grant identity.
+
+        Expired and individually revoked refresh rows change nothing, matching the
+        expired-access no-op. A used but unexpired predecessor still revokes its own
+        grant: the client is authenticated and owns it. Replay detection stays in the
+        exchange path and is unaffected.
+        """
         refresh = await tx.refresh(raw_token, lock=False)
         if refresh is not None:
-            return refresh.grant_public_id
+            live = refresh.revoked_at is None and refresh.expires_at > datetime.now(UTC)
+            return refresh.grant_public_id if live else None
         claims = self.token_manager.verify_mcp_oauth_access_token(
             raw_token, issuer=self.config.issuer, audience=self.config.resource
         )
