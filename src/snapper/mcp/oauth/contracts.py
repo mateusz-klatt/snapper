@@ -138,6 +138,14 @@ class OAuthApprovedAuthorization:
 
 
 @dataclass(frozen=True, slots=True)
+class OAuthDeniedAuthorization:
+    """Exact registered callback and state for an error redirect after a committed denial."""
+
+    redirect_uri: str
+    state: str | None = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class OAuthTokenExchangeResult:
     """Credentials constructed privately and returned only after one successful commit."""
 

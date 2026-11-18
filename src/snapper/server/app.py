@@ -231,6 +231,7 @@ from snapper.messaging.schemas.data import UnderlyingInstrumentData
 from snapper.messaging.schemas.data import VenueFeeScheduleData
 from snapper.messaging.security.command_signing import command_signing_key
 from snapper.server._locale_utils import resolve_caller_default_language
+from snapper.server.access_log import install_access_log_redaction
 from snapper.server.ai_delegate_routes import AiIntegrationDisabledError
 from snapper.server.ai_delegate_routes import ai_integration_disabled_handler
 from snapper.server.ai_delegate_routes import router as ai_delegate_router
@@ -253,6 +254,10 @@ from snapper.server.json_body import patch_openapi
 from snapper.server.market_cache_routes import router as market_cache_router
 from snapper.server.market_coverage_routes import router as market_coverage_router
 from snapper.server.market_feed_health_routes import router as market_feed_health_router
+from snapper.server.mcp_oauth_routes import OAuthProtocolError
+from snapper.server.mcp_oauth_routes import oauth_protocol_error_handler
+from snapper.server.mcp_oauth_routes import registration_router as mcp_oauth_registration_router
+from snapper.server.mcp_oauth_routes import router as mcp_oauth_router
 from snapper.server.metrics_routes import router as metrics_router
 from snapper.server.operator_routes import router as operator_router
 from snapper.server.order_routes import router as order_router
@@ -1496,6 +1501,30 @@ def _include_device_routers(app: FastAPI) -> None:
     app.include_router(device_router, prefix=API_PREFIX)
 
 
+def _mount_mcp(app: FastAPI) -> None:
+    """Register the dark OAuth surfaces, then mount the MCP Streamable HTTP sub-app.
+
+    The OAuth routers are included before the ``/api/mcp`` mount so their exact
+    ``/api/mcp/*`` paths win over the sub-app's bearer gate. Each OAuth route
+    answers 404 unless ``MCP_OAUTH_ENABLED`` is true.
+
+    Args:
+        app: The application being assembled by :func:`create_app`.
+    """
+    install_access_log_redaction()
+    app.add_exception_handler(OAuthProtocolError, oauth_protocol_error_handler)
+    app.include_router(mcp_oauth_router)
+    app.include_router(mcp_oauth_registration_router)
+    mcp_sub_app = build_mcp_app(
+        settings_service_getter=lambda: getattr(app.state, "settings_service", None),
+        repository_getter=get_repository_dependency,
+        caps_enforcer_getter=_safe_get_caps_enforcer,
+        tracker_getter=lambda: getattr(app.state, "rest_tracker", None),
+    )
+    app.state.mcp_sub_app = mcp_sub_app
+    app.mount("/api/mcp", mcp_sub_app)
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -1578,14 +1607,7 @@ def create_app() -> FastAPI:
     app.include_router(create_api_router(manager), prefix=API_PREFIX)
     app.include_router(create_authenticated_websocket_router(manager), prefix=API_PREFIX)
 
-    mcp_sub_app = build_mcp_app(
-        settings_service_getter=lambda: getattr(app.state, "settings_service", None),
-        repository_getter=get_repository_dependency,
-        caps_enforcer_getter=_safe_get_caps_enforcer,
-        tracker_getter=lambda: getattr(app.state, "rest_tracker", None),
-    )
-    app.state.mcp_sub_app = mcp_sub_app
-    app.mount("/api/mcp", mcp_sub_app)
+    _mount_mcp(app)
 
     patch_openapi(app)
 

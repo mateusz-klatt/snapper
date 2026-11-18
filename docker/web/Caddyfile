@@ -1,5 +1,25 @@
 {
 	admin off
+	log default {
+		output stderr
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					replace state REDACTED
+					replace code REDACTED
+					replace code_challenge REDACTED
+					replace code_verifier REDACTED
+					replace request REDACTED
+					replace client_secret REDACTED
+					replace token REDACTED
+					replace refresh_token REDACTED
+					replace access_token REDACTED
+				}
+				request>headers>X-Mcp-Oauth-Request delete
+			}
+		}
+	}
 }
 
 :8000 {
@@ -46,7 +66,23 @@
 
 	log {
 		output stdout
-		format console
+		format filter {
+			wrap console
+			fields {
+				request>uri query {
+					replace state REDACTED
+					replace code REDACTED
+					replace code_challenge REDACTED
+					replace code_verifier REDACTED
+					replace request REDACTED
+					replace client_secret REDACTED
+					replace token REDACTED
+					replace refresh_token REDACTED
+					replace access_token REDACTED
+				}
+				request>headers>X-Mcp-Oauth-Request delete
+			}
+		}
 	}
 }
 

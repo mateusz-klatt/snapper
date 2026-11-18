@@ -2987,6 +2987,98 @@ X-CSRF-Token: <csrf_token>
 }
 ```
 
+## MCP OAuth Authorization Server
+
+These routes publish the private ChatGPT connector's OAuth 2.1 flow. They are
+**off by default**: unless `MCP_OAUTH_ENABLED=true`, every route below answers
+404, no metadata is published and the MCP Bearer challenge is unchanged. The
+MCP resource does not yet accept OAuth access tokens; activation needs the
+principal and catalog wiring as well. With the flag on and the database
+`ai_integration_enabled` flag off, metadata stays stable, authorization,
+consent and token issuance are refused, and revocation keeps working.
+
+`/api/mcp/register` always answers 404, and OpenID discovery is absent.
+Setting `MCP_OAUTH_DCR_ENABLED=true` fails startup.
+
+### Discovery
+
+- `GET /.well-known/oauth-protected-resource/api/mcp` and
+  `GET /api/mcp/.well-known/oauth-protected-resource` return the same RFC 9728
+  document: the exact resource, its authorization server, and the scopes
+  `snapper.read` and `offline_access`.
+- `GET /.well-known/oauth-authorization-server/api/mcp` and
+  `GET /api/mcp/.well-known/oauth-authorization-server` return the same RFC 8414
+  document: authorize, token and revocation endpoints, `S256` only,
+  `client_secret_basic` and `client_secret_post`, and the `iss` response
+  parameter.
+
+### GET /api/mcp/authorize
+
+Validates the client and its exact registered redirect URI first. An unknown
+client or an unregistered callback is answered directly with 400 and no
+redirect. Otherwise every refusal returns to the registered callback with
+`error`, `state` and `iss`: `unsupported_response_type`, `invalid_scope` for an
+omitted, empty, offline-only or widened scope (scope is never defaulted),
+`invalid_request` for anything but S256 PKCE, `invalid_target` for a resource
+that is not exact, and `temporarily_unavailable` while the integration is
+disabled. A valid request is stored as a short-lived pending request and the
+browser is sent to `/oauth/authorize#request=<opaque>`. The pending request
+travels in the URL fragment, so it is never sent to a server.
+
+### POST /api/mcp/token
+
+Form-encoded RFC 6749 token endpoint. The client authenticates with exactly one
+method, the one it was registered with; mixing Basic and form credentials is
+refused. Both `authorization_code` and `refresh_token` exchanges require the
+exact `resource`. A refresh without `offline_access` in its scope returns an
+access token only and ends the refresh family. Errors are RFC bodies such as
+`{"error": "invalid_grant"}`; a failed Basic authentication answers 401 with a
+Basic challenge. Every response carries `Cache-Control: no-store`.
+
+### POST /api/mcp/revoke
+
+Form-encoded RFC 7009 revocation, authenticated like the token endpoint.
+Revoking a live access or refresh token revokes the whole grant owned by the
+calling client. Unknown, invalid, expired, already revoked and other-client
+tokens succeed with 200 and an empty JSON object, and change nothing.
+
+### Consent API
+
+The authenticated consent page uses three routes. All need the normal cookie
+session and `manage:ai_integration`; both POSTs need CSRF. Responses are
+`no-store`. Errors are `{"detail": {"error_code": ...}}` with
+`consent_request_invalid` (400), `consent_scope_invalid` (400),
+`consent_access_denied` (403), `grant_replacement_required` (409) or
+`consent_delegate_limit` (409); a disabled integration returns the shared
+`feature_disabled` 503 envelope.
+
+- `GET /api/mcp-oauth/consent` reads the pending request from the
+  `X-MCP-OAuth-Request` header, never from the query, and returns
+  `mcp_oauth_consent_request` with the client name, scopes, resource, the
+  caller's operators and the remaining lifetime. It never returns state, the
+  redirect URI or a secret, and changes nothing. Unknown, expired and resolved
+  requests are indistinguishable.
+- `POST /api/mcp-oauth/consent/approve` takes
+  `mcp_oauth_consent_approve_request` with `oauth_request`,
+  `operator_public_id` and `replace_existing_grant`. Approving a different
+  scope set for an existing grant needs `replace_existing_grant=true`.
+- `POST /api/mcp-oauth/consent/deny` takes `mcp_oauth_consent_deny_request`
+  with `oauth_request` and `operator_public_id`, under the same operator
+  authority checks.
+
+Both decisions return `mcp_oauth_consent_redirect` with `redirect_to`, the
+exact registered callback carrying `code` or `error=access_denied`, `state` and
+`iss`. The `oauth_request` body key is redacted before the provenance
+middleware stores the request.
+
+### Log redaction
+
+The uvicorn access log replaces the query of `/api/mcp/authorize` with
+`[REDACTED]`. The Caddy access log and its default error log replace the
+`state`, `code`, `code_challenge`, `code_verifier`, `request`,
+`client_secret`, `token`, `refresh_token` and `access_token` query values and
+drop the `X-MCP-OAuth-Request` header.
+
 ## AI Delegates
 
 AI delegate management is gated by `ai_integration_enabled`, the same feature

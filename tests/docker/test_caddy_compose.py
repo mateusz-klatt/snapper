@@ -44,3 +44,63 @@ def test_caddy_does_not_override_the_non_root_image_user() -> None:
     Then: No service-level user override weakens the image contract.
     """
     assert "user" not in _web_service()
+
+
+_CADDY_FILE: Final[Path] = _REPO_ROOT / "docker" / "web" / "Caddyfile"
+_REDACTED_QUERY_KEYS: Final[tuple[str, ...]] = (
+    "state",
+    "code",
+    "code_challenge",
+    "code_verifier",
+    "request",
+    "client_secret",
+    "token",
+    "refresh_token",
+    "access_token",
+)
+
+
+def _log_filter_blocks() -> list[str]:
+    """Return every ``format filter`` block of the real Caddyfile."""
+    text = _CADDY_FILE.read_text(encoding="utf-8")
+    blocks: list[str] = []
+    start = text.find("format filter {")
+    while start != -1:
+        depth = 0
+        for index in range(start, len(text)):
+            depth += {"{": 1, "}": -1}.get(text[index], 0)
+            if depth == 0 and text[index] == "}":
+                blocks.append(text[start : index + 1])
+                break
+        start = text.find("format filter {", start + 1)
+    return blocks
+
+
+def test_caddy_redacts_oauth_credentials_in_access_and_error_logs() -> None:
+    """Both the site access log and the default (error) log filter OAuth credentials.
+
+    Given: The real Caddyfile, verified against caddy:2-alpine v2.11.9 with sentinels,
+    When: Its log filter blocks are inspected,
+    Then: The global default log and the :8000 access log both replace every
+        credential-bearing query key and delete the consent capability header.
+    """
+    blocks = _log_filter_blocks()
+
+    assert len(blocks) == 2
+    for block in blocks:
+        for key in _REDACTED_QUERY_KEYS:
+            assert f"replace {key} REDACTED" in block
+        assert "request>headers>X-Mcp-Oauth-Request delete" in block
+
+
+def test_caddy_spa_fallback_serves_the_consent_route() -> None:
+    """The catch-all serves index.html, so ``/oauth/authorize`` reaches the SPA.
+
+    Given: The :8000 site of the real Caddyfile,
+    When: Its routes are inspected,
+    Then: No handle claims ``/oauth`` and the catch-all falls back to ``/index.html``.
+    """
+    text = _CADDY_FILE.read_text(encoding="utf-8")
+
+    assert "handle /oauth" not in text
+    assert "try_files {path} /index.html" in text

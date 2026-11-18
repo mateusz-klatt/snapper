@@ -38,6 +38,7 @@ from snapper.mcp.oauth.contracts import OAuthAuthorizationRequestCreate
 from snapper.mcp.oauth.contracts import OAuthCodeExchangeCommand
 from snapper.mcp.oauth.contracts import OAuthConsentApprovalCommand
 from snapper.mcp.oauth.contracts import OAuthConsentDenialCommand
+from snapper.mcp.oauth.contracts import OAuthDeniedAuthorization
 from snapper.mcp.oauth.contracts import OAuthPendingAuthorization
 from snapper.mcp.oauth.contracts import OAuthPendingDescription
 from snapper.mcp.oauth.contracts import OAuthRefreshExchangeCommand
@@ -316,11 +317,16 @@ class MCPOAuthService:
             expires_at=now + timedelta(seconds=self.config.code_ttl_seconds),
         )
 
-    async def deny_authorization_request(self, command: OAuthConsentDenialCommand) -> None:
+    async def deny_authorization_request(
+        self, command: OAuthConsentDenialCommand
+    ) -> OAuthDeniedAuthorization:
         """Deny once under current owner/operator authority without creating a grant.
 
         Args:
             command: Pending request credential and authenticated owner/operator authority.
+
+        Returns:
+            The exact registered callback and state for the error redirect, after commit.
 
         Raises:
             MCPOAuthError: If protocol identity, state or current authority is invalid.
@@ -334,9 +340,43 @@ class MCPOAuthService:
                 )
                 await lock_oauth_operator(session, owner, command.operator_public_id)
                 await tx.resolve_request(request, "denied", datetime.now(UTC))
+                denied = OAuthDeniedAuthorization(request.redirect_uri, request.state)
                 await session.commit()
+                return denied
         except PermissionError as error:
             raise MCPOAuthError("access_denied") from error
+
+    async def trusted_redirect(
+        self, client_id: str, redirect_uri: str | None, *, provided_explicitly: bool
+    ) -> str:
+        """Resolve the exact registered callback before any authorize error redirect.
+
+        Args:
+            client_id: Untrusted client identifier from the authorize request.
+            redirect_uri: Untrusted callback, or None when omitted.
+            provided_explicitly: Whether the request carried a redirect_uri parameter.
+
+        Returns:
+            The registered callback that error redirects may target.
+
+        Raises:
+            MCPOAuthError: ``invalid_client`` or ``invalid_redirect_uri``; the caller
+                must then answer directly and never redirect.
+        """
+        async with self.repository.session() as session:
+            client = await OAuthTransaction(session).client(client_id, lock=False)
+        if client is None:
+            raise MCPOAuthError("invalid_client")
+        probe = OAuthAuthorizationRequestCreate(
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            scopes=(),
+            code_challenge="",
+            code_challenge_method="",
+            resource=self.config.resource,
+            redirect_uri_provided_explicitly=provided_explicitly,
+        )
+        return self._redirect(client, probe)
 
     def _mint_tokens(
         self, identity: OAuthDelegateIdentity, scopes: tuple[str, ...], client_id: str
