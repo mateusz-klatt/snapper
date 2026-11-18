@@ -555,7 +555,8 @@ def test_caddy_control_bridge_has_exact_source_route_and_method_allowlist() -> N
     public_log = _brace_block(public_block, "log")
     assert public_log not in public_route
     assert "output stdout" in public_log
-    assert "format console" in public_log
+    assert "format filter {" in public_log
+    assert "wrap console" in public_log
     assert "@delegate_control remote_ip 172.30.10.0/29 172.30.11.0/29" in control_block
     assert {
         _matcher_contract(control_block, "@delegate_ws_token"),

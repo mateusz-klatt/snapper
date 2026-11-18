@@ -154,7 +154,7 @@ def oauth_settings() -> AppSettings:
 def require_mcp_oauth_enabled(
     settings: Annotated[AppSettings, Depends(oauth_settings)],
 ) -> AppSettings:
-    """Hide every OAuth surface unless the bootstrap flag publishes it.
+    """Hide every OAuth surface unless the bootstrap flag is exactly ``True``.
 
     Args:
         settings: Bootstrap settings.
@@ -165,7 +165,7 @@ def require_mcp_oauth_enabled(
     Raises:
         HTTPException: 404 when ``MCP_OAUTH_ENABLED`` is false.
     """
-    if not settings.mcp_oauth_enabled:
+    if settings.mcp_oauth_enabled is not True:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
     return settings
 
