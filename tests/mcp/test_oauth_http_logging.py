@@ -161,6 +161,7 @@ def test_access_log_redacts_the_authorize_query(caplog: pytest.LogCaptureFixture
     [
         ("/api/mcp/authorize", "/api/mcp/authorize"),
         ("/api/mcp/authorize?state=s", "/api/mcp/authorize?[REDACTED]"),
+        ("/api/mcp/authorize/?state=s", "/api/mcp/authorize/?[REDACTED]"),
         ("/api/orders?limit=5", "/api/orders?limit=5"),
         ("/api/mcp/authorizex?state=s", "/api/mcp/authorizex?state=s"),
     ],

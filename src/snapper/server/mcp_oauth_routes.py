@@ -25,6 +25,7 @@ from datetime import UTC
 from datetime import datetime
 from typing import Annotated
 from urllib.parse import parse_qsl
+from urllib.parse import unquote_plus
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
@@ -321,9 +322,12 @@ async def authorize(
         A 302 either to the consent page or back to the registered callback with an error.
 
     Raises:
-        OAuthProtocolError: 400 without any redirect for an untrusted client or callback.
+        OAuthProtocolError: 400 without any redirect for a repeated parameter or an
+            untrusted client or callback.
     """
     params = request.query_params
+    if len(params.keys()) != len(params.multi_items()):
+        raise OAuthProtocolError("invalid_request")
     service = build_oauth_service(repo, settings)
     state = params.get("state")
     try:
@@ -391,6 +395,10 @@ class _ClientCredentials:
 def _client_credentials(request: Request, form: dict[str, str]) -> _ClientCredentials:
     """Read Basic or POST client credentials; mixing both is refused.
 
+    Basic credentials are form-urlencoded before base64 (RFC 6749 section 2.3.1),
+    so both parts are decoded. A body ``client_id`` sent alongside Basic must name
+    the same client.
+
     Raises:
         MCPOAuthError: ``invalid_client`` when none, both or malformed credentials are given.
     """
@@ -403,24 +411,35 @@ def _client_credentials(request: Request, form: dict[str, str]) -> _ClientCreden
             decoded = base64.b64decode(header[6:], validate=True).decode("utf-8")
         except (binascii.Error, UnicodeDecodeError) as error:
             raise MCPOAuthError("invalid_client") from error
-        client_id, separator, secret = decoded.partition(":")
+        raw_id, separator, raw_secret = decoded.partition(":")
         if not separator:
             raise MCPOAuthError("invalid_client")
-        return _ClientCredentials(client_id, secret, "client_secret_basic")
+        client_id = unquote_plus(raw_id)
+        if "client_id" in form and form["client_id"] != client_id:
+            raise MCPOAuthError("invalid_client")
+        return _ClientCredentials(client_id, unquote_plus(raw_secret), "client_secret_basic")
     if posted and form.get("client_id"):
         return _ClientCredentials(form["client_id"], form["client_secret"], "client_secret_post")
     raise MCPOAuthError("invalid_client")
 
 
 async def _form(request: Request) -> dict[str, str]:
-    """Read a form body, rejecting repeated parameters as RFC 6749 requires.
+    """Read a form body exactly: blank values are kept and every key appears once.
+
+    A blank value is never conflated with an absent one, so an explicit empty
+    ``scope`` reaches the service as an empty, refused scope set.
 
     Raises:
-        MCPOAuthError: ``invalid_request`` for a non-form or repeated-parameter body.
+        MCPOAuthError: ``invalid_request`` for a non-form, malformed or repeated-parameter body.
     """
     if not request.headers.get("content-type", "").startswith("application/x-www-form-urlencoded"):
         raise MCPOAuthError("invalid_request")
-    pairs = parse_qsl((await request.body()).decode("utf-8", errors="replace"))
+    try:
+        pairs = parse_qsl(
+            (await request.body()).decode("utf-8"), keep_blank_values=True, strict_parsing=True
+        )
+    except (UnicodeDecodeError, ValueError) as error:
+        raise MCPOAuthError("invalid_request") from error
     form = dict(pairs)
     if len(form) != len(pairs):
         raise MCPOAuthError("invalid_request")

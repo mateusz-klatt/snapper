@@ -29,6 +29,7 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.app import AppSettings
 from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.json_types import JsonObject
+from snapper.data.models import OAuthAuthorizationRequest
 from snapper.data.models import OAuthGrant
 from snapper.data.models import OAuthRefreshToken
 from snapper.mcp.oauth.service import MCPOAuthService
@@ -871,3 +872,148 @@ def test_consent_read_checks_session_and_permission_before_any_lookup(
         )
         expected = 403
     assert _describe(case, request_id).status_code == expected
+
+
+async def _pending_rows(case: HttpCase) -> int:
+    """Count persisted pending authorization requests."""
+    async with case.harness.repository.session() as session:
+        return len((await session.execute(select(OAuthAuthorizationRequest))).scalars().all())
+
+
+def _refresh_form(refresh_token: str, **extra: str) -> dict[str, str]:
+    """Build an exact-resource refresh form."""
+    return {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "resource": _RESOURCE,
+        **extra,
+    }
+
+
+def test_explicit_empty_refresh_scope_is_refused_without_consuming_the_token(
+    case: HttpCase,
+) -> None:
+    """F1: a blank scope is not an omitted scope.
+
+    Given an issued read/offline refresh token.
+    When the client refreshes with an explicit empty scope.
+    Then invalid_scope is returned, and the same token still refreshes afterwards.
+    """
+    tokens = _tokens(case)
+    refused = case.client.post(
+        "/api/mcp/token",
+        headers=_basic(),
+        data=_refresh_form(str(tokens["refresh_token"]), scope=""),
+    )
+    assert refused.status_code == 400 and refused.json() == {"error": "invalid_scope"}
+    rotated = case.client.post(
+        "/api/mcp/token", headers=_basic(), data=_refresh_form(str(tokens["refresh_token"]))
+    )
+    assert rotated.status_code == 200 and "refresh_token" in rotated.json()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"grant_type=refresh_token&scope=snapper.read&scope=",
+        b"grant_type=refresh_token&grant_type=",
+        b"grant_type",
+        b"grant_type=refresh_token&\xff=1",
+    ],
+    ids=["blank-duplicate", "blank-duplicate-grant", "malformed-field", "non-utf8"],
+)
+def test_ambiguous_or_malformed_token_forms_are_invalid_requests(
+    case: HttpCase, content: bytes
+) -> None:
+    """Blank duplicates, fields without '=' and undecodable bodies are refused.
+
+    Given a token request body that is ambiguous or malformed.
+    When it reaches the token endpoint.
+    Then invalid_request is returned before any client authentication.
+    """
+    response = case.client.post("/api/mcp/token", headers=_FORM, content=content)
+    assert response.status_code == 400 and response.json() == {"error": "invalid_request"}
+
+
+def test_blank_redirect_uri_is_not_an_omitted_redirect_uri(case: HttpCase) -> None:
+    """A code bound to an explicit redirect cannot be exchanged with a blank one.
+
+    Given a code issued for an explicitly supplied redirect URI.
+    When it is exchanged with redirect_uri set to an empty value.
+    Then invalid_grant is returned and the code remains exchangeable with the exact URI.
+    """
+    code = _approve(case, _pending(case))["code"][0]
+    form = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "code_verifier": _VERIFIER,
+        "resource": _RESOURCE,
+    }
+    blank = case.client.post("/api/mcp/token", headers=_basic(), data={**form, "redirect_uri": ""})
+    assert blank.status_code == 400 and blank.json() == {"error": "invalid_grant"}
+    exact = case.client.post(
+        "/api/mcp/token", headers=_basic(), data={**form, "redirect_uri": _REDIRECT_URI}
+    )
+    assert exact.status_code == 200
+
+
+def test_basic_credentials_are_form_url_decoded(case: HttpCase) -> None:
+    """N1: RFC 6749 section 2.3.1 form-urlencodes Basic credentials before base64.
+
+    Given a client id and secret sent percent-encoded inside HTTP Basic.
+    When the client refreshes.
+    Then the decoded credentials authenticate.
+    """
+    tokens = _tokens(case)
+    encoded_id = "".join(f"%{ord(char):02X}" for char in _CLIENT_ID)
+    encoded_secret = f"%{ord(_CLIENT_SECRET[0]):02X}{_CLIENT_SECRET[1:]}"
+    raw = base64.b64encode(f"{encoded_id}:{encoded_secret}".encode()).decode()
+    headers = {**_FORM, "authorization": f"Basic {raw}"}
+    response = case.client.post(
+        "/api/mcp/token", headers=headers, data=_refresh_form(str(tokens["refresh_token"]))
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("body_client_id", "status_code"),
+    [(_CLIENT_ID, 200), (_OTHER_CLIENT_ID, 401), ("", 401)],
+    ids=["matching", "mismatching", "blank"],
+)
+def test_body_client_id_must_match_basic_authentication(
+    case: HttpCase, body_client_id: str, status_code: int
+) -> None:
+    """A body client_id alongside Basic is allowed only when it names the same client.
+
+    Given a Basic-authenticated refresh that also carries client_id in the body.
+    When the body id matches, differs, or is blank.
+    Then only the matching id is accepted; the others are invalid_client.
+    """
+    tokens = _tokens(case)
+    response = case.client.post(
+        "/api/mcp/token",
+        headers=_basic(),
+        data=_refresh_form(str(tokens["refresh_token"]), client_id=body_client_id),
+    )
+    assert response.status_code == status_code
+    if status_code == 401:
+        assert response.json() == {"error": "invalid_client"}
+
+
+@pytest.mark.parametrize("duplicate", ["client_id", "redirect_uri", "state", "scope"])
+async def test_repeated_authorize_parameters_are_refused_directly(
+    case: HttpCase, duplicate: str
+) -> None:
+    """N2: any repeated authorize parameter is ambiguous and is answered directly.
+
+    Given an otherwise valid authorization request with one parameter repeated.
+    When authorize is called.
+    Then 400 invalid_request is returned with no Location and no pending request row.
+    """
+    params = list(_authorize_params().items())
+    params.append((duplicate, dict(params)[duplicate]))
+    response = case.client.get("/api/mcp/authorize", params=params)
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid_request"}
+    assert "location" not in response.headers
+    assert await _pending_rows(case) == 0

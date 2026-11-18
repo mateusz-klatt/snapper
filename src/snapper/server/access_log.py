@@ -20,7 +20,7 @@ _REDACTED = "[REDACTED]"
 
 
 def redact_request_target(target: str) -> str:
-    """Replace the query of a credential-bearing path, keeping every other target.
+    """Replace the query of a credential-bearing path, with or without a trailing slash.
 
     Args:
         target: The request target uvicorn logs, path plus optional query.
@@ -30,7 +30,7 @@ def redact_request_target(target: str) -> str:
         :data:`REDACTED_QUERY_PATHS`, otherwise the unchanged target.
     """
     parts = urlsplit(target)
-    if parts.path not in REDACTED_QUERY_PATHS or not parts.query:
+    if parts.path.rstrip("/") not in REDACTED_QUERY_PATHS or not parts.query:
         return target
     return f"{parts.path}?{_REDACTED}"
 
