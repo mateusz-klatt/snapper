@@ -125,35 +125,64 @@ async def test_control_records_never_persist_oauth_credentials(
         assert secret not in persisted
 
 
-def test_access_log_redacts_the_authorize_query(caplog: pytest.LogCaptureFixture) -> None:
+class _CapturingHandler(logging.Handler):
+    """Collect formatted records from exactly one logger."""
+
+    def __init__(self) -> None:
+        """Start with no captured lines."""
+        super().__init__(logging.INFO)
+        self.lines: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Keep the fully formatted message."""
+        self.lines.append(record.getMessage())
+
+
+@pytest.mark.parametrize("prior_state", ["default", "disabled", "non_propagating"])
+def test_access_log_redacts_the_authorize_query(prior_state: str) -> None:
     """Uvicorn's own request-line format keeps method, path and status but no query.
 
-    Given the redaction filter on uvicorn's access logger and the target uvicorn derives.
+    The test owns the access logger's state for its duration, because the app's
+    logging setup, or a dictConfig with disable_existing_loggers, can leave
+    ``uvicorn.access`` disabled or non-propagating in the same test process.
+    Every attribute it changes is restored afterwards.
+
+    Given the redaction filter and a handler attached directly to uvicorn's access
+    logger, after the logger was left default, disabled or non-propagating.
     When an authorize request line with a sentinel state is logged.
     Then the line keeps method, path and status, and neither state nor challenge appears.
     """
     access = logging.getLogger(ACCESS_LOGGER)
+    saved = (access.disabled, access.propagate, access.level)
+    access.disabled = prior_state == "disabled"
+    access.propagate = prior_state != "non_propagating"
     redaction = OAuthQueryRedactionFilter()
-    access.addFilter(redaction)
+    handler = _CapturingHandler()
     scope = {
         "path": "/api/mcp/authorize",
         "query_string": f"client_id=x&state={_SENTINEL_STATE}&code_challenge=c".encode(),
     }
     try:
-        with caplog.at_level(logging.INFO, logger=ACCESS_LOGGER):
-            access.info(
-                '%s - "%s %s HTTP/%s" %d',
-                "127.0.0.1:5000",
-                "GET",
-                get_path_with_query_string(scope),
-                "1.1",
-                302,
-            )
+        access.disabled = False
+        access.setLevel(logging.INFO)
+        access.addFilter(redaction)
+        access.addHandler(handler)
+        access.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:5000",
+            "GET",
+            get_path_with_query_string(scope),
+            "1.1",
+            302,
+        )
     finally:
+        access.removeHandler(handler)
         access.removeFilter(redaction)
-    line = caplog.records[-1].getMessage()
-    assert line == '127.0.0.1:5000 - "GET /api/mcp/authorize?[REDACTED] HTTP/1.1" 302'
-    assert _SENTINEL_STATE not in line
+        access.disabled, access.propagate = saved[0], saved[1]
+        access.setLevel(saved[2])
+    assert handler.lines == ['127.0.0.1:5000 - "GET /api/mcp/authorize?[REDACTED] HTTP/1.1" 302']
+    assert _SENTINEL_STATE not in handler.lines[0]
+    assert (access.disabled, access.propagate, access.level) == saved
 
 
 @pytest.mark.parametrize(
