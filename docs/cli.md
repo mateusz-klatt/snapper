@@ -2153,8 +2153,20 @@ The internal OAuth service remains dormant. Its first-release scope ceiling is
 `snapper.read` with optional `offline_access`; authorization-code exchange and
 refresh rotation validate the exact resource, client and current delegate
 binding inside one transaction. Reuse of a consumed refresh token revokes its
-grant and every refresh family on that grant. This foundation does not make a
-browser connector available before the HTTP authorization and consent flow ships.
+grant and every refresh family on that grant. `offline_access` is the only
+authority to issue a refresh token: a valid refresh that narrows the scope set
+to `snapper.read` consumes its predecessor and returns an access token alone,
+and a later reuse of that predecessor is still treated as replay. An omitted
+refresh scope keeps the predecessor's scopes; an empty, resource-free or
+widened refresh scope is refused before any mutation. Revoking either an
+access or a refresh token revokes the whole grant owned by the authenticated
+client; unknown, invalid or other-client tokens change nothing. An expired
+access token can no longer be verified, and an expired or individually
+revoked refresh token is no longer live, so revoking either is a no-op. A used
+but unexpired refresh token still revokes its own client's grant. Setting
+`MCP_OAUTH_DCR_ENABLED=true` fails startup, because dynamic client
+registration is not supported. This foundation does not make a browser
+connector available before the HTTP authorization and consent flow ships.
 
 ### `dev-mint-pat`
 

@@ -136,6 +136,16 @@ class TestMCPOAuthBootstrap:
         assert loader.mcp_oauth_refresh_token_ttl_days == 30
         assert loader.mcp_allowed_hosts == "snapper.ch,api.snapper.ch"
 
+    def test_dynamic_client_registration_flag_fails_startup(self) -> None:
+        """Verify an unsupported DCR flag cannot silently publish a register endpoint.
+
+        Given MCP_OAUTH_DCR_ENABLED=true while dynamic registration is unimplemented,
+        When bootstrap settings are loaded,
+        Then validation refuses to start instead of ignoring the flag.
+        """
+        with pytest.raises(ValidationError, match="MCP_OAUTH_DCR_ENABLED"):
+            BootstrapSettingsLoader(_env_file=None, MCP_OAUTH_DCR_ENABLED=True)
+
 
 class TestCoordinatorInstanceCount:
     """``SNAPPER_COORDINATOR_INSTANCE_COUNT`` env round-trip."""

@@ -100,6 +100,26 @@ class OAuthRefreshExchangeCommand:
 
 
 @dataclass(frozen=True, slots=True)
+class OAuthRevocationCommand:
+    """Client-authenticated RFC 7009 revocation of one access or refresh credential."""
+
+    client_id: str
+    client_secret: str = field(repr=False)
+    auth_method: str
+    raw_token: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthPendingDescription:
+    """Consent-page view of one pending request, without state, redirect, or secrets."""
+
+    client_name: str
+    scopes: tuple[str, ...]
+    resource: str
+    expires_in: int
+
+
+@dataclass(frozen=True, slots=True)
 class OAuthPendingAuthorization:
     """Opaque request credential returned only after the request is durable."""
 

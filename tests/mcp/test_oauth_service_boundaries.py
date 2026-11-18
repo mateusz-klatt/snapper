@@ -859,23 +859,25 @@ async def test_unknown_integrity_conflict_does_not_retry_or_leave_partial_consen
 async def test_refresh_cannot_reexpand_a_predecessor_after_scope_narrowing(
     oauth_case: OAuthCase,
 ) -> None:
-    """A valid initial scope may still not be reintroduced after a family narrows.
+    """Dropping offline_access ends the family; its consumed credential cannot re-expand.
 
-    Given a refresh family already narrowed from read/offline to read.
-    When a successor requests offline access again.
-    Then expansion is refused while the narrower access token remains valid.
+    Given a refresh family narrowed from read/offline to read, which is terminal.
+    When the consumed predecessor asks for offline access again.
+    Then no successor exists, the attempt is treated as replay, and the grant is revoked.
     """
     tokens = await _tokens(oauth_case)
     assert tokens.refresh_token is not None
     narrowed = await oauth_case.harness.service.exchange_refresh_token(
         replace(_refresh(tokens.refresh_token), scopes=(SNAPPER_READ,))
     )
-    assert narrowed.refresh_token is not None
-    with pytest.raises(MCPOAuthError):
-        await oauth_case.harness.service.exchange_refresh_token(
-            replace(_refresh(narrowed.refresh_token), scopes=(SNAPPER_READ, OFFLINE_ACCESS))
-        )
+    assert narrowed.refresh_token is None
     assert await oauth_case.harness.service.verify_access_token(narrowed.access_token)
+    with pytest.raises(OAuthRefreshReuseDetectedError):
+        await oauth_case.harness.service.exchange_refresh_token(
+            replace(_refresh(tokens.refresh_token), scopes=(SNAPPER_READ, OFFLINE_ACCESS))
+        )
+    with pytest.raises(MCPOAuthError):
+        await oauth_case.harness.service.verify_access_token(narrowed.access_token)
 
 
 @pytest.mark.parametrize(
