@@ -401,3 +401,55 @@ async def test_revocation_with_a_used_own_refresh_token_revokes_its_grant(
     assert await _grant_revoked(oauth_case)
     with pytest.raises(MCPOAuthError):
         await oauth_case.harness.service.verify_access_token(rotated.access_token)
+
+
+@pytest.mark.parametrize(("offset", "revokes"), [(-1, True), (0, False)], ids=["before", "at"])
+@pytest.mark.asyncio
+async def test_refresh_revocation_expiry_boundary_is_exclusive(
+    oauth_case: OAuthCase, offset: int, revokes: bool
+) -> None:
+    """A refresh token is live strictly before its expiry instant.
+
+    Given a refresh row and a clock one second before, or exactly at, its expiry.
+    When its own client revokes it.
+    Then the grant is revoked only while the token is still live.
+    """
+    tokens = await _tokens(oauth_case)
+    assert tokens.refresh_token is not None
+    expires_at = (await _refresh_rows(oauth_case))[0].expires_at
+    with freeze_time(expires_at + timedelta(seconds=offset)):
+        await oauth_case.harness.service.revoke_token(_revocation(tokens.refresh_token))
+    assert await _grant_revoked(oauth_case) is revokes
+
+
+@pytest.mark.asyncio
+async def test_revoking_one_grant_leaves_another_owners_grant_usable(
+    oauth_case: OAuthCase,
+) -> None:
+    """Revocation reaches exactly the presented credential's grant.
+
+    Given two owners, each with a live grant for the same client.
+    When the first owner's used predecessor is revoked.
+    Then only the first grant is revoked and the second still refreshes and verifies.
+    """
+    first = await _tokens(oauth_case)
+    assert first.refresh_token is not None
+    other_id = str(uuid7())
+    membership = await _seed_user_with_membership(
+        oauth_case.harness.repository, user_public_id=other_id
+    )
+    other_owner = OAuthCase(
+        oauth_case.harness, _principal(other_id, membership_public_id=membership)
+    )
+    second = await _tokens(other_owner)
+    assert second.refresh_token is not None
+    await oauth_case.harness.service.exchange_refresh_token(_refresh(first.refresh_token))
+    await oauth_case.harness.service.revoke_token(_revocation(first.refresh_token))
+    rotated = await oauth_case.harness.service.exchange_refresh_token(
+        _refresh(second.refresh_token)
+    )
+    assert await oauth_case.harness.service.verify_access_token(rotated.access_token)
+    async with oauth_case.harness.repository.session() as session:
+        grants = (await session.execute(select(OAuthGrant))).scalars().all()
+        states = {grant.owner_user_public_id: grant.revoked_at is not None for grant in grants}
+    assert states == {oauth_case.owner.user_public_id: True, other_id: False}
