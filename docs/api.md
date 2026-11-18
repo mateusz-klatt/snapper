@@ -3048,9 +3048,12 @@ The authenticated consent page uses three routes. All need the normal cookie
 session and `manage:ai_integration`; both POSTs need CSRF. Responses are
 `no-store`. Errors are `{"detail": {"error_code": ...}}` with
 `consent_request_invalid` (400), `consent_scope_invalid` (400),
-`consent_access_denied` (403), `grant_replacement_required` (409) or
-`consent_delegate_limit` (409); a disabled integration returns the shared
-`feature_disabled` 503 envelope.
+`consent_access_denied` (403, also when the owner already holds the maximum
+number of AI delegates) or `grant_replacement_required` (409); a disabled
+integration returns the shared `feature_disabled` 503 envelope. While
+`MCP_OAUTH_ENABLED` is off these routes answer 404 like every other OAuth
+route, so a consent page opened directly or left open across a flag change
+cannot succeed by retrying.
 
 - `GET /api/mcp-oauth/consent` reads the pending request from the
   `X-MCP-OAuth-Request` header, never from the query, and returns

@@ -806,7 +806,7 @@ def test_live_integration_defaults_to_enabled_without_a_settings_service(case: H
 @pytest.mark.parametrize(
     ("error", "status_code", "code"),
     [
-        (DelegateProliferationError("cap"), 409, "consent_delegate_limit"),
+        (DelegateProliferationError("cap"), 403, "consent_access_denied"),
         (DelegateOperatorBindingError("operator"), 403, "consent_access_denied"),
     ],
     ids=["delegate-cap", "operator-binding"],

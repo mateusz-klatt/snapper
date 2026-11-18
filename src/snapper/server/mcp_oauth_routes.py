@@ -563,9 +563,7 @@ def _consent_error(error: Exception) -> HTTPException:
     """Map service refusals onto the stable consent-API error codes."""
     if isinstance(error, OAuthGrantReplacementRequiredError):
         code: tuple[int, str] = (status.HTTP_409_CONFLICT, "grant_replacement_required")
-    elif isinstance(error, DelegateProliferationError):
-        code = (status.HTTP_409_CONFLICT, "consent_delegate_limit")
-    elif isinstance(error, DelegateOperatorBindingError):
+    elif isinstance(error, (DelegateProliferationError, DelegateOperatorBindingError)):
         code = (status.HTTP_403_FORBIDDEN, "consent_access_denied")
     else:
         code = _CONSENT_ERRORS.get(
