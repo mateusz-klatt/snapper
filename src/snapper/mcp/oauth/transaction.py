@@ -209,24 +209,31 @@ class OAuthTransaction:
         code.consumed_at = now
 
     async def rotate_refresh(
-        self, predecessor: OAuthRefreshToken, successor: OAuthRefreshToken, now: datetime
+        self, predecessor: OAuthRefreshToken, successor: OAuthRefreshToken | None, now: datetime
     ) -> None:
-        """Claim one unused token and add its successor in the caller's unit of work.
+        """Claim one unused token and add its optional successor in the caller's unit of work.
+
+        A ``None`` successor is the terminal access-only exchange: the predecessor is
+        consumed exactly like a rotation, so a later reuse is still detected as replay.
 
         Args:
             predecessor: Previously issued refresh token whose unused state is claimed.
-            successor: Hash-only successor retaining the grant and refresh family.
+            successor: Hash-only successor retaining the grant and refresh family, or
+                None when the exchange no longer carries ``offline_access``.
             now: UTC decision instant used for expiry and mutation checks.
 
         Raises:
             OAuthTransactionConflictError: If the compare-and-swap claim lost; roll back the whole unit of work.
+            ValueError: If a successor leaves the grant or family or widens scopes.
         """
-        same_identity = (
-            successor.grant_public_id == predecessor.grant_public_id
-            and successor.family_public_id == predecessor.family_public_id
-        )
-        if not same_identity or not set(successor.scopes) <= set(predecessor.scopes):
-            raise ValueError("OAuth refresh successor violates family or scope")
+        if successor is not None:
+            same_identity = (
+                successor.grant_public_id == predecessor.grant_public_id
+                and successor.family_public_id == predecessor.family_public_id
+            )
+            if not same_identity or not set(successor.scopes) <= set(predecessor.scopes):
+                raise ValueError("OAuth refresh successor violates family or scope")
+        replacement = successor.public_id if successor is not None else None
         result = await self.session.execute(
             update(OAuthRefreshToken)
             .where(
@@ -235,11 +242,12 @@ class OAuthTransaction:
                 OAuthRefreshToken.revoked_at.is_(None),
                 OAuthRefreshToken.expires_at > now,
             )
-            .values(used_at=now, replaced_by_public_id=successor.public_id)
+            .values(used_at=now, replaced_by_public_id=replacement)
         )
         if cast(CursorResult[tuple[object, ...]], result).rowcount != 1:
             raise OAuthTransactionConflictError("OAuth refresh claim lost")
-        self.session.add(successor)
+        if successor is not None:
+            self.session.add(successor)
 
     async def revoke_grant(self, grant_public_id: str, now: datetime) -> bool:
         """Revoke the affected grant and all its families in this same transaction.
