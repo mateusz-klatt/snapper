@@ -17,6 +17,7 @@
 					replace access_token REDACTED
 				}
 				request>headers>X-Mcp-Oauth-Request delete
+				resp_headers>Location delete
 			}
 		}
 	}
@@ -81,6 +82,7 @@
 					replace access_token REDACTED
 				}
 				request>headers>X-Mcp-Oauth-Request delete
+				resp_headers>Location delete
 			}
 		}
 	}

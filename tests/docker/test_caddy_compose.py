@@ -82,7 +82,9 @@ def test_caddy_redacts_oauth_credentials_in_access_and_error_logs() -> None:
     Given: The real Caddyfile, verified against caddy:2-alpine v2.11.9 with sentinels,
     When: Its log filter blocks are inspected,
     Then: The global default log and the :8000 access log both replace every
-        credential-bearing query key and delete the consent capability header.
+        credential-bearing query key, delete the consent capability header, and
+        drop the response Location, whose authorize redirect carries the capability
+        in its fragment.
     """
     blocks = _log_filter_blocks()
 
@@ -91,6 +93,7 @@ def test_caddy_redacts_oauth_credentials_in_access_and_error_logs() -> None:
         for key in _REDACTED_QUERY_KEYS:
             assert f"replace {key} REDACTED" in block
         assert "request>headers>X-Mcp-Oauth-Request delete" in block
+        assert "resp_headers>Location delete" in block
 
 
 def test_caddy_spa_fallback_serves_the_consent_route() -> None:
