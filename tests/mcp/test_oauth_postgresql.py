@@ -6,6 +6,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from uuid import uuid7
@@ -385,7 +386,7 @@ async def test_refresh_race_commits_strict_grant_wide_revocation(
     async def hold_rotation(
         tx: OAuthTransaction,
         predecessor: OAuthRefreshToken,
-        successor: OAuthRefreshToken,
+        successor: OAuthRefreshToken | None,
         now: datetime,
     ) -> None:
         """Pause only after the first real atomic predecessor claim."""
@@ -436,6 +437,84 @@ async def test_refresh_race_commits_strict_grant_wide_revocation(
                 .all()
             )
             assert len(rows) == 3 and all(row.revoked_at is not None for row in rows)
+    finally:
+        release.set()
+        for task in [first, second]:
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *[task for task in [first, second] if task is not None], return_exceptions=True
+        )
+
+
+async def test_terminal_access_only_refresh_race_still_detects_replay(
+    pg_frame: PGFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A terminal access-only narrowing consumes its predecessor under a real lock.
+
+    Given one read/offline refresh family and an unrelated live grant.
+    When one PostgreSQL pool narrows to snapper.read (no successor) and holds its claim,
+    and a second pool presents the same predecessor while waiting on the row lock.
+    Then the first returns access only, the second is replay, and only the affected
+    grant and its refresh rows are revoked.
+    """
+    owner_id, tokens = await _tokens(pg_frame)
+    assert tokens.refresh_token is not None
+    _unrelated_owner, unrelated = await _tokens(pg_frame)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = OAuthTransaction.rotate_refresh
+
+    async def hold_terminal_claim(
+        tx: OAuthTransaction,
+        predecessor: OAuthRefreshToken,
+        successor: OAuthRefreshToken | None,
+        now: datetime,
+    ) -> None:
+        """Pause only after the real compare-and-swap claim of a terminal exchange."""
+        assert successor is None
+        await original(tx, predecessor, successor, now)
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(OAuthTransaction, "rotate_refresh", hold_terminal_claim)
+    narrowed_command = replace(_refresh(tokens.refresh_token), scopes=(SNAPPER_READ,))
+    first = asyncio.create_task(pg_frame.first.exchange_refresh_token(narrowed_command))
+    second = None
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        second = asyncio.create_task(
+            pg_frame.second.exchange_refresh_token(_refresh(tokens.refresh_token))
+        )
+        await _wait_for_native_lock(pg_frame)
+        release.set()
+        narrowed = await asyncio.wait_for(first, 10)
+        assert narrowed.refresh_token is None
+        with pytest.raises(OAuthRefreshReuseDetectedError):
+            await asyncio.wait_for(second, 10)
+        with pytest.raises(MCPOAuthError):
+            await pg_frame.first.verify_access_token(narrowed.access_token)
+        assert await pg_frame.first.verify_access_token(unrelated.access_token)
+        async with pg_frame.repository.session() as session:
+            grant = (
+                await session.execute(
+                    select(OAuthGrant).where(OAuthGrant.owner_user_public_id == owner_id)
+                )
+            ).scalar_one()
+            rows = (
+                (
+                    await session.execute(
+                        select(OAuthRefreshToken).where(
+                            OAuthRefreshToken.grant_public_id == grant.public_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert grant.revoked_at is not None
+        assert len(rows) == 1
+        assert rows[0].used_at is not None and rows[0].replaced_by_public_id is None
+        assert rows[0].revoked_at is not None
     finally:
         release.set()
         for task in [first, second]:
