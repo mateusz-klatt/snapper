@@ -17,6 +17,7 @@ from uuid import uuid7
 
 import pytest
 import pytest_asyncio
+from freezegun import freeze_time
 from sqlalchemy import select
 from sqlalchemy import update
 
@@ -315,3 +316,65 @@ async def test_unavailable_pending_requests_are_indistinguishable(
             await session.commit()
     with pytest.raises(MCPOAuthError, match="^invalid_request$"):
         await oauth_case.harness.service.describe_authorization_request(raw)
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_narrowed_refresh_row_cannot_re_expand(oauth_case: OAuthCase) -> None:
+    """A pre-existing read-only refresh row still cannot widen back to offline access.
+
+    Given a refresh row persisted with only snapper.read, as the earlier code could write.
+    When the client asks to refresh it with snapper.read and offline_access.
+    Then invalid_scope is raised before any mutation.
+    """
+    tokens = await _tokens(oauth_case)
+    assert tokens.refresh_token is not None
+    async with oauth_case.harness.repository.session() as session:
+        await session.execute(update(OAuthRefreshToken).values(scopes=[SNAPPER_READ]))
+        await session.commit()
+    with pytest.raises(MCPOAuthError, match="invalid_scope"):
+        await oauth_case.harness.service.exchange_refresh_token(
+            replace(_refresh(tokens.refresh_token), scopes=(SNAPPER_READ, OFFLINE_ACCESS))
+        )
+    rows = await _refresh_rows(oauth_case)
+    assert rows[0].used_at is None and rows[0].revoked_at is None
+
+
+@pytest.mark.asyncio
+async def test_revocation_with_an_expired_access_token_is_a_no_op(
+    oauth_case: OAuthCase,
+) -> None:
+    """An expired access JWT cannot be verified, so it revokes nothing.
+
+    Given a live grant and its access token, observed after the token expired.
+    When the client revokes that expired access token.
+    Then the call succeeds and the grant stays active.
+    """
+    tokens = await _tokens(oauth_case)
+    later = datetime.now(UTC) + timedelta(seconds=3600)
+    with freeze_time(later):
+        await oauth_case.harness.service.revoke_token(_revocation(tokens.access_token))
+    assert not await _grant_revoked(oauth_case)
+
+
+@pytest.mark.asyncio
+async def test_revocation_with_an_expired_own_refresh_token_revokes_its_grant(
+    oauth_case: OAuthCase,
+) -> None:
+    """An expired refresh row still identifies the authenticated client's own grant.
+
+    The hash proves possession and the grant lookup proves ownership, so an explicit
+    revocation is honoured; an expired refresh token can never be exchanged.
+
+    Given a refresh row whose expiry has passed.
+    When its own client revokes it.
+    Then the grant and its families are revoked.
+    """
+    tokens = await _tokens(oauth_case)
+    assert tokens.refresh_token is not None
+    async with oauth_case.harness.repository.session() as session:
+        await session.execute(
+            update(OAuthRefreshToken).values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+        await session.commit()
+    await oauth_case.harness.service.revoke_token(_revocation(tokens.refresh_token))
+    assert await _grant_revoked(oauth_case)
