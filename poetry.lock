@@ -284,14 +284,14 @@ tz = ["tzdata"]
 
 [[package]]
 name = "annotated-doc"
-version = "0.0.6"
+version = "0.0.7"
 description = "Document parameters, class attributes, return types, and variables inline, with Annotated."
 optional = false
-python-versions = ">=3.10"
+python-versions = ">=3.11"
 groups = ["main"]
 files = [
-    {file = "annotated_doc-0.0.6-py3-none-any.whl", hash = "sha256:361ca0950cc7082f53fa69e9328409f40a62c61e57e0a47e1825a08078a58a53"},
-    {file = "annotated_doc-0.0.6.tar.gz", hash = "sha256:7969bb69912085b2285849c0dcac0b4b374fd180c13cf10a87f284ffcf347bbf"},
+    {file = "annotated_doc-0.0.7-py3-none-any.whl", hash = "sha256:6bc31bbbec6dfaaedc1676dbc11dbda96fe22a2b5c400e9ebad113fec44a9dc6"},
+    {file = "annotated_doc-0.0.7.tar.gz", hash = "sha256:0a30ef8f5322a4173720ae6712dc9a5e58f5a19868f3f167b4b5778db066c2b5"},
 ]
 
 [[package]]
@@ -892,14 +892,14 @@ redis = ["redis (>=2.10.5)"]
 
 [[package]]
 name = "ccxt"
-version = "4.5.92"
+version = "4.5.93"
 description = "A cryptocurrency trading API with more than 100 exchanges in JavaScript / TypeScript / Python / C# / PHP / Go"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "ccxt-4.5.92-py3-none-any.whl", hash = "sha256:004c4a9176700df6c5d4f8f7b2fd4691743040b70a2818c7afe1ad93021e62d4"},
-    {file = "ccxt-4.5.92.tar.gz", hash = "sha256:5faa74fe17168ad8c21f34cc6286c7d771b68d0bca67ff595dcced62b98b46d5"},
+    {file = "ccxt-4.5.93-py3-none-any.whl", hash = "sha256:214d1a0379b5539fa29936e03cbe12d78c55a58df8f225d59f9fc3ad72805b53"},
+    {file = "ccxt-4.5.93.tar.gz", hash = "sha256:da110503c8fcc3e789db342eec1fe82cbe7da7f4ed52e50d9bfd521da8f17d8d"},
 ]
 
 [package.dependencies]
@@ -908,7 +908,7 @@ aiohttp = ">=3.14.3,<3.15"
 aiohttp-fast-zlib = "0.3.0"
 aiosignal = "1.4.0"
 attrs = "26.1.0"
-certifi = ">=2026.6.17"
+certifi = ">=2026.10.19"
 cffi = "2.0.0"
 charset_normalizer = "3.4.7"
 cryptography = ">=50,<51"
@@ -927,7 +927,7 @@ yarl = ">=1.20,<2"
 zlib-ng = "1.0.0"
 
 [package.extras]
-dev = ["aiodns (==4.0.4)", "aiohttp (>=3.14.3,<3.15)", "aiohttp-fast-zlib (==0.3.0)", "certifi (==2026.6.17)", "coincurve (==21.0.0) ; implementation_name == \"cpython\" and python_version < \"3.14\" and platform_machine in \"x86_64 AMD64 aarch64 arm64 ARM64 i686\"", "cryptography (>=50,<51)", "mypy (==1.6.1)", "orjson (==3.11.9) ; implementation_name == \"cpython\" and python_version < \"3.15\" and platform_machine in \"x86_64 AMD64 aarch64 arm64 armv7l i686 ppc64le s390x\"", "requests (>=2.32,<3)", "ruff (==0.0.292)", "tox (==4.56.1)", "typing_extensions (==4.16.0)", "uvloop (==0.22.1) ; platform_system != \"Windows\" and implementation_name == \"cpython\"", "winloop (==0.6.3) ; platform_system == \"Windows\" and implementation_name == \"cpython\" and python_version < \"3.15\" and platform_machine in \"AMD64 ARM64\"", "yarl (>=1.20,<2)", "zlib-ng (==1.0.0)"]
+dev = ["aiodns (==4.0.4)", "aiohttp (>=3.14.3,<3.15)", "aiohttp-fast-zlib (==0.3.0)", "certifi (==2026.10.23)", "coincurve (==21.0.0) ; implementation_name == \"cpython\" and python_version < \"3.14\" and platform_machine in \"x86_64 AMD64 aarch64 arm64 ARM64 i686\"", "cryptography (>=50,<51)", "mypy (==1.6.1)", "orjson (==3.11.9) ; implementation_name == \"cpython\" and python_version < \"3.15\" and platform_machine in \"x86_64 AMD64 aarch64 arm64 armv7l i686 ppc64le s390x\"", "requests (>=2.32,<3)", "ruff (==0.0.292)", "tox (==4.56.1)", "typing_extensions (==4.16.0)", "uvloop (==0.22.1) ; platform_system != \"Windows\" and implementation_name == \"cpython\"", "winloop (==0.6.3) ; platform_system == \"Windows\" and implementation_name == \"cpython\" and python_version < \"3.15\" and platform_machine in \"AMD64 ARM64\"", "yarl (>=1.20,<2)", "zlib-ng (==1.0.0)"]
 qa = ["ruff (==0.0.292)", "tox (==4.56.1)"]
 type = ["mypy (==1.6.1)"]
 
@@ -1238,14 +1238,14 @@ files = [
 
 [[package]]
 name = "cloudpickle"
-version = "3.1.2"
+version = "3.1.3"
 description = "Pickler class to extend the standard pickle.Pickler functionality"
 optional = false
 python-versions = ">=3.8"
 groups = ["dev"]
 files = [
-    {file = "cloudpickle-3.1.2-py3-none-any.whl", hash = "sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a"},
-    {file = "cloudpickle-3.1.2.tar.gz", hash = "sha256:7fda9eb655c9c230dab534f1983763de5835249750e85fbcef43aaa30a9a2414"},
+    {file = "cloudpickle-3.1.3-py3-none-any.whl", hash = "sha256:1654f4f18e416447210a63c5c25a135d65a292156aa5fa519dfa4baf7726dddb"},
+    {file = "cloudpickle-3.1.3.tar.gz", hash = "sha256:cbe9fde14429a5db009ea05ce94e5182cf998c97b96918d50c10f73f9c2f4f33"},
 ]
 
 [[package]]
@@ -1838,14 +1838,14 @@ tests = ["asttokens (>=2.1.0)", "coverage-enable-subprocess", "coverage[toml]", 
 
 [[package]]
 name = "fastapi"
-version = "0.163.1"
+version = "0.165.0"
 description = "FastAPI framework, high performance, easy to learn, fast to code, ready for production"
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
 files = [
-    {file = "fastapi-0.163.1-py3-none-any.whl", hash = "sha256:68f2d8050f5c3583121c0d203046cc7def5c16a7d6c43a0e7707a8ea610fe2d3"},
-    {file = "fastapi-0.163.1.tar.gz", hash = "sha256:3d364b02a68b67292e833ff2dfed3b8dc3aeadf73e271c15316c6c166668792f"},
+    {file = "fastapi-0.165.0-py3-none-any.whl", hash = "sha256:896f48462042bb4f162147eb8fac7e858753dc1f486765709baf105d70e4fc5b"},
+    {file = "fastapi-0.165.0.tar.gz", hash = "sha256:dd94d4128319c1e1d50535ab023ab698f850a4d2822f0e181747b46f4ff3c0ab"},
 ]
 
 [package.dependencies]
@@ -1853,7 +1853,7 @@ annotated-doc = ">=0.0.2"
 anyio = ">=4.1.0"
 opentelemetry-api = ">=1.44.0"
 pydantic = ">=2.9.0"
-starlette = ">=0.46.0"
+starlette = ">=1.6.0"
 typing-extensions = ">=4.8.0"
 typing-inspection = ">=0.4.2"
 
@@ -1880,14 +1880,14 @@ devel = ["colorama", "json-spec", "jsonschema", "pylint", "pytest", "pytest-benc
 
 [[package]]
 name = "filelock"
-version = "4.2.10"
+version = "4.2.12"
 description = "A platform independent file lock."
 optional = false
 python-versions = ">=3.11"
 groups = ["dev"]
 files = [
-    {file = "filelock-4.2.10-py3-none-any.whl", hash = "sha256:9479aaeb4db20b5a53e3da28493edd24720b66b8a0b84030aa56ccdf243d6857"},
-    {file = "filelock-4.2.10.tar.gz", hash = "sha256:fcc3c0cb8bfe7f4b3bb0e231c04b15dbad068cb3c2515f343d8fde4dce93bd5d"},
+    {file = "filelock-4.2.12-py3-none-any.whl", hash = "sha256:21decfec02f116ed4c954433cdb31f28c3b346b784543177b6d7059da2702ee9"},
+    {file = "filelock-4.2.12.tar.gz", hash = "sha256:7e7da24d3ac39268b0f156e56870001de44886318f092f9d851e692f7114d6dd"},
 ]
 
 [[package]]
@@ -4170,14 +4170,14 @@ files = [
 
 [[package]]
 name = "narwhals"
-version = "2.28.0"
+version = "2.29.0"
 description = "Extremely lightweight compatibility layer between dataframe libraries"
 optional = false
 python-versions = ">=3.10"
 groups = ["main", "dev"]
 files = [
-    {file = "narwhals-2.28.0-py3-none-any.whl", hash = "sha256:1f69d6385ec30e2fa6e1fdeb37c562ecabd0f713f6f3e3b58a668c5c9df9567f"},
-    {file = "narwhals-2.28.0.tar.gz", hash = "sha256:2d9860c80d6610820826e94c6e42ce4b1d92d89cdd479586e652a8d211dab345"},
+    {file = "narwhals-2.29.0-py3-none-any.whl", hash = "sha256:1c69b3dc30240f6e848c5a673cafc86affa44184ecce721e25b7194663ad10dc"},
+    {file = "narwhals-2.29.0.tar.gz", hash = "sha256:eb19c877d9a705300bcc9414499a07b32a52db703369414e57e474ca5fc63c42"},
 ]
 
 [package.extras]
@@ -4748,14 +4748,14 @@ testing = ["pytest", "pytest-cov", "wheel"]
 
 [[package]]
 name = "platformdirs"
-version = "4.14.5"
+version = "4.14.7"
 description = "A small Python package for determining appropriate platform-specific dirs, e.g. a `user data dir`."
 optional = false
 python-versions = ">=3.11"
 groups = ["dev"]
 files = [
-    {file = "platformdirs-4.14.5-py3-none-any.whl", hash = "sha256:8e778c6fa421516f4d3369449f8df3b0e1b72c0e0005fe88e3ec772d0a14e750"},
-    {file = "platformdirs-4.14.5.tar.gz", hash = "sha256:32e9921db7385aa8169bee4fe9501923e5715ba9fb7ea3b9c69b0d8e0639f7a1"},
+    {file = "platformdirs-4.14.7-py3-none-any.whl", hash = "sha256:391513b74707c42335fff3ea17eaac657a7ee9ffcadd809634d34ea594d0122c"},
+    {file = "platformdirs-4.14.7.tar.gz", hash = "sha256:5472257c1cf97a14658af52997011c7e59e4aebf3a24950b973c11b579e1b074"},
 ]
 
 [[package]]
@@ -5695,14 +5695,14 @@ tzdata = "*"
 
 [[package]]
 name = "python-discovery"
-version = "1.9.5"
+version = "1.9.6"
 description = "Python interpreter discovery"
 optional = false
 python-versions = ">=3.9"
 groups = ["dev"]
 files = [
-    {file = "python_discovery-1.9.5-py3-none-any.whl", hash = "sha256:a1fae8fca11e4bc61e38491c2aafff29e430b3c5e272d51ae52fb895bc4c0fac"},
-    {file = "python_discovery-1.9.5.tar.gz", hash = "sha256:86279f5d2728bc067de28b7ddc571be2eacc2ae0e7048f8629d2481a0f8848a2"},
+    {file = "python_discovery-1.9.6-py3-none-any.whl", hash = "sha256:93b10b90363d4151964cdeee2ec6601f3041b17fc2b253a1c3da7d6e7ddd8337"},
+    {file = "python_discovery-1.9.6.tar.gz", hash = "sha256:383aa67858d73a9585a843a37a4383c6be98e4d86a981a031328e393a6eb2632"},
 ]
 
 [package.dependencies]
@@ -5760,14 +5760,14 @@ files = [
 
 [[package]]
 name = "python-socks"
-version = "3.2.1"
+version = "3.2.2"
 description = "Proxy (SOCKS4, SOCKS5, HTTP CONNECT) client for Python"
 optional = false
 python-versions = ">=3.9.0"
 groups = ["main"]
 files = [
-    {file = "python_socks-3.2.1-py3-none-any.whl", hash = "sha256:db2c37d4f7aeebfbba91d2d7670718b2d516061b34296fa8498c6f671e87c504"},
-    {file = "python_socks-3.2.1.tar.gz", hash = "sha256:d21618ae6c6734d357be83263b3791666d12af59480ace8f48f2b5fcc8edc987"},
+    {file = "python_socks-3.2.2-py3-none-any.whl", hash = "sha256:e0d464617bc24fb9511cf668ce67ea87efdcfec19d60ac149ad301065058f443"},
+    {file = "python_socks-3.2.2.tar.gz", hash = "sha256:307cca18f0b464cdc48341578e521832c4878690a6f87b82dfad7bad7474b78f"},
 ]
 
 [package.extras]
@@ -7284,14 +7284,14 @@ files = [
 
 [[package]]
 name = "typer"
-version = "0.29.1"
+version = "0.29.2"
 description = "Typer, build great CLIs. Easy to code. Based on Python type hints."
 optional = false
-python-versions = ">=3.10"
+python-versions = ">=3.11"
 groups = ["main"]
 files = [
-    {file = "typer-0.29.1-py3-none-any.whl", hash = "sha256:00dbc549c13428bec1be55fe1f4d0fb8c6637a310e4f178ef14abe9534ee7b58"},
-    {file = "typer-0.29.1.tar.gz", hash = "sha256:ab6eb3880bf67ce96147734717f9ec333c06f66e361f3ea947d0be43da39f242"},
+    {file = "typer-0.29.2-py3-none-any.whl", hash = "sha256:f30731f8ca758368b836b3714872e58e395cef8fcaff918c853b1969ed5274e7"},
+    {file = "typer-0.29.2.tar.gz", hash = "sha256:b1998dc5f2c3dedafa1517a9521fa944cc4dc1fadcea085d81a3b10ebcaeb075"},
 ]
 
 [package.dependencies]
@@ -7474,14 +7474,14 @@ test = ["aiohttp (>=3.10.5)", "flake8 (>=6.1,<7.0)", "mypy (>=0.800)", "psutil",
 
 [[package]]
 name = "virtualenv"
-version = "21.15.6"
+version = "21.15.9"
 description = "Virtual Python Environment builder"
 optional = false
 python-versions = ">=3.9"
 groups = ["dev"]
 files = [
-    {file = "virtualenv-21.15.6-py3-none-any.whl", hash = "sha256:4b99ab9b95ff11043939bb4cad2fa0449175fa5a478372864f62160cb6c1a7ed"},
-    {file = "virtualenv-21.15.6.tar.gz", hash = "sha256:c8b65c7d206ca6ef18de9352c160b3f04f66fff9f6b0ec8fd31f14688eba52c4"},
+    {file = "virtualenv-21.15.9-py3-none-any.whl", hash = "sha256:c0fbae7de061402e31897d96cfbe7dc35ce93cd464fe05f9bdbecf61313447bf"},
+    {file = "virtualenv-21.15.9.tar.gz", hash = "sha256:adc6799981f513ce852aea17ea592e0d342ce48e87f5d17a3d997966df582a67"},
 ]
 
 [package.dependencies]
@@ -8280,4 +8280,4 @@ test = ["pytest"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.14"
-content-hash = "9ed61d9ae405cf5deecc258307aedbd36aaafa220de69085f4562966cbf92e01"
+content-hash = "d0e521517d3b2940c42a8cb6cc6b5918ebb50bcdc28f740d75bf3bffd9aa7524"
