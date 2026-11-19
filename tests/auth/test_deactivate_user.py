@@ -31,6 +31,7 @@ from snapper.auth.schemas.requests import DeactivateUserBody
 from snapper.auth.schemas.requests import DeactivateUserRequest
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import TokenManager
+from snapper.auth.user_service import UserAuthorityConflictError
 from snapper.auth.user_service import UserService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User
@@ -134,6 +135,68 @@ def _patch_token_manager_lookup() -> Generator[MagicMock]:
 
 class TestDeactivateUserOrchestration:
     """Coverage for the canonical kill-switch flow."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("has_grants", [False, True])
+    async def test_postgresql_locks_grant_owners_before_the_target(
+        self, has_grants: bool, _patch_token_manager_lookup: MagicMock
+    ) -> None:
+        """Deactivate only after locking the owners of the target's active grants.
+
+        Given a PostgreSQL user with or without incoming grants.
+        When an administrator deactivates the user.
+        Then the transaction sets isolation and locks any owners before the target.
+        """
+        target = _make_db_user("target")
+        service, session, commit, revoke, manager = _build_service(existing_db_user=target)
+        _patch_token_manager_lookup.return_value = manager
+        owners = [User(public_id="owner", known_to=KNOWN_TO_MAX)]
+        session.scalars.side_effect = [["owner"], owners] if has_grants else [[]]
+        with (
+            patch.object(service.repository, "dialect_name", "postgresql"),
+            patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()),
+        ):
+            assert await service.deactivate_user(target.public_id, reason=None)
+        statements = [
+            call.args[0] for call in session.method_calls if call[0] in {"execute", "scalars"}
+        ]
+        assert str(statements[0]) == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+        assert "oauth_grants.delegate_user_public_id = (SELECT users.public_id" in str(
+            statements[1]
+        )
+        assert "oauth_grants.revoked_at IS NULL" in str(statements[1])
+        if has_grants:
+            assert "ORDER BY users.public_id FOR UPDATE" in str(statements[2])
+            assert statements[2].get_execution_options()["populate_existing"]
+        target_lock = statements[3 if has_grants else 2]
+        assert "users.public_id = " in str(target_lock) and "FOR UPDATE" in str(target_lock)
+        revoke.assert_awaited_once_with(target.public_id, service.repository)
+        commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_postgresql_rejects_closed_grant_owner_before_revocation(
+        self, _patch_token_manager_lookup: MagicMock
+    ) -> None:
+        """A stale owner version invalidates a delegate's pending deactivation.
+
+        Given a grant whose owner version closes while deactivation waits on its lock.
+        When the lock returns that closed row.
+        Then deactivation reports a conflict before changing the user or revoking credentials.
+        """
+        target = _make_db_user("delegate")
+        service, session, commit, revoke, manager = _build_service(existing_db_user=target)
+        _patch_token_manager_lookup.return_value = manager
+        closed_owner = User(public_id="owner", known_to=datetime(2020, 1, 1, tzinfo=UTC))
+        session.scalars.side_effect = [["owner"], [closed_owner]]
+        with (
+            patch.object(service.repository, "dialect_name", "postgresql"),
+            patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()) as mutate,
+            pytest.raises(UserAuthorityConflictError, match="OAuth grant owner changed"),
+        ):
+            await service.deactivate_user(target.public_id, reason=None)
+        mutate.assert_not_awaited()
+        revoke.assert_not_awaited()
+        commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_happy_path_publishes_bus_event_with_expected_payload(

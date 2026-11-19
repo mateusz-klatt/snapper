@@ -269,15 +269,23 @@ def test_registration_and_openid_stay_absent(case: HttpCase) -> None:
 
 @pytest.mark.parametrize("oauth_enabled", [False, True])
 @pytest.mark.parametrize("integration_enabled", [False, True])
-def test_openid_discovery_returns_404_before_the_mcp_mount(
-    oauth_enabled: bool, integration_enabled: bool, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("static_mounted", [False, True], ids=["no-frontend", "with-frontend"])
+def test_openid_discovery_returns_404_before_mcp_and_static_mounts(
+    oauth_enabled: bool,
+    integration_enabled: bool,
+    static_mounted: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unsupported OpenID discovery never reaches the protected MCP mount.
+    """Unsupported OpenID discovery never reaches the MCP or frontend mounts.
 
-    Given either bootstrap and integration flag state on a real FastAPI app,
+    Given either bootstrap and integration flag state, with or without frontend assets,
     When root, path-specific and issuer-relative discovery URLs are requested,
     Then each returns 404 without a bearer challenge or a redirect.
     """
+    monkeypatch.chdir(tmp_path)
+    if static_mounted:
+        (tmp_path / "frontend" / "dist").mkdir(parents=True)
     monkeypatch.setattr(server_app, "get_settings", lambda: _settings(enabled=oauth_enabled))
     app = create_app()
     flags = _Flags()
@@ -289,7 +297,7 @@ def test_openid_discovery_returns_404_before_the_mcp_mount(
         "/.well-known/openid-configuration/api/mcp",
         "/api/mcp/.well-known/openid-configuration",
     ):
-        for method in ("GET", "HEAD", "POST"):
+        for method in ("GET", "HEAD", "POST", "OPTIONS", "PROPFIND"):
             response = client.request(method, path)
             assert response.status_code == 404, (method, path)
             assert "www-authenticate" not in response.headers

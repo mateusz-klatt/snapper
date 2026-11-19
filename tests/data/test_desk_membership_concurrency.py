@@ -6,6 +6,8 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from unittest.mock import PropertyMock
 from unittest.mock import patch
 
@@ -156,6 +158,30 @@ async def test_concurrent_first_attachments_preserve_exactly_one_primary(
     memberships = await _active_memberships(repository)
     assert {desk for desk, _is_primary in memberships} == {_DESK_A, _DESK_B}
     assert sum(is_primary for _desk, is_primary in memberships) == 1
+
+
+@pytest.mark.asyncio
+async def test_postgresql_detach_sets_read_committed_before_locking_user() -> None:
+    """Pin the detachment snapshot before looking up its target.
+
+    Given a PostgreSQL session and a missing target viewer.
+    When the repository tries to detach the viewer.
+    Then it sets READ COMMITTED before its first locking read and skips revocation.
+    """
+    repository = SQLAlchemyRepository("postgresql+asyncpg://localhost/test")
+    missing = MagicMock()
+    missing.scalars.return_value.first.return_value = None
+    revoke = AsyncMock()
+    with (
+        patch.object(AsyncSession, "execute", side_effect=[None, missing]) as execute,
+        pytest.raises(DeskMembershipNotFoundError, match="Active target user not found"),
+    ):
+        await repository.detach_viewer_from_desk(_detach(_DESK_A, 1), revoke)
+    isolation, user_read = [str(call.args[0]) for call in execute.await_args_list]
+    assert isolation == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+    assert "FROM users" in user_read and "FOR UPDATE" in user_read
+    revoke.assert_not_awaited()
+    await repository.engine.dispose()
 
 
 @pytest.mark.asyncio
