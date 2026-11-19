@@ -666,6 +666,30 @@ class TestReconcileCycleFold:
         trade_svc.record_recon_success.assert_called()
 
 
+async def _run_loop_until_called(recon: ReconciliationLoop, expected: MagicMock) -> None:
+    """Run the real loop until the expected trade-service call happened, then stop it.
+
+    The loop sleeps its interval before every cycle, so a fixed wall-clock sleep races
+    the first cycle on a loaded parallel worker. Polling the mock with a bounded deadline
+    keeps every loop test deterministic without changing the loop's own timing.
+
+    Args:
+        recon: Loop under test, started here and stopped before returning.
+        expected: Trade-service mock method the first completed cycle must call.
+
+    Raises:
+        TimeoutError: When no cycle made the expected call within five seconds.
+    """
+    task = asyncio.create_task(recon.run())
+    try:
+        async with asyncio.timeout(5.0):
+            while not expected.called:
+                await asyncio.sleep(0.005)
+    finally:
+        recon.stop()
+        await asyncio.wait_for(task, timeout=5.0)
+
+
 @pytest.mark.asyncio
 async def test_reconcile_cycle_records_success() -> None:
     """Successful reconciliation cycle records success on trade service.
@@ -679,10 +703,7 @@ async def test_reconcile_cycle_records_success() -> None:
     recon = ReconciliationLoop(
         exchange_name="kraken", repository=repo, trade_service=trade_svc, interval_seconds=0.01
     )
-    task = asyncio.create_task(recon.run())
-    await asyncio.sleep(0.05)
-    recon.stop()
-    await asyncio.wait_for(task, timeout=1.0)
+    await _run_loop_until_called(recon, trade_svc.record_recon_success)
     trade_svc.record_recon_success.assert_called_with("kraken.BTC-USD.live")
 
 
@@ -702,10 +723,7 @@ async def test_reconcile_cycle_records_failure_on_error() -> None:
     recon = ReconciliationLoop(
         exchange_name="kraken", repository=repo, trade_service=trade_svc, interval_seconds=0.01
     )
-    task = asyncio.create_task(recon.run())
-    await asyncio.sleep(0.05)
-    recon.stop()
-    await asyncio.wait_for(task, timeout=1.0)
+    await _run_loop_until_called(recon, trade_svc.record_recon_failure)
     trade_svc.record_recon_failure.assert_called_with("kraken.BTC-USD.live")
 
 
@@ -723,10 +741,7 @@ async def test_reconcile_detects_stale_commands() -> None:
     recon = ReconciliationLoop(
         exchange_name="kraken", repository=repo, trade_service=trade_svc, interval_seconds=0.01
     )
-    task = asyncio.create_task(recon.run())
-    await asyncio.sleep(0.05)
-    recon.stop()
-    await asyncio.wait_for(task, timeout=1.0)
+    await _run_loop_until_called(recon, trade_svc.record_recon_success)
     trade_svc.record_recon_success.assert_called()
 
 
@@ -768,10 +783,7 @@ async def test_reconcile_skips_terminal_commands() -> None:
     recon = ReconciliationLoop(
         exchange_name="kraken", repository=repo, trade_service=trade_svc, interval_seconds=0.01
     )
-    task = asyncio.create_task(recon.run())
-    await asyncio.sleep(0.05)
-    recon.stop()
-    await asyncio.wait_for(task, timeout=1.0)
+    await _run_loop_until_called(recon, trade_svc.record_recon_success)
     trade_svc.record_recon_success.assert_called()
 
 
@@ -791,10 +803,7 @@ async def test_reconcile_failure_triggers_halt() -> None:
     recon = ReconciliationLoop(
         exchange_name="kraken", repository=repo, trade_service=trade_svc, interval_seconds=0.01
     )
-    task = asyncio.create_task(recon.run())
-    await asyncio.sleep(0.05)
-    recon.stop()
-    await asyncio.wait_for(task, timeout=1.0)
+    await _run_loop_until_called(recon, trade_svc.record_recon_failure)
     trade_svc.record_recon_failure.assert_called_with("kraken.BTC-USD.live")
 
 
@@ -880,10 +889,7 @@ async def test_reconcile_fresh_command_not_stale() -> None:
     recon = ReconciliationLoop(
         exchange_name="kraken", repository=repo, trade_service=trade_svc, interval_seconds=0.01
     )
-    task = asyncio.create_task(recon.run())
-    await asyncio.sleep(0.05)
-    recon.stop()
-    await asyncio.wait_for(task, timeout=1.0)
+    await _run_loop_until_called(recon, trade_svc.record_recon_success)
     trade_svc.record_recon_success.assert_called()
 
 
