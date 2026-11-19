@@ -59,6 +59,7 @@ from tests.helpers.candle_repair import RUN_TIME
 from tests.helpers.candle_repair import XRP
 from tests.helpers.candle_repair import candle
 from tests.helpers.candle_repair import fixed_context
+from tests.helpers.candle_repair import install_exclusive_file_spy
 from tests.helpers.candle_repair import kraken_row
 from tests.helpers.candle_repair import kraken_rows
 from tests.helpers.candle_repair import seed_instrument
@@ -476,13 +477,16 @@ def _artifacts_digest(
     return artifacts.digest
 
 
-def test_identical_state_gives_an_identical_approval_and_digest(tmp_path: Path) -> None:
+def test_identical_state_gives_an_identical_approval_and_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The approval is canonical and holds no time of the run or generated id.
 
     Given: The same request, context, inputs and plan.
     When: The plan's files are written twice, into two directories.
     Then: Both approvals are byte-identical and canonical, and their digests equal.
     """
+    assert_exclusive_owner_only = install_exclusive_file_spy(monkeypatch)
     context = fixed_context(MagicMock())
     first = _artifacts_digest(tmp_path / "first", context=context)
     second = _artifacts_digest(
@@ -521,7 +525,7 @@ def test_identical_state_gives_an_identical_approval_and_digest(tmp_path: Path) 
     assert summary["by_symbol"]["BTC-EUR"]["equal"] == 1
     assert summary["by_day"]["2026-11-10"]["insert"] == 1
     for name in ("preview.csv", "approval.json", "summary.json"):
-        assert (tmp_path / "first" / name).stat().st_mode & 0o777 == 0o600
+        assert_exclusive_owner_only(tmp_path / "first" / name)
 
 
 def test_every_bound_input_changes_the_digest(tmp_path: Path) -> None:

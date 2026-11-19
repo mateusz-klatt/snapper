@@ -1,13 +1,17 @@
 """Exercise the candle void's approval, original database binding and recovery artifacts."""
 
 import json
+import os
 import sqlite3
+import sys
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Final
 from typing import cast
 from unittest.mock import AsyncMock
 from uuid import uuid7
@@ -45,6 +49,18 @@ from tests.helpers.candle_repair import candle
 from tests.helpers.candle_repair import seed_instrument
 
 _CHF = "00000000-0000-4000-8000-000000000c51"
+_REAL_FSYNC_DIRECTORY: Final[Callable[[Path], None]] = candle_void._fsync_directory
+
+
+@pytest.fixture(autouse=True)
+def _fake_directory_fsync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub parent-directory fsync so ledger tests stay independent of host durability."""
+
+    def skip_directory_fsync(path: Path) -> None:
+        """Accept the directory path without opening a directory descriptor."""
+        del path
+
+    monkeypatch.setattr(candle_void, "_fsync_directory", skip_directory_fsync)
 
 
 @pytest_asyncio.fixture
@@ -928,10 +944,138 @@ def test_directory_fsync_unsupported_raises(monkeypatch: pytest.MonkeyPatch) -> 
         """Reject a directory descriptor as an unsupported platform would."""
         raise PermissionError
 
+    monkeypatch.setattr(candle_void, "_fsync_directory", _REAL_FSYNC_DIRECTORY)
     monkeypatch.setattr(candle_void.os, "open", refuse_open)
 
     with pytest.raises(PermissionError):
         candle_void._fsync_directory(Path("unused"))
+
+
+@pytest.mark.parametrize("fsync_fails", [False, True])
+def test_directory_fsync_opens_syncs_and_always_closes_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fsync_fails: bool
+) -> None:
+    """Directory fsync opens the path read-only, syncs it, and closes the descriptor.
+
+    Given fake os.open, os.fsync and os.close where fsync either succeeds or raises.
+    When _fsync_directory runs on a directory path.
+    Then the directory descriptor is synced and always closed even when fsync fails.
+    """
+    sentinel = 987654321
+    opened: list[tuple[Path, int]] = []
+    synced: list[int] = []
+    closed: list[int] = []
+    real_open = os.open
+    real_fsync = os.fsync
+    real_close = os.close
+
+    def fake_open(
+        target: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        """Return a sentinel descriptor for the target directory."""
+        if dir_fd is None and isinstance(target, (str, os.PathLike)) and Path(target) == tmp_path:
+            opened.append((Path(target), flags))
+            return sentinel
+        if dir_fd is None:
+            return real_open(target, flags, mode)
+        return real_open(target, flags, mode, dir_fd=dir_fd)
+
+    def fake_fsync(descriptor: int) -> None:
+        """Record the sentinel sync and optionally simulate a sync failure."""
+        if descriptor == sentinel:
+            synced.append(descriptor)
+            if fsync_fails:
+                raise OSError("synthetic fsync failure")
+            return
+        real_fsync(descriptor)
+
+    def fake_close(descriptor: int) -> None:
+        """Record the sentinel close and delegate real descriptors."""
+        if descriptor == sentinel:
+            closed.append(descriptor)
+            return
+        real_close(descriptor)
+
+    monkeypatch.setattr(candle_void, "_fsync_directory", _REAL_FSYNC_DIRECTORY)
+    monkeypatch.setattr(candle_void.os, "open", fake_open)
+    monkeypatch.setattr(candle_void.os, "fsync", fake_fsync)
+    monkeypatch.setattr(candle_void.os, "close", fake_close)
+
+    if fsync_fails:
+        with pytest.raises(OSError, match="synthetic fsync failure"):
+            candle_void._fsync_directory(tmp_path)
+    else:
+        candle_void._fsync_directory(tmp_path)
+
+    assert opened == [(tmp_path, os.O_RDONLY)]
+    assert synced == [sentinel]
+    assert closed == [sentinel]
+
+
+def test_write_durable_unlinks_new_file_when_directory_open_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory-open PermissionError removes the unsynced file and fails closed.
+
+    Given a parent directory whose os.open raises PermissionError.
+    When write_durable writes a new file inside that directory.
+    Then PermissionError propagates and the newly created file is unlinked.
+    """
+    target = tmp_path / "prepared.json"
+    real_open = os.open
+
+    def fake_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        """Refuse opening the target directory while allowing the file open."""
+        if dir_fd is None and isinstance(path, (str, os.PathLike)) and Path(path) == tmp_path:
+            raise PermissionError("directory descriptor unsupported")
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(candle_void, "_fsync_directory", _REAL_FSYNC_DIRECTORY)
+    monkeypatch.setattr(candle_void.os, "open", fake_open)
+
+    with pytest.raises(PermissionError, match="directory descriptor unsupported"):
+        candle_void.write_durable(target, b'{"status":"prepared"}')
+
+    assert not target.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="directory fsync unsupported by design")
+def test_write_durable_persists_new_file_and_syncs_parent_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real-filesystem durable writes persist bytes exclusively with mode 0600.
+
+    Given a POSIX host supporting directory descriptors.
+    When write_durable writes a new file and is invoked a second time on the same path.
+    Then the file has owner-only permissions, intact content, and refuses replacement.
+    """
+    monkeypatch.setattr(candle_void, "_fsync_directory", _REAL_FSYNC_DIRECTORY)
+    target = tmp_path / "prepared.json"
+    payload = b'{"status":"prepared"}'
+
+    previous_umask = os.umask(0)
+    try:
+        candle_void.write_durable(target, payload)
+    finally:
+        os.umask(previous_umask)
+
+    assert target.read_bytes() == payload
+    assert target.stat().st_mode & 0o777 == 0o600
+    with pytest.raises(FileExistsError):
+        candle_void.write_durable(target, b"replacement")
+    assert target.read_bytes() == payload
 
 
 async def test_preparation_directory_fsync_failure_never_reports_success_or_closes_rows(

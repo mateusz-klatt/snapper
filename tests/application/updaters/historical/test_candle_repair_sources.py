@@ -53,6 +53,7 @@ from tests.helpers.candle_repair import FETCHED_AT
 from tests.helpers.candle_repair import OPEN
 from tests.helpers.candle_repair import RUN_TIME
 from tests.helpers.candle_repair import XRP
+from tests.helpers.candle_repair import install_exclusive_file_spy
 from tests.helpers.candle_repair import kraken_row
 from tests.helpers.candle_repair import kraken_rows
 from tests.helpers.candle_repair import seed_instrument
@@ -432,19 +433,22 @@ def test_output_dir_is_created_or_must_be_an_empty_directory(tmp_path: Path) -> 
         prepare_output_dir(created / "preview.csv")
 
 
-def test_files_are_created_exclusively_with_owner_only_mode(tmp_path: Path) -> None:
+def test_files_are_created_exclusively_with_owner_only_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Every output file is new and readable by its owner only.
 
     Given: A permissive umask.
     When: A file is written, then written again.
-    Then: It has mode 0600 and the second write is refused.
+    Then: It is created exclusively with mode 0600 and the second write is refused.
     """
+    assert_exclusive_owner_only = install_exclusive_file_spy(monkeypatch)
     previous = os.umask(0)
     try:
         write_exclusive(tmp_path / "approval.json", b"{}")
     finally:
         os.umask(previous)
-    assert (tmp_path / "approval.json").stat().st_mode & 0o777 == 0o600
+    assert_exclusive_owner_only(tmp_path / "approval.json")
     with pytest.raises(FileExistsError):
         write_exclusive(tmp_path / "approval.json", b"{}")
 
