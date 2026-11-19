@@ -17,18 +17,30 @@ publisher.
 from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
+from typing import Literal
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import call
 from unittest.mock import patch
 
 import pytest
+from fastapi import FastAPI
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
+from snapper.api.schemas.base import MessageResponse
+from snapper.auth.dependencies import require_authentication
+from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.routes import deactivate_user as deactivate_route
+from snapper.auth.routes import router
+from snapper.auth.routes import update_user as update_route
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.requests import DeactivateUserBody
 from snapper.auth.schemas.requests import DeactivateUserRequest
+from snapper.auth.schemas.requests import UpdateUserBody
+from snapper.auth.schemas.requests import UpdateUserRequest
+from snapper.auth.schemas.responses import UserResponse
 from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import TokenManager
 from snapper.auth.user_service import UserAuthorityConflictError
@@ -81,6 +93,7 @@ def _make_db_user(public_id: str, *, is_active: bool = True) -> MagicMock:
     db_user.password_hash = _BCRYPT_FAKE_DIGEST
     db_user.role = "viewer"
     db_user.is_active = is_active
+    db_user.default_language = "pl"
     db_user.created_at = datetime(2026, 1, 1, tzinfo=UTC)
     db_user.timestamp = datetime(2026, 1, 1, tzinfo=UTC)
     db_user.known_to = KNOWN_TO_MAX
@@ -106,6 +119,7 @@ def _build_service(
     execute_result = MagicMock()
     execute_result.scalar_one_or_none = MagicMock(return_value=existing_db_user)
     session_mock.execute = AsyncMock(return_value=execute_result)
+    session_mock.scalar.return_value = None
     commit_mock = AsyncMock()
     session_mock.commit = commit_mock
     session_ctx = MagicMock()
@@ -174,29 +188,52 @@ class TestDeactivateUserOrchestration:
         commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_postgresql_rejects_closed_grant_owner_before_revocation(
-        self, _patch_token_manager_lookup: MagicMock
+    @pytest.mark.parametrize("second_conflict", [False, True])
+    async def test_postgresql_retries_a_closed_grant_owner_before_revocation(
+        self, second_conflict: bool, _patch_token_manager_lookup: MagicMock
     ) -> None:
-        """A stale owner version invalidates a delegate's pending deactivation.
+        """A stale grant owner forces a new deactivation transaction.
 
         Given a grant whose owner version closes while deactivation waits on its lock.
         When the lock returns that closed row.
-        Then deactivation reports a conflict before changing the user or revoking credentials.
+        Then the next transaction prepares authority again before deciding whether to write.
+
+        Args:
+            second_conflict: Whether the second owner lock still observes a closed row.
+            _patch_token_manager_lookup: Mocked legacy token manager lookup.
         """
         target = _make_db_user("delegate")
         service, session, commit, revoke, manager = _build_service(existing_db_user=target)
         _patch_token_manager_lookup.return_value = manager
         closed_owner = User(public_id="owner", known_to=datetime(2020, 1, 1, tzinfo=UTC))
+        current_owner = User(public_id="owner", known_to=KNOWN_TO_MAX)
         session.scalars.side_effect = [["owner"], [closed_owner]]
+        first_context = service.repository.session.return_value
+        second, second_context = _lock_attempt(target, None)
+        second.scalars.side_effect = [
+            ["owner"],
+            [closed_owner if second_conflict else current_owner],
+        ]
         with (
             patch.object(service.repository, "dialect_name", "postgresql"),
+            patch.object(
+                service.repository, "session", side_effect=[first_context, second_context]
+            ),
             patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()) as mutate,
-            pytest.raises(UserAuthorityConflictError, match="OAuth grant owner changed"),
         ):
-            await service.deactivate_user(target.public_id, reason=None)
-        mutate.assert_not_awaited()
-        revoke.assert_not_awaited()
+            if second_conflict:
+                with pytest.raises(UserAuthorityConflictError, match="OAuth grant owner changed"):
+                    await service.deactivate_user(target.public_id, reason=None)
+            else:
+                assert await service.deactivate_user(target.public_id, reason=None)
+        first_context.__aexit__.assert_awaited_once()
+        assert first_context.__aexit__.await_args.args[0] is UserAuthorityConflictError
+        session.execute.assert_awaited_once()
         commit.assert_not_awaited()
+        assert second.scalars.await_count == 2
+        assert mutate.await_count == int(not second_conflict)
+        assert revoke.await_count == int(not second_conflict)
+        assert second.commit.await_count == int(not second_conflict)
 
     @pytest.mark.asyncio
     async def test_happy_path_publishes_bus_event_with_expected_payload(
@@ -525,6 +562,304 @@ def _make_request_envelope(reason: str | None) -> DeactivateUserRequest:
         sequence_id=1,
         payload=DeactivateUserBody(reason=reason),
     )
+
+
+async def _call_authority_route(
+    operation: Literal["deactivate", "update"], target: MagicMock
+) -> MessageResponse | UserResponse:
+    """Call the real admin route for a SCD2 authority reduction.
+
+    Args:
+        operation: Admin route to invoke.
+        target: User whose authority the route reduces.
+
+    Returns:
+        The route's success envelope.
+    """
+    if operation == "deactivate":
+        return await deactivate_route(
+            request=_make_rest_request(),
+            user_id=target.username,
+            current_user=_make_principal("admin"),
+            _csrf=None,
+            body=_make_request_envelope("policy"),
+        )
+    return await update_route(
+        request=_make_rest_request(),
+        user_id=target.username,
+        current_user=_make_principal("admin"),
+        _csrf=None,
+        user_data=UpdateUserRequest(
+            public_id="env-public-id",
+            timestamp=datetime(2026, 4, 19, tzinfo=UTC),
+            session_id="env-session",
+            sequence_id=1,
+            payload=UpdateUserBody(is_active=False),
+        ),
+    )
+
+
+def _lock_attempt(
+    locked_user: MagicMock | None, visible_id: int | None
+) -> tuple[AsyncMock, MagicMock]:
+    """Build a session whose locked select and unlocked probe have independent results.
+
+    Args:
+        locked_user: Entity returned from the locking select.
+        visible_id: Primary key visible in the probe's newer snapshot.
+
+    Returns:
+        The session and its context manager.
+    """
+    session = AsyncMock()
+    session.execute.return_value = MagicMock(scalar_one_or_none=MagicMock(return_value=locked_user))
+    session.scalar.return_value = visible_id
+    context = MagicMock()
+    context.__aenter__.return_value = session
+    context.__aexit__.return_value = False
+    return session, context
+
+
+def _assert_authority_probe(session: AsyncMock, active_only: bool) -> None:
+    """Verify the probe has the locked select's predicates without its lock.
+
+    Args:
+        session: Losing transaction that executed both queries.
+        active_only: Whether to expect deactivation's active-user filter.
+    """
+    lock = next(
+        awaited.args[0]
+        for awaited in session.execute.await_args_list
+        if "FOR UPDATE" in str(awaited.args[0])
+    )
+    session.scalar.assert_awaited_once()
+    probe = session.scalar.await_args.args[0]
+    assert "FOR UPDATE" in str(lock)
+    assert lock.get_execution_options()["populate_existing"] is True
+    assert "FOR UPDATE" not in str(probe)
+    assert str(probe).startswith("SELECT users.id ")
+    assert str(probe.whereclause) == str(lock.whereclause)
+    target_column = "public_id" if active_only else "username"
+    assert f"users.{target_column} = " in str(probe.whereclause)
+    assert ("AND users.is_active" in str(probe.whereclause)) is active_only
+    assert "users.timestamp <= " in str(probe.whereclause)
+    assert "users.known_to > " in str(probe.whereclause)
+
+
+class TestUserAuthorityRetry:
+    """Exercise the real admin routes over mocked transaction snapshots."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("operation", ["deactivate", "update"])
+    @pytest.mark.parametrize("status", [200, 404, 409])
+    async def test_routes_handle_lost_lock(
+        self,
+        operation: Literal["deactivate", "update"],
+        status: int,
+        _patch_token_manager_lookup: MagicMock,
+    ) -> None:
+        """Only a visible successor calls for a second transaction.
+
+        Given an empty or closed locking result with an optional visible successor.
+        When an administrator deactivates or sets is_active to false.
+        Then the route returns success after retry, 404 without a successor, or 409 after two conflicts.
+
+        Args:
+            operation: Route to exercise.
+            status: Expected HTTP status.
+            _patch_token_manager_lookup: Mocked legacy token manager lookup.
+        """
+        target = _make_db_user("target")
+        locked = _make_db_user("target")
+        locked.email = "current@example.com"
+        successor = _make_db_user("target", is_active=False)
+        service, _, _, revoke, manager = _build_service(existing_db_user=target)
+        service.set_msg_publisher(publisher := _RecordingPublisher())
+        _patch_token_manager_lookup.return_value = manager
+        deactivation = operation == "deactivate"
+        _, preflight = _lock_attempt(None, target.id)
+        closed = _make_db_user("target")
+        closed.known_to = datetime(2020, 1, 1, tzinfo=UTC)
+        first, first_context = _lock_attempt(None, None if status == 404 else target.id)
+        second, second_context = (
+            _lock_attempt(locked, None) if status == 200 else _lock_attempt(closed, target.id)
+        )
+        second.scalars.return_value = ["late-jti"]
+        manager.attach_mock(second.commit, "commit_attempt")
+        contexts = [preflight, first_context] if deactivation else [first_context]
+        if status != 404:
+            contexts.append(second_context)
+        with (
+            patch("snapper.auth.routes.get_user_service", return_value=service),
+            patch.object(
+                service, "get_user_by_id", return_value=service._db_user_to_auth_user(target)
+            ),
+            patch.object(service.repository, "dialect_name", "sqlite"),
+            patch.object(service.repository, "session", side_effect=contexts) as open_session,
+            patch("snapper.auth.user_service.close_and_insert", return_value=successor) as mutate,
+        ):
+            if status == 200:
+                response = await _call_authority_route(operation, target)
+                assert response.payload in (
+                    f"User '{target.username}' has been deactivated",
+                    service._db_user_to_auth_user(successor),
+                )
+            else:
+                with pytest.raises(HTTPException) as raised:
+                    await _call_authority_route(operation, target)
+                assert raised.value.status_code == status
+        assert open_session.call_count == len(contexts)
+        _assert_authority_probe(first, active_only=operation == "deactivate")
+        first.commit.assert_not_awaited()
+        if status == 409:
+            _assert_authority_probe(second, active_only=operation == "deactivate")
+        if status == 200:
+            second.commit.assert_awaited_once()
+            mutate.assert_awaited_once()
+            values = mutate.await_args_list[0].kwargs["new_values"]
+            assert values["is_active"] is False
+            assert values["email"] == locked.email
+        else:
+            second.commit.assert_not_awaited()
+            mutate.assert_not_awaited()
+        deactivated = status == 200 and deactivation
+        assert revoke.await_count == int(deactivation)
+        assert manager.blacklist_token_immediately.call_count == int(deactivated)
+        if deactivated:
+            assert manager.mock_calls[-2:] == [
+                call.commit_attempt(),
+                call.blacklist_token_immediately("late-jti"),
+            ]
+        assert len(publisher.sent) == int(deactivated)
+
+    @pytest.mark.asyncio
+    async def test_delete_user_propagates_two_lock_conflicts(self) -> None:
+        """Soft deletion surfaces the conflict from its second transaction.
+
+        Given two locking reads that miss a visible successor.
+        When the caller deletes the user by username.
+        Then the second conflict propagates without committing either attempt.
+        """
+        service, _, _, _, _ = _build_service(existing_db_user=None)
+        first, first_context = _lock_attempt(None, 1)
+        second, second_context = _lock_attempt(None, 2)
+        with (
+            patch.object(
+                service.repository, "session", side_effect=[first_context, second_context]
+            ),
+            pytest.raises(UserAuthorityConflictError) as raised,
+        ):
+            await service.delete_user("target")
+        _assert_authority_probe(first, active_only=False)
+        _assert_authority_probe(second, active_only=False)
+        assert first_context.__aexit__.await_args.args[0] is UserAuthorityConflictError
+        assert second_context.__aexit__.await_args.args[1] is raised.value
+        first.commit.assert_not_awaited()
+        second.commit.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("path", "command_type", "payload", "expected"),
+    [
+        pytest.param(
+            "/api/auth/me/update",
+            "update_auth_me_request",
+            {"default_language": "en"},
+            {"default_language": "en"},
+            id="preferences",
+        ),
+        pytest.param(
+            "/api/auth/users/user-target/change-password",
+            "change_password_request",
+            {"current_password": "test-current", "new_password": "test-replacement"},
+            "Password changed successfully",
+            id="change-password",
+        ),
+        pytest.param(
+            "/api/auth/users/user-target/admin-reset-password",
+            "admin_reset_password_request",
+            {"new_password": "test-replacement"},
+            "Password reset successfully for user user-target",
+            id="admin-reset-password",
+        ),
+    ],
+)
+@pytest.mark.parametrize("conflicts", [1, 2], ids=["retry-succeeds", "retry-conflicts"])
+def test_account_write_routes_resolve_authority_conflicts(
+    path: str,
+    command_type: str,
+    payload: dict[str, str],
+    expected: dict[str, str] | str,
+    conflicts: int,
+) -> None:
+    """Account write routes preserve the response contract through a retry.
+
+    Given one or two transactions whose locked read misses a visible row.
+    When a caller submits a preference or password change over HTTP.
+    Then the route returns its success envelope after one conflict or a 409 after two.
+
+    Args:
+        path: Account write URL.
+        command_type: Request envelope discriminator.
+        payload: Request body inside the envelope.
+        expected: Success payload or expected fields of that payload.
+        conflicts: Number of transaction snapshots that show a conflict.
+    """
+    target = _make_db_user("target")
+    successor = _make_db_user("target")
+    successor.default_language = "en"
+    service, _, _, _, _ = _build_service(existing_db_user=target)
+    first, first_context = _lock_attempt(None, target.id)
+    second, second_context = (
+        _lock_attempt(target, None) if conflicts == 1 else _lock_attempt(None, target.id)
+    )
+    principal = _make_principal(target.username)
+    app = FastAPI()
+    app.state.rest_tracker = SequenceTracker()
+    app.include_router(router, prefix="/api")
+    app.dependency_overrides[require_authentication] = lambda: principal
+    app.dependency_overrides[validate_csrf_token] = lambda: None
+    with (
+        patch("snapper.auth.routes.get_user_service", return_value=service),
+        patch.object(
+            service.repository, "session", side_effect=[first_context, second_context]
+        ) as open_session,
+        patch.object(service, "_verify_password", return_value=True),
+        patch.object(service, "hash_password", return_value=_BCRYPT_FAKE_DIGEST),
+        patch("snapper.auth.user_service.close_and_insert", return_value=successor) as mutate,
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            path,
+            json={
+                "type": command_type,
+                "public_id": "env-public-id",
+                "session_id": "env-session",
+                "sequence_id": 1,
+                "timestamp": "2026-04-19T00:00:00Z",
+                "payload": payload,
+            },
+        )
+    assert open_session.call_count == 2
+    first.scalar.assert_awaited_once()
+    first.commit.assert_not_awaited()
+    if conflicts == 2:
+        assert response.status_code == 409
+        assert response.json() == {"detail": "User version changed. Retry the request."}
+        second.scalar.assert_awaited_once()
+        second.commit.assert_not_awaited()
+        mutate.assert_not_awaited()
+        return
+    assert response.status_code == 200, response.text
+    second.scalar.assert_not_awaited()
+    second.commit.assert_awaited_once()
+    mutate.assert_awaited_once()
+    if isinstance(expected, str):
+        assert MessageResponse.model_validate_json(response.content).payload == expected
+    else:
+        profile = UserResponse.model_validate_json(response.content).payload
+        assert profile.username == target.username
+        assert profile.default_language == expected["default_language"]
 
 
 class TestDeactivateUserRoute:

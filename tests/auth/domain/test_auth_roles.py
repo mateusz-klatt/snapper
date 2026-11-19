@@ -1,8 +1,11 @@
 """Tests for authentication roles and permissions."""
 
+from collections.abc import Awaitable
+from collections.abc import Callable
 from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
+from functools import partial
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -12,6 +15,7 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Response
 from fastapi.testclient import TestClient
+from sqlalchemy import Select
 
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
@@ -20,6 +24,7 @@ from snapper.auth.routes import get_current_user_profile
 from snapper.auth.routes import router
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.user import UserProfile
+from snapper.auth.user_service import UserAuthorityConflictError
 from snapper.auth.user_service import UserService
 from snapper.auth.user_service import get_user_service
 from snapper.data.models import KNOWN_TO_MAX
@@ -621,6 +626,7 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -747,6 +753,7 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -767,6 +774,7 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -836,6 +844,7 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -930,6 +939,7 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -972,11 +982,123 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
         with pytest.raises(ValueError, match="not found"):
             await user_service.reset_password_by_username("missing", "newpassword")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("second_conflict", [False, True])
+    @pytest.mark.parametrize(
+        "writer",
+        [
+            pytest.param(
+                partial(
+                    UserService.update_self_preferences, user_id="testuser", default_language="pl"
+                ),
+                id="preferences",
+            ),
+            pytest.param(
+                partial(
+                    UserService.change_password,
+                    user_id="testuser",
+                    old_password="old",
+                    new_password="new",
+                ),
+                id="change-password",
+            ),
+            pytest.param(
+                partial(UserService.admin_reset_password, user_id="testuser", new_password="new"),
+                id="admin-reset-password",
+            ),
+            pytest.param(
+                partial(
+                    UserService.reset_password_by_username, username="testuser", new_password="new"
+                ),
+                id="cli-reset-password",
+            ),
+        ],
+    )
+    async def test_self_service_and_password_writers_retry_the_locked_read(
+        self,
+        user_service: UserService,
+        mock_db_user: User,
+        writer: Callable[[UserService], Awaitable[UserProfile | bool | None]],
+        second_conflict: bool,
+    ) -> None:
+        """Preference and password writers take a fresh lock before copying.
+
+        Given the first locking select misses a current row visible to the probe.
+        When a preference or password writer retries in a fresh transaction.
+        Then it uses the locked version for its write or propagates the second conflict.
+
+        Args:
+            user_service: Real service with a mocked repository.
+            mock_db_user: Current user version returned after the lock.
+            writer: Public SCD2 writer with its arguments bound.
+            second_conflict: Whether the second locking select also misses.
+        """
+        missing = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+        first = AsyncMock()
+        first.execute.return_value = missing
+        first.scalar.return_value = mock_db_user.id
+        first_context = MagicMock()
+        first_context.__aenter__.return_value = first
+        mock_db_user.email = "current@example.com"
+
+        async def _lock(statement: Select[tuple[User]]) -> MagicMock:
+            """Check the lock and expose the fields available in that snapshot.
+
+            Args:
+                statement: Select issued to load the current user.
+
+            Returns:
+                The result of the locking read.
+            """
+            first_context.__aexit__.assert_awaited_once()
+            assert "FOR UPDATE" in str(statement)
+            assert statement.get_execution_options()["populate_existing"] is True
+            mock_db_user.is_active = "users.is_active" in str(statement.whereclause)
+            return (
+                missing
+                if second_conflict
+                else MagicMock(scalar_one_or_none=MagicMock(return_value=mock_db_user))
+            )
+
+        second = AsyncMock()
+        second.execute.side_effect = _lock
+        second.scalar.return_value = mock_db_user.id
+        second_context = MagicMock()
+        second_context.__aenter__.return_value = second
+        with (
+            patch.object(
+                user_service.repository, "session", side_effect=[first_context, second_context]
+            ),
+            patch.object(user_service, "_verify_password", return_value=True),
+            patch.object(user_service, "hash_password", return_value="new_hash"),
+            patch(
+                "snapper.auth.user_service.close_and_insert", return_value=mock_db_user
+            ) as mutate,
+        ):
+            if second_conflict:
+                with pytest.raises(UserAuthorityConflictError):
+                    await writer(user_service)
+            else:
+                await writer(user_service)
+        first.commit.assert_not_awaited()
+        if second_conflict:
+            second.commit.assert_not_awaited()
+            mutate.assert_not_awaited()
+        else:
+            second.commit.assert_awaited_once()
+            mutate.assert_awaited_once()
+            mutation = mutate.await_args_list[0].kwargs
+            assert mutation["session"] is second
+            values = mutation["new_values"]
+            assert values["email"] == mock_db_user.email
+            assert values["is_active"] is mock_db_user.is_active
 
     @pytest.mark.asyncio
     async def test_list_login_events_returns_results(self, user_service: UserService) -> None:

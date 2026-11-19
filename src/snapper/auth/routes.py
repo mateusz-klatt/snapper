@@ -972,15 +972,17 @@ async def update_current_user_preferences(
         UserResponse wrapping the updated user profile.
 
     Raises:
-        HTTPException: 404 if the caller's user row was not found
-        (concurrent admin deactivation between auth-dep resolution
-        and update is the only known way this surfaces).
+        HTTPException: 404 if the caller's user row was not found, or 409
+            if both attempts conflict with concurrent changes.
     """
     user_service = get_user_service()
-    updated_user = await user_service.update_self_preferences(
-        user_id=current_user.username,
-        default_language=body.payload.default_language,
-    )
+    try:
+        updated_user = await user_service.update_self_preferences(
+            user_id=current_user.username,
+            default_language=body.payload.default_language,
+        )
+    except UserAuthorityConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if not updated_user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1444,7 +1446,8 @@ async def change_user_password(
         Success message.
 
     Raises:
-        HTTPException: If forbidden or invalid current password.
+        HTTPException: If forbidden, the current password is invalid, the user is absent,
+            or both attempts conflict with concurrent changes.
     """
     user_service = get_user_service()
     if user_id != current_user.username:
@@ -1458,11 +1461,14 @@ async def change_user_password(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only change your own password",
             )
-    success = await user_service.change_password(
-        user_id=user_id,
-        old_password=password_data.payload.current_password,
-        new_password=password_data.payload.new_password,
-    )
+    try:
+        success = await user_service.change_password(
+            user_id=user_id,
+            old_password=password_data.payload.current_password,
+            new_password=password_data.payload.new_password,
+        )
+    except UserAuthorityConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if not success:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1497,12 +1503,15 @@ async def admin_reset_user_password(
         Success message.
 
     Raises:
-        HTTPException: If forbidden or user not found.
+        HTTPException: If forbidden, the user is absent, or both attempts conflict
+            with concurrent changes.
     """
     user_service = get_user_service()
     try:
         await user_service.admin_reset_password(user_id, password_data.payload.new_password)
         return _message_response(request, f"Password reset successfully for user {user_id}")
+    except UserAuthorityConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

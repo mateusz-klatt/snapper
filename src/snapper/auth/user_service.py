@@ -14,6 +14,7 @@ from uuid import uuid7
 import bcrypt
 from loguru import logger
 from sqlalchemy import ColumnElement
+from sqlalchemy import SQLColumnExpression
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import text
@@ -682,22 +683,44 @@ class UserService:
 
         Returns:
             Updated UserProfile or None if not found.
+
+        Raises:
+            UserAuthorityConflictError: If concurrent replacement prevents both attempts.
+        """
+        try:
+            return await self._update_user_once(user_id, email, role, is_active)
+        except UserAuthorityConflictError:
+            return await self._update_user_once(user_id, email, role, is_active)
+
+    async def _update_user_once(
+        self,
+        user_id: str,
+        email: str | None,
+        role: UserRole | None,
+        is_active: bool | None,
+    ) -> UserProfile | None:
+        """Apply an admin update in a fresh transaction.
+
+        Args:
+            user_id: Target username.
+            email: Replacement email, if supplied.
+            role: Replacement role, if supplied.
+            is_active: Replacement active status, if supplied.
+
+        Returns:
+            The updated user, or None if the username is absent.
+
+        Raises:
+            UserAuthorityConflictError: If the user or an OAuth owner version changed.
         """
         async with self.repository.session() as session:
             target = User.username == user_id
             if is_active is False:
                 await self._prepare_oauth_authority_reduction(session, target)
-            stmt = (
-                select(User)
-                .where(target, *where_active_now(User))
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-            result = await session.execute(stmt)
-            db_user = result.scalar_one_or_none()
-            now = datetime.now(UTC)
-            if db_user is None or db_user.known_to <= now:
+            db_user = await self._lock_current_user(session, target)
+            if db_user is None:
                 return None
+            now = datetime.now(UTC)
             new_values: dict[str, object] = {
                 "username": db_user.username,
                 "email": email if email is not None else db_user.email,
@@ -712,7 +735,7 @@ class UserService:
             new_row = await close_and_insert(
                 session=session,
                 model=User,
-                match_filters=[User.username == user_id],
+                match_filters=[target],
                 new_values=new_values,
                 bus_time=now,
             )
@@ -729,7 +752,7 @@ class UserService:
     ) -> UserProfile | None:
         """Update the caller's self-service preferences via SCD2 close+insert.
 
-        Writes a new active ``users`` row with the caller's
+        Writes a new current ``users`` row with the caller's
         ``default_language`` preference while preserving the other
         profile fields. The admin-facing :meth:`update_user` is
         intentionally separate so ``MANAGE_USERS`` permission stays
@@ -743,15 +766,34 @@ class UserService:
 
         Returns:
             Updated UserProfile or ``None`` if the user was not found.
+
+        Raises:
+            UserAuthorityConflictError: If concurrent replacement prevents both attempts.
+        """
+        try:
+            return await self._update_self_preferences_once(user_id, default_language)
+        except UserAuthorityConflictError:
+            return await self._update_self_preferences_once(user_id, default_language)
+
+    async def _update_self_preferences_once(
+        self, user_id: str, default_language: str | None
+    ) -> UserProfile | None:
+        """Write the preference using the current locked user version.
+
+        Args:
+            user_id: Caller's username.
+            default_language: Preferred language, or None to clear it.
+
+        Returns:
+            The updated user, or None if the username is absent.
+
+        Raises:
+            UserAuthorityConflictError: If the current user version changed.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(
-                User.username == user_id,
-                *where_active_now(User),
-            )
-            result = await session.execute(stmt)
-            db_user = result.scalar_one_or_none()
-            if not db_user:
+            target = User.username == user_id
+            db_user = await self._lock_current_user(session, target)
+            if db_user is None:
                 return None
             now = datetime.now(UTC)
             new_values: dict[str, object | None] = {
@@ -768,7 +810,7 @@ class UserService:
             new_row = await close_and_insert(
                 session=session,
                 model=User,
-                match_filters=[User.username == user_id],
+                match_filters=[target],
                 new_values=new_values,
                 bus_time=now,
             )
@@ -807,29 +849,52 @@ class UserService:
         Returns:
             ``True`` when the user was found and deactivated, ``False``
             when no active row matches ``user_public_id``.
+
+        Raises:
+            UserAuthorityConflictError: If concurrent replacement prevents both attempts.
         """
         sqlite = self.repository.dialect_name == "sqlite"
         if sqlite and not await self._sqlite_revoke_legacy_sessions(user_public_id):
             return False
+        try:
+            committed = await self._deactivate_user_once(user_public_id, sqlite)
+        except UserAuthorityConflictError:
+            committed = await self._deactivate_user_once(user_public_id, sqlite)
+        if committed is None:
+            return False
+        now, late_jtis = committed
+        for jti in late_jtis:
+            get_token_manager().blacklist_token_immediately(jti)
+        await self._publish_user_deactivated(
+            user_public_id=user_public_id,
+            reason=reason,
+            deactivated_at=now,
+        )
+        return True
+
+    async def _deactivate_user_once(
+        self, user_public_id: str, sqlite: bool
+    ) -> tuple[datetime, list[str]] | None:
+        """Deactivate an active user and retire credentials in one attempt.
+
+        Args:
+            user_public_id: Public identity of the target user.
+            sqlite: Whether legacy session revocation already ran outside this transaction.
+
+        Returns:
+            The committed deactivation time and late JTIs, or None if no active user matches.
+
+        Raises:
+            UserAuthorityConflictError: If the user or an OAuth owner version changed.
+        """
         late_jtis: list[str] = []
         async with self.repository.session() as session:
             target = User.public_id == user_public_id
             await self._prepare_oauth_authority_reduction(session, target)
-            stmt = (
-                select(User)
-                .where(
-                    target,
-                    User.is_active,
-                    *where_active_now(User),
-                )
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-            result = await session.execute(stmt)
-            db_user = result.scalar_one_or_none()
+            db_user = await self._lock_current_user(session, target, (User.is_active,))
+            if db_user is None:
+                return None
             now = datetime.now(UTC)
-            if db_user is None or db_user.known_to <= now:
-                return False
             new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
@@ -844,7 +909,7 @@ class UserService:
             await close_and_insert(
                 session=session,
                 model=User,
-                match_filters=[User.public_id == user_public_id],
+                match_filters=[target],
                 new_values=new_values,
                 bus_time=now,
             )
@@ -864,14 +929,47 @@ class UserService:
             else:
                 await get_token_manager().revoke_user_sessions(user_public_id, self.repository)
             await session.commit()
-        for jti in late_jtis:
-            get_token_manager().blacklist_token_immediately(jti)
-        await self._publish_user_deactivated(
-            user_public_id=user_public_id,
-            reason=reason,
-            deactivated_at=now,
+        return now, late_jtis
+
+    async def _lock_current_user(
+        self,
+        session: AsyncSession,
+        target_predicate: ColumnElement[bool],
+        extra_predicates: tuple[SQLColumnExpression[bool], ...] = (),
+    ) -> User | None:
+        """Lock and refresh the version used to copy fields into its successor.
+
+        PostgreSQL can recheck a row closed by a concurrent transaction without seeing
+        its successor in the same statement. A new snapshot distinguishes replacement
+        from absence.
+
+        Args:
+            session: Transaction in which to hold the user row lock.
+            target_predicate: Predicate identifying the target user.
+            extra_predicates: Additional conditions for a qualifying user.
+
+        Returns:
+            The locked current user, or None if no qualifying version is visible.
+
+        Raises:
+            UserAuthorityConflictError: If a qualifying version is visible after the lock miss.
+        """
+        stmt = (
+            select(User)
+            .where(target_predicate, *extra_predicates, *where_active_now(User))
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
-        return True
+        result = await session.execute(stmt)
+        db_user = result.scalar_one_or_none()
+        if db_user is not None and db_user.known_to > datetime.now(UTC):
+            return db_user
+        visible_id = await session.scalar(
+            select(User.id).where(target_predicate, *extra_predicates, *where_active_now(User))
+        )
+        if visible_id is not None:
+            raise UserAuthorityConflictError("User version changed. Retry the request.")
+        return None
 
     async def _sqlite_revoke_legacy_sessions(self, user_public_id: str) -> bool:
         """Run the legacy credential barrier outside SQLite's user write transaction."""
@@ -1039,6 +1137,9 @@ class UserService:
 
         Returns:
             True if deleted, False if not found.
+
+        Raises:
+            UserAuthorityConflictError: If concurrent replacement prevents both attempts.
         """
         return await self.update_user(user_id, is_active=False) is not None
 
@@ -1054,14 +1155,35 @@ class UserService:
 
         Returns:
             True if changed, False if user not found or wrong password.
+
+        Raises:
+            UserAuthorityConflictError: If concurrent replacement prevents both attempts.
+        """
+        try:
+            return await self._change_password_once(user_id, old_password, new_password)
+        except UserAuthorityConflictError:
+            return await self._change_password_once(user_id, old_password, new_password)
+
+    async def _change_password_once(
+        self, user_id: str, old_password: str, new_password: str
+    ) -> bool:
+        """Verify and replace the password on the locked active user version.
+
+        Args:
+            user_id: Target username.
+            old_password: Current password for verification.
+            new_password: New password to set.
+
+        Returns:
+            Whether the password was changed.
+
+        Raises:
+            UserAuthorityConflictError: If the current user version changed.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(
-                User.username == user_id, User.is_active, *where_active_now(User)
-            )
-            result = await session.execute(stmt)
-            db_user = result.scalar_one_or_none()
-            if not db_user:
+            target = User.username == user_id
+            db_user = await self._lock_current_user(session, target, (User.is_active,))
+            if db_user is None:
                 return False
             if not self._verify_password(old_password, db_user.password_hash):
                 return False
@@ -1080,7 +1202,7 @@ class UserService:
             await close_and_insert(
                 session=session,
                 model=User,
-                match_filters=[User.username == user_id],
+                match_filters=[target],
                 new_values=new_values,
                 bus_time=now,
             )
@@ -1096,15 +1218,28 @@ class UserService:
 
         Raises:
             ValueError: If user not found.
+            UserAuthorityConflictError: If concurrent replacement prevents both attempts.
+        """
+        try:
+            await self._admin_reset_password_once(user_id, new_password)
+        except UserAuthorityConflictError:
+            await self._admin_reset_password_once(user_id, new_password)
+
+    async def _admin_reset_password_once(self, user_id: str, new_password: str) -> None:
+        """Apply an admin password reset using the current locked user version.
+
+        Args:
+            user_id: Target username.
+            new_password: New plain-text password.
+
+        Raises:
+            ValueError: If the username is absent.
+            UserAuthorityConflictError: If the current user version changed.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(
-                User.username == user_id,
-                *where_active_now(User),
-            )
-            result = await session.execute(stmt)
-            db_user = result.scalar_one_or_none()
-            if not db_user:
+            target = User.username == user_id
+            db_user = await self._lock_current_user(session, target)
+            if db_user is None:
                 raise ValueError(f"User '{user_id}' not found")
             now = datetime.now(UTC)
             new_values: dict[str, object | None] = {
@@ -1121,7 +1256,7 @@ class UserService:
             await close_and_insert(
                 session=session,
                 model=User,
-                match_filters=[User.username == user_id],
+                match_filters=[target],
                 new_values=new_values,
                 bus_time=now,
             )
@@ -1136,15 +1271,28 @@ class UserService:
 
         Raises:
             ValueError: If user not found.
+            UserAuthorityConflictError: If concurrent replacement prevents both attempts.
+        """
+        try:
+            await self._reset_password_by_username_once(username, new_password)
+        except UserAuthorityConflictError:
+            await self._reset_password_by_username_once(username, new_password)
+
+    async def _reset_password_by_username_once(self, username: str, new_password: str) -> None:
+        """Apply a CLI password reset using the current locked user version.
+
+        Args:
+            username: Target username.
+            new_password: New plain-text password.
+
+        Raises:
+            ValueError: If the username is absent.
+            UserAuthorityConflictError: If the current user version changed.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(
-                User.username == username,
-                *where_active_now(User),
-            )
-            result = await session.execute(stmt)
-            db_user = result.scalar_one_or_none()
-            if not db_user:
+            target = User.username == username
+            db_user = await self._lock_current_user(session, target)
+            if db_user is None:
                 raise ValueError(f"User '{username}' not found")
             now = datetime.now(UTC)
             new_values: dict[str, object | None] = {
@@ -1161,7 +1309,7 @@ class UserService:
             await close_and_insert(
                 session=session,
                 model=User,
-                match_filters=[User.username == username],
+                match_filters=[target],
                 new_values=new_values,
                 bus_time=now,
             )
