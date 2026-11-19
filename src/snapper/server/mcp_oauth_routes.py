@@ -179,13 +179,18 @@ unsupported_router = APIRouter(
     tags=["mcp-oauth"],
     routes=[
         Route(
-            "/api/mcp/.well-known/openid-configuration",
+            path,
             endpoint=Response(status_code=status.HTTP_404_NOT_FOUND),
             include_in_schema=False,
         )
+        for path in (
+            "/.well-known/openid-configuration",
+            "/.well-known/openid-configuration/api/mcp",
+            "/api/mcp/.well-known/openid-configuration",
+        )
     ],
 )
-"""Answer unsupported discovery and registration before the MCP mount for either flag state."""
+"""Answer unsupported OpenID discovery before the MCP and frontend mounts for either flag state."""
 
 
 def build_oauth_service(repository: Repository, settings: AppSettings) -> MCPOAuthService:
