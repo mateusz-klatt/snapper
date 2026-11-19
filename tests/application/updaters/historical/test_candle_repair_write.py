@@ -62,6 +62,7 @@ from tests.helpers.candle_repair import RUN_TIME
 from tests.helpers.candle_repair import XRP
 from tests.helpers.candle_repair import candle
 from tests.helpers.candle_repair import fixed_context
+from tests.helpers.candle_repair import install_exclusive_file_spy
 from tests.helpers.candle_repair import kraken_row
 from tests.helpers.candle_repair import seed_instrument
 from tests.helpers.candle_repair import snapshot_request
@@ -236,7 +237,9 @@ async def _current(repository: SQLAlchemyRepository) -> list[dict[str, object]]:
 
 @pytest.mark.asyncio
 async def test_write_applies_the_voted_plan_and_a_rerun_reports_equal(
-    repository: SQLAlchemyRepository, tmp_path: Path
+    repository: SQLAlchemyRepository,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A confirmed write applies the voted inserts and corrections with its own provenance.
 
@@ -246,6 +249,7 @@ async def test_write_applies_the_voted_plan_and_a_rerun_reports_equal(
         sequence ids in plan order, the correction is known at the snapshot fetch, the
         receipts record one acknowledged attempt per chunk, and the rerun is all equal.
     """
+    assert_exclusive_owner_only = install_exclusive_file_spy(monkeypatch)
     digest = await _plan(repository, tmp_path)
     report = await _write(fixed_context(repository), tmp_path, "write", _options(tmp_path, digest))
 
@@ -279,7 +283,7 @@ async def test_write_applies_the_voted_plan_and_a_rerun_reports_equal(
     ]
     assert current[0]["timestamp"] == OPEN + timedelta(minutes=3, seconds=30)
     for name in ("receipt.json", "receipt.jsonl"):
-        assert (tmp_path / "write" / name).stat().st_mode & 0o777 == 0o600
+        assert_exclusive_owner_only(tmp_path / "write" / name)
 
     rerun = await plan_repair(
         fixed_context(repository, now=datetime.now(UTC)),

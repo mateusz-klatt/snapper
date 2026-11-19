@@ -2,11 +2,18 @@
 
 import gzip
 import json
+import os
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
+
+import pytest
 
 from snapper.application.updaters.historical.candle_repair import RepairRequest
 from snapper.application.updaters.historical.candle_repair import RepairSource
@@ -323,3 +330,73 @@ def fixed_context(repository: SQLAlchemyRepository, *, now: datetime = RUN_TIME)
         clock=lambda: now,
         sleep=instant_sleep,
     )
+
+
+@dataclass(slots=True)
+class _ExclusiveCreateRecord:
+    """Recorded creation arguments for one ``os.open`` call."""
+
+    flags: int
+    open_mode: int
+    fchmod_modes: list[int] = field(default_factory=list)
+
+
+def install_exclusive_file_spy(monkeypatch: pytest.MonkeyPatch) -> Callable[[Path], None]:
+    """Wrap ``os.open`` and ``os.fchmod`` and return a path-assertion helper.
+
+    The helper checks the requested creation flags and mode on every platform, and the
+    resulting permission bits only where the operating system implements POSIX modes.
+
+    Args:
+        monkeypatch: Fixture restoring the real ``os`` functions after the test.
+
+    Returns:
+        Callable asserting that a path was created with ``O_EXCL`` and mode ``0o600``.
+    """
+    creates: dict[Path, list[_ExclusiveCreateRecord]] = {}
+    active_fds: dict[int, _ExclusiveCreateRecord] = {}
+    real_open = os.open
+    real_fchmod = os.fchmod
+
+    def wrapped_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        """Delegate to ``os.open`` and record direct file creations."""
+        descriptor = (
+            real_open(path, flags, mode)
+            if dir_fd is None
+            else real_open(path, flags, mode, dir_fd=dir_fd)
+        )
+        active_fds.pop(descriptor, None)
+        if dir_fd is None and (flags & os.O_CREAT):
+            record = _ExclusiveCreateRecord(flags=flags, open_mode=mode)
+            creates.setdefault(Path(os.fsdecode(path)).resolve(), []).append(record)
+            active_fds[descriptor] = record
+        return descriptor
+
+    def wrapped_fchmod(fd: int, mode: int) -> None:
+        """Delegate to ``os.fchmod`` and record permission updates."""
+        real_fchmod(fd, mode)
+        record = active_fds.get(fd)
+        if record is not None:
+            record.fchmod_modes.append(mode)
+
+    def assert_created(path: Path) -> None:
+        """Assert ``path`` was created exclusively with owner-only mode 0600."""
+        records = creates.get(path.resolve(), [])
+        assert len(records) == 1
+        record = records[0]
+        assert record.flags & os.O_CREAT
+        assert record.flags & os.O_EXCL
+        assert record.open_mode == 0o600
+        assert record.fchmod_modes == [0o600]
+        if sys.platform != "win32":
+            assert path.stat().st_mode & 0o777 == 0o600
+
+    monkeypatch.setattr(os, "open", wrapped_open)
+    monkeypatch.setattr(os, "fchmod", wrapped_fchmod)
+    return assert_created

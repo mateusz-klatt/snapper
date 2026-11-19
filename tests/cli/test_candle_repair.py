@@ -23,6 +23,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from tests.helpers.candle_repair import OPEN
 from tests.helpers.candle_repair import XRP
 from tests.helpers.candle_repair import candle
+from tests.helpers.candle_repair import install_exclusive_file_spy
 from tests.helpers.candle_repair import kraken_row
 from tests.helpers.candle_repair import seed_instrument
 from tests.helpers.candle_repair import trade
@@ -493,6 +494,7 @@ def test_no_credential_reaches_output_files_or_logs(
     Then: The approval names host, port and database only, the refusals name no value,
         and no sentinel appears on stdout, stderr, in any output file or in any log message.
     """
+    assert_exclusive_owner_only = install_exclusive_file_spy(monkeypatch)
     monkeypatch.setattr(
         candle_repair_cli,
         "get_bootstrap_settings",
@@ -533,7 +535,7 @@ def test_no_credential_reaches_output_files_or_logs(
     texts.extend(path.read_text() for path in (tmp_path / "out").iterdir())
     assert not any(sentinel in text for sentinel in _SENTINELS for text in texts)
     for path in (tmp_path / "out").iterdir():
-        assert path.stat().st_mode & 0o777 == 0o600
+        assert_exclusive_owner_only(path)
 
 
 def test_trades_dry_run_rebuilds_bars_from_stored_trades(database: str, tmp_path: Path) -> None:
