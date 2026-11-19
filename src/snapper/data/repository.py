@@ -267,6 +267,7 @@ from snapper.data.models import MarketSnapshot
 from snapper.data.models import MarketView
 from snapper.data.models import MarketViewSource
 from snapper.data.models import NotificationDevice
+from snapper.data.models import OAuthGrant
 from snapper.data.models import Operator
 from snapper.data.models import Order
 from snapper.data.models import PairedExecutionGroup
@@ -310,6 +311,7 @@ from snapper.data.models import WalletCredential
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.models import WalletUserReadGrant
 from snapper.data.models import is_open_ended_version
+from snapper.data.oauth_grant_revocation import revoke_oauth_grants_in_tx
 from snapper.data.pnl_correction_state import MAX_CORRECTION_CHUNK_MINUTES
 from snapper.data.pnl_correction_state import PnlCorrectionChunk
 from snapper.data.pnl_correction_state import PnlCorrectionEdit
@@ -35586,6 +35588,8 @@ class SQLAlchemyRepository(Repository):
         if self.dialect_name == "sqlite":
             return await self._detach_viewer_from_desk_sqlite(request, revoke_authority)
         async with self.session() as s:
+            if s.get_bind().dialect.name == "postgresql":
+                await s.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
             user = await self._load_desk_target_user(s, request, lock=True)
             decision_at = max(request.timestamp, datetime.now(UTC))
             await self._require_active_desk(s, request.operator_public_id, decision_at)
@@ -35663,7 +35667,7 @@ class SQLAlchemyRepository(Repository):
         request: DeskMembershipDetach,
         decision: _DeskDetachDecision,
     ) -> DeskMembershipDetachResult | None:
-        """Close one locked membership, promote deterministically, and commit."""
+        """Close one locked membership and its OAuth grants before committing."""
         await s.execute(
             update(UserOperatorMembership)
             .where(
@@ -35672,6 +35676,12 @@ class SQLAlchemyRepository(Repository):
             )
             .values(known_to=decision.decision_at)
             .execution_options(synchronize_session=False)
+        )
+        await revoke_oauth_grants_in_tx(
+            s,
+            decision.decision_at,
+            OAuthGrant.owner_user_public_id == decision.user.public_id,
+            OAuthGrant.operator_public_id == request.operator_public_id,
         )
         promoted_operator_public_id: str | None = None
         if decision.target.is_primary:
@@ -35729,8 +35739,10 @@ class SQLAlchemyRepository(Repository):
         )
         if lock:
             statement = statement.with_for_update()
-        user = (await s.execute(statement)).scalars().first()
-        if user is None:
+        user = (
+            (await s.execute(statement.execution_options(populate_existing=True))).scalars().first()
+        )
+        if user is None or user.known_to <= datetime.now(UTC):
             raise DeskMembershipNotFoundError("Active target user not found")
         if not _is_human_viewer_role(user.role):
             raise DeskMembershipTargetError(

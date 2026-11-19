@@ -2119,8 +2119,10 @@ and prints the raw secret exactly once after the database commit succeeds.
 ```bash
 snapper mcp-oauth provision-client \
     --name "Private ChatGPT" \
-    --redirect-uri "https://chatgpt.com/connector/oauth/callback"
+    --redirect-uri "https://chatgpt.com/connector_platform_oauth_redirect"
 ```
+
+Copy the exact redirect URI shown in the ChatGPT connector's OAuth settings.
 
 **Options:**
 
@@ -2136,28 +2138,24 @@ must compare them exactly. The command accepts HTTPS URIs and HTTP only for the
 exact loopback hosts `localhost`, `127.0.0.1`, and `[::1]`; it rejects fragments,
 userinfo, whitespace, noncanonical spellings, and duplicates. Scope and redirect
 URI duplicates are refusals rather than silent deduplication.
-The dormant first connector is strictly read-only: provisioning rejects
-`snapper.account.read` and every write scope even though those names already
-exist in the future OAuth scope catalog.
+The private connector is read-only. Provisioning accepts `snapper.read`
+with optional `offline_access` for refresh tokens.
 
 Successful stdout is a one-line JSON object containing `client_id`,
 `client_secret`, and the registered public metadata. Save it immediately in the
 client's secret store: Snapper cannot recover or print the raw secret again. A
 validation failure or generated-ID collision exits `1` and prints no secret.
 
-This command only creates the dormant client row. It does not enable
-`MCP_OAUTH_ENABLED`, publish OAuth metadata, or add authorize/token/revoke
-routes. Existing delegate PAT clients are unchanged.
+This command registers the client. The server publishes OAuth metadata,
+authorization, token exchange, and revocation when `MCP_OAUTH_ENABLED=true`.
 
-The internal OAuth service remains dormant. Its first-release scope ceiling is
-`snapper.read` with optional `offline_access`; authorization-code exchange and
-refresh rotation validate the exact resource, client and current delegate
-binding inside one transaction. Reuse of a consumed refresh token revokes its
-grant and every refresh family on that grant. `offline_access` is the only
-authority to issue a refresh token: a valid refresh that narrows the scope set
-to `snapper.read` consumes its predecessor and returns an access token alone,
-and a later reuse of that predecessor is still treated as replay. An omitted
-refresh scope keeps the predecessor's scopes; an empty, resource-free or
+Authorization-code exchange and refresh rotation validate the exact resource,
+client and current delegate binding inside one transaction. Reuse of a consumed
+refresh token revokes its grant and every refresh family on that grant.
+Issuing a refresh token requires `offline_access`. A valid refresh that
+narrows the scope set to `snapper.read` consumes its predecessor and returns
+an access token alone. A later reuse of that predecessor is treated as replay.
+An omitted refresh scope keeps the predecessor's scopes. An empty, resource-free or
 widened refresh scope is refused before any mutation. Revoking either an
 access or a refresh token revokes the whole grant owned by the authenticated
 client; unknown, invalid or other-client tokens change nothing. An expired
@@ -2165,8 +2163,8 @@ access token can no longer be verified, and an expired or individually
 revoked refresh token is no longer live, so revoking either is a no-op. A used
 but unexpired refresh token still revokes its own client's grant. Setting
 `MCP_OAUTH_DCR_ENABLED=true` fails startup, because dynamic client
-registration is not supported. This foundation does not make a browser
-connector available before the HTTP authorization and consent flow ships.
+registration is not supported. For the HTTP and consent flow, see
+[MCP OAuth Authorization Server](api.md#mcp-oauth-authorization-server).
 
 ### `dev-mint-pat`
 

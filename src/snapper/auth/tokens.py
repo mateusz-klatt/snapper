@@ -985,6 +985,7 @@ class TokenManager:
         expires_at = request.issued_at + timedelta(seconds=request.ttl_seconds)
         issued_at_epoch = int(request.issued_at.timestamp())
         claims = MCPOAuthAccessTokenClaims(
+            token_use="mcp_oauth_access",
             sub=request.user.user_public_id,
             username=request.user.username,
             role=request.user.role,

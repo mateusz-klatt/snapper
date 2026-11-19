@@ -62,6 +62,7 @@ from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import get_token_manager
 from snapper.auth.user_service import DeskMembershipAuthorizationError
+from snapper.auth.user_service import UserAuthorityConflictError
 from snapper.auth.user_service import get_user_service
 from snapper.data.repository import DeskMembershipNotFoundError
 from snapper.data.repository import DeskMembershipTargetError
@@ -1338,15 +1339,18 @@ async def update_user(
         UserResponse wrapping the updated user profile.
 
     Raises:
-        HTTPException: If user not found.
+        HTTPException: 404 if the user is absent, or 409 if account authority changed.
     """
     user_service = get_user_service()
-    updated_user = await user_service.update_user(
-        user_id=user_id,
-        email=user_data.payload.email,
-        role=user_data.payload.role,
-        is_active=user_data.payload.is_active,
-    )
+    try:
+        updated_user = await user_service.update_user(
+            user_id=user_id,
+            email=user_data.payload.email,
+            role=user_data.payload.role,
+            is_active=user_data.payload.is_active,
+        )
+    except UserAuthorityConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if not updated_user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"User with ID '{user_id}' not found"
@@ -1389,7 +1393,7 @@ async def deactivate_user(
 
     Raises:
         HTTPException: 400 when the caller targets their own account
-            404 when no active user matches `user_id`.
+            404 when no active user matches `user_id`, or 409 if account authority changed.
     """
     user_service = get_user_service()
     if user_id == current_user.username:
@@ -1401,7 +1405,10 @@ async def deactivate_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"User with ID '{user_id}' not found"
         )
-    success = await user_service.deactivate_user(profile.public_id, body.payload.reason)
+    try:
+        success = await user_service.deactivate_user(profile.public_id, body.payload.reason)
+    except UserAuthorityConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"User with ID '{user_id}' not found"

@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from snapper.application.ai_delegates.service import DelegateOperatorBindingError
 from snapper.application.ai_delegates.service import DelegateProliferationError
+from snapper.auth.dependencies import get_csrf_manager
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
@@ -34,6 +35,7 @@ from snapper.data.models import OAuthGrant
 from snapper.data.models import OAuthRefreshToken
 from snapper.mcp.oauth.service import MCPOAuthService
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server import app as server_app
 from snapper.server import mcp_oauth_routes
 from snapper.server.app import create_app
 from snapper.server.dependencies import get_repository_dependency
@@ -263,6 +265,35 @@ def test_registration_and_openid_stay_absent(case: HttpCase) -> None:
     assert case.client.get("/.well-known/openid-configuration").status_code == 404
     metadata = case.client.get("/.well-known/oauth-authorization-server/api/mcp").json()
     assert "registration_endpoint" not in metadata
+
+
+@pytest.mark.parametrize("oauth_enabled", [False, True])
+@pytest.mark.parametrize("integration_enabled", [False, True])
+def test_openid_discovery_returns_404_before_the_mcp_mount(
+    oauth_enabled: bool, integration_enabled: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unsupported OpenID discovery never reaches the protected MCP mount.
+
+    Given either bootstrap and integration flag state on a real FastAPI app,
+    When root, path-specific and issuer-relative discovery URLs are requested,
+    Then each returns 404 without a bearer challenge or a redirect.
+    """
+    monkeypatch.setattr(server_app, "get_settings", lambda: _settings(enabled=oauth_enabled))
+    app = create_app()
+    flags = _Flags()
+    flags.values["ai_integration_enabled"] = integration_enabled
+    app.state.settings_service = flags
+    client = TestClient(app, follow_redirects=False)
+    for path in (
+        "/.well-known/openid-configuration",
+        "/.well-known/openid-configuration/api/mcp",
+        "/api/mcp/.well-known/openid-configuration",
+    ):
+        for method in ("GET", "HEAD", "POST"):
+            response = client.request(method, path)
+            assert response.status_code == 404, (method, path)
+            assert "www-authenticate" not in response.headers
+            assert "location" not in response.headers
 
 
 def test_metadata_spellings_are_equivalent_and_exact(case: HttpCase) -> None:
@@ -779,6 +810,38 @@ def test_consent_mutations_enforce_csrf(case: HttpCase) -> None:
     assert response.status_code == 403
     case.app.dependency_overrides[validate_csrf_token] = lambda: None
     assert _describe(case, request_id).status_code == 200
+
+
+@pytest.mark.parametrize("decision", ["approve", "deny"])
+async def test_consent_requires_browser_session_and_csrf(case: HttpCase, decision: str) -> None:
+    """Consent accepts the owner's browser cookie and its paired CSRF proof.
+
+    Given a real persisted session and a pending authorization,
+    When read and decision requests use the owner's bearer or cookie credentials,
+    Then only the cookie session may read, and only its CSRF-protected decision succeeds.
+    """
+    del case.app.dependency_overrides[require_authentication]
+    del case.app.dependency_overrides[validate_csrf_token]
+    manager = case.harness.token_manager
+    pair = manager.create_tokens(case.owner)
+    await manager.persist_tokens(pair, case.owner.user_public_id, case.harness.repository)
+    request_id = _pending(case)
+    payload = _envelope(
+        f"mcp_oauth_consent_{decision}_request",
+        {"oauth_request": request_id, "operator_public_id": _OPERATOR_A},
+    )
+    url = f"/api/mcp-oauth/consent/{decision}"
+    case.client.headers["Authorization"] = f"Bearer {pair.access_token}"
+    assert _describe(case, request_id).status_code == 401
+    assert case.client.post(url, json=payload).status_code == 401
+    case.client.cookies.set("access_token", pair.access_token)
+    assert case.client.post(url, json=payload).status_code == 401
+    del case.client.headers["Authorization"]
+    assert _describe(case, request_id).status_code == 200
+    assert case.client.post(url, json=payload).status_code == 403
+    csrf = get_csrf_manager().generate_token()
+    case.client.cookies.set("csrf_token", csrf)
+    assert case.client.post(url, json=payload, headers={"X-CSRF-Token": csrf}).status_code == 200
 
 
 def test_oauth_settings_default_to_the_cached_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:

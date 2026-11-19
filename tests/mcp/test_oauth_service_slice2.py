@@ -15,6 +15,7 @@ from datetime import timedelta
 from pathlib import Path
 from uuid import uuid7
 
+import jwt
 import pytest
 import pytest_asyncio
 from freezegun import freeze_time
@@ -90,6 +91,9 @@ async def test_refresh_narrowed_without_offline_access_is_terminal_and_access_on
     assert narrowed.scopes == (SNAPPER_READ,)
     verified = await oauth_case.harness.service.verify_access_token(narrowed.access_token)
     assert verified.scopes == (SNAPPER_READ,)
+    assert verified.claims == oauth_case.harness.token_manager.verify_mcp_oauth_access_token(
+        narrowed.access_token, issuer=oauth_case.harness.service.config.issuer, audience=_RESOURCE
+    )
     rows = await _refresh_rows(oauth_case)
     assert len(rows) == 1
     assert rows[0].used_at is not None
@@ -241,6 +245,33 @@ async def test_another_client_cannot_revoke_a_foreign_grant(
     )
     assert not await _grant_revoked(oauth_case)
     assert await oauth_case.harness.service.verify_access_token(tokens.access_token)
+
+
+@pytest.mark.parametrize("mismatch", ["client", "sid"])
+@pytest.mark.asyncio
+async def test_revocation_requires_consistent_signed_grant_identity(
+    oauth_case: OAuthCase, mismatch: str
+) -> None:
+    """Keep the grant live when the credential disagrees with its stored identity.
+
+    Given an owned live grant,
+    When a signed access credential names another client or a different session,
+    Then revocation returns without changing the grant or its refresh family.
+    """
+    tokens = await _tokens(oauth_case)
+    manager = oauth_case.harness.token_manager
+    live = await oauth_case.harness.service.verify_access_token(tokens.access_token)
+    payload = live.claims.model_dump()
+    if mismatch == "client":
+        payload.update(client_id=_OTHER_CLIENT_ID, azp=_OTHER_CLIENT_ID)
+    else:
+        payload.update(sid=str(uuid7()))
+    inconsistent = jwt.encode(
+        payload, manager.settings.auth_secret_key, algorithm=manager.settings.auth_algorithm
+    )
+    await oauth_case.harness.service.revoke_token(_revocation(inconsistent))
+    assert not await _grant_revoked(oauth_case)
+    assert all(row.revoked_at is None for row in await _refresh_rows(oauth_case))
 
 
 @pytest.mark.asyncio

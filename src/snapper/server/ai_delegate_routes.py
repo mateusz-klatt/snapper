@@ -48,6 +48,7 @@ from snapper.auth.domain.permissions import has_global_read_permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import get_token_manager
+from snapper.auth.user_service import UserAuthorityConflictError
 from snapper.auth.user_service import get_user_service
 from snapper.data.repository import Repository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -426,7 +427,12 @@ async def deactivate_delegate(
         ) from exc
     reason = body.payload.reason if body is not None else None
     user_service = get_user_service()
-    success = await user_service.deactivate_user(user_public_id=delegate_public_id, reason=reason)
+    try:
+        success = await user_service.deactivate_user(
+            user_public_id=delegate_public_id, reason=reason
+        )
+    except UserAuthorityConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     if not success:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_DELEGATE_NOT_FOUND)
     tracker: SequenceTracker = request.app.state.rest_tracker

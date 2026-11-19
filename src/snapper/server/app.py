@@ -202,6 +202,7 @@ from snapper.infrastructure.rest.tracker import get_rest_call_tracker
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 from snapper.interface.websocket.connection_manager import WebSocketConnectionManager
 from snapper.interface.websocket.helpers import build_allowed_origins
+from snapper.mcp.oauth.transport import MCPOAuthTransport
 from snapper.mcp.server import build_mcp_app
 from snapper.mcp.server import normalize_mcp_mount_path
 from snapper.messaging.infrastructure.gap_detector import GapDetectorStats
@@ -255,9 +256,10 @@ from snapper.server.market_cache_routes import router as market_cache_router
 from snapper.server.market_coverage_routes import router as market_coverage_router
 from snapper.server.market_feed_health_routes import router as market_feed_health_router
 from snapper.server.mcp_oauth_routes import OAuthProtocolError
+from snapper.server.mcp_oauth_routes import build_oauth_service
 from snapper.server.mcp_oauth_routes import oauth_protocol_error_handler
-from snapper.server.mcp_oauth_routes import registration_router as mcp_oauth_registration_router
 from snapper.server.mcp_oauth_routes import router as mcp_oauth_router
+from snapper.server.mcp_oauth_routes import unsupported_router as mcp_oauth_unsupported_router
 from snapper.server.metrics_routes import router as metrics_router
 from snapper.server.operator_routes import router as operator_router
 from snapper.server.order_routes import router as order_router
@@ -1514,12 +1516,20 @@ def _mount_mcp(app: FastAPI) -> None:
     install_access_log_redaction()
     app.add_exception_handler(OAuthProtocolError, oauth_protocol_error_handler)
     app.include_router(mcp_oauth_router)
-    app.include_router(mcp_oauth_registration_router)
+    app.include_router(mcp_oauth_unsupported_router)
+    settings = get_settings()
+    oauth_transport = None
+    if settings.mcp_oauth_enabled is True:
+        oauth_transport = MCPOAuthTransport(
+            resource=settings.mcp_public_resource_url,
+            service_factory=lambda repository: build_oauth_service(repository, settings),
+        )
     mcp_sub_app = build_mcp_app(
         settings_service_getter=lambda: getattr(app.state, "settings_service", None),
         repository_getter=get_repository_dependency,
         caps_enforcer_getter=_safe_get_caps_enforcer,
         tracker_getter=lambda: getattr(app.state, "rest_tracker", None),
+        oauth_transport=oauth_transport,
     )
     app.state.mcp_sub_app = mcp_sub_app
     app.mount("/api/mcp", mcp_sub_app)

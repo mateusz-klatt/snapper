@@ -28,6 +28,8 @@ from snapper.application.ai_delegates.service import OAuthDelegateRequest
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import TokenManager
+from snapper.auth.user_service import UserAuthorityConflictError
+from snapper.auth.user_service import UserService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AiDelegate
 from snapper.data.models import Base
@@ -36,11 +38,14 @@ from snapper.data.models import OAuthAuthorizationRequest
 from snapper.data.models import OAuthClient
 from snapper.data.models import OAuthGrant
 from snapper.data.models import OAuthRefreshToken
+from snapper.data.models import Operator
 from snapper.data.models import User
 from snapper.data.models import UserActiveToken
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import close_and_insert
+from snapper.data.repository_types import DeskMembershipDetach
 from snapper.mcp.oauth.contracts import MCPOAuthError
 from snapper.mcp.oauth.contracts import MCPOAuthServiceConfig
 from snapper.mcp.oauth.contracts import OAuthAuthorizationRequestCreate
@@ -90,11 +95,12 @@ class PGFrame:
 
 
 def _create_oauth_tables(connection: Connection) -> None:
-    """Create the ten unchanged real ORM tables needed by these protocol races."""
+    """Create the real tables needed by the isolated protocol and authority races."""
     models = [
         User,
         UserTradingCaps,
         UserOperatorMembership,
+        Operator,
         AiDelegate,
         OAuthClient,
         OAuthGrant,
@@ -559,6 +565,172 @@ async def _cancel_all(tasks: list[asyncio.Task[object] | None]) -> None:
         if task is not None and not task.done():
             task.cancel()
     await asyncio.gather(*[task for task in tasks if task is not None], return_exceptions=True)
+
+
+@pytest.mark.parametrize("target", ["owner", "delegate"])
+async def test_account_deactivation_serializes_with_in_flight_refresh(
+    pg_frame: PGFrame, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    """Deactivation follows owner lock order and revokes a concurrent successor.
+
+    Given a rotation paused with a newly inserted successor and its locks held.
+    When independent owner/delegate deactivation waits and the rotation commits.
+    Then deactivation commits without deadlock and revokes both refresh rows.
+    """
+    owner_id, tokens = await _tokens(pg_frame)
+    assert tokens.refresh_token is not None
+    identity = await pg_frame.first.verify_access_token(tokens.access_token)
+    target_id = owner_id if target == "owner" else identity.principal.user_public_id
+    monkeypatch.setattr(UserService, "_instance", None)
+    monkeypatch.setattr(UserService, "_initialized", False)
+    monkeypatch.setattr(
+        "snapper.auth.user_service.get_repository", lambda _: pg_frame.other_repository
+    )
+    monkeypatch.setattr(
+        "snapper.auth.user_service.get_token_manager", lambda: pg_frame.second.token_manager
+    )
+    users = UserService()
+    started, release = asyncio.Event(), asyncio.Event()
+    original = OAuthTransaction.rotate_refresh
+
+    async def hold_rotation(
+        tx: OAuthTransaction,
+        predecessor: OAuthRefreshToken,
+        successor: OAuthRefreshToken | None,
+        rotated_at: datetime,
+    ) -> None:
+        """Hold the existing lock set until the second backend is waiting."""
+        await original(tx, predecessor, successor, rotated_at)
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(OAuthTransaction, "rotate_refresh", hold_rotation)
+    rotation = asyncio.create_task(
+        pg_frame.first.exchange_refresh_token(_refresh(tokens.refresh_token))
+    )
+    deactivation = None
+    try:
+        await asyncio.wait_for(started.wait(), 10)
+        deactivation = asyncio.create_task(users.deactivate_user(target_id, reason=None))
+        await _wait_for_native_lock(pg_frame)
+        release.set()
+        successor = await asyncio.wait_for(rotation, 10)
+        assert await asyncio.wait_for(deactivation, 10)
+        grant, rows = await _grant_rows(pg_frame, owner_id)
+        assert grant.revoked_at is not None
+        assert len(rows) == 2 and all(row.revoked_at == grant.revoked_at for row in rows)
+        with pytest.raises(MCPOAuthError, match="invalid_token"):
+            await pg_frame.first.verify_access_token(successor.access_token)
+    finally:
+        release.set()
+        await _cancel_all([rotation, deactivation])
+
+
+@pytest.mark.parametrize("close_first", [False, True], ids=["stale-row", "empty-lock-result"])
+async def test_delegate_deactivation_refuses_a_closed_owner_lock(
+    pg_frame: PGFrame, monkeypatch: pytest.MonkeyPatch, close_first: bool
+) -> None:
+    """A closed SCD2 owner row cannot fence delegate deactivation.
+
+    Given a current grant and a writer holding the owner's row lock.
+    When the writer closes the row before or after the lock query starts.
+    Then deactivation rolls back rather than proceeding without a current lock.
+    """
+    owner_id, tokens = await _tokens(pg_frame)
+    identity = await pg_frame.first.verify_access_token(tokens.access_token)
+    monkeypatch.setattr(UserService, "_instance", None)
+    monkeypatch.setattr(UserService, "_initialized", False)
+    monkeypatch.setattr(
+        "snapper.auth.user_service.get_repository", lambda _: pg_frame.other_repository
+    )
+    users = UserService()
+    deactivation = None
+    async with pg_frame.repository.session() as writer:
+        owner = await writer.scalar(
+            select(User).where(User.public_id == owner_id).with_for_update()
+        )
+        assert owner is not None
+
+        async def replace_owner_version() -> None:
+            """Write the replacement while the writer continues to hold its lock."""
+            await close_and_insert(
+                writer,
+                User,
+                [User.public_id == owner_id],
+                {
+                    "username": owner.username,
+                    "email": owner.email,
+                    "password_hash": owner.password_hash,
+                    "role": owner.role,
+                    "is_active": True,
+                    "session_id": str(uuid7()),
+                    "sequence_id": 1,
+                    "created_at": owner.created_at,
+                },
+                datetime.now(UTC),
+            )
+            await writer.flush()
+
+        try:
+            if close_first:
+                await replace_owner_version()
+            deactivation = asyncio.create_task(
+                users.deactivate_user(identity.principal.user_public_id, reason=None)
+            )
+            await _wait_for_native_lock(pg_frame)
+            if not close_first:
+                await replace_owner_version()
+            await writer.commit()
+            with pytest.raises(UserAuthorityConflictError, match="OAuth grant owner changed"):
+                await asyncio.wait_for(deactivation, 10)
+        finally:
+            await _cancel_all([deactivation])
+    grant, rows = await _grant_rows(pg_frame, owner_id)
+    assert grant.revoked_at is None and all(row.revoked_at is None for row in rows)
+    assert (
+        await pg_frame.first.verify_access_token(tokens.access_token)
+    ).grant_public_id == grant.public_id
+
+
+async def test_postgresql_membership_close_revokes_its_oauth_authority(pg_frame: PGFrame) -> None:
+    """Verify the normal PostgreSQL desk transaction permanently retires its grant.
+
+    Given an existing grant and an owner whose role now allows desk detachment.
+    When the membership is closed through the production repository entry point.
+    Then the grant and its refresh rows carry the same committed boundary.
+    """
+    owner_id, tokens = await _tokens(pg_frame)
+    now = datetime.now(UTC)
+    session_id = str(uuid7())
+    async with pg_frame.repository.session() as session:
+        session.add(
+            Operator(
+                public_id=_OPERATOR_A,
+                label="oauth-race",
+                timestamp=now,
+                session_id=session_id,
+                sequence_id=1,
+            )
+        )
+        await session.execute(
+            update(User).where(User.public_id == owner_id).values(role=UserRole.VIEWER.value)
+        )
+        await session.commit()
+
+    async def revoke_sessions(user_public_id: str) -> None:
+        """Keep the existing legacy revocation callback observable."""
+        assert user_public_id == owner_id
+
+    request = DeskMembershipDetach(
+        f"owner-{owner_id[-4:]}", _OPERATOR_A, datetime.now(UTC), session_id, 2
+    )
+    result = await pg_frame.other_repository.detach_viewer_from_desk(request, revoke_sessions)
+    assert result is not None
+    grant, rows = await _grant_rows(pg_frame, owner_id)
+    assert grant.revoked_at == result.detached_at
+    assert [row.revoked_at for row in rows] == [result.detached_at]
+    with pytest.raises(MCPOAuthError, match="invalid_token"):
+        await pg_frame.first.verify_access_token(tokens.access_token)
 
 
 async def test_revocation_waiting_on_a_rotation_revokes_its_committed_successor(

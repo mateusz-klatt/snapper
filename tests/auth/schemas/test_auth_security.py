@@ -89,7 +89,7 @@ class TestUtilitiesCoverage:
         """Verify MCP OAuth claims cannot decode as another token purpose.
 
         Given a complete audience-bound MCP OAuth access-token payload,
-        When it is validated with its default purpose and a wrong purpose,
+        When it is validated with the explicit OAuth purpose and a wrong purpose,
         Then the OAuth purpose is preserved and the wrong value is rejected.
         """
         payload: dict[str, object] = {
@@ -107,6 +107,7 @@ class TestUtilitiesCoverage:
             "client_id": "chatgpt-client",
             "nbf": 2_000_000_000,
             "grant_id": "grant-public-id",
+            "token_use": "mcp_oauth_access",
         }
         claims = MCPOAuthAccessTokenClaims.model_validate(payload)
         assert claims.token_use == "mcp_oauth_access"

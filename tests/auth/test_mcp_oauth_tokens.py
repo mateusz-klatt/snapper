@@ -149,6 +149,28 @@ def test_mcp_oauth_verifier_accepts_only_exact_single_audience_list() -> None:
     )
 
 
+def test_mcp_oauth_requires_an_explicit_purpose_claim() -> None:
+    """An otherwise complete access token must carry its signed OAuth purpose.
+
+    Given an isolated issuer and a valid audience-bound access token,
+    When the issuer omits the purpose claim,
+    Then verification refuses the credential.
+    """
+    manager = TokenManager()
+    signed = _mint(manager)
+    claims = manager.verify_mcp_oauth_access_token(signed, issuer=_ISSUER, audience=_AUDIENCE)
+    assert claims is not None
+    missing_purpose = jwt.encode(
+        claims.model_dump(exclude={"token_use"}),
+        manager.settings.auth_secret_key,
+        algorithm=manager.settings.auth_algorithm,
+    )
+    assert (
+        manager.verify_mcp_oauth_access_token(missing_purpose, issuer=_ISSUER, audience=_AUDIENCE)
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     "token_request",
     [

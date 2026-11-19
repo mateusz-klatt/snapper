@@ -39,6 +39,7 @@ from fastapi import status
 from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse
 from fastapi.responses import Response
+from starlette.routing import Route
 
 from snapper.api.schemas.mcp_oauth import AuthorizationServerMetadata
 from snapper.api.schemas.mcp_oauth import ConsentApproveRequest
@@ -55,6 +56,7 @@ from snapper.application.ai_delegates.service import DelegateOperatorBindingErro
 from snapper.application.ai_delegates.service import DelegateProliferationError
 from snapper.application.ai_delegates.service import DelegateService
 from snapper.application.ai_delegates.service import OAuthGrantReplacementRequiredError
+from snapper.auth.dependencies import _extract_bearer_token
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
@@ -173,8 +175,17 @@ def require_mcp_oauth_enabled(
 router = APIRouter(tags=["mcp-oauth"], dependencies=[Depends(require_mcp_oauth_enabled)])
 """Every route is hidden behind the bootstrap flag before any body is parsed."""
 
-registration_router = APIRouter(tags=["mcp-oauth"])
-"""Always-present 404 for dynamic client registration, independent of the flag."""
+unsupported_router = APIRouter(
+    tags=["mcp-oauth"],
+    routes=[
+        Route(
+            "/api/mcp/.well-known/openid-configuration",
+            endpoint=Response(status_code=status.HTTP_404_NOT_FOUND),
+            include_in_schema=False,
+        )
+    ],
+)
+"""Answer unsupported discovery and registration before the MCP mount for either flag state."""
 
 
 def build_oauth_service(repository: Repository, settings: AppSettings) -> MCPOAuthService:
@@ -280,7 +291,7 @@ async def authorization_server_metadata(
     )
 
 
-@registration_router.api_route(
+@unsupported_router.api_route(
     "/api/mcp/register", methods=["GET", "POST", "PUT", "DELETE"], include_in_schema=False
 )
 async def dynamic_client_registration() -> Response:
@@ -613,7 +624,17 @@ async def _operator_options(repo: Repository, owner: AuthPrincipal) -> list[Cons
     ]
 
 
-_MANAGE = Depends(require_permission(Permission.MANAGE_AI_INTEGRATION))
+def _consent_owner(
+    request: Request,
+    owner: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_AI_INTEGRATION))],
+) -> AuthPrincipal:
+    """Restrict interactive consent to the authenticated web session and its CSRF policy."""
+    if _extract_bearer_token(request) is not None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Consent requires a browser session")
+    return owner
+
+
+_MANAGE = Depends(_consent_owner)
 
 
 @router.get("/api/mcp-oauth/consent")

@@ -64,6 +64,7 @@ from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import TOKEN_TYPE_REFRESH
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import get_token_manager
+from snapper.auth.user_service import UserAuthorityConflictError
 from snapper.auth.user_service import get_user_service
 from snapper.auth.websocket_auth import AuthConnectionStats
 from snapper.auth.websocket_auth import WebSocketAuthManager
@@ -4968,6 +4969,58 @@ async def test_update_user_success(monkeypatch: Any) -> None:
     )
     assert result.payload.username == "dora"
     assert stub_service.updated_users["u4"] == updated_user
+
+
+@pytest.mark.asyncio()
+@pytest.mark.parametrize("operation", ["update", "deactivate"])
+async def test_admin_account_mutations_return_retryable_authority_conflict(
+    monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """Tell an admin to retry when account authority changes concurrently.
+
+    Given: A concurrent change prevents UserService from locking current grant owners.
+    When: An admin deactivates the target account through either route.
+    Then: The route returns a 409 with the retry message.
+    """
+    service = MagicMock()
+    service.update_user = AsyncMock(side_effect=UserAuthorityConflictError("Retry the request."))
+    service.deactivate_user = AsyncMock(
+        side_effect=UserAuthorityConflictError("Retry the request.")
+    )
+    service.get_user_by_id = AsyncMock(return_value=MagicMock(public_id="user-pid"))
+    monkeypatch.setattr(routes, "get_user_service", lambda: service)
+    admin = AuthPrincipal(username="admin", role=UserRole.ADMIN)
+    with pytest.raises(HTTPException) as exc:
+        if operation == "update":
+            await routes.update_user(
+                request=_make_rest_request(),
+                user_id="user-2",
+                user_data=UpdateUserRequest(
+                    session_id="test-sid",
+                    sequence_id=1,
+                    public_id="test-pid",
+                    timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                    payload=UpdateUserBody(is_active=False),
+                ),
+                current_user=admin,
+                _csrf=None,
+            )
+        else:
+            await routes.deactivate_user(
+                request=_make_rest_request(),
+                user_id="user-2",
+                body=DeactivateUserRequest(
+                    session_id="test-sid",
+                    sequence_id=1,
+                    public_id="test-pid",
+                    timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+                    payload=DeactivateUserBody(),
+                ),
+                current_user=admin,
+                _csrf=None,
+            )
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Retry the request."
 
 
 @pytest.mark.asyncio()

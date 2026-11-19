@@ -13,7 +13,10 @@ from uuid import uuid7
 
 import bcrypt
 from loguru import logger
+from sqlalchemy import ColumnElement
+from sqlalchemy import or_
 from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,9 +30,10 @@ from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import get_token_manager
 from snapper.config.settings import get_settings
 from snapper.data.models import OAuthGrant
-from snapper.data.models import OAuthRefreshToken
 from snapper.data.models import User
+from snapper.data.models import UserActiveToken
 from snapper.data.models import UserLoginEvent
+from snapper.data.oauth_grant_revocation import revoke_oauth_grants_in_tx
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
@@ -54,6 +58,10 @@ _DESK_MEMBERSHIPS_TOPIC = "desk_memberships"
 
 class DeskMembershipAuthorizationError(Exception):
     """Raised when a caller lacks the requested access to the target desk."""
+
+
+class UserAuthorityConflictError(RuntimeError):
+    """Concurrent account authority replacement requires a new attempt."""
 
 
 class UserService:
@@ -676,15 +684,20 @@ class UserService:
             Updated UserProfile or None if not found.
         """
         async with self.repository.session() as session:
-            stmt = select(User).where(
-                User.username == user_id,
-                *where_active_now(User),
+            target = User.username == user_id
+            if is_active is False:
+                await self._prepare_oauth_authority_reduction(session, target)
+            stmt = (
+                select(User)
+                .where(target, *where_active_now(User))
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
-            if not db_user:
-                return None
             now = datetime.now(UTC)
+            if db_user is None or db_user.known_to <= now:
+                return None
             new_values: dict[str, object] = {
                 "username": db_user.username,
                 "email": email if email is not None else db_user.email,
@@ -703,6 +716,8 @@ class UserService:
                 new_values=new_values,
                 bus_time=now,
             )
+            if is_active is False:
+                await self._revoke_oauth_authority(session, db_user.public_id, now)
             await session.commit()
             await session.refresh(new_row)
             return self._db_user_to_auth_user(new_row)
@@ -765,13 +780,16 @@ class UserService:
         """Deactivate a user as the SOLE publisher of `admin.user_deactivated`.
 
         Implements the canonical kill-switch flow:
-        1. SCD2 close+insert on the active `users` row with an inactive state.
+        1. SCD2 close+insert on the active `users` row with an inactive state,
+           retiring OAuth grants and their refresh rows in the same transaction.
         2. `TokenManager.revoke_user_sessions(...)` — direct in-process call
            that revokes every active token row in the `user_active_tokens`
            inventory and seeds the local fast-path blacklist. The token
            method commits its own transaction (`Repository.revoke_user_active_tokens`
            opens its own session) and deliberately does NOT publish a bus
-           event so the single-publisher rule is preserved.
+           event so the single-publisher rule is preserved. On SQLite this
+           separate write runs after preflight and before the user transaction,
+           which revokes any tokens issued before it acquired the writer lock.
         3. Commit the user SCD2 mutation. Token revocation has already
            landed; if this commit fails the user row stays active but
            tokens remain revoked — the safer failure mode (kill switch
@@ -790,21 +808,28 @@ class UserService:
             ``True`` when the user was found and deactivated, ``False``
             when no active row matches ``user_public_id``.
         """
+        sqlite = self.repository.dialect_name == "sqlite"
+        if sqlite and not await self._sqlite_revoke_legacy_sessions(user_public_id):
+            return False
+        late_jtis: list[str] = []
         async with self.repository.session() as session:
+            target = User.public_id == user_public_id
+            await self._prepare_oauth_authority_reduction(session, target)
             stmt = (
                 select(User)
                 .where(
-                    User.public_id == user_public_id,
+                    target,
                     User.is_active,
                     *where_active_now(User),
                 )
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
             result = await session.execute(stmt)
             db_user = result.scalar_one_or_none()
-            if not db_user:
-                return False
             now = datetime.now(UTC)
+            if db_user is None or db_user.known_to <= now:
+                return False
             new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
@@ -824,9 +849,23 @@ class UserService:
                 bus_time=now,
             )
             await self._revoke_oauth_authority(session, user_public_id, now)
-            token_manager = get_token_manager()
-            await token_manager.revoke_user_sessions(user_public_id, self.repository)
+            if sqlite:
+                late_jtis = list(
+                    await session.scalars(
+                        update(UserActiveToken)
+                        .where(
+                            UserActiveToken.user_public_id == user_public_id,
+                            UserActiveToken.revoked_at.is_(None),
+                        )
+                        .values(revoked_at=now)
+                        .returning(UserActiveToken.jti)
+                    )
+                )
+            else:
+                await get_token_manager().revoke_user_sessions(user_public_id, self.repository)
             await session.commit()
+        for jti in late_jtis:
+            get_token_manager().blacklist_token_immediately(jti)
         await self._publish_user_deactivated(
             user_public_id=user_public_id,
             reason=reason,
@@ -834,37 +873,76 @@ class UserService:
         )
         return True
 
+    async def _sqlite_revoke_legacy_sessions(self, user_public_id: str) -> bool:
+        """Run the legacy credential barrier outside SQLite's user write transaction."""
+        async with self.repository.session() as session:
+            user_id = await session.scalar(
+                select(User.id).where(
+                    User.public_id == user_public_id, User.is_active, *where_active_now(User)
+                )
+            )
+        if user_id is None:
+            return False
+        await get_token_manager().revoke_user_sessions(user_public_id, self.repository)
+        return True
+
+    async def _prepare_oauth_authority_reduction(
+        self, session: AsyncSession, target: ColumnElement[bool]
+    ) -> None:
+        """Serialize SQLite writers and follow OAuth's owner-before-delegate lock order."""
+        dialect = self.repository.dialect_name
+        if dialect == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
+        elif dialect == "postgresql":
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+            delegate_id = (
+                select(User.public_id)
+                .where(target, *where_active_now(User))
+                .correlate(None)
+                .scalar_subquery()
+            )
+            owner_ids = frozenset(
+                await session.scalars(
+                    select(OAuthGrant.owner_user_public_id).where(
+                        OAuthGrant.delegate_user_public_id == delegate_id,
+                        OAuthGrant.revoked_at.is_(None),
+                    )
+                )
+            )
+            if not owner_ids:
+                return
+            result = await session.scalars(
+                select(User)
+                .where(User.public_id.in_(owner_ids), *where_active_now(User))
+                .order_by(User.public_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            now = datetime.now(UTC)
+            locked_owner_ids = {row.public_id for row in result if row.known_to > now}
+            if locked_owner_ids != owner_ids:
+                raise UserAuthorityConflictError("OAuth grant owner changed. Retry the request.")
+
     @staticmethod
     async def _revoke_oauth_authority(
         session: AsyncSession,
-        delegate_user_public_id: str,
+        user_public_id: str,
         revoked_at: datetime,
     ) -> None:
-        """Revoke every OAuth grant and refresh token for one delegate.
+        """Revoke every OAuth grant and refresh token bound to the inactive user.
 
         Args:
             session: User-deactivation transaction.
-            delegate_user_public_id: Deactivated OAuth delegate identity.
+            user_public_id: Deactivated OAuth owner or delegate identity.
             revoked_at: UTC deactivation boundary.
         """
-        grant_ids = select(OAuthGrant.public_id).where(
-            OAuthGrant.delegate_user_public_id == delegate_user_public_id
-        )
-        await session.execute(
-            update(OAuthRefreshToken)
-            .where(
-                OAuthRefreshToken.grant_public_id.in_(grant_ids),
-                OAuthRefreshToken.revoked_at.is_(None),
-            )
-            .values(revoked_at=revoked_at)
-        )
-        await session.execute(
-            update(OAuthGrant)
-            .where(
-                OAuthGrant.delegate_user_public_id == delegate_user_public_id,
-                OAuthGrant.revoked_at.is_(None),
-            )
-            .values(revoked_at=revoked_at)
+        await revoke_oauth_grants_in_tx(
+            session,
+            revoked_at,
+            or_(
+                OAuthGrant.owner_user_public_id == user_public_id,
+                OAuthGrant.delegate_user_public_id == user_public_id,
+            ),
         )
 
     async def _publish_user_deactivated(
@@ -962,36 +1040,7 @@ class UserService:
         Returns:
             True if deleted, False if not found.
         """
-        async with self.repository.session() as session:
-            stmt = select(User).where(
-                User.username == user_id,
-                *where_active_now(User),
-            )
-            result = await session.execute(stmt)
-            db_user = result.scalar_one_or_none()
-            if not db_user:
-                return False
-            now = datetime.now(UTC)
-            new_values: dict[str, object | None] = {
-                "username": db_user.username,
-                "email": db_user.email,
-                "password_hash": db_user.password_hash,
-                "role": db_user.role,
-                "is_active": False,
-                "default_language": db_user.default_language,
-                "created_at": db_user.created_at,
-                "session_id": self._tracker.session_id,
-                "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
-            }
-            await close_and_insert(
-                session=session,
-                model=User,
-                match_filters=[User.username == user_id],
-                new_values=new_values,
-                bus_time=now,
-            )
-            await session.commit()
-            return True
+        return await self.update_user(user_id, is_active=False) is not None
 
     async def change_password(self, user_id: str, old_password: str, new_password: str) -> bool:
         """Change user's password via SCD Type 2 close+insert.

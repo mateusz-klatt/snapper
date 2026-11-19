@@ -636,12 +636,14 @@ class MCPOAuthService:
             client = await self._client(
                 tx, command.client_id, command.client_secret, command.auth_method
             )
-            grant_id = await self._revocation_grant(tx, command.raw_token)
+            grant_id = await self._revocation_grant(tx, command)
             if grant_id is not None and await tx.grant(grant_id, client.client_id, lock=False):
                 await tx.revoke_grant(grant_id, datetime.now(UTC))
             await session.commit()
 
-    async def _revocation_grant(self, tx: OAuthTransaction, raw_token: str) -> str | None:
+    async def _revocation_grant(
+        self, tx: OAuthTransaction, command: OAuthRevocationCommand
+    ) -> str | None:
         """Resolve a live refresh hash or a verified access JWT to its grant identity.
 
         Expired and individually revoked refresh rows change nothing, matching the
@@ -649,14 +651,17 @@ class MCPOAuthService:
         grant: the client is authenticated and owns it. Replay detection stays in the
         exchange path and is unaffected.
         """
-        refresh = await tx.refresh(raw_token, lock=False)
+        refresh = await tx.refresh(command.raw_token, lock=False)
         if refresh is not None:
             live = refresh.revoked_at is None and refresh.expires_at > datetime.now(UTC)
             return refresh.grant_public_id if live else None
         claims = self.token_manager.verify_mcp_oauth_access_token(
-            raw_token, issuer=self.config.issuer, audience=self.config.resource
+            command.raw_token,
+            issuer=self.config.issuer,
+            audience=self.config.resource,
+            client_id=command.client_id,
         )
-        return claims.grant_id if claims is not None else None
+        return claims.grant_id if claims is not None and claims.sid == claims.grant_id else None
 
     async def verify_access_token(self, raw_token: str) -> OAuthVerifiedAccess:
         """Perform an uncached live JWT/client/grant/current-permission intersection.
@@ -718,7 +723,12 @@ class MCPOAuthService:
             )
             await session.commit()
             return OAuthVerifiedAccess(
-                principal, frozenset(permissions), grant.public_id, client.client_id, scopes
+                principal,
+                frozenset(permissions),
+                grant.public_id,
+                client.client_id,
+                scopes,
+                claims=claims,
             )
 
     @staticmethod
