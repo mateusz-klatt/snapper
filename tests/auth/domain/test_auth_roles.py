@@ -645,7 +645,13 @@ class TestUserService:
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()
         mock_ci_result.scalars.return_value.first.return_value = mock_db_user
-        mock_session.execute.side_effect = [mock_select_result, mock_ci_result, AsyncMock()]
+        mock_session.execute.side_effect = [
+            mock_select_result,
+            mock_ci_result,
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        ]
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -666,7 +672,13 @@ class TestUserService:
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()
         mock_ci_result.scalars.return_value.first.return_value = mock_db_user
-        mock_session.execute.side_effect = [mock_select_result, mock_ci_result, AsyncMock()]
+        mock_session.execute.side_effect = [
+            mock_select_result,
+            mock_ci_result,
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        ]
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session

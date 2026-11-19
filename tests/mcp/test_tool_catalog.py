@@ -4,6 +4,7 @@ from datetime import UTC
 from datetime import datetime
 
 import pytest
+from mcp.server import MCPServer
 
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.roles import UserRole
@@ -70,7 +71,7 @@ async def _listed_tool_names(
 
     Args:
         server: Permission-aware MCP server to query.
-        claims: Claims to bind, or ``None`` for the compatibility path.
+        claims: Claims to bind, or ``None`` for an unauthenticated context.
 
     Returns:
         Names returned by the server's public list operation.
@@ -92,7 +93,7 @@ async def test_policy_covers_every_registered_tool_and_hides_unknown_tools() -> 
     Then: Every registered tool has one policy entry and the unknown tool is hidden.
     """
     server = _build_catalog_server()
-    registered_names = await _listed_tool_names(server, None)
+    registered_names = {tool.name for tool in await MCPServer.list_tools(server)}
     claims = _make_claims(
         UserRole.AI_REVIEWER,
         sorted(permission.value for permission in ROLE_PERMISSIONS[UserRole.AI_REVIEWER]),
@@ -103,18 +104,18 @@ async def test_policy_covers_every_registered_tool_and_hides_unknown_tools() -> 
 
 
 @pytest.mark.asyncio
-async def test_absent_claims_preserve_the_complete_catalog() -> None:
-    """Context-free list paths retain the historical unfiltered behavior.
+async def test_absent_claims_hide_the_complete_catalog() -> None:
+    """Context-free list paths fail closed without a Snapper principal.
 
     Given: The complete production MCP registration with no claims in the ContextVar.
     When: The permission-aware list handler is invoked directly.
-    Then: All policy-covered tools are returned without an authentication failure.
+    Then: No registered tool is visible without authenticated claims.
     """
     server = _build_catalog_server()
 
     visible_names = await _listed_tool_names(server, None)
 
-    assert visible_names == set(MCP_TOOL_VISIBILITY_POLICY)
+    assert visible_names == set()
 
 
 @pytest.mark.asyncio

@@ -55,6 +55,7 @@ from snapper.application.ai_delegates.service import DelegateOperatorBindingErro
 from snapper.application.ai_delegates.service import DelegateProliferationError
 from snapper.application.ai_delegates.service import DelegateService
 from snapper.application.ai_delegates.service import OAuthGrantReplacementRequiredError
+from snapper.auth.dependencies import _extract_bearer_token
 from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
@@ -613,7 +614,17 @@ async def _operator_options(repo: Repository, owner: AuthPrincipal) -> list[Cons
     ]
 
 
-_MANAGE = Depends(require_permission(Permission.MANAGE_AI_INTEGRATION))
+def _consent_owner(
+    request: Request,
+    owner: Annotated[AuthPrincipal, Depends(require_permission(Permission.MANAGE_AI_INTEGRATION))],
+) -> AuthPrincipal:
+    """Restrict interactive consent to the authenticated web session and its CSRF policy."""
+    if _extract_bearer_token(request) is not None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Consent requires a browser session")
+    return owner
+
+
+_MANAGE = Depends(_consent_owner)
 
 
 @router.get("/api/mcp-oauth/consent")

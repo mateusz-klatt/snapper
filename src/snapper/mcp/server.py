@@ -22,9 +22,15 @@ from typing import Any
 
 from loguru import logger
 from mcp.server import MCPServer
+from mcp.server.auth.middleware.auth_context import AuthContextMiddleware
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.mcpserver import Context
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import CallToolResult
+from mcp.types import InputRequiredResult
 from mcp.types import Tool as MCPTool
 from starlette.applications import Starlette
+from starlette.authentication import AuthCredentials
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -39,8 +45,15 @@ from snapper.auth.tokens import REJECTION_REASON_USER_DEACTIVATED
 from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import get_token_manager
 from snapper.data.repository import Repository
+from snapper.mcp.error_envelope import to_call_tool_result
+from snapper.mcp.oauth.transport import MCPOAuthTransport
+from snapper.mcp.oauth.transport import oauth_tool_list
+from snapper.mcp.oauth.transport import oauth_tool_refusal
+from snapper.mcp.oauth.transport import protected_resource_metadata_url
 from snapper.mcp.rate_limiting import PrincipalRateLimitMiddleware
+from snapper.mcp.security_schemes import mirror_security_schemes
 from snapper.mcp.tool_catalog import filter_mcp_tools
+from snapper.mcp.tool_catalog import is_mcp_tool_visible
 from snapper.mcp.tools import register_mcp_tools
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
@@ -70,14 +83,42 @@ class PermissionAwareMCPServer(MCPServer[None]):
         """Return tools visible to the current authenticated principal.
 
         Returns:
-            The complete registered catalog when request claims are absent,
-            or the permission-filtered catalog for authenticated requests.
+            Tools admitted by the current permissions and OAuth scopes.
         """
-        tools = await super().list_tools()
         claims = TOKEN_CLAIMS_CTX.get()
         if claims is None:
-            return tools
+            return []
+        tools = await super().list_tools()
+        access = get_access_token()
+        if access is not None:
+            tools = oauth_tool_list(tools, access)
         return filter_mcp_tools(tools, claims)
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Context[None, Any] | None = None
+    ) -> CallToolResult | InputRequiredResult:
+        """Check OAuth scope and permissions before invoking a tool or its resolvers.
+
+        Args:
+            name: Requested MCP tool name.
+            arguments: Wire arguments to validate if the call is authorized.
+            context: SDK context supplied by the mounted request handler.
+
+        Returns:
+            The refusal or the authorized SDK tool result.
+        """
+        access = get_access_token()
+        if access is not None:
+            refused = oauth_tool_refusal(name, access)
+            if refused is not None:
+                return refused
+            if not is_mcp_tool_visible(name, get_current_claims()):
+                return to_call_tool_result(
+                    success=False,
+                    error_code="not_authorized",
+                    message="The current Snapper permissions do not allow this tool.",
+                )
+        return await super().call_tool(name, arguments, context)
 
 
 def get_current_claims() -> TokenClaims:
@@ -171,7 +212,9 @@ class FeatureFlagMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-def _build_rejection_response(rejection_reason: str | None) -> JSONResponse:
+def _build_rejection_response(
+    rejection_reason: str | None, challenge: str = _INVALID_BEARER_CHALLENGE
+) -> JSONResponse:
     """Return a 401 JSONResponse whose ``error_code`` matches ``rejection_reason``.
 
     The reason comes straight from ``TokenManager.verify_token_with_reason``
@@ -185,6 +228,7 @@ def _build_rejection_response(rejection_reason: str | None) -> JSONResponse:
             ``None``. ``None`` is treated as ``REJECTION_REASON_INVALID``
             defensively so an unforeseen outcome shape cannot
             accidentally leak a ``user_deactivated`` verdict.
+        challenge: Bearer response header for this transport configuration.
 
     Returns:
         401 :class:`JSONResponse` with the specific ``error_code``.
@@ -192,7 +236,7 @@ def _build_rejection_response(rejection_reason: str | None) -> JSONResponse:
     if rejection_reason == REJECTION_REASON_USER_DEACTIVATED:
         return JSONResponse(
             status_code=401,
-            headers={"WWW-Authenticate": _INVALID_BEARER_CHALLENGE},
+            headers={"WWW-Authenticate": challenge},
             content={
                 "error_code": "user_deactivated",
                 "detail": (
@@ -203,7 +247,7 @@ def _build_rejection_response(rejection_reason: str | None) -> JSONResponse:
         )
     return JSONResponse(
         status_code=401,
-        headers={"WWW-Authenticate": _INVALID_BEARER_CHALLENGE},
+        headers={"WWW-Authenticate": challenge},
         content={
             "error_code": "invalid_bearer_token",
             "detail": "Bearer token failed verification. Refresh via POST /api/auth/refresh.",
@@ -241,6 +285,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self,
         app: Any,
         repository_getter: Callable[[], Repository | None],
+        oauth_transport: MCPOAuthTransport | None = None,
     ) -> None:
         """Initialize the middleware with a Repository getter.
 
@@ -256,9 +301,18 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 time. ``None`` at call time surfaces as a 503 so
                 MCP requests fail fast during a broken lifespan
                 rather than silently skipping the DB-backed check.
+            oauth_transport: Optional verified OAuth path and discovery metadata.
         """
         super().__init__(app)
         self._repository_getter = repository_getter
+        self._oauth_transport = oauth_transport
+        self._missing_challenge = _MISSING_BEARER_CHALLENGE
+        self._invalid_challenge = _INVALID_BEARER_CHALLENGE
+        if oauth_transport is not None:
+            url = protected_resource_metadata_url(oauth_transport.resource)
+            metadata = f'resource_metadata="{url}"'
+            self._missing_challenge = f"Bearer {metadata}"
+            self._invalid_challenge = f"{_INVALID_BEARER_CHALLENGE}, {metadata}"
 
     async def dispatch(self, request: Request, call_next: Any) -> Any:
         """Verify the Bearer token before dispatching to the MCP app.
@@ -285,7 +339,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         if token is None:
             return JSONResponse(
                 status_code=401,
-                headers={"WWW-Authenticate": _MISSING_BEARER_CHALLENGE},
+                headers={"WWW-Authenticate": self._missing_challenge},
                 content={
                     "error_code": "missing_bearer_token",
                     "detail": (
@@ -307,15 +361,22 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                     ),
                 },
             )
-        token_manager = get_token_manager()
-        outcome = await token_manager.verify_token_with_reason(
-            token,
-            repository,
-            expected_token_type=TOKEN_TYPE_ACCESS,
-        )
-        if outcome.claims is None:
-            return _build_rejection_response(outcome.rejection_reason)
-        claims = outcome.claims
+        claims = None
+        if self._oauth_transport is not None:
+            verified = await self._oauth_transport.verify(token, repository)
+            if verified is not None:
+                claims, user = verified
+                request.scope["user"] = user
+                request.scope["auth"] = AuthCredentials(user.scopes)
+        if claims is None:
+            outcome = await get_token_manager().verify_token_with_reason(
+                token,
+                repository,
+                expected_token_type=TOKEN_TYPE_ACCESS,
+            )
+            claims = outcome.claims
+            if claims is None:
+                return _build_rejection_response(outcome.rejection_reason, self._invalid_challenge)
         request.state.token_claims = claims
         ctx_token = TOKEN_CLAIMS_CTX.set(claims)
         try:
@@ -402,6 +463,7 @@ def build_mcp_app(
     repository_getter: Callable[[], Repository | None] | None = None,
     caps_enforcer_getter: Callable[[], TradingCapsEnforcer | None] | None = None,
     tracker_getter: Callable[[], SequenceTracker | None] | None = None,
+    oauth_transport: MCPOAuthTransport | None = None,
 ) -> Starlette:
     """Return the Starlette sub-app to be mounted under ``/api/mcp``.
 
@@ -413,9 +475,10 @@ def build_mcp_app(
               don't verify JWTs.
           3. :class:`BearerAuthMiddleware` — auth gate; populates
            ``request.state.token_claims`` before tool dispatch.
-          4. :class:`PrincipalRateLimitMiddleware` — per-principal
+          4. :class:`AuthContextMiddleware` — binds the verified OAuth user to the SDK context.
+          5. :class:`PrincipalRateLimitMiddleware` — per-principal
               throttle keyed off the claims set by (3).
-          5. Downstream MCPServer Streamable HTTP app with tools
+          6. Downstream MCPServer Streamable HTTP app with tools
            registered via :func:`register_mcp_tools`.
 
     Args:
@@ -449,6 +512,7 @@ def build_mcp_app(
             tracker — fine for stateless deployments because the
             partial-unique cancel-idempotency-key index prevents
             cross-call replay collisions.
+        oauth_transport: OAuth authentication and discovery configuration, if enabled.
 
     Returns:
         A Starlette sub-app ready for ``FastAPI.mount("/api/mcp",...)``.
@@ -457,6 +521,7 @@ def build_mcp_app(
         _MCP_SERVER_NAME,
         instructions=f"Snapper MCP endpoint (v{_MCP_SERVER_VERSION}).",
     )
+    mcp_server.middleware.append(mirror_security_schemes)
     register_mcp_tools(
         mcp_server,
         repository_getter=repository_getter or (lambda: None),
@@ -470,9 +535,11 @@ def build_mcp_app(
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
     downstream.add_middleware(PrincipalRateLimitMiddleware)
+    downstream.add_middleware(AuthContextMiddleware)
     downstream.add_middleware(
         BearerAuthMiddleware,
         repository_getter=repository_getter or (lambda: None),
+        oauth_transport=oauth_transport,
     )
     downstream.add_middleware(
         FeatureFlagMiddleware,

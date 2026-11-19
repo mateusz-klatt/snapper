@@ -2991,11 +2991,15 @@ X-CSRF-Token: <csrf_token>
 
 These routes publish the private ChatGPT connector's OAuth 2.1 flow. They are
 **off by default**: unless `MCP_OAUTH_ENABLED=true`, every route below answers
-404, no metadata is published and the MCP Bearer challenge is unchanged. The
-MCP resource does not yet accept OAuth access tokens; activation needs the
-principal and catalog wiring as well. With the flag on and the database
-`ai_integration_enabled` flag off, metadata stays stable, authorization,
-consent and token issuance are refused, and revocation keeps working.
+404, no metadata is published and the MCP Bearer challenge is unchanged. With
+the flag on, the challenge identifies the protected-resource metadata, and MCP
+accepts audience-bound OAuth access tokens after verifying the current grant,
+delegate and permissions. OAuth tool discovery and calls require both the
+tool's scopes and the corresponding Snapper permissions. The private connector
+receives read-only tools. Existing delegate PATs still use their normal
+authentication path. If the database `ai_integration_enabled` flag is off,
+metadata stays stable, authorization, consent and token issuance are refused,
+and revocation keeps working.
 
 `/api/mcp/register` always answers 404, and OpenID discovery is absent.
 Setting `MCP_OAUTH_DCR_ENABLED=true` fails startup.

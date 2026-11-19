@@ -550,7 +550,13 @@ def test_caddy_control_bridge_has_exact_source_route_and_method_allowlist() -> N
     )
     assert "reverse_proxy snapper:8000" in protected_resource_block
     assert "reverse_proxy snapper:8000" in authorization_server_block
-    assert "/.well-known/openid-configuration" not in public_route
+    assert (
+        "@openid_discovery path /.well-known/openid-configuration /.well-known/openid-configuration/*"
+        in public_route
+    )
+    assert public_route.index("respond @openid_discovery 404") < public_route.index(
+        "try_files {path} /index.html"
+    )
     assert "\n\trespond @delegate_control_on_public 403" not in public_block
     public_log = _brace_block(public_block, "log")
     assert public_log not in public_route

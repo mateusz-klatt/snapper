@@ -88,7 +88,7 @@ class MCPOAuthAccessTokenClaims(TokenClaims):
     azp: str | None = None
     nbf: int
     grant_id: str
-    token_use: Literal["mcp_oauth_access"] = "mcp_oauth_access"
+    token_use: Literal["mcp_oauth_access"]
 
 
 class TokenPair(StrictBody):

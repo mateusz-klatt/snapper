@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from snapper.application.ai_delegates.service import DelegateOperatorBindingError
 from snapper.application.ai_delegates.service import DelegateProliferationError
+from snapper.auth.dependencies import get_csrf_manager
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
@@ -779,6 +780,38 @@ def test_consent_mutations_enforce_csrf(case: HttpCase) -> None:
     assert response.status_code == 403
     case.app.dependency_overrides[validate_csrf_token] = lambda: None
     assert _describe(case, request_id).status_code == 200
+
+
+@pytest.mark.parametrize("decision", ["approve", "deny"])
+async def test_consent_requires_browser_session_and_csrf(case: HttpCase, decision: str) -> None:
+    """Consent accepts the owner's browser cookie and its paired CSRF proof.
+
+    Given a real persisted session and a pending authorization,
+    When read and decision requests use the owner's bearer or cookie credentials,
+    Then only the cookie session may read, and only its CSRF-protected decision succeeds.
+    """
+    del case.app.dependency_overrides[require_authentication]
+    del case.app.dependency_overrides[validate_csrf_token]
+    manager = case.harness.token_manager
+    pair = manager.create_tokens(case.owner)
+    await manager.persist_tokens(pair, case.owner.user_public_id, case.harness.repository)
+    request_id = _pending(case)
+    payload = _envelope(
+        f"mcp_oauth_consent_{decision}_request",
+        {"oauth_request": request_id, "operator_public_id": _OPERATOR_A},
+    )
+    url = f"/api/mcp-oauth/consent/{decision}"
+    case.client.headers["Authorization"] = f"Bearer {pair.access_token}"
+    assert _describe(case, request_id).status_code == 401
+    assert case.client.post(url, json=payload).status_code == 401
+    case.client.cookies.set("access_token", pair.access_token)
+    assert case.client.post(url, json=payload).status_code == 401
+    del case.client.headers["Authorization"]
+    assert _describe(case, request_id).status_code == 200
+    assert case.client.post(url, json=payload).status_code == 403
+    csrf = get_csrf_manager().generate_token()
+    case.client.cookies.set("csrf_token", csrf)
+    assert case.client.post(url, json=payload, headers={"X-CSRF-Token": csrf}).status_code == 200
 
 
 def test_oauth_settings_default_to_the_cached_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:

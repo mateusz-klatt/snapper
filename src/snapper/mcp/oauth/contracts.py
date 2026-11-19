@@ -5,6 +5,7 @@ from dataclasses import field
 
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.schemas.tokens import MCPOAuthAccessTokenClaims
 
 
 class MCPOAuthError(ValueError):
@@ -165,3 +166,4 @@ class OAuthVerifiedAccess:
     grant_public_id: str
     client_id: str
     scopes: tuple[str, ...]
+    claims: MCPOAuthAccessTokenClaims = field(repr=False)
