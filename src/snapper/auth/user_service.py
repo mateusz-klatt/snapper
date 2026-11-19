@@ -31,6 +31,7 @@ from snapper.auth.tokens import get_token_manager
 from snapper.config.settings import get_settings
 from snapper.data.models import OAuthGrant
 from snapper.data.models import User
+from snapper.data.models import UserActiveToken
 from snapper.data.models import UserLoginEvent
 from snapper.data.oauth_grant_revocation import revoke_oauth_grants_in_tx
 from snapper.data.repository import close_and_insert
@@ -57,6 +58,10 @@ _DESK_MEMBERSHIPS_TOPIC = "desk_memberships"
 
 class DeskMembershipAuthorizationError(Exception):
     """Raised when a caller lacks the requested access to the target desk."""
+
+
+class UserAuthorityConflictError(RuntimeError):
+    """Concurrent account authority replacement requires a new attempt."""
 
 
 class UserService:
@@ -783,7 +788,8 @@ class UserService:
            method commits its own transaction (`Repository.revoke_user_active_tokens`
            opens its own session) and deliberately does NOT publish a bus
            event so the single-publisher rule is preserved. On SQLite this
-           separate write runs after preflight and before the user transaction.
+           separate write runs after preflight and before the user transaction,
+           which revokes any tokens issued before it acquired the writer lock.
         3. Commit the user SCD2 mutation. Token revocation has already
            landed; if this commit fails the user row stays active but
            tokens remain revoked — the safer failure mode (kill switch
@@ -805,6 +811,7 @@ class UserService:
         sqlite = self.repository.dialect_name == "sqlite"
         if sqlite and not await self._sqlite_revoke_legacy_sessions(user_public_id):
             return False
+        late_jtis: list[str] = []
         async with self.repository.session() as session:
             target = User.public_id == user_public_id
             await self._prepare_oauth_authority_reduction(session, target)
@@ -842,9 +849,23 @@ class UserService:
                 bus_time=now,
             )
             await self._revoke_oauth_authority(session, user_public_id, now)
-            if not sqlite:
+            if sqlite:
+                late_jtis = list(
+                    await session.scalars(
+                        update(UserActiveToken)
+                        .where(
+                            UserActiveToken.user_public_id == user_public_id,
+                            UserActiveToken.revoked_at.is_(None),
+                        )
+                        .values(revoked_at=now)
+                        .returning(UserActiveToken.jti)
+                    )
+                )
+            else:
                 await get_token_manager().revoke_user_sessions(user_public_id, self.repository)
             await session.commit()
+        for jti in late_jtis:
+            get_token_manager().blacklist_token_immediately(jti)
         await self._publish_user_deactivated(
             user_public_id=user_public_id,
             reason=reason,
@@ -880,20 +901,27 @@ class UserService:
                 .correlate(None)
                 .scalar_subquery()
             )
-            owners = select(OAuthGrant.owner_user_public_id).where(
-                OAuthGrant.delegate_user_public_id == delegate_id,
-                OAuthGrant.revoked_at.is_(None),
+            owner_ids = frozenset(
+                await session.scalars(
+                    select(OAuthGrant.owner_user_public_id).where(
+                        OAuthGrant.delegate_user_public_id == delegate_id,
+                        OAuthGrant.revoked_at.is_(None),
+                    )
+                )
             )
+            if not owner_ids:
+                return
             result = await session.scalars(
                 select(User)
-                .where(User.public_id.in_(owners), *where_active_now(User))
+                .where(User.public_id.in_(owner_ids), *where_active_now(User))
                 .order_by(User.public_id)
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
             now = datetime.now(UTC)
-            if any(row.known_to <= now for row in result):
-                raise RuntimeError("OAuth grant owner changed during authority reduction")
+            locked_owner_ids = {row.public_id for row in result if row.known_to > now}
+            if locked_owner_ids != owner_ids:
+                raise UserAuthorityConflictError("OAuth grant owner changed. Retry the request.")
 
     @staticmethod
     async def _revoke_oauth_authority(

@@ -27,7 +27,7 @@
 	@delegate_control_on_public remote_ip 172.30.10.0/29 172.30.11.0/29
 	route {
 		respond @delegate_control_on_public 403
-		@openid_discovery path /.well-known/openid-configuration /.well-known/openid-configuration/*
+		@openid_discovery path /.well-known/openid-configuration /.well-known/openid-configuration/* /api/mcp/.well-known/openid-configuration
 		respond @openid_discovery 404
 		encode gzip zstd
 		@mcp_exact path /api/mcp

@@ -45,6 +45,7 @@ from snapper.auth.tokens import TOKEN_TYPE_ACCESS
 from snapper.auth.tokens import PermissionScopeError
 from snapper.auth.tokens import TokenManager
 from snapper.auth.tokens import hash_token
+from snapper.auth.user_service import UserAuthorityConflictError
 from snapper.core.ids import is_uuid7
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import OAuthGrant
@@ -2288,10 +2289,16 @@ class TestRouteHandlers:
         assert response.payload.is_active is False
 
     @pytest.mark.asyncio
-    async def test_deactivate_route_404_when_user_service_returns_false(
-        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("conflict", [False, True])
+    async def test_deactivate_route_distinguishes_missing_delegate_and_authority_conflict(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch, conflict: bool
     ) -> None:
-        """Race: delegate existed at load but was deactivated by a concurrent caller."""
+        """Return the relevant status after a concurrent change.
+
+        Given: A delegate is present when first read.
+        When: The service finds the delegate gone or cannot lock current grant owners.
+        Then: The route returns 404 for the missing delegate or a retryable 409.
+        """
         delegate = DelegateRead(
             public_id="d5",
             username="ai-race-abc123",
@@ -2310,6 +2317,8 @@ class TestRouteHandlers:
         class _RaceUserService:
             async def deactivate_user(self, user_public_id: str, reason: str | None) -> bool:
                 await asyncio.sleep(0)
+                if conflict:
+                    raise UserAuthorityConflictError("Retry the request.")
                 return False
 
         monkeypatch.setattr(ai_delegate_routes, "_build_service", lambda _repo: _FoundService())
@@ -2325,7 +2334,9 @@ class TestRouteHandlers:
                 repo=repo,
                 _csrf=None,
             )
-        assert exc.value.status_code == 404
+        assert exc.value.status_code == (409 if conflict else 404)
+        if conflict:
+            assert exc.value.detail == "Retry the request."
 
 
 def _make_rest_request() -> Any:

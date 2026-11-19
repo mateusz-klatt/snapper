@@ -14,6 +14,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.auth.domain.roles import UserRole
+from snapper.auth.schemas.tokens import TokenPair
+from snapper.auth.tokens import TOKEN_TYPE_ACCESS
+from snapper.auth.tokens import TOKEN_TYPE_REFRESH
 from snapper.auth.user_service import UserService
 from snapper.data.models import OAuthGrant
 from snapper.data.models import OAuthRefreshToken
@@ -103,6 +106,52 @@ async def test_account_authority_reduction_retires_grant_permanently(
     assert tokens.refresh_token is not None
     with pytest.raises(MCPOAuthError):
         await oauth.exchange_refresh_token(_refresh(tokens.refresh_token))
+
+
+@pytest.mark.asyncio
+async def test_sqlite_deactivation_retires_login_between_credential_barriers(
+    user_oauth_case: tuple[OAuthCase, UserService], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A login after the initial sweep cannot keep active token inventory.
+
+    Given a user deactivation after its initial legacy session revocation.
+    When that still-active account logs in before the final writer transaction.
+    Then both late login tokens are durably revoked and stay unusable after reactivation.
+    """
+    case, users = user_oauth_case
+    repository = case.harness.repository
+    manager = case.harness.token_manager
+    pairs: list[TokenPair] = []
+    initial_sweep = users._sqlite_revoke_legacy_sessions
+
+    async def login_after_initial_sweep(user_public_id: str) -> bool:
+        """Perform the real login operations while the account is still active."""
+        found = await initial_sweep(user_public_id)
+        profile = await users.authenticate_user(case.owner.username, "fixture-password")
+        assert profile is not None
+        principal = await users.build_auth_principal(profile)
+        pairs.append(manager.create_tokens(principal))
+        await manager.persist_tokens(pairs[0], user_public_id, repository)
+        assert len(await repository.list_active_user_token_jtis(user_public_id)) == 2
+        return found
+
+    monkeypatch.setattr(users, "_sqlite_revoke_legacy_sessions", login_after_initial_sweep)
+    assert await users.deactivate_user(case.owner.user_public_id, reason=None)
+    assert await repository.list_active_user_token_jtis(case.owner.user_public_id) == []
+    restored = await users.update_user(case.owner.username, is_active=True)
+    assert restored is not None and restored.is_active
+    assert (
+        await manager.verify_token_with_db(
+            pairs[0].access_token, repository, expected_token_type=TOKEN_TYPE_ACCESS
+        )
+        is None
+    )
+    assert (
+        await manager.verify_token_with_db(
+            pairs[0].refresh_token, repository, expected_token_type=TOKEN_TYPE_REFRESH
+        )
+        is None
+    )
 
 
 async def _fail_after_revoke(

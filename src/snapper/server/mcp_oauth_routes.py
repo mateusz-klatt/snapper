@@ -39,6 +39,7 @@ from fastapi import status
 from fastapi.responses import JSONResponse
 from fastapi.responses import RedirectResponse
 from fastapi.responses import Response
+from starlette.routing import Route
 
 from snapper.api.schemas.mcp_oauth import AuthorizationServerMetadata
 from snapper.api.schemas.mcp_oauth import ConsentApproveRequest
@@ -174,8 +175,17 @@ def require_mcp_oauth_enabled(
 router = APIRouter(tags=["mcp-oauth"], dependencies=[Depends(require_mcp_oauth_enabled)])
 """Every route is hidden behind the bootstrap flag before any body is parsed."""
 
-registration_router = APIRouter(tags=["mcp-oauth"])
-"""Always-present 404 for dynamic client registration, independent of the flag."""
+unsupported_router = APIRouter(
+    tags=["mcp-oauth"],
+    routes=[
+        Route(
+            "/api/mcp/.well-known/openid-configuration",
+            endpoint=Response(status_code=status.HTTP_404_NOT_FOUND),
+            include_in_schema=False,
+        )
+    ],
+)
+"""Answer unsupported discovery and registration before the MCP mount for either flag state."""
 
 
 def build_oauth_service(repository: Repository, settings: AppSettings) -> MCPOAuthService:
@@ -281,7 +291,7 @@ async def authorization_server_metadata(
     )
 
 
-@registration_router.api_route(
+@unsupported_router.api_route(
     "/api/mcp/register", methods=["GET", "POST", "PUT", "DELETE"], include_in_schema=False
 )
 async def dynamic_client_registration() -> Response:

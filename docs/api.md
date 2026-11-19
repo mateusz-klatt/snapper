@@ -611,6 +611,8 @@ and `is_active`.
 
 Update email, role, and active state for an existing user. Requires
 `manage:users` and CSRF for cookie auth. Returns `UserResponse`.
+Deactivation returns `409` when an OAuth grant owner's account changes
+concurrently. Retry the request against the current account state.
 
 ### POST /api/auth/users/{user_id}/deactivate
 
@@ -621,6 +623,8 @@ users return `404`. The service also revokes active sessions and emits
 `admin.user_deactivated` for immediate verify-cache eviction and
 WebSocket close fanout; auth listeners also poll the committed
 `users.is_active=False` row as broker-outage fallback.
+A concurrent change to an OAuth grant owner's account returns `409` and
+the deactivation can be retried.
 
 ### POST /api/auth/users/{user_id}/change-password
 
@@ -3001,8 +3005,10 @@ authentication path. If the database `ai_integration_enabled` flag is off,
 metadata stays stable, authorization, consent and token issuance are refused,
 and revocation keeps working.
 
-`/api/mcp/register` always answers 404, and OpenID discovery is absent.
-Setting `MCP_OAUTH_DCR_ENABLED=true` fails startup.
+`/api/mcp/register` and all three OpenID discovery paths always answer 404:
+`/.well-known/openid-configuration`, `/.well-known/openid-configuration/api/mcp`,
+and `/api/mcp/.well-known/openid-configuration`. Setting
+`MCP_OAUTH_DCR_ENABLED=true` fails startup.
 
 ### Discovery
 
@@ -3226,6 +3232,9 @@ cookie-authenticated requests.
 **Response (200):** `DelegateResponse` with `is_active: false`.
 
 **Response (404):** The delegate does not exist or is not owned by the caller.
+
+**Response (409):** An OAuth grant owner's account changed concurrently.
+Retry deactivation against the current state.
 
 ## Underlying Assets
 

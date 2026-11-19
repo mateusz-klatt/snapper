@@ -28,6 +28,7 @@ from snapper.application.ai_delegates.service import OAuthDelegateRequest
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.tokens import TokenManager
+from snapper.auth.user_service import UserAuthorityConflictError
 from snapper.auth.user_service import UserService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AiDelegate
@@ -625,14 +626,15 @@ async def test_account_deactivation_serializes_with_in_flight_refresh(
         await _cancel_all([rotation, deactivation])
 
 
+@pytest.mark.parametrize("close_first", [False, True], ids=["stale-row", "empty-lock-result"])
 async def test_delegate_deactivation_refuses_a_closed_owner_lock(
-    pg_frame: PGFrame, monkeypatch: pytest.MonkeyPatch
+    pg_frame: PGFrame, monkeypatch: pytest.MonkeyPatch, close_first: bool
 ) -> None:
     """A closed SCD2 owner row cannot fence delegate deactivation.
 
-    Given a current grant and a profile writer locking its owner.
-    When the writer publishes a new owner row while deactivation waits on the old row.
-    Then the deactivation rolls back, leaving the unchanged grant active.
+    Given a current grant and a writer holding the owner's row lock.
+    When the writer closes the row before or after the lock query starts.
+    Then deactivation rolls back rather than proceeding without a current lock.
     """
     owner_id, tokens = await _tokens(pg_frame)
     identity = await pg_frame.first.verify_access_token(tokens.access_token)
@@ -648,11 +650,9 @@ async def test_delegate_deactivation_refuses_a_closed_owner_lock(
             select(User).where(User.public_id == owner_id).with_for_update()
         )
         assert owner is not None
-        try:
-            deactivation = asyncio.create_task(
-                users.deactivate_user(identity.principal.user_public_id, reason=None)
-            )
-            await _wait_for_native_lock(pg_frame)
+
+        async def replace_owner_version() -> None:
+            """Write the replacement while the writer continues to hold its lock."""
             await close_and_insert(
                 writer,
                 User,
@@ -669,8 +669,19 @@ async def test_delegate_deactivation_refuses_a_closed_owner_lock(
                 },
                 datetime.now(UTC),
             )
+            await writer.flush()
+
+        try:
+            if close_first:
+                await replace_owner_version()
+            deactivation = asyncio.create_task(
+                users.deactivate_user(identity.principal.user_public_id, reason=None)
+            )
+            await _wait_for_native_lock(pg_frame)
+            if not close_first:
+                await replace_owner_version()
             await writer.commit()
-            with pytest.raises(RuntimeError, match="OAuth grant owner changed"):
+            with pytest.raises(UserAuthorityConflictError, match="OAuth grant owner changed"):
                 await asyncio.wait_for(deactivation, 10)
         finally:
             await _cancel_all([deactivation])
