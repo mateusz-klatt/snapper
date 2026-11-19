@@ -84,7 +84,14 @@ async def test_postgresql_crypto_plane_scan_is_typed_bounded_and_transactional(
     monkeypatch.setattr(AsyncSession, "execute", capture)
     assert await repository.get_pnl_crypto_usd_plane_candles(["BTC", "BTC"], _M, _M, _NOW) == []
     assert len(statements) == 3
-    assert statements[:2] == ["SET LOCAL statement_timeout = '20s'", "SET LOCAL jit = off"]
+    budget = statements[0]
+    assert "set_config('statement_timeout', CASE WHEN" in budget
+    assert "interval '20 seconds' THEN '20s' ELSE current_setting('statement_timeout')" in budget
+    assert "set_config('lock_timeout', CASE WHEN" in budget
+    assert "interval '1 second' THEN '1s' ELSE current_setting('lock_timeout')" in budget
+    assert ", true)" in budget
+    assert "SET LOCAL statement_timeout" not in budget
+    assert statements[1] == "SET LOCAL jit = off"
     query = statements[2]
     assert "WITH pnl_crypto_usd_candidate_instruments AS MATERIALIZED" in query
     assert "candles.instrument_public_id = ANY (CAST((SELECT array_agg(" in query

@@ -46,9 +46,10 @@ subquery. This candidate set does not replace the candle-author-time ownership
 joins, denomination and spot-kind unanimity, or venue certification. Corrected
 or delisted metadata and ambiguous price planes retain their existing meaning.
 
-That PostgreSQL read owns an explicit transaction with JIT disabled and a
-20-second statement timeout. The settings end with that transaction and do not
-change other repository reads. A timeout aborts the affected scope's remaining
+That PostgreSQL read owns an explicit transaction with JIT disabled and the
+shared P&L budget: the statement timeout is capped at 20 seconds and the lock
+timeout at 1 second, and a shorter limit already in effect is kept. The settings
+end with that transaction and do not change other repository reads. A timeout aborts the affected scope's remaining
 work for the tick, logs its wallet and chunk range once per failure streak,
 and contributes to the existing per-tick failed-scope count. Catch-up samples
 and the detector baseline cannot advance past the failed evidence load.

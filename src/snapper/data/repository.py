@@ -22989,8 +22989,10 @@ class SQLAlchemyRepository(Repository):
         decertification cannot admit or de-plane a candle authored under the
         earlier spec. A historical candidate-ID set bounds the candle scan
         without replacing any of those proofs. PostgreSQL executes the read
-        inside an explicit transaction with JIT disabled and a twenty-second
-        statement timeout; both settings expire with this transaction.
+        inside an explicit transaction with JIT disabled and the shared P&L
+        budget, which caps the statement at twenty seconds and lock waits at one
+        second without relaxing a shorter inherited limit; every setting expires
+        with this transaction.
 
         Args:
             currencies: Distinct base currencies to price.
@@ -23007,7 +23009,7 @@ class SQLAlchemyRepository(Repository):
         candidate_filter = _pnl_crypto_usd_candidate_filter(currencies, as_of, self.dialect_name)
         async with self.session() as s, s.begin():
             if self.dialect_name == "postgresql":
-                await s.execute(text("SET LOCAL statement_timeout = '20s'"))
+                await self._bound_pnl_correction_transaction(s)
                 await s.execute(text("SET LOCAL jit = off"))
             result = await s.execute(
                 select(
