@@ -959,12 +959,11 @@ def test_directory_fsync_opens_syncs_and_always_closes_descriptor(
 
     Given fake os.open, os.fsync and os.close where fsync either succeeds or raises.
     When _fsync_directory runs on a directory path.
-    Then the directory descriptor is synced and always closed even when fsync fails.
+    Then the directory is opened read-only, synced and closed in that order, and closed
+        even when fsync fails.
     """
     sentinel = 987654321
-    opened: list[tuple[Path, int]] = []
-    synced: list[int] = []
-    closed: list[int] = []
+    trace: list[tuple[str, object, int | None]] = []
     real_open = os.open
     real_fsync = os.fsync
     real_close = os.close
@@ -978,7 +977,7 @@ def test_directory_fsync_opens_syncs_and_always_closes_descriptor(
     ) -> int:
         """Return a sentinel descriptor for the target directory."""
         if dir_fd is None and isinstance(target, (str, os.PathLike)) and Path(target) == tmp_path:
-            opened.append((Path(target), flags))
+            trace.append(("open", Path(target), flags))
             return sentinel
         if dir_fd is None:
             return real_open(target, flags, mode)
@@ -987,7 +986,7 @@ def test_directory_fsync_opens_syncs_and_always_closes_descriptor(
     def fake_fsync(descriptor: int) -> None:
         """Record the sentinel sync and optionally simulate a sync failure."""
         if descriptor == sentinel:
-            synced.append(descriptor)
+            trace.append(("fsync", descriptor, None))
             if fsync_fails:
                 raise OSError("synthetic fsync failure")
             return
@@ -996,7 +995,7 @@ def test_directory_fsync_opens_syncs_and_always_closes_descriptor(
     def fake_close(descriptor: int) -> None:
         """Record the sentinel close and delegate real descriptors."""
         if descriptor == sentinel:
-            closed.append(descriptor)
+            trace.append(("close", descriptor, None))
             return
         real_close(descriptor)
 
@@ -1011,9 +1010,11 @@ def test_directory_fsync_opens_syncs_and_always_closes_descriptor(
     else:
         candle_void._fsync_directory(tmp_path)
 
-    assert opened == [(tmp_path, os.O_RDONLY)]
-    assert synced == [sentinel]
-    assert closed == [sentinel]
+    assert trace == [
+        ("open", tmp_path, os.O_RDONLY),
+        ("fsync", sentinel, None),
+        ("close", sentinel, None),
+    ]
 
 
 def test_write_durable_unlinks_new_file_when_directory_open_fails(
@@ -1023,10 +1024,17 @@ def test_write_durable_unlinks_new_file_when_directory_open_fails(
 
     Given a parent directory whose os.open raises PermissionError.
     When write_durable writes a new file inside that directory.
-    Then PermissionError propagates and the newly created file is unlinked.
+    Then the file was created exclusively, fully written and synced before the parent
+        sync was refused, PermissionError propagates, and the file is unlinked.
     """
     target = tmp_path / "prepared.json"
+    payload = b'{"status":"prepared"}'
     real_open = os.open
+    real_fsync = os.fsync
+    file_descriptors: list[int] = []
+    file_flags: list[int] = []
+    synced_files: list[int] = []
+    at_refusal: list[bytes | None] = []
 
     def fake_open(
         path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
@@ -1035,19 +1043,37 @@ def test_write_durable_unlinks_new_file_when_directory_open_fails(
         *,
         dir_fd: int | None = None,
     ) -> int:
-        """Refuse opening the target directory while allowing the file open."""
+        """Refuse the parent directory, recording the file state at that moment."""
         if dir_fd is None and isinstance(path, (str, os.PathLike)) and Path(path) == tmp_path:
+            at_refusal.append(target.read_bytes() if target.exists() else None)
             raise PermissionError("directory descriptor unsupported")
-        if dir_fd is None:
-            return real_open(path, flags, mode)
-        return real_open(path, flags, mode, dir_fd=dir_fd)
+        descriptor = (
+            real_open(path, flags, mode)
+            if dir_fd is None
+            else real_open(path, flags, mode, dir_fd=dir_fd)
+        )
+        if isinstance(path, (str, os.PathLike)) and Path(path) == target:
+            file_descriptors.append(descriptor)
+            file_flags.append(flags)
+        return descriptor
+
+    def fake_fsync(descriptor: int) -> None:
+        """Record which descriptors were synced, delegating to the real call."""
+        synced_files.append(descriptor)
+        real_fsync(descriptor)
 
     monkeypatch.setattr(candle_void, "_fsync_directory", _REAL_FSYNC_DIRECTORY)
     monkeypatch.setattr(candle_void.os, "open", fake_open)
+    monkeypatch.setattr(candle_void.os, "fsync", fake_fsync)
 
     with pytest.raises(PermissionError, match="directory descriptor unsupported"):
-        candle_void.write_durable(target, b'{"status":"prepared"}')
+        candle_void.write_durable(target, payload)
 
+    assert len(file_descriptors) == 1
+    assert file_flags[0] & os.O_CREAT
+    assert file_flags[0] & os.O_EXCL
+    assert synced_files == file_descriptors
+    assert at_refusal == [payload]
     assert not target.exists()
 
 
