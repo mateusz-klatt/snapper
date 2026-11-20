@@ -68,6 +68,8 @@ class TestZMQBroker:
             await asyncio.wait_for(broker.start(), timeout=2.0)
             status = broker.get_status()
             assert status["running"] is True
+            assert not broker.xsub_endpoint.endswith(":0")
+            assert not broker.xpub_endpoint.endswith(":0")
             assert status["xsub_endpoint"] == broker.xsub_endpoint
             assert status["xpub_endpoint"] == broker.xpub_endpoint
         finally:
@@ -78,8 +80,8 @@ class TestZMQBroker:
         """Test ZmqBrokerProcess forwards messages.
 
         Given: A running broker with publisher and subscriber,
-        When: Publisher sends message to XSUB,
-        Then: Subscriber receives message from XPUB.
+        When: Publisher resends a message to XSUB until the subscription has propagated,
+        Then: Subscriber receives the message from XPUB within the 5 s deadline.
         """
         broker = ZmqBrokerProcess(
             xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
@@ -93,11 +95,10 @@ class TestZMQBroker:
                 sub_socket = context.socket(zmq.SUB)
                 sub_socket.connect(broker.xpub_endpoint)
                 sub_socket.setsockopt_string(zmq.SUBSCRIBE, "TEST")
-                await asyncio.sleep(0.1)
-                await asyncio.wait_for(
-                    pub_socket.send_multipart([b"TEST", b"hello world"]), timeout=1.0
-                )
-                topic, payload = await asyncio.wait_for(sub_socket.recv_multipart(), timeout=2.0)
+                async with asyncio.timeout(5.0):
+                    while not await sub_socket.poll(timeout=50):
+                        await pub_socket.send_multipart([b"TEST", b"hello world"])
+                    topic, payload = await sub_socket.recv_multipart()
                 assert topic == b"TEST"
                 assert payload == b"hello world"
             finally:
@@ -316,6 +317,8 @@ class TestZMQBrokerAdditionalCoverage:
             await asyncio.wait_for(broker.start(), timeout=2.0)
             status = broker.get_status()
             assert status["running"] is True
+            assert not broker.xsub_endpoint.endswith(":0")
+            assert not broker.xpub_endpoint.endswith(":0")
             assert status["xsub_endpoint"] == broker.xsub_endpoint
             assert status["xpub_endpoint"] == broker.xpub_endpoint
         finally:
@@ -1017,8 +1020,8 @@ def test_zmq_broker_thread_proxy_loop_forwards_real_sockets() -> None:
     """Test ``ZmqBrokerThread._proxy_loop`` forwards a real PUB->SUB round-trip.
 
     Given: A ``ZmqBrokerThread`` started on ephemeral tcp endpoints.
-    When: A PUB connects to XSUB and sends a frame, a SUB connects to
-        XPUB and reads it.
+    When: A PUB connects to XSUB and resends a frame until a SUB connected
+        to XPUB can read it, within a 5 s deadline.
     Then: The SUB receives the frame, exercising the CLI threaded
         broker's forwarding hot path.
 
@@ -1043,9 +1046,12 @@ def test_zmq_broker_thread_proxy_loop_forwards_real_sockets() -> None:
             sub = context.socket(zmq.SUB)
             sub.connect(broker.xpub_socket.getsockopt_string(zmq.LAST_ENDPOINT))
             sub.setsockopt_string(zmq.SUBSCRIBE, "TOPIC")
-            time.sleep(0.2)
-            pub.send_multipart([b"TOPIC", b"payload"], flags=zmq.DONTWAIT)
-            assert sub.poll(timeout=2000, flags=zmq.POLLIN) & zmq.POLLIN
+            deadline = time.monotonic() + 5.0
+            ready = 0
+            while not ready and time.monotonic() < deadline:
+                pub.send_multipart([b"TOPIC", b"payload"], flags=zmq.DONTWAIT)
+                ready = sub.poll(timeout=50, flags=zmq.POLLIN)
+            assert ready & zmq.POLLIN
             topic, payload = sub.recv_multipart(flags=zmq.DONTWAIT)
             assert topic == b"TOPIC"
             assert payload == b"payload"
