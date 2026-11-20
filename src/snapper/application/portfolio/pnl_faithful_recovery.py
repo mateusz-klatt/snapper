@@ -7,6 +7,7 @@ Budget exhaustion is an unfinished search, not proof of unrepresentability.
 """
 
 import math
+from collections.abc import Callable
 from collections.abc import Hashable
 from dataclasses import dataclass
 from itertools import product
@@ -40,16 +41,18 @@ class FaithfulFlowProjection[InstrumentKeyT: Hashable, AttributionKeyT: Hashable
 
 @dataclass
 class FaithfulRecoveryBudget:
-    """A request's shared deterministic allowance across all flow families.
+    """A shared deterministic allowance across all flow families.
 
     Candidate tuples are streamed. Each actual candidate prepays its complete
     ordered key scan, so their total visits cannot exceed this allowance.
     Tuple construction has the same bounded linear cost as those scans.
     Signature validation and terminal-result reuse are separately O(K), with
     K bounded by MAX_RECOVERY_KEYS; no historical cache grows with the window.
+    A replay point can also prepay on its containing chunk via ``reserve_shared``.
     """
 
     remaining_key_visits: int = MAX_RECOVERY_KEY_VISITS
+    reserve_shared: Callable[[int], None] | None = None
 
     def __post_init__(self) -> None:
         """Keep every owned request allowance inside the admitted upper bound."""
@@ -72,6 +75,8 @@ class FaithfulRecoveryBudget:
             raise ValueError("faithful recovery scan cost cannot be negative")
         if key_visits > self.remaining_key_visits:
             return False
+        if self.reserve_shared is not None:
+            self.reserve_shared(key_visits)
         self.remaining_key_visits -= key_visits
         return True
 

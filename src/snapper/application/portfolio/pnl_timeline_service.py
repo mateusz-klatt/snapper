@@ -141,6 +141,9 @@ from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEn
 from snapper.application.portfolio.pnl_timeline import PnlInstrumentContribution
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline import PnlTimelineResult
+from snapper.application.portfolio.pnl_timeline import (
+    PnlTimelineWorkBudgetError as _PnlTimelineWorkBudgetError,
+)
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
 from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
@@ -175,6 +178,8 @@ from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 from snapper.data.repository_types import PortfolioPnlAnchorRow
 from snapper.data.repository_types import PortfolioPnlAnchorWriteEvidence
 from snapper.data.repository_types import PortfolioPnlSampleRow
+
+PnlTimelineWorkBudgetError = _PnlTimelineWorkBudgetError
 
 _timed_build_pnl_timeline = pnl_read_core(build_pnl_timeline)
 
@@ -530,7 +535,8 @@ class PnlSeriesReplayOptions:
     ``frozen_fill_witness_cut`` pins the venue event bounds and membership proof
     used to certify the captured execution cut.
     ``replay_generation_tip`` fixes the price and display reference proof scope
-    across resumed chunks at the generation's finalized tip.
+    across resumed chunks at the generation's finalized tip. It also sets the
+    faithful-recovery allowance and terminal state per persisted sample.
     ``verify_replay_probe`` recertifies a new generation's cut after fill-gap
     analysis so observations cannot be bound to a superseded prefix.
     ``pointwise_exact_fx`` values each required minute independently of the
@@ -1304,10 +1310,6 @@ class PnlWalletTimelineResult:
     marker_limit: int
     markers_truncated: bool
     applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...] = ()
-
-
-class PnlTimelineWorkBudgetError(ValueError):
-    """The requested raw grid and instrument fan-out exceed the work budget."""
 
 
 def _empty_pnl_series(granularity: str, valuation_ccy: str) -> PnlWalletSeriesResult:
@@ -6726,6 +6728,7 @@ async def build_wallet_pnl_series(
                 to_time=to_time,
                 granularity=granularity,
                 valuation_ccy=valuation_ccy,
+                recovery_budget_per_point=options.replay_generation_tip is not None,
             )
             result = _timed_build_pnl_timeline(
                 executions,

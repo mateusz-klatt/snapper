@@ -24,6 +24,7 @@ from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinMetric
 from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillConsumer
 from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillDiscovery
 from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillRequirement
+from snapper.application.portfolio.fx_proof_backfill import FxProofBackfillSemanticRefusal
 from snapper.application.portfolio.fx_proof_backfill import _acquire_apply_lock
 from snapper.application.portfolio.fx_proof_backfill import _checkpoint_start
 from snapper.application.portfolio.fx_proof_backfill import _consumer_discovery
@@ -41,6 +42,8 @@ from snapper.application.portfolio.fx_proof_backfill import discover_fx_proof_ba
 from snapper.application.portfolio.fx_proof_backfill import fx_proof_backfill_apply_lock
 from snapper.application.portfolio.fx_proof_backfill import reset_fx_proof_backfill_checkpoint
 from snapper.application.portfolio.fx_proof_backfill import run_fx_proof_backfill
+from snapper.application.portfolio.pnl_timeline_service import _FxRequest
+from snapper.application.portfolio.pnl_timeline_service import _load_pointwise_series_fx
 from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
 from snapper.data.models import PortfolioPnlPoint
 from snapper.data.models import UUIDColumn
@@ -205,12 +208,12 @@ class _DiscoveryRepository:
         *,
         open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[tuple[str, str, str]]:
-        """Expose partial Binance and complete Kraken candidate planes."""
+        """Expose partial Coinbase and complete Kraken candidate planes."""
         del open_intervals
         self.horizons.append(as_of)
         planes: list[tuple[str, str, str]] = []
         if ("EUR", "USD") in pairs or ("USD", "EUR") in pairs:
-            planes.extend(("EUR", "USD", venue) for venue in ("binance", "kraken"))
+            planes.extend(("EUR", "USD", venue) for venue in ("coinbase", "kraken"))
         if ("PLN", "USD") in pairs or ("USD", "PLN") in pairs:
             planes.append(("PLN", "USD", "kraken"))
         return planes
@@ -224,11 +227,15 @@ class _DiscoveryRepository:
         *,
         open_intervals: Sequence[tuple[datetime, datetime]] = (),
     ) -> list[PnlFxRateRow]:
-        """Make Binance partial while Kraken covers the true electorate."""
+        """Give Coinbase a different close while Kraken covers both minutes."""
         self.horizons.append(as_of)
+        coinbase = _row("EUR", "USD", "coinbase", _MINUTE, 1)
+        coinbase["close"] = 1.25
+        kraken_first = _row("EUR", "USD", "kraken", _MINUTE, 2)
+        kraken_first["close"] = 1.5
         rows = [
-            _row("EUR", "USD", "binance", _MINUTE, 1),
-            _row("EUR", "USD", "kraken", _MINUTE, 2),
+            coinbase,
+            kraken_first,
             _row("EUR", "USD", "kraken", _MINUTE + timedelta(minutes=1), 3),
             _row("PLN", "USD", "kraken", _MINUTE + timedelta(minutes=2), 4),
         ]
@@ -319,16 +326,21 @@ def test_backfill_event_subsets_keep_distinct_report_and_evaluation_identities()
 
 
 @pytest.mark.asyncio
-async def test_true_pair_electorate_accrual_horizon_and_instrument_refusal() -> None:
+@pytest.mark.parametrize(
+    "calculation_version", ["5A.13", "5B.1", "5B.2", "5C.1", "5C.2", "5C.3", "5C.4"]
+)
+async def test_true_pair_electorate_accrual_horizon_and_instrument_refusal(
+    calculation_version: str,
+) -> None:
     """Full consumer electorates reproduce election ranking and retain good peers.
 
-    Given Binance covers one EUR minute, Kraken covers both, one PLN accrual, and one bad instrument
-    When the consumer is derived at its sealed knowledge horizon
+    Given Coinbase covers one EUR minute, Kraken covers both, one PLN accrual, and one bad instrument
+    When a legacy consumer is derived at its sealed knowledge horizon
     Then Kraken wins the two-minute manifest, accrual conversion remains, and only the bad peer refuses
     """
     fake = _DiscoveryRepository()
     repo = cast(Repository, fake)
-    discovery = await _consumer_discovery(repo, _consumer())
+    discovery = await _consumer_discovery(repo, _consumer(calculation_version))
     by_pair = {item.evaluation.pair: item for item in discovery.requirements}
     eur = by_pair[("EUR", "USD")].evaluation
     assert eur.required_minutes == frozenset({_MINUTE, _MINUTE + timedelta(minutes=1)})
@@ -355,6 +367,70 @@ async def test_true_pair_electorate_accrual_horizon_and_instrument_refusal() -> 
     )
     assert fake.horizons
     assert set(fake.horizons) == {_HORIZON}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize(
+    ("calculation_version", "reason"),
+    [("5C.5", "pointwise_fx_backfill_unsupported"), ("5C.6", "unsupported_calculation_version")],
+)
+async def test_unsupported_consumer_refuses_legacy_fx_backfill(
+    apply: bool,
+    calculation_version: str,
+    reason: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backfill certifies FX requirements only for known range-election versions.
+
+    Given different Coinbase and Kraken closes and only Kraken covers both event minutes
+    When FX proof backfill reports or applies a pointwise or unknown consumer
+    Then it refuses before reading election evidence or certifying any proof
+    """
+    fake = _DiscoveryRepository()
+    repo = cast(Repository, fake)
+    pair = ("EUR", "USD")
+    second_minute = _MINUTE + timedelta(minutes=1)
+    legacy = await _consumer_discovery(repo, _consumer())
+    by_pair = {item.evaluation.pair: item.evaluation for item in legacy.requirements}
+    assert by_pair[pair].selected_plane == ("EUR", "USD", "kraken")
+    pointwise = await _load_pointwise_series_fx(
+        repo,
+        _FxRequest(
+            mark_requirements={},
+            event_requirements={_INSTRUMENT: {pair: {_MINUTE, second_minute}}},
+            identity_planes={},
+            as_of=_HORIZON,
+            valuation_ccy="USD",
+        ),
+    )
+    assert pointwise.venues_at(_INSTRUMENT, _MINUTE)[pair] == ("EUR", "USD", "coinbase")
+    assert pointwise.venues_at(_INSTRUMENT, second_minute)[pair] == ("EUR", "USD", "kraken")
+    fake.horizons.clear()
+
+    async def list_consumers() -> list[FxProofBackfillConsumer]:
+        """Expose the unsupported calculation version from the durable consumer union."""
+        return [_consumer(calculation_version)]
+
+    monkeypatch.setattr(fake, "list_fx_proof_backfill_consumers", list_consumers)
+    result = await run_fx_proof_backfill(repo, apply, tmp_path / "cursor.json")
+
+    assert result.requirements == ()
+    assert result.semantic_refusals == (
+        FxProofBackfillSemanticRefusal(
+            wallet_public_id=_WALLET,
+            valuation_ccy="USD",
+            calculation_version=calculation_version,
+            instrument_public_id="*",
+            reason=reason,
+            lost_requirements=(),
+        ),
+    )
+    assert result.proof_creations == result.refusal_audit_creations == 0
+    assert not result.fully_verified
+    assert not result.aborted
+    assert fake.horizons == []
 
 
 @pytest.mark.asyncio

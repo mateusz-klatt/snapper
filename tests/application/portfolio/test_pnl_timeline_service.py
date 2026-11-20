@@ -37,6 +37,7 @@ from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
+from snapper.application.portfolio.pnl_timeline import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import _UNSAMPLED_EQUITY_COVERAGE
 from snapper.application.portfolio.pnl_timeline_service import PNL_ANCHOR_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_SAMPLE_CALC_VERSION
@@ -53,7 +54,6 @@ from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPoli
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayMetadata
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
 from snapper.application.portfolio.pnl_timeline_service import PnlSignalMarker
-from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import _build_equity_overlay
 from snapper.application.portfolio.pnl_timeline_service import _build_execution_lineage
 from snapper.application.portfolio.pnl_timeline_service import _ceil_to_minute

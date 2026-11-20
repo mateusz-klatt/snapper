@@ -41,6 +41,12 @@ from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 
 FX_PROOF_BACKFILL_BATCH_SIZE = 50
+_RANGE_ELECTION_CALC_VERSIONS = frozenset({"5A.13", "5B.1", "5B.2", "5C.1", "5C.2", "5C.3", "5C.4"})
+"""Persisted anchor and sample versions that use a range-wide FX election."""
+
+_POINTWISE_SAMPLE_CALC_VERSION = "5C.5"
+"""Historical sample version whose FX proofs require pointwise election."""
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 FX_PROOF_BACKFILL_CHECKPOINT = _PROJECT_ROOT / "data" / "fx-proof-backfill-checkpoint.json"
 
@@ -81,7 +87,7 @@ class FxProofBackfillRequirement:
 
 @dataclass(frozen=True, slots=True)
 class FxProofBackfillSemanticRefusal:
-    """One instrument whose conversion requirements could not be derived safely."""
+    """One consumer or instrument whose FX requirements could not be certified safely."""
 
     wallet_public_id: str
     valuation_ccy: str
@@ -93,7 +99,7 @@ class FxProofBackfillSemanticRefusal:
 
 @dataclass(frozen=True, slots=True)
 class FxProofBackfillDiscovery:
-    """Requirements and instrument-granular pre-election refusals."""
+    """Requirements and pre-election semantic refusals."""
 
     requirements: tuple[FxProofBackfillRequirement, ...]
     semantic_refusals: tuple[FxProofBackfillSemanticRefusal, ...]
@@ -372,6 +378,20 @@ async def _consumer_discovery(
     consumer: FxProofBackfillConsumer,
 ) -> FxProofBackfillDiscovery:
     """Derive one consumer's true full per-pair electorates at its own horizon."""
+    if consumer.calculation_version not in _RANGE_ELECTION_CALC_VERSIONS:
+        refusal = FxProofBackfillSemanticRefusal(
+            wallet_public_id=consumer.wallet_public_id,
+            valuation_ccy=consumer.valuation_ccy,
+            calculation_version=consumer.calculation_version,
+            instrument_public_id="*",
+            reason=(
+                "pointwise_fx_backfill_unsupported"
+                if consumer.calculation_version == _POINTWISE_SAMPLE_CALC_VERSION
+                else "unsupported_calculation_version"
+            ),
+            lost_requirements=(),
+        )
+        return FxProofBackfillDiscovery((), (refusal,))
     horizon = consumer.knowledge_at
     prefix = await repo.get_pnl_timeline_execution_prefix_at_watermarks(
         consumer.wallet_public_id,

@@ -137,6 +137,7 @@ and performs no candle reading or FX conversion itself.
 
 import math
 from collections import defaultdict
+from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Hashable
 from collections.abc import Mapping
@@ -158,11 +159,20 @@ from snapper.application.portfolio.exact_sum import ExactSum
 from snapper.application.portfolio.exact_sum import exact_units_of
 from snapper.application.portfolio.exact_sum import faithful_roundings
 from snapper.application.portfolio.exact_sum import project_units
+from snapper.application.portfolio.pnl_faithful_recovery import MAX_RECOVERY_KEY_VISITS
 from snapper.application.portfolio.pnl_faithful_recovery import MAX_RECOVERY_KEYS
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowInput
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowRecovery
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulRecoveryBudget
 from snapper.core.numeric import is_positive_finite
+
+MAX_REPLAY_RECOVERY_KEY_VISITS: Final = MAX_RECOVERY_KEY_VISITS
+"""Cap each physical replay chunk while allowing a single point's full allowance."""
+
+
+class PnlTimelineWorkBudgetError(ValueError):
+    """A timeline request or replay chunk exceeds its work budget."""
+
 
 ValuationStatus = Literal["complete", "incomplete"]
 """Whether a point's mark-to-market valuation is trustworthy or withheld."""
@@ -588,12 +598,15 @@ class TimelineWindow:
         to_time: Inclusive end of the emitted grid.
         granularity: One of ``'1m'``, ``'5m'``, ``'1h'``, ``'1d'``.
         valuation_ccy: Currency all monetary components are expressed in.
+        recovery_budget_per_point: Give each persisted sample its own recovery
+            allowance and terminal state, independent of the replay chunk.
     """
 
     from_time: datetime
     to_time: datetime
     granularity: str
     valuation_ccy: str
+    recovery_budget_per_point: bool = False
 
 
 @dataclass(frozen=True)
@@ -1669,9 +1682,12 @@ type _FlowRecovery = FaithfulFlowRecovery[str, AttributionKey]
 type _FlowRecoveries = tuple[_FlowRecovery, _FlowRecovery, _FlowRecovery]
 
 
-def _new_flow_recoveries() -> _FlowRecoveries:
-    """Give three families separate terminal entries and one request allowance."""
+def _new_flow_recoveries(
+    reserve_shared: Callable[[int], None] | None = None,
+) -> _FlowRecoveries:
+    """Give three families separate terminal entries and one shared allowance."""
     budget = FaithfulRecoveryBudget()
+    budget.reserve_shared = reserve_shared
     return (
         FaithfulFlowRecovery[str, AttributionKey](budget),
         FaithfulFlowRecovery[str, AttributionKey](budget),
@@ -2581,6 +2597,21 @@ def _downsample(points: Sequence[PnlTimelinePoint], step: int) -> list[PnlTimeli
     return result
 
 
+@dataclass
+class _ReplayRecoveryWork:
+    """Cap candidate key visits across the points in one physical chunk."""
+
+    remaining_key_visits: int
+
+    def reserve(self, key_visits: int) -> None:
+        """Prepay a candidate or signal the writer to retry with fewer points."""
+        if key_visits > self.remaining_key_visits:
+            raise PnlTimelineWorkBudgetError(
+                "Portfolio P&L replay chunk exceeds its faithful recovery work budget"
+            )
+        self.remaining_key_visits -= key_visits
+
+
 @dataclass(frozen=True)
 class _TimelineBuildEvidence:
     """Resolved optional lineage and incompleteness evidence for one build."""
@@ -2594,6 +2625,7 @@ class _TimelineBuildEvidence:
     mark_incompleteness_reasons: MarkIncompletenessReasonMap
     mark_carried_inputs: MarkCarriedInputMap
     widen_unrealized_absorber: bool
+    replay_recovery_work: _ReplayRecoveryWork | None
 
 
 @dataclass
@@ -2680,6 +2712,8 @@ def _resolved_build_evidence(
     lineage: Mapping[str, TimelineExecutionLineage] | None,
     untrusted_price_reasons_by_instrument: Mapping[str, Collection[PnlIncompletenessReason]] | None,
     mark_evidence: TimelineMarkEvidence | None,
+    *,
+    recovery_budget_per_point: bool,
 ) -> _TimelineBuildEvidence:
     """Resolve optional caller evidence to immutable empty mappings."""
     resolved_mark_evidence = TimelineMarkEvidence() if mark_evidence is None else mark_evidence
@@ -2694,6 +2728,11 @@ def _resolved_build_evidence(
         mark_incompleteness_reasons=resolved_mark_evidence.incompleteness_reasons,
         mark_carried_inputs=resolved_mark_evidence.carried_inputs,
         widen_unrealized_absorber=resolved_mark_evidence.widen_unrealized_absorber,
+        replay_recovery_work=(
+            _ReplayRecoveryWork(MAX_REPLAY_RECOVERY_KEY_VISITS)
+            if recovery_budget_per_point
+            else None
+        ),
     )
 
 
@@ -3264,7 +3303,11 @@ def _point_valuation_context(
                 by_attribution=state.accrual_by_attribution,
                 total=state.accrual_total,
             ),
-            flow_recoveries=state.flow_recoveries,
+            flow_recoveries=(
+                _new_flow_recoveries(evidence.replay_recovery_work.reserve)
+                if evidence.replay_recovery_work is not None
+                else state.flow_recoveries
+            ),
         ),
         activation_time=state.activation_time,
         global_reasons=global_reasons,
@@ -3368,6 +3411,8 @@ def build_pnl_timeline(
 
     Raises:
         ValueError: When ``window.granularity`` is not a supported value.
+        PnlTimelineWorkBudgetError: When the replay chunk would exceed its shared
+            faithful recovery work budget.
     """
     step = _granularity_step(window.granularity)
     evidence = _resolved_build_evidence(
@@ -3375,6 +3420,7 @@ def build_pnl_timeline(
         lineage,
         untrusted_price_reasons_by_instrument,
         mark_evidence,
+        recovery_budget_per_point=window.recovery_budget_per_point,
     )
     state = _initialize_timeline_state(opening)
     _validate_timeline_execution_scopes(state, executions)

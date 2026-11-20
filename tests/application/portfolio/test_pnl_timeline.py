@@ -552,6 +552,51 @@ class TestAttribution:
         assert result.points[1].fee_pnl == 20.0 + 4 * math.ulp(20.0)
         _assert_exact_attribution_sums(result.points[1])
 
+    def test_per_point_allowance_matches_a_separately_replayed_minute(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keep the same recovery opportunity at each sampled minute.
+
+        Given: Two distinct fee states that each require the full allowance,
+        When: A built series values both minutes or starts directly at the second,
+        Then: Per-point recovery yields identical second points, and a public
+            request still shares its single allowance across the two minutes.
+        """
+
+        def budget_factory() -> FaithfulRecoveryBudget:
+            """Allow exactly one completed family search."""
+            return FaithfulRecoveryBudget(22)
+
+        monkeypatch.setattr(pnl_timeline, "FaithfulRecoveryBudget", budget_factory)
+        first, lineage = self._faithful_fee_fixture()
+        second = tuple(
+            replace(
+                execution,
+                event_time=_m(1),
+                scope_sequence=execution.scope_sequence + len(first),
+                order_public_id=f"later-{execution.order_public_id}",
+            )
+            for execution in first
+        )
+        lineage.update(
+            {
+                later.order_public_id: lineage[earlier.order_public_id]
+                for earlier, later in zip(first, second, strict=True)
+            }
+        )
+        executions = (*first, *second)
+        default_window = _window(0, 1)
+        pointwise_window = replace(default_window, recovery_budget_per_point=True)
+        public = build_pnl_timeline(executions, (), {}, default_window, lineage=lineage)
+        wide = build_pnl_timeline(executions, (), {}, pointwise_window, lineage=lineage)
+        resumed = build_pnl_timeline(
+            executions, (), {}, replace(pointwise_window, from_time=_m(1)), lineage=lineage
+        )
+
+        assert [point.valuation_status for point in public.points] == ["complete", "incomplete"]
+        assert [point.valuation_status for point in wide.points] == ["complete", "complete"]
+        assert wide.points[1:] == resumed.points
+
     def _lineage(self) -> dict[str, TimelineExecutionLineage]:
         """Return manual, system, and non-manual plan lineage for one cycle."""
         return {

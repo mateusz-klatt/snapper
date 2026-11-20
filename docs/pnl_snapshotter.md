@@ -177,11 +177,30 @@ The snapshotter checks price references and display identity through the
 generation's fixed target. A symbol or venue revision therefore produces the
 same trust decision at every chunk width. Pointwise FX shadow proofs use the
 `pnl-fiat-pointwise-v1` policy, with at most 64 evaluations per tick and
-64 rows per pair and minute.
+64 rows per pair and minute. FX proof backfill accepts only known versions
+that used the range-wide policy. That excludes pointwise 5C.5 consumers.
+
+Each snapshotter minute has a separate faithful flow-recovery allowance.
+Its financial result is independent of the recovery work performed for
+other minutes in the same chunk. A separate limit on recovery work for an
+entire chunk triggers subdivision before any rows from that attempt are
+committed.
 
 Only a recomputed row receives `5C.5`. The current overlay reads the selected
 sample version. Older rows remain available as historical evidence until the
 writer recomputes them.
+
+## Known limits
+
+A newly matched fill above the frozen witness bound can leave published
+samples below the cursor stale until the next generation reads the fill.
+
+A backdated accrual committed between chunks can reach the remaining chunks
+without an invalidation of previously committed minutes.
+
+Price reference and display identity decisions use revisions known through
+the generation tip. A revision later in the generation can therefore
+withhold an earlier sample consistently across chunk sizes.
 
 ## Replay acceptance
 
