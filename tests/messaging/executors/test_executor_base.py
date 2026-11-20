@@ -28,6 +28,8 @@ from uuid import uuid5
 import ccxt
 import pytest
 import zmq
+import zmq.asyncio
+from loguru import logger
 
 import snapper.application.process_manager.launcher as launcher_module
 import snapper.messaging.executors.base as base_module
@@ -36,6 +38,7 @@ from snapper.application.trade.trade_service import TradeService
 from snapper.core.command_material import TradeCommandMaterialUnavailableError
 from snapper.core.types import FillStatusEnum
 from snapper.core.types import OrderEventEnum
+from snapper.core.types import OrderExchange
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import RecordVenueEventParams
@@ -56,6 +59,10 @@ from snapper.infrastructure.network.egress_context import current_egress_identit
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
 from snapper.messaging.executors.paper import PaperOrderExecutor
+from snapper.messaging.infrastructure.publisher import MessagePublisher
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
+from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
@@ -600,7 +607,7 @@ async def test_stop_disconnects_exchange_client_after_zmq_teardown() -> None:
 
     Given: A running executor with ZMQ sockets and an exchange client,
     When: stop() is called,
-    Then: Sockets close and the context terminates BEFORE the client
+    Then: Sockets close and the context is destroyed BEFORE the client
     disconnects — consumers unwind before their transport is torn —
     and the disconnect is awaited exactly once.
     """
@@ -609,14 +616,14 @@ async def test_stop_disconnects_exchange_client_after_zmq_teardown() -> None:
     ex.running = True
     ex.subscriber = zmq_socket_stub(close=lambda: order.append("sub"))
     ex.publisher = zmq_socket_stub(close=lambda: order.append("pub"))
-    ex.context = SimpleNamespace(term=lambda: order.append("term"))
+    ex.context = SimpleNamespace(destroy=lambda linger: order.append(f"destroy:{linger}"))
 
     async def _disconnect() -> None:
         order.append("disconnect")
 
     ex.exchange_client = SimpleNamespace(disconnect=_disconnect)
     await ex.stop()
-    assert order == ["sub", "pub", "term", "disconnect"]
+    assert order == ["sub", "pub", "destroy:0", "disconnect"]
     assert not ex.running
 
 
@@ -636,7 +643,7 @@ async def test_stop_skips_disconnect_while_client_context_active() -> None:
     ex.running = True
     ex.subscriber = zmq_socket_stub(close=lambda: None)
     ex.publisher = zmq_socket_stub(close=lambda: None)
-    ex.context = SimpleNamespace(term=lambda: None)
+    ex.context = SimpleNamespace(destroy=lambda linger: None)
     ex._client_context_active = True
     disconnects: list[bool] = []
 
@@ -687,7 +694,7 @@ async def test_stop_swallows_exchange_client_disconnect_failure() -> None:
     ex.running = True
     ex.subscriber = zmq_socket_stub(close=lambda: None)
     ex.publisher = zmq_socket_stub(close=lambda: None)
-    ex.context = SimpleNamespace(term=lambda: None)
+    ex.context = SimpleNamespace(destroy=lambda linger: None)
 
     async def _disconnect() -> None:
         raise RuntimeError("disconnect failed")
@@ -709,7 +716,7 @@ async def test_stop_with_none_subscriber(monkeypatch: pytest.MonkeyPatch) -> Non
     ex.running = True
     ex.subscriber = None
     ex.publisher = zmq_socket_stub(close=lambda: None)
-    ex.context = SimpleNamespace(term=lambda: None)
+    ex.context = SimpleNamespace(destroy=lambda linger: None)
     await ex.stop()
     assert not ex.running
 
@@ -726,7 +733,7 @@ async def test_stop_with_none_publisher(monkeypatch: pytest.MonkeyPatch) -> None
     ex.running = True
     ex.subscriber = zmq_socket_stub(close=lambda: None)
     ex.publisher = None
-    ex.context = SimpleNamespace(term=lambda: None)
+    ex.context = SimpleNamespace(destroy=lambda linger: None)
     await ex.stop()
     assert not ex.running
 
@@ -1669,8 +1676,8 @@ def test_stop_closes_resources() -> None:
     )
 
     class Ctx:
-        def term(self) -> None:
-            closed["ctx"] = True
+        def destroy(self, linger: int) -> None:
+            closed["ctx"] = linger == 0
 
     ex.context = Ctx()
     asyncio.run(ex.stop())
@@ -3062,9 +3069,13 @@ class ContextStub:
         """Initialize context stub."""
         self.terminated = False
 
-    def term(self) -> None:
-        """Terminate the context."""
-        self.terminated = True
+    def destroy(self, linger: int) -> None:
+        """Destroy the context, recording termination only for a zero linger.
+
+        Args:
+            linger: Linger applied to sockets still open on the context.
+        """
+        self.terminated = linger == 0
 
 
 class SubscriberStub:
@@ -3718,7 +3729,8 @@ class TestExecutorCoverage:
         mock_settings = self._create_mock_settings()
         mock_get_settings.return_value = mock_settings
         service = KrakenOrderExecutor()
-        service.context = MagicMock()
+        mock_context = MagicMock()
+        service.context = mock_context
         mock_subscriber = MagicMock()
         service.subscriber = mock_subscriber
         mock_publisher = MagicMock()
@@ -3728,7 +3740,11 @@ class TestExecutorCoverage:
         assert service.running is False
         mock_subscriber.close.assert_called_once()
         mock_publisher.close.assert_called_once()
-        service.context.term.assert_called_once()
+        mock_context.destroy.assert_called_once_with(linger=0)
+        mock_context.term.assert_not_called()
+        assert service.context is None
+        assert service.subscriber is None
+        assert service.publisher is None
 
     @pytest.mark.asyncio
     @patch("snapper.config.settings.get_settings")
@@ -10657,6 +10673,357 @@ class TestStartSiblingContainment:
             await ex.start()
         assert sorted(cancelled) == ["heartbeat", "order_handler", "reconciliation"]
         ex.stop.assert_awaited_once()
+
+
+class _TypedStartFailureExecutor(ExchangeExecutorService[ExchangeClientBase]):
+    """Typed executor stub with real ZMQ socket setup and no-op DB/credential init."""
+
+    def __init__(self, client: ExchangeClientBase) -> None:
+        """Initialize the executor with a concrete typed exchange client."""
+        super().__init__()
+        self._client = client
+
+    def _create_exchange_client(self) -> ExchangeClientBase:
+        """Return the configured exchange client."""
+        return self._client
+
+    def _get_exchange_name(self) -> OrderExchange:
+        """Return the kraken exchange identifier."""
+        return "kraken"
+
+    async def _initialize_settings(self) -> None:
+        """Install an isolated mock repository without touching DB or settings ZMQ."""
+        self.repository = MagicMock(spec=Repository)
+
+    async def _resolve_credentials(self, exchange_name: OrderExchange) -> None:
+        """Skip credential decryption during ZMQ lifecycle tests."""
+        return None
+
+
+class TestZmqReleaseOnFailedStartAndStop:
+    """ZMQ sockets and context are always released on failed start and stop."""
+
+    @staticmethod
+    def _build_client(*, enter_error: Exception | None = None) -> MagicMock:
+        """Construct a typed ExchangeClientBase mock for startup/teardown scenarios."""
+        client = MagicMock(spec=ExchangeClientBase)
+        client.supports_websocket_executions = False
+        client.balance_capability = CapabilityStatus.UNSUPPORTED
+        client.position_capability = CapabilityStatus.UNSUPPORTED
+        client.set_tracker = MagicMock()
+        client.get_orders = AsyncMock(return_value=[])
+        client.disconnect = AsyncMock()
+        client.__aexit__ = AsyncMock(return_value=False)
+        if enter_error is not None:
+            client.__aenter__ = AsyncMock(side_effect=enter_error)
+        else:
+            client.__aenter__ = AsyncMock(return_value=client)
+        return client
+
+    @staticmethod
+    def _attach_real_zmq(
+        executor: ExchangeExecutorService[ExchangeClientBase],
+    ) -> tuple[zmq.asyncio.Context, ValidatedSubscriber, ValidatedPublisher]:
+        """Populate an executor with a real ZMQ context, sockets, and MessagePublisher."""
+        ctx = zmq.asyncio.Context()
+        sub = ValidatedSubscriber(ctx.socket(zmq.SUB))
+        pub = ValidatedPublisher(ctx.socket(zmq.PUB))
+        executor.context = ctx
+        executor.subscriber = sub
+        executor.publisher = pub
+        executor.msg_publisher = MessagePublisher(pub, SequenceTracker())
+        return ctx, sub, pub
+
+    @staticmethod
+    def _capture_zmq_snapshot(
+        executor: ExchangeExecutorService[ExchangeClientBase],
+        captured: list[
+            tuple[
+                zmq.asyncio.Context,
+                ValidatedSubscriber,
+                ValidatedPublisher,
+                MessagePublisher,
+            ]
+        ],
+    ) -> None:
+        """Record live ZMQ handles created by _setup_zmq_sockets before a simulated failure."""
+        assert executor.context is not None
+        assert executor.subscriber is not None
+        assert executor.publisher is not None
+        assert executor.msg_publisher is not None
+        assert not executor.context.closed
+        assert not executor.subscriber._socket.closed
+        assert not executor.publisher._socket.closed
+        captured.append(
+            (
+                executor.context,
+                executor.subscriber,
+                executor.publisher,
+                executor.msg_publisher,
+            )
+        )
+
+    @staticmethod
+    def _assert_released(
+        executor: ExchangeExecutorService[ExchangeClientBase],
+        ctx: zmq.asyncio.Context,
+        sub: ValidatedSubscriber,
+        pub: ValidatedPublisher,
+    ) -> None:
+        """Assert sockets are closed, context is terminated, and executor refs are cleared."""
+        assert executor.running is False
+        assert sub._socket.closed is True
+        assert pub._socket.closed is True
+        assert ctx.closed is True
+        assert executor.subscriber is None
+        assert executor.publisher is None
+        assert executor.msg_publisher is None
+        assert executor.context is None
+
+    @pytest.mark.asyncio
+    async def test_stop_releases_zmq_resources_when_not_running(self) -> None:
+        """stop() releases ZMQ resources even when running is False and is idempotent.
+
+        Given: A non-running executor holding a real ZMQ context, subscriber,
+            publisher, and message publisher,
+        When: stop() is called twice,
+        Then: The first stop() closes both sockets, terminates the context,
+            and clears all four attributes to None, and the second stop() is
+            a no-op.
+        """
+        executor = _TypedStartFailureExecutor(self._build_client())
+        ctx, sub, pub = self._attach_real_zmq(executor)
+        assert executor.running is False
+
+        await executor.stop()
+        self._assert_released(executor, ctx, sub, pub)
+
+        await executor.stop()
+        self._assert_released(executor, ctx, sub, pub)
+
+    @pytest.mark.asyncio
+    async def test_release_destroys_context_with_unclosed_extra_socket(self) -> None:
+        """Releasing never blocks on a socket the executor did not track.
+
+        Given: A non-running executor whose real ZMQ context also owns an extra
+            socket that no executor attribute references,
+        When: stop() releases the ZMQ resources,
+        Then: The context is destroyed with linger 0, the stray socket is closed
+            with it, and every executor reference is cleared without blocking.
+        """
+        executor = _TypedStartFailureExecutor(self._build_client())
+        ctx, sub, pub = self._attach_real_zmq(executor)
+        stray = ctx.socket(zmq.SUB)
+
+        await asyncio.wait_for(executor.stop(), timeout=5.0)
+
+        assert stray.closed is True
+        self._assert_released(executor, ctx, sub, pub)
+
+    @pytest.mark.asyncio
+    async def test_failed_start_on_client_enter_releases_zmq_and_stop_is_idempotent(
+        self,
+    ) -> None:
+        """A connect failure before running becomes True releases ZMQ resources cleanly.
+
+        Given: An executor whose real _setup_zmq_sockets creates a context,
+            subscriber, publisher, and message publisher before
+            exchange_client.__aenter__ raises ConnectionError,
+        When: start() fails and stop() is called twice,
+        Then: The subscriber and publisher are closed, the context is
+            terminated, all ZMQ attributes are None with running False, and
+            a repeated stop() is a no-op.
+        """
+        client = self._build_client()
+        executor = _TypedStartFailureExecutor(client)
+        captured: list[
+            tuple[
+                zmq.asyncio.Context,
+                ValidatedSubscriber,
+                ValidatedPublisher,
+                MessagePublisher,
+            ]
+        ] = []
+
+        async def _failing_enter() -> ExchangeClientBase:
+            self._capture_zmq_snapshot(executor, captured)
+            raise ConnectionError("egress proxy unreachable")
+
+        client.__aenter__ = AsyncMock(side_effect=_failing_enter)
+
+        with pytest.raises(ConnectionError, match="egress proxy unreachable"):
+            await executor.start()
+
+        assert len(captured) == 1
+        ctx, sub, pub, _msg_pub = captured[0]
+        self._assert_released(executor, ctx, sub, pub)
+
+        await executor.stop()
+        self._assert_released(executor, ctx, sub, pub)
+        client.disconnect.assert_awaited_once()
+
+        await executor.stop()
+        self._assert_released(executor, ctx, sub, pub)
+
+    @pytest.mark.asyncio
+    async def test_failed_start_on_prepare_source_releases_zmq_and_stop_is_idempotent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failure in _prepare_connected_execution_source releases ZMQ resources.
+
+        Given: An executor whose client context entry succeeds with real ZMQ
+            sockets and context, and whose _prepare_connected_execution_source
+            raises RuntimeError before running becomes True,
+        When: start() fails and stop() is called twice,
+        Then: The client context unwinds, sockets are closed, the context is
+            terminated, all four ZMQ attributes are None, and the second
+            stop() is a no-op.
+        """
+        client = self._build_client()
+        executor = _TypedStartFailureExecutor(client)
+        captured: list[
+            tuple[
+                zmq.asyncio.Context,
+                ValidatedSubscriber,
+                ValidatedPublisher,
+                MessagePublisher,
+            ]
+        ] = []
+
+        async def _failing_prepare(_exchange_name: OrderExchange) -> None:
+            self._capture_zmq_snapshot(executor, captured)
+            raise RuntimeError("private source check failed")
+
+        monkeypatch.setattr(executor, "_prepare_connected_execution_source", _failing_prepare)
+
+        with pytest.raises(RuntimeError, match="private source check failed"):
+            await executor.start()
+
+        assert len(captured) == 1
+        ctx, sub, pub, _msg_pub = captured[0]
+        client.__aexit__.assert_awaited_once()
+        self._assert_released(executor, ctx, sub, pub)
+
+        await executor.stop()
+        self._assert_released(executor, ctx, sub, pub)
+
+        await executor.stop()
+        self._assert_released(executor, ctx, sub, pub)
+
+    @pytest.mark.asyncio
+    async def test_three_failed_start_stop_cycles_terminate_all_contexts(self) -> None:
+        """Repeated failed start/stop cycles never leave an unterminated ZMQ context.
+
+        Given: An executor whose exchange_client.__aenter__ raises on three
+            consecutive start() attempts,
+        When: Three failed start() / stop() cycles execute sequentially,
+        Then: Three distinct contexts were created and every cycle's context
+            is terminated and sockets closed, leaving no live context.
+        """
+        client = self._build_client()
+        executor = _TypedStartFailureExecutor(client)
+        captured: list[
+            tuple[
+                zmq.asyncio.Context,
+                ValidatedSubscriber,
+                ValidatedPublisher,
+                MessagePublisher,
+            ]
+        ] = []
+
+        async def _failing_enter() -> ExchangeClientBase:
+            self._capture_zmq_snapshot(executor, captured)
+            raise ConnectionError("connect retry failed")
+
+        client.__aenter__ = AsyncMock(side_effect=_failing_enter)
+
+        for _ in range(3):
+            with pytest.raises(ConnectionError, match="connect retry failed"):
+                await executor.start()
+            await executor.stop()
+
+        assert len(captured) == 3
+        assert len({id(entry[0]) for entry in captured}) == 3
+        for ctx, sub, pub, _msg_pub in captured:
+            self._assert_released(executor, ctx, sub, pub)
+
+    @pytest.mark.asyncio
+    async def test_failed_start_then_stop_allows_clean_restart(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A later start() after failed-start cleanup recreates ZMQ resources cleanly.
+
+        Given: An executor whose first start() fails during connect and is
+            followed by stop(),
+        When: A second start() succeeds and stop() tears it down,
+        Then: The second start() recreates fresh ZMQ sockets and context and
+            both cycles' contexts end terminated.
+        """
+        client = self._build_client()
+        executor = _TypedStartFailureExecutor(client)
+        captured: list[
+            tuple[
+                zmq.asyncio.Context,
+                ValidatedSubscriber,
+                ValidatedPublisher,
+                MessagePublisher,
+            ]
+        ] = []
+        attempts = 0
+
+        async def _connect_once() -> ExchangeClientBase:
+            nonlocal attempts
+            attempts += 1
+            self._capture_zmq_snapshot(executor, captured)
+            if attempts == 1:
+                raise ConnectionError("transient connect failure")
+            return client
+
+        client.__aenter__ = AsyncMock(side_effect=_connect_once)
+        monkeypatch.setattr(
+            executor,
+            "_prepare_connected_execution_source",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(executor, "_supervise_loop", AsyncMock(return_value=None))
+
+        with pytest.raises(ConnectionError, match="transient connect failure"):
+            await executor.start()
+        await executor.stop()
+
+        await executor.start()
+        assert executor.running is True
+        await executor.stop()
+
+        assert len(captured) == 2
+        assert captured[0][0] is not captured[1][0]
+        for ctx, sub, pub, _msg_pub in captured:
+            self._assert_released(executor, ctx, sub, pub)
+
+    @pytest.mark.asyncio
+    async def test_running_stop_logs_stopped_and_releases_zmq_resources(self) -> None:
+        """Normal stop on a running executor still logs stopped and releases ZMQ.
+
+        Given: A running executor holding a real ZMQ context, subscriber,
+            publisher, and message publisher,
+        When: stop() is called and then called a second time,
+        Then: The first stop() clears running, logs the stopped message once,
+            closes sockets, terminates the context, and clears all four ZMQ
+            attributes, while the second stop() is a silent no-op.
+        """
+        executor = _TypedStartFailureExecutor(self._build_client())
+        ctx, sub, pub = self._attach_real_zmq(executor)
+        executor.running = True
+        messages: list[str] = []
+        sink_id = logger.add(lambda msg: messages.append(str(msg)), level="INFO")
+        try:
+            await executor.stop()
+            await executor.stop()
+        finally:
+            logger.remove(sink_id)
+
+        assert sum("ExchangeExecutorService[kraken] stopped" in m for m in messages) == 1
+        self._assert_released(executor, ctx, sub, pub)
 
 
 class TestLoopResidualBranches:

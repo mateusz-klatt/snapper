@@ -112,3 +112,50 @@ class TestRedact:
         assert result is not None
         parsed = json.loads(result)
         assert parsed == payload
+
+    def test_oauth_secrets_redacted_while_non_oauth_code_and_state_remain(self) -> None:
+        """OAuth secret fields are redacted deeply while generic code/state keys stay intact.
+
+        Given: A non-OAuth payload containing ``code`` and ``state`` plus nested OAuth secrets,
+        When: ``redact()`` masks sensitive keys,
+        Then: ``code``, ``state``, and ``request`` stay unredacted while ``client_secret``,
+            ``code_verifier``, ``code_challenge``, ``client_assertion``, and ``id_token``
+            are replaced with ``[REDACTED]`` at top level and inside nested dicts and lists.
+        """
+        payload: dict[str, object] = {
+            "code": "ETH-USD",
+            "state": "connected",
+            "request": "order-status",
+            "client_secret": "sec-1",
+            "nested": {
+                "code_verifier": "ver-1",
+                "code_challenge": "chal-1",
+                "client_assertion": "jwt-1",
+                "id_token": "id-1",
+                "code": "BTC-USD",
+                "state": "active",
+            },
+            "items": [
+                {"client_secret": "sec-2", "state": "open"},
+                {"ID_Token": "id-2", "code": "SOL-USD"},
+            ],
+        }
+        result = redact(payload)
+        assert result is not None
+        parsed = json.loads(result)
+        assert parsed["code"] == "ETH-USD"
+        assert parsed["state"] == "connected"
+        assert parsed["request"] == "order-status"
+        assert parsed["client_secret"] == "[REDACTED]"
+        assert parsed["nested"] == {
+            "code_verifier": "[REDACTED]",
+            "code_challenge": "[REDACTED]",
+            "client_assertion": "[REDACTED]",
+            "id_token": "[REDACTED]",
+            "code": "BTC-USD",
+            "state": "active",
+        }
+        assert parsed["items"] == [
+            {"client_secret": "[REDACTED]", "state": "open"},
+            {"ID_Token": "[REDACTED]", "code": "SOL-USD"},
+        ]

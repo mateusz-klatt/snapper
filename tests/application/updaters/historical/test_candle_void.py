@@ -1024,8 +1024,8 @@ def test_write_durable_unlinks_new_file_when_directory_open_fails(
 
     Given a parent directory whose os.open raises PermissionError.
     When write_durable writes a new file inside that directory.
-    Then the file was created exclusively, fully written and synced before the parent
-        sync was refused, PermissionError propagates, and the file is unlinked.
+    Then the file was created exclusively with mode 0600, fully written and synced before
+        the parent sync was refused, PermissionError propagates, and the file is unlinked.
     """
     target = tmp_path / "prepared.json"
     payload = b'{"status":"prepared"}'
@@ -1033,6 +1033,7 @@ def test_write_durable_unlinks_new_file_when_directory_open_fails(
     real_fsync = os.fsync
     file_descriptors: list[int] = []
     file_flags: list[int] = []
+    file_modes: list[int] = []
     synced_files: list[int] = []
     at_refusal: list[bytes | None] = []
 
@@ -1055,6 +1056,7 @@ def test_write_durable_unlinks_new_file_when_directory_open_fails(
         if isinstance(path, (str, os.PathLike)) and Path(path) == target:
             file_descriptors.append(descriptor)
             file_flags.append(flags)
+            file_modes.append(mode)
         return descriptor
 
     def fake_fsync(descriptor: int) -> None:
@@ -1072,6 +1074,7 @@ def test_write_durable_unlinks_new_file_when_directory_open_fails(
     assert len(file_descriptors) == 1
     assert file_flags[0] & os.O_CREAT
     assert file_flags[0] & os.O_EXCL
+    assert file_modes == [0o600]
     assert synced_files == file_descriptors
     assert at_refusal == [payload]
     assert not target.exists()

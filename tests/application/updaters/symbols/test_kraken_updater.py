@@ -311,6 +311,9 @@ class TestKrakenSymbolUpdater:
             },
         ]
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_session.__enter__.return_value = mock_session
         mock_session.__exit__.return_value = None
         mock_session.execute.return_value.scalar_one_or_none.return_value = None

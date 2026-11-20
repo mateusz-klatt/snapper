@@ -1336,14 +1336,18 @@ async def test_native_repair_rejects_unsafe_batches_and_current_minutes(
 ) -> None:
     """Keep malformed repair batches outside a write transaction.
 
-    Given empty, oversized, open-minute and numerically invalid batches,
+    Given empty, oversized, still-open-minute and numerically invalid batches,
     When native repair validates them,
     Then empty is a no-op and all unsafe batches raise without inserting.
+
+    The open candle starts at the next UTC minute, so it cannot close during the
+    test even if the wall clock rolls over before the repository stamps it.
     """
     assert await repository.insert_missing_native_candles([]) == []
     with pytest.raises(ValueError, match="100"):
         await repository.insert_missing_native_candles([_row()] * 101)
-    current = _row() | {"open_at": datetime.now(UTC).replace(second=0, microsecond=0)}
+    next_minute = datetime.now(UTC).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    current = _row() | {"open_at": next_minute}
     for row in [
         current,
         _row() | {"vwap": float("nan")},

@@ -1,8 +1,14 @@
 """Tests for authentication roles and permissions."""
 
+from collections.abc import AsyncIterator
+from collections.abc import Awaitable
+from collections.abc import Callable
 from collections.abc import Generator
+from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
+from functools import partial
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -12,6 +18,7 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Response
 from fastapi.testclient import TestClient
+from sqlalchemy import Select
 
 from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
@@ -20,10 +27,12 @@ from snapper.auth.routes import get_current_user_profile
 from snapper.auth.routes import router
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.auth.schemas.user import UserProfile
+from snapper.auth.user_service import UserAuthorityConflictError
 from snapper.auth.user_service import UserService
 from snapper.auth.user_service import get_user_service
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User
+from snapper.data.repository import TemporalVersionConflictError
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
@@ -621,6 +630,7 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -747,6 +757,7 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -767,6 +778,7 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -785,6 +797,7 @@ class TestUserService:
         """
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
+        mock_session.scalar.return_value = mock_db_user.password_hash
         mock_select_result = MagicMock()
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()
@@ -794,11 +807,12 @@ class TestUserService:
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
         with (
-            patch.object(user_service, "_verify_password", return_value=True),
+            patch.object(user_service, "_verify_password", return_value=True) as verify,
             patch.object(user_service, "hash_password", return_value="new_hash"),
         ):
             result = await user_service.change_password("test_user", "old_password", "new_password")
         assert result is True
+        verify.assert_called_once_with("old_password", mock_db_user.password_hash)
         assert mock_session.commit.called
 
     @pytest.mark.asyncio
@@ -812,17 +826,17 @@ class TestUserService:
         Then: False is returned and password is not changed.
         """
         mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_db_user
-        mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = mock_db_user.password_hash
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
-        with patch.object(user_service, "_verify_password", return_value=False):
+        with patch.object(user_service, "_verify_password", return_value=False) as verify:
             result = await user_service.change_password(
                 "test_user", "wrong_password", "new_password"
             )
         assert result is False
+        verify.assert_called_once_with("wrong_password", mock_db_user.password_hash)
+        mock_session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_change_password_user_not_found(self, user_service: UserService) -> None:
@@ -833,14 +847,242 @@ class TestUserService:
         Then: False is returned.
         """
         mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
         result = await user_service.change_password("nonexistent", "old_password", "new_password")
         assert result is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("second_conflict", [False, True])
+    async def test_change_password_retries_when_hash_changes_before_lock(
+        self,
+        user_service: UserService,
+        mock_db_user: User,
+        second_conflict: bool,
+    ) -> None:
+        """A password hash change between verify and lock triggers one retry.
+
+        Given an unlocked read whose password hash changes before the write lock.
+        When change_password retries and the second locked read either matches or changes again.
+        Then the retry commits the change on a match or raises UserAuthorityConflictError.
+
+        Args:
+            user_service: Real service with a mocked repository.
+            mock_db_user: Base database user row cloned for each locked attempt.
+            second_conflict: Whether the retry's locked read also sees a changed hash.
+        """
+        read_one = AsyncMock()
+        read_one.scalar.return_value = "hash-v1"
+        read_two = AsyncMock()
+        read_two.scalar.return_value = "hash-v2"
+
+        locked_one = MagicMock(spec=User)
+        locked_one.known_to = KNOWN_TO_MAX
+        locked_one.password_hash = "hash-v2"
+        write_one = AsyncMock()
+        write_one.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=locked_one)
+        )
+
+        locked_two = MagicMock(spec=User)
+        locked_two.known_to = KNOWN_TO_MAX
+        locked_two.username = mock_db_user.username
+        locked_two.email = mock_db_user.email
+        locked_two.role = mock_db_user.role
+        locked_two.is_active = True
+        locked_two.default_language = mock_db_user.default_language
+        locked_two.created_at = mock_db_user.created_at
+        locked_two.password_hash = "hash-v3" if second_conflict else "hash-v2"
+        write_two = AsyncMock()
+        write_two.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=locked_two)
+        )
+
+        contexts = [MagicMock() for _ in range(4)]
+        for ctx, sess in zip(contexts, [read_one, write_one, read_two, write_two], strict=True):
+            ctx.__aenter__.return_value = sess
+            ctx.__aexit__.return_value = False
+
+        with (
+            patch.object(user_service.repository, "session", side_effect=contexts),
+            patch.object(user_service, "_verify_password", return_value=True) as verify,
+            patch.object(user_service, "hash_password", return_value="new_hash"),
+            patch("snapper.auth.user_service.close_and_insert", return_value=locked_two) as mutate,
+        ):
+            if second_conflict:
+                with pytest.raises(UserAuthorityConflictError, match="User version changed"):
+                    await user_service.change_password("testuser", "old", "new")
+            else:
+                assert await user_service.change_password("testuser", "old", "new") is True
+        assert verify.call_count == 2
+        assert verify.call_args_list[0].args == ("old", "hash-v1")
+        assert verify.call_args_list[1].args == ("old", "hash-v2")
+        write_one.commit.assert_not_awaited()
+        if second_conflict:
+            write_two.commit.assert_not_awaited()
+            mutate.assert_not_awaited()
+        else:
+            write_two.commit.assert_awaited_once()
+            mutate.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_change_password_returns_false_when_user_vanishes_before_lock(
+        self, user_service: UserService
+    ) -> None:
+        """Concurrent deactivation after unlocked verify returns False without writing.
+
+        Given an unlocked read returning a valid password hash and verify succeeding.
+        When the locked write read sees no active user and no visible successor.
+        Then change_password returns False without calling close_and_insert or commit.
+
+        Args:
+            user_service: Real service with a mocked repository.
+        """
+        read_session = AsyncMock()
+        read_session.scalar.return_value = "hash-v1"
+        read_ctx = MagicMock()
+        read_ctx.__aenter__.return_value = read_session
+        read_ctx.__aexit__.return_value = False
+
+        write_session = AsyncMock()
+        write_session.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=None)
+        )
+        write_session.scalar.return_value = None
+        write_ctx = MagicMock()
+        write_ctx.__aenter__.return_value = write_session
+        write_ctx.__aexit__.return_value = False
+
+        with (
+            patch.object(user_service.repository, "session", side_effect=[read_ctx, write_ctx]),
+            patch.object(user_service, "_verify_password", return_value=True),
+            patch.object(user_service, "hash_password", return_value="new_hash"),
+            patch("snapper.auth.user_service.close_and_insert") as mutate,
+        ):
+            result = await user_service.change_password("testuser", "old", "new")
+        assert result is False
+        mutate.assert_not_awaited()
+        write_session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("dialect", ["postgresql", "sqlite", "mysql"])
+    async def test_begin_user_write_dialect_behavior(
+        self, user_service: UserService, dialect: str
+    ) -> None:
+        """_begin_user_write pins SQLite immediate locking and PG READ COMMITTED only.
+
+        Given a user service bound to SQLite, PostgreSQL, or another dialect.
+        When _begin_user_write is called on a session.
+        Then BEGIN IMMEDIATE runs on SQLite, READ COMMITTED on PostgreSQL, and nothing otherwise.
+
+        Args:
+            user_service: Service under test.
+            dialect: Database dialect name to simulate.
+        """
+        session = AsyncMock()
+        with patch.object(user_service.repository, "dialect_name", dialect):
+            await user_service._begin_user_write(session)
+        if dialect == "sqlite":
+            session.execute.assert_awaited_once()
+            assert str(session.execute.await_args.args[0]) == "BEGIN IMMEDIATE"
+        elif dialect == "postgresql":
+            session.execute.assert_awaited_once()
+            assert (
+                str(session.execute.await_args.args[0])
+                == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+            )
+        else:
+            session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "writer",
+        [
+            pytest.param(
+                partial(
+                    UserService.change_password,
+                    user_id="testuser",
+                    old_password="old",
+                    new_password="new",
+                ),
+                id="change-password",
+            ),
+            pytest.param(
+                partial(UserService.admin_reset_password, user_id="testuser", new_password="new"),
+                id="admin-reset-password",
+            ),
+            pytest.param(
+                partial(
+                    UserService.reset_password_by_username,
+                    username="testuser",
+                    new_password="new",
+                ),
+                id="cli-reset-password",
+            ),
+        ],
+    )
+    async def test_password_writers_keep_bcrypt_outside_transactions(
+        self,
+        user_service: UserService,
+        mock_db_user: User,
+        writer: Callable[[UserService], Awaitable[bool | None]],
+    ) -> None:
+        """Password writers run bcrypt verify and hash outside any open session.
+
+        Given a SQLite repository whose active session depth is tracked around bcrypt calls.
+        When any password writer executes its normal write path.
+        Then verify/hash run with zero open sessions and BEGIN IMMEDIATE starts the write session.
+
+        Args:
+            user_service: Service under test.
+            mock_db_user: Active user row returned by the locked select.
+            writer: Password writer under test.
+        """
+        active_sessions = 0
+        bcrypt_depths: list[int] = []
+        write_session = AsyncMock()
+        write_session.execute.side_effect = [
+            MagicMock(),
+            MagicMock(scalar_one_or_none=MagicMock(return_value=mock_db_user)),
+        ]
+        read_session = AsyncMock()
+        read_session.scalar.return_value = mock_db_user.password_hash
+        is_change_password = getattr(writer, "func", None) is UserService.change_password
+        queue = [read_session, write_session] if is_change_password else [write_session]
+
+        @asynccontextmanager
+        async def track_session() -> AsyncIterator[AsyncMock]:
+            """Track whether a database session is open around bcrypt work."""
+            nonlocal active_sessions
+            session = queue.pop(0)
+            active_sessions += 1
+            try:
+                yield session
+            finally:
+                active_sessions -= 1
+
+        def record_verify(_old: str, _hashed: str) -> bool:
+            """Record active session count during password verification."""
+            bcrypt_depths.append(active_sessions)
+            return True
+
+        def record_hash(_new: str) -> str:
+            """Record active session count during password hashing."""
+            bcrypt_depths.append(active_sessions)
+            return "new_hash"
+
+        with (
+            patch.object(user_service.repository, "dialect_name", "sqlite"),
+            patch.object(user_service.repository, "session", side_effect=track_session),
+            patch.object(user_service, "_verify_password", side_effect=record_verify),
+            patch.object(user_service, "hash_password", side_effect=record_hash),
+            patch("snapper.auth.user_service.close_and_insert", return_value=mock_db_user),
+        ):
+            await writer(user_service)
+        assert bcrypt_depths and all(depth == 0 for depth in bcrypt_depths)
+        assert str(write_session.execute.await_args_list[0].args[0]) == "BEGIN IMMEDIATE"
 
     def test_get_user_service_singleton(self) -> None:
         """Test get_user_service returns the same singleton instance.
@@ -930,6 +1172,7 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
@@ -972,11 +1215,347 @@ class TestUserService:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
+        mock_session.scalar.return_value = None
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
         with pytest.raises(ValueError, match="not found"):
             await user_service.reset_password_by_username("missing", "newpassword")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("second_conflict", [False, True])
+    @pytest.mark.parametrize(
+        "writer",
+        [
+            pytest.param(
+                partial(
+                    UserService.update_self_preferences, user_id="testuser", default_language="pl"
+                ),
+                id="preferences",
+            ),
+            pytest.param(
+                partial(
+                    UserService.change_password,
+                    user_id="testuser",
+                    old_password="old",
+                    new_password="new",
+                ),
+                id="change-password",
+            ),
+            pytest.param(
+                partial(UserService.admin_reset_password, user_id="testuser", new_password="new"),
+                id="admin-reset-password",
+            ),
+            pytest.param(
+                partial(
+                    UserService.reset_password_by_username, username="testuser", new_password="new"
+                ),
+                id="cli-reset-password",
+            ),
+        ],
+    )
+    async def test_self_service_and_password_writers_retry_the_locked_read(
+        self,
+        user_service: UserService,
+        mock_db_user: User,
+        writer: Callable[[UserService], Awaitable[UserProfile | bool | None]],
+        second_conflict: bool,
+    ) -> None:
+        """Preference and password writers take a fresh lock before copying.
+
+        Given the first locking select misses a current row visible to the probe.
+        When a preference or password writer retries in a fresh transaction.
+        Then it uses the locked version for its write or propagates the second conflict.
+
+        Args:
+            user_service: Real service with a mocked repository.
+            mock_db_user: Current user version returned after the lock.
+            writer: Public SCD2 writer with its arguments bound.
+            second_conflict: Whether the second locking select also misses.
+        """
+        missing = MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+        first = AsyncMock()
+        first.execute.return_value = missing
+        first.scalar.return_value = mock_db_user.id
+        first_context = MagicMock()
+        first_context.__aenter__.return_value = first
+        mock_db_user.email = "current@example.com"
+
+        async def _lock(statement: Select[tuple[User]]) -> MagicMock:
+            """Check the lock and expose the fields available in that snapshot.
+
+            Args:
+                statement: Select issued to load the current user.
+
+            Returns:
+                The result of the locking read.
+            """
+            first_context.__aexit__.assert_awaited_once()
+            assert "FOR UPDATE" in str(statement)
+            assert statement.get_execution_options()["populate_existing"] is True
+            mock_db_user.is_active = "users.is_active" in str(statement.whereclause)
+            return (
+                missing
+                if second_conflict
+                else MagicMock(scalar_one_or_none=MagicMock(return_value=mock_db_user))
+            )
+
+        second = AsyncMock()
+        second.execute.side_effect = _lock
+        second.scalar.return_value = mock_db_user.id
+        second_context = MagicMock()
+        second_context.__aenter__.return_value = second
+        read_session = AsyncMock()
+        read_session.scalar.return_value = mock_db_user.password_hash
+        read_context = MagicMock()
+        read_context.__aenter__.return_value = read_session
+        read_context.__aexit__.return_value = False
+        is_change_password = getattr(writer, "func", None) is UserService.change_password
+        contexts = (
+            [read_context, first_context, read_context, second_context]
+            if is_change_password
+            else [first_context, second_context]
+        )
+        with (
+            patch.object(user_service.repository, "session", side_effect=contexts),
+            patch.object(user_service, "_verify_password", return_value=True),
+            patch.object(user_service, "hash_password", return_value="new_hash"),
+            patch(
+                "snapper.auth.user_service.close_and_insert", return_value=mock_db_user
+            ) as mutate,
+        ):
+            if second_conflict:
+                with pytest.raises(UserAuthorityConflictError):
+                    await writer(user_service)
+            else:
+                await writer(user_service)
+        first.commit.assert_not_awaited()
+        if second_conflict:
+            second.commit.assert_not_awaited()
+            mutate.assert_not_awaited()
+        else:
+            second.commit.assert_awaited_once()
+            mutate.assert_awaited_once()
+            mutation = mutate.await_args_list[0].kwargs
+            assert mutation["session"] is second
+            values = mutation["new_values"]
+            assert values["email"] == mock_db_user.email
+            assert values["is_active"] is mock_db_user.is_active
+
+    @staticmethod
+    def _make_session_attempt(
+        locked_user: User | None,
+        scalar_value: object = None,
+        scalars_value: list[str] | None = None,
+    ) -> tuple[AsyncMock, MagicMock]:
+        """Create a mocked AsyncSession and async context manager for one attempt.
+
+        Args:
+            locked_user: User returned by ``execute(...).scalar_one_or_none()``.
+            scalar_value: Value returned by ``session.scalar(...)``.
+            scalars_value: Sequence returned by ``session.scalars(...)``.
+
+        Returns:
+            Tuple of the mocked session and its async context manager.
+        """
+        session = AsyncMock(add=MagicMock())
+        session.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=locked_user)
+        )
+        session.scalar.return_value = scalar_value
+        session.scalars.return_value = scalars_value or []
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=session)
+        context.__aexit__ = AsyncMock(return_value=False)
+        return session, context
+
+    @classmethod
+    def _build_writer_contexts(
+        cls,
+        writer_func: object,
+        mock_db_user: User,
+    ) -> tuple[list[MagicMock], AsyncMock, AsyncMock]:
+        """Assemble mocked repository session contexts for a writer retry run.
+
+        Args:
+            writer_func: Unbound ``UserService`` writer method being exercised.
+            mock_db_user: Locked user row returned on each write attempt.
+
+        Returns:
+            Ordered session contexts, first write session, and second write session.
+        """
+        first, first_context = cls._make_session_attempt(mock_db_user)
+        second, second_context = cls._make_session_attempt(mock_db_user, scalars_value=["late-jti"])
+        if writer_func is UserService.deactivate_user:
+            _, preflight_context = cls._make_session_attempt(None, scalar_value=mock_db_user.id)
+            return [preflight_context, first_context, second_context], first, second
+        if writer_func is UserService.change_password:
+            _, read_one = cls._make_session_attempt(None, scalar_value=mock_db_user.password_hash)
+            _, read_two = cls._make_session_attempt(None, scalar_value=mock_db_user.password_hash)
+            return [read_one, first_context, read_two, second_context], first, second
+        return [first_context, second_context], first, second
+
+    @staticmethod
+    def _make_successor_user(mock_db_user: User, writer_func: object) -> User:
+        """Build a User-like successor row returned by ``close_and_insert``.
+
+        Args:
+            mock_db_user: Baseline user fixture whose unchanged columns are copied.
+            writer_func: Unbound ``UserService`` writer method being exercised.
+
+        Returns:
+            Mock ``User`` row representing the newly inserted version.
+        """
+        successor = MagicMock(spec=User)
+        successor.public_id = mock_db_user.public_id
+        successor.timestamp = mock_db_user.timestamp
+        successor.session_id = mock_db_user.session_id
+        successor.sequence_id = 2
+        successor.username = mock_db_user.username
+        successor.email = "updated@example.com"
+        successor.password_hash = "new_hash"
+        successor.role = mock_db_user.role
+        successor.is_active = writer_func is not UserService.deactivate_user
+        successor.default_language = "pl"
+        successor.created_at = mock_db_user.created_at
+        return cast(User, successor)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("second_conflict", [False, True])
+    @pytest.mark.parametrize(
+        "writer",
+        [
+            pytest.param(
+                partial(
+                    UserService.update_user,
+                    user_id="testuser",
+                    email="updated@example.com",
+                ),
+                id="update-user",
+            ),
+            pytest.param(
+                partial(
+                    UserService.update_self_preferences,
+                    user_id="testuser",
+                    default_language="pl",
+                ),
+                id="preferences",
+            ),
+            pytest.param(
+                partial(
+                    UserService.deactivate_user,
+                    user_public_id="fake-public-id",
+                    reason="policy",
+                ),
+                id="deactivate",
+            ),
+            pytest.param(
+                partial(
+                    UserService.change_password,
+                    user_id="testuser",
+                    old_password="old",
+                    new_password="new",
+                ),
+                id="change-password",
+            ),
+            pytest.param(
+                partial(
+                    UserService.admin_reset_password,
+                    user_id="testuser",
+                    new_password="new",
+                ),
+                id="admin-reset-password",
+            ),
+            pytest.param(
+                partial(
+                    UserService.reset_password_by_username,
+                    username="testuser",
+                    new_password="new",
+                ),
+                id="cli-reset-password",
+            ),
+        ],
+    )
+    async def test_all_user_writers_retry_and_map_temporal_version_conflict(
+        self,
+        user_service: UserService,
+        mock_db_user: User,
+        writer: Callable[[UserService], Awaitable[UserProfile | bool | None]],
+        second_conflict: bool,
+    ) -> None:
+        """All six User SCD2 writers retry once and map repeat conflicts.
+
+        Given close_and_insert raises TemporalVersionConflictError on the first attempt
+            and either succeeds or raises TemporalVersionConflictError on the retry.
+        When any of the six public UserService writers is invoked.
+        Then the writer succeeds after retry with single post-commit side effects,
+            or raises UserAuthorityConflictError chained from TemporalVersionConflictError.
+
+        Args:
+            user_service: Real service with a mocked repository.
+            mock_db_user: Locked user row returned on each write attempt.
+            writer: Public SCD2 writer with its arguments bound.
+            second_conflict: Whether the retry's close_and_insert also raises.
+        """
+        writer_func = getattr(writer, "func", None)
+        contexts, first_session, second_session = self._build_writer_contexts(
+            writer_func, mock_db_user
+        )
+        successor = self._make_successor_user(mock_db_user, writer_func)
+        closed_at = datetime(2026, 1, 1, tzinfo=UTC)
+        bus_time = datetime(2026, 1, 2, tzinfo=UTC)
+        first_conflict = TemporalVersionConflictError("users", 1, closed_at, bus_time)
+        second_error = TemporalVersionConflictError("users", 1, closed_at, bus_time)
+        mutate = AsyncMock(
+            side_effect=[first_conflict, second_error if second_conflict else successor]
+        )
+        token_manager = MagicMock(
+            revoke_user_sessions=AsyncMock(return_value=0),
+            blacklist_token_immediately=MagicMock(),
+        )
+        publisher = MagicMock(send=AsyncMock())
+        with (
+            patch.object(user_service.repository, "dialect_name", "sqlite"),
+            patch.object(user_service.repository, "session", side_effect=contexts),
+            patch.object(user_service, "_verify_password", return_value=True),
+            patch.object(user_service, "hash_password", return_value="new_hash"),
+            patch.object(user_service, "_msg_publisher", publisher),
+            patch("snapper.auth.user_service.get_token_manager", return_value=token_manager),
+            patch("snapper.auth.user_service.close_and_insert", new=mutate),
+        ):
+            if second_conflict:
+                with pytest.raises(
+                    UserAuthorityConflictError,
+                    match="User version changed. Retry the request.",
+                ) as raised:
+                    await writer(user_service)
+                assert isinstance(raised.value.__cause__, TemporalVersionConflictError)
+                assert raised.value.__cause__ is second_error
+                assert mutate.await_count == 2
+                first_session.commit.assert_not_awaited()
+                second_session.commit.assert_not_awaited()
+                token_manager.blacklist_token_immediately.assert_not_called()
+                publisher.send.assert_not_awaited()
+                return
+            result = await writer(user_service)
+        assert mutate.await_count == 2
+        first_session.commit.assert_not_awaited()
+        second_session.commit.assert_awaited_once()
+        if writer_func in {UserService.update_user, UserService.update_self_preferences}:
+            assert result == user_service._db_user_to_auth_user(successor)
+        elif writer_func in {UserService.deactivate_user, UserService.change_password}:
+            assert result is True
+        else:
+            assert result is None
+        if writer_func is UserService.deactivate_user:
+            token_manager.blacklist_token_immediately.assert_called_once_with("late-jti")
+            publisher.send.assert_awaited_once()
+            assert publisher.send.await_args is not None
+            assert publisher.send.await_args.args[0] == "admin.user_deactivated"
+            assert publisher.send.await_args.args[1].user_public_id == mock_db_user.public_id
+        else:
+            token_manager.blacklist_token_immediately.assert_not_called()
+            publisher.send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_list_login_events_returns_results(self, user_service: UserService) -> None:

@@ -261,6 +261,7 @@ from snapper.server.mcp_oauth_routes import oauth_protocol_error_handler
 from snapper.server.mcp_oauth_routes import router as mcp_oauth_router
 from snapper.server.mcp_oauth_routes import unsupported_router as mcp_oauth_unsupported_router
 from snapper.server.metrics_routes import router as metrics_router
+from snapper.server.oauth_no_store_middleware import OAuthNoStoreFastAPI
 from snapper.server.operator_routes import router as operator_router
 from snapper.server.order_routes import router as order_router
 from snapper.server.paired_execution_routes import router as paired_execution_router
@@ -1550,7 +1551,7 @@ def create_app() -> FastAPI:
     Returns:
         Configured FastAPI application instance.
     """
-    app = FastAPI(
+    app = OAuthNoStoreFastAPI(
         title="Snapper Trading Dashboard",
         description="Real-time trading data and analytics dashboard",
         version="0.1.0",

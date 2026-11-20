@@ -15,14 +15,19 @@ import pytest
 from sqlalchemy import func
 from sqlalchemy import select
 
+from snapper.application.portfolio import fx_conversion_shadow
 from snapper.application.portfolio.fx_conversion_shadow import FX_ELECTION_POLICY_VERSION
+from snapper.application.portfolio.fx_conversion_shadow import POINTWISE_FX_ELECTION_POLICY_VERSION
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowEvaluation
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
+from snapper.application.portfolio.fx_conversion_shadow import PointwiseFxShadowRequirement
 from snapper.application.portfolio.fx_conversion_shadow import _artifact_matches_raw
 from snapper.application.portfolio.fx_conversion_shadow import _build_artifact
 from snapper.application.portfolio.fx_conversion_shadow import _log_once
+from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shadow_context
 from snapper.application.portfolio.fx_conversion_shadow import canonical_candidate_planes
 from snapper.application.portfolio.fx_conversion_shadow import carried_minutes_for
+from snapper.application.portfolio.fx_conversion_shadow import collect_pointwise_fx_shadow
 from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_evaluation_completeness
 from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_pin_metrics
 from snapper.application.portfolio.fx_conversion_shadow import reset_fx_shadow_pin_metrics
@@ -364,6 +369,54 @@ def test_context_guards_collection_and_skips_bulk_manifests() -> None:
     )
     assert context.evaluations == []
     assert fx_shadow_pin_metrics().failure == 1
+
+
+def test_pointwise_shadow_caps_the_tick_and_skips_overflowed_minutes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bound pointwise proofs without persisting truncated candidate evidence.
+
+    Given an overflowed minute, a covered minute and a later gap
+    When the active context collects exact-minute decisions over several calls
+    Then the overflowed decision is skipped, the gap refuses, and the tick caps writes
+    """
+    monkeypatch.setattr(fx_conversion_shadow, "MAX_POINTWISE_SHADOW_EVALUATIONS", 2)
+    monkeypatch.setattr(fx_conversion_shadow, "MAX_POINTWISE_SHADOW_ROWS", 1)
+    context = FxShadowPinContext(calculation_version="5C.5", evaluations=[])
+    match_minute = _MINUTE + timedelta(minutes=1)
+    gap_minute = match_minute + timedelta(minutes=1)
+    plane = ("EUR", "USD", "kraken")
+    pair = ("EUR", "USD")
+    overflow = PointwiseFxShadowRequirement(pair, _MINUTE, plane)
+    covered = PointwiseFxShadowRequirement(
+        pair, match_minute, plane, owner=_INSTRUMENT, is_event=True
+    )
+    gap = PointwiseFxShadowRequirement(pair, gap_minute, plane)
+    rows = (_row(), _row(exchange="competing"), _row(exchange="overflow"), _row(match_minute))
+    rates = _evaluation(rows=rows).authoritative_rates
+    with activate_fx_shadow_context(context):
+        collect_pointwise_fx_shadow(lambda: (overflow, covered), rows, rates, "USD", _AS_OF)
+        collect_pointwise_fx_shadow(lambda: (gap,), rows, rates, "USD", _AS_OF)
+        collect_pointwise_fx_shadow(
+            lambda: pytest.fail("pointwise tick budget should be exhausted"),
+            rows,
+            rates,
+            "USD",
+            _AS_OF,
+        )
+    observed, refused = context.evaluations
+    assert observed.required_minutes == observed.event_minutes == frozenset({match_minute})
+    assert observed.scope_kind == "instrument_owned"
+    assert observed.rows == (rows[-1],)
+    assert observed.authoritative_rates == {(*plane, match_minute): rows[-1]["close"]}
+    record, proofs = _build_artifact(observed, _AS_OF, context.calculation_version)
+    assert record["election_policy_version"] == POINTWISE_FX_ELECTION_POLICY_VERSION
+    assert proofs[0]["carried_minutes"] == 0
+    assert refused.required_minutes == frozenset({gap_minute})
+    assert not refused.rows and not refused.authoritative_rates
+    record, proofs = _build_artifact(refused, _AS_OF, context.calculation_version)
+    assert record["completeness_state"] == "refused"
+    assert proofs == ()
 
 
 @pytest.mark.asyncio

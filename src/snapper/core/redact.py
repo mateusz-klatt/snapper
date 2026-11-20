@@ -21,6 +21,11 @@ _SENSITIVE_KEYS = frozenset(
         "refresh_token",
         "access_token",
         "oauth_request",
+        "client_secret",
+        "code_verifier",
+        "code_challenge",
+        "client_assertion",
+        "id_token",
     }
 )
 

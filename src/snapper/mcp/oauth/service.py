@@ -629,7 +629,28 @@ class MCPOAuthService:
             command: Client authentication and the credential to revoke.
 
         Raises:
-            MCPOAuthError: ``invalid_client`` when client authentication fails.
+            MCPOAuthError: ``invalid_client`` when authentication fails, or
+                ``temporarily_unavailable`` when both transactions conflict.
+        """
+        try:
+            await self._revoke_token_once(command)
+            return
+        except OAuthTransactionConflictError:
+            pass
+        try:
+            await self._revoke_token_once(command)
+        except OAuthTransactionConflictError as error:
+            raise MCPOAuthError("temporarily_unavailable") from error
+
+    async def _revoke_token_once(self, command: OAuthRevocationCommand) -> None:
+        """Authenticate, resolve, and revoke in one fresh transaction.
+
+        Args:
+            command: Client authentication and the credential to revoke.
+
+        Raises:
+            MCPOAuthError: If client authentication fails.
+            OAuthTransactionConflictError: If the owner version closes during the lock wait.
         """
         async with self.store.begin_write_transaction() as session:
             tx = OAuthTransaction(session)

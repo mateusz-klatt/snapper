@@ -1726,6 +1726,8 @@ class PortfolioPnlCorrectionFrontier(Base):
     execution_manifest_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     has_fill_gap: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     expected_venues_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    venue_event_watermarks_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fill_witness_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prior_peak: Mapped[float | None] = mapped_column(Float, nullable=True)
     repair_from: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 

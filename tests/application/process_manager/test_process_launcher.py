@@ -67,6 +67,7 @@ from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import ProcessRun
 from snapper.data.models import Setting
 from snapper.data.repository import SQLAlchemyRepository
@@ -3092,6 +3093,15 @@ class _DummyRepository:
     """Test dummy for database repository."""
 
     def __init__(self, setting: Setting | list[Setting] | None) -> None:
+        """Hold the settings as current SCD2 versions.
+
+        Args:
+            setting: Setting rows served by every session; transient rows get the
+                open-ended ``known_to`` a persisted current version would carry.
+        """
+        for row in setting if isinstance(setting, list) else [setting]:
+            if row is not None and row.known_to is None:
+                row.known_to = KNOWN_TO_MAX
         self.setting = setting
         self.last_session: _DummySession | None = None
 
@@ -6181,6 +6191,7 @@ async def test_sync_registry_to_database_adds_missing_tags(
     first_result.scalar_one_or_none.return_value = existing_setting
     update_result = MagicMock()
     update_result.scalar_one_or_none.return_value = existing_setting
+    update_result.scalars.return_value.first.return_value.known_to = KNOWN_TO_MAX
     first_session = AsyncMock()
     first_session.execute.return_value = first_result
     update_session = AsyncMock()
@@ -6827,6 +6838,7 @@ class TestProcessFactoryRegistrySync:
         )
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = existing_setting
+        mock_result.scalars.return_value.first.return_value.known_to = KNOWN_TO_MAX
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
         mock_session.execute.return_value = mock_result

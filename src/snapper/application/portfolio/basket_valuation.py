@@ -49,6 +49,9 @@ from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.fx_rates import resolve_rate
 from snapper.core.numeric import is_positive_finite
 
+type FiatVenuesByMinute = Mapping[datetime, FxVenueMap]
+"""Exact oriented fiat conversion planes grouped by their consumed minute."""
+
 type ValuationProvenanceKind = Literal["identity", "fiat_fx", "crypto_candle"]
 """Which price plane produced a priced leg's USD value."""
 
@@ -139,13 +142,16 @@ class ValuationEvidence:
     oriented venue map, consumed exactly as :func:`resolve_rate` expects, plus a
     parallel version-identity map keyed identically to the rate map. The crypto
     plane is the new crypto→USD candle map. Bundling them keeps
-    :func:`value_currency` to a single evidence argument.
+    :func:`value_currency` to a single evidence argument. The snapshotter uses
+    minute-specific fiat pins so a candle at another minute cannot change the
+    venue, orientation or availability for the leg being valued.
     """
 
     fiat_rates: FxRateMap
     fiat_venues: FxVenueMap
     fiat_versions: FiatVersionMap
     crypto_planes: CryptoUsdPlaneMap
+    fiat_venues_by_minute: FiatVenuesByMinute | None = None
 
 
 @dataclass(frozen=True)
@@ -211,7 +217,7 @@ def _identity_leg(exchange: str, qty: float) -> ValuedLeg:
 
 
 def _value_fiat(
-    currency: str, qty: float, minute: datetime, evidence: ValuationEvidence
+    currency: str, qty: float, minute: datetime, evidence: ValuationEvidence, venues: FxVenueMap
 ) -> ValuedLeg:
     """Value a fiat currency leg through the pinned forex candle plane.
 
@@ -230,12 +236,13 @@ def _value_fiat(
         qty: The finite, non-zero balance quantity.
         minute: Grid minute whose ``[minute-1m, minute)`` close is the rate.
         evidence: Pre-loaded fiat rate, venue and version maps.
+        venues: Oriented fiat planes pinned for this conversion minute.
 
     Returns:
         A priced leg, or a withheld leg with ``missing_fiat_rate``, ``overflow`` or
         ``missing_version``.
     """
-    resolved = resolve_rate(currency, "USD", minute, evidence.fiat_rates, evidence.fiat_venues)
+    resolved = resolve_rate(currency, "USD", minute, evidence.fiat_rates, venues)
     if resolved is None:
         return ValuedLeg(usd_value=None, provenance=None, reason="missing_fiat_rate")
     if resolved.orientation == "direct":
@@ -379,9 +386,10 @@ def value_currency(
         return ValuedLeg(usd_value=None, provenance=None, reason="non_finite")
     if currency == "USD":
         return _identity_leg(exchange, qty)
-    fiat_plane = evidence.fiat_venues.get(currency_pair_key(currency, "USD"))
-    if fiat_plane is not None:
-        return _value_fiat(currency, qty, minute, evidence)
+    venues = evidence.fiat_venues_by_minute
+    fiat_venues = evidence.fiat_venues if venues is None else venues.get(minute, {})
+    if currency_pair_key(currency, "USD") in fiat_venues:
+        return _value_fiat(currency, qty, minute, evidence, fiat_venues)
     return _value_crypto(exchange, currency, qty, minute, evidence.crypto_planes)
 
 

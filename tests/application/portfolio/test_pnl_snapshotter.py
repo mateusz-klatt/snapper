@@ -263,6 +263,7 @@ def _meta(
         raw_execution_watermarks=watermarks.copy(),
         execution_manifest_digest=_EXECUTION_MANIFEST_DIGEST,
         has_fill_gap=has_fill_gap,
+        fill_witness_cut={"watermarks": {"kraken:spot": 10}, "digest": "c" * 64},
     )
 
 
@@ -492,6 +493,8 @@ class _FakeRepo:
                 execution_manifest_digest=_EXECUTION_MANIFEST_DIGEST,
                 has_fill_gap=False,
                 expected_venues=frozenset({"kraken"}),
+                venue_event_watermarks={"kraken:spot": 10},
+                fill_witness_digest="c" * 64,
             ),
             None,
         )
@@ -1512,6 +1515,44 @@ class TestCatchupAndCorrections:
         assert repo.frontier() == original
 
     @pytest.mark.asyncio
+    async def test_advance_replay_rejects_missing_fill_witness_cut(self) -> None:
+        """Reject a pending checkpoint whose witnesses cannot be reopened."""
+        repo = _FakeRepo()
+        repo.seed_completed_replay(_minute(2))
+        original = repo.frontier()
+        snap = _snapshotter(repo, original.as_of)
+        ctx = snap._build_scope_context(_WALLET, _anchor(), frozenset({"kraken"}), original.as_of)
+        frontier = replace(
+            original,
+            next_minute=_minute(2),
+            venue_event_watermarks=None,
+            fill_witness_digest=None,
+        )
+        with pytest.raises(PortfolioPnlCorrectionConflictError, match="no certified fill-witness"):
+            await snap._advance_replay(cast(Repository, repo), ctx, frontier)
+        assert not repo.attempted_chunks
+        assert repo.frontier() == original
+
+    @pytest.mark.asyncio
+    async def test_uncertified_legacy_pending_cut_is_restarted_from_anchor(self) -> None:
+        """Refresh a legacy checkpoint that had no durable venue witness proof."""
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        repo.seed_completed_replay(_minute(3))
+        original = repo.frontier()
+        repo._frontiers[original.key] = replace(
+            original, next_minute=_minute(2), venue_event_watermarks=None, fill_witness_digest=None
+        )
+        snap = _snapshotter(repo, original.as_of)
+
+        with _patched_series(seq=4):
+            await snap._tick_once()
+
+        certified = repo.frontier()
+        assert certified.generation == original.generation + 1
+        assert certified.window_start == _minute(1)
+        assert certified.venue_event_watermarks == {"kraken:spot": 10}
+
+    @pytest.mark.asyncio
     async def test_clock_before_frontier_defers_replay(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1718,7 +1759,7 @@ class TestCatchupAndCorrections:
 
         Given: Two old 5C.3 rows separated by a formerly withheld minute,
         When: The enabled writer actually recomputes the stale epoch,
-        Then: The hole is inserted and only recomputed replacements carry 5C.4.
+        Then: The hole is inserted and only recomputed replacements carry the current version.
         """
         stale_rows = [_persisted_sample(_minute(offset), status="complete") for offset in (1, 3)]
         for row in stale_rows:
@@ -1736,8 +1777,8 @@ class TestCatchupAndCorrections:
         assert [edit.point_time for edit in repo.superseded] == [_minute(1), _minute(3)]
         inserted = [row for batch in repo.recorded for row in batch]
         assert _minute(2) in {row["point_time"] for row in inserted}
-        assert all(row["calc_version"] == "5C.4" for row in inserted)
-        assert all(row["calc_version"] == "5C.4" for row in repo.persisted)
+        assert all(row["calc_version"] == PNL_SAMPLE_CALC_VERSION for row in inserted)
+        assert all(row["calc_version"] == PNL_SAMPLE_CALC_VERSION for row in repo.persisted)
         assert all(row["calc_version"] == "5C.3" for row in stale_rows)
 
     @pytest.mark.asyncio
@@ -1944,9 +1985,9 @@ class TestCatchupAndCorrections:
         assert any("catch-up conflicts" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("fail_probe", [False, True])
+    @pytest.mark.parametrize("failure", ["probe", "replay", "fill_witness"])
     async def test_missing_replay_metadata_holds_the_durable_baseline(
-        self, monkeypatch: pytest.MonkeyPatch, fail_probe: bool
+        self, monkeypatch: pytest.MonkeyPatch, failure: str
     ) -> None:
         """Missing anchor evidence defers publication and does not consume the baseline."""
         repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
@@ -1958,15 +1999,16 @@ class TestCatchupAndCorrections:
             del kwargs
             from_time, to_time = args[3], args[4]
             assert isinstance(from_time, datetime) and isinstance(to_time, datetime)
-            is_probe = from_time == to_time == _minute(4)
-            return _series(
-                from_time, to_time, metadata=None if is_probe == fail_probe else _meta(seq=7)
-            )
+            phase = "probe" if from_time == to_time == _minute(4) else "replay"
+            metadata = _meta(seq=7)
+            if failure == "fill_witness":
+                metadata = replace(metadata, fill_witness_cut=None)
+            return _series(from_time, to_time, metadata=None if phase == failure else metadata)
 
         monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
         await snap._tick_once()
         assert repo.frontier().baseline_watermarks == {"kraken": 4}
-        assert repo.frontier().next_minute == (None if fail_probe else _minute(3))
+        assert repo.frontier().next_minute == (_minute(3) if failure == "replay" else None)
         assert not repo.committed_chunks
         assert not repo.persisted
 
@@ -2237,9 +2279,13 @@ class TestBudgetSplitAndHelpers:
         assert repo.frontier().baseline_watermarks == {"kraken": 9}
 
     def test_watermarks_json_serializes_canonically(self) -> None:
-        """The advanced watermark map serializes to canonical JSON."""
-        assert _watermarks_json(_meta(seq=3)) == '{"kraken":3}'
-        assert _watermarks_json(None) == "{}"
+        """A sample records its own causal watermark rather than the chunk envelope."""
+        minute = _minute(1)
+        metadata = _meta(seq=3)
+        assert _watermarks_json(metadata, minute) == '{"kraken":3}'
+        pointwise = replace(metadata, sample_watermarks_by_minute={minute: {"kraken": 2}})
+        assert _watermarks_json(pointwise, minute) == '{"kraken":2}'
+        assert _watermarks_json(None, minute) == "{}"
 
     def test_sample_values_equal_ignores_provenance(self) -> None:
         """Value equality ignores the write provenance identity columns."""
@@ -2328,7 +2374,7 @@ class TestBudgetSplitAndHelpers:
 class TestEvidenceAndPartition:
     """Crypto plane, fiat forex plane, and the temporal position partition."""
 
-    @pytest.mark.parametrize("sqlstate", ["57014", "XX000"])
+    @pytest.mark.parametrize("sqlstate", ["57014", "55P03", "XX000"])
     @pytest.mark.parametrize("recompute", [False, True])
     async def test_crypto_query_failure_preserves_rows_and_baseline(
         self,
@@ -2340,13 +2386,14 @@ class TestEvidenceAndPartition:
         """A failed evidence read cannot publish catch-up or advance its detector.
 
         Given either a fresh catch-up or a detected late fill over an older sample
-        When the crypto evidence statement is cancelled or otherwise fails
-        Then durable rows and baselines stay unchanged and each tick reports failure.
+        When the crypto evidence statement is cancelled, times out on a lock or otherwise fails
+        Then durable rows and baselines stay unchanged and each tick reports failure,
+            and only the two budget SQLSTATEs log the once-per-streak timeout diagnostic.
 
         Args:
             monkeypatch: Isolate the repository read failure.
             caplog: Capture scope and chunk diagnostics.
-            sqlstate: PostgreSQL cancellation or unrelated database failure.
+            sqlstate: PostgreSQL statement timeout, lock timeout or unrelated failure.
             recompute: Exercise suffix correction before catch-up publication.
         """
 
@@ -2393,7 +2440,7 @@ class TestEvidenceAndPartition:
             for record in caplog.records
             if "crypto-plane query timed out" in record.message
         ]
-        assert len(timeouts) == (1 if sqlstate == "57014" else 0)
+        assert len(timeouts) == (1 if sqlstate in {"57014", "55P03"} else 0)
         if timeouts:
             assert _WALLET in timeouts[0]
             assert str(_minute(1)) in timeouts[0]

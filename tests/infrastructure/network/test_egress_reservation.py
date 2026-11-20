@@ -230,6 +230,23 @@ class TestQuarantine:
         assert snapshot.last_close_1015_at is None
         assert snapshot.last_handshake_429_at is None
 
+    def test_quarantine_reason_http_proxy_error_records_no_cause_marker(self) -> None:
+        """Spec — reason="http-proxy-error" advances quarantine, sets no marker.
+
+        Given a fresh reservation,
+        When quarantine(60, reason="http-proxy-error") is called,
+        Then quarantine_until is set but NEITHER last_close_1015_at NOR
+            last_handshake_429_at is touched — a proxy error must not be
+            mis-reported to operators as a Cloudflare 1015 close or a 429.
+        """
+        pool = _build_pool()
+        reservation = pool.reserve(exchange="walutomat", purpose="http")
+        reservation.quarantine(60.0, reason="http-proxy-error")
+        snapshot = pool.snapshot()[0]
+        assert snapshot.quarantine_until is not None
+        assert snapshot.last_close_1015_at is None
+        assert snapshot.last_handshake_429_at is None
+
 
 class TestWebsocketKwargs:
     """Tests for ``EgressReservation.websocket_kwargs`` output."""

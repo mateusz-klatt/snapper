@@ -47,14 +47,24 @@ def test_0070_distinguishes_legacy_null_and_a_frozen_empty_cut(tmp_path: Path) -
                 "execution_manifest_digest": None,
                 "has_fill_gap": None,
                 "expected_venues_json": None,
+                "venue_event_watermarks_json": None,
+                "fill_witness_digest": None,
             }
             connection.execute(
                 text(
                     "UPDATE portfolio_pnl_correction_frontiers "
                     "SET raw_execution_watermarks_json = :raw, execution_manifest_digest = :manifest, "
-                    "has_fill_gap = :gap, expected_venues_json = :venues"
+                    "has_fill_gap = :gap, expected_venues_json = :venues, "
+                    "venue_event_watermarks_json = :witness_cut, fill_witness_digest = :witness_digest"
                 ),
-                {"raw": "{}", "manifest": "a" * 64, "gap": False, "venues": '["kraken"]'},
+                {
+                    "raw": "{}",
+                    "manifest": "a" * 64,
+                    "gap": False,
+                    "venues": '["kraken"]',
+                    "witness_cut": "{}",
+                    "witness_digest": "b" * 64,
+                },
             )
             assert dict(connection.execute(read).mappings().one()) == {
                 **before,
@@ -62,6 +72,8 @@ def test_0070_distinguishes_legacy_null_and_a_frozen_empty_cut(tmp_path: Path) -
                 "execution_manifest_digest": "a" * 64,
                 "has_fill_gap": 0,
                 "expected_venues_json": '["kraken"]',
+                "venue_event_watermarks_json": "{}",
+                "fill_witness_digest": "b" * 64,
             }
             current.downgrade()
             assert dict(connection.execute(read).mappings().one()) == before

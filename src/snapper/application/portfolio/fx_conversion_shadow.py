@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -12,12 +13,15 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
+from itertools import islice
 from typing import cast
 from uuid import uuid7
 
 from loguru import logger
 
+from snapper.application.portfolio.fx_rates import FxPairKey
 from snapper.application.portfolio.fx_rates import FxRateKey
+from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.core.numeric import is_positive_finite
 from snapper.data.fx_conversion_carry import MAX_CARRIED_MINUTES
 from snapper.data.fx_conversion_digests import build_decision_inputs_digest
@@ -55,6 +59,9 @@ a replay would produce append-only evidence that disagrees with the stored
 rides on the same bump for the same reason.
 """
 MAX_SHADOW_MANIFEST_MINUTES = 15
+POINTWISE_FX_ELECTION_POLICY_VERSION = "pnl-fiat-pointwise-v1"
+MAX_POINTWISE_SHADOW_EVALUATIONS = 64
+MAX_POINTWISE_SHADOW_ROWS = 64
 SHADOW_PIN_TICK_TIMEOUT_SECONDS = 10.0
 
 
@@ -80,6 +87,21 @@ class FxShadowEvaluation:
     authoritative_rates: Mapping[FxRateKey, float]
     discovered_candidates: tuple[FxConversionCandidatePlane, ...] | None = None
     event_minutes: frozenset[datetime] = frozenset()
+    election_policy_version: str = FX_ELECTION_POLICY_VERSION
+
+
+@dataclass(frozen=True, slots=True)
+class PointwiseFxShadowRequirement:
+    """One minute and consumer whose exact FX decision can be shadowed."""
+
+    pair: FxPairKey
+    minute: datetime
+    selected_plane: PnlFxRatePlane | None
+    owner: str | None = None
+    is_event: bool = False
+
+
+type _PointwiseRows = dict[tuple[FxPairKey, datetime], list[PnlFxRateRow]]
 
 
 @dataclass
@@ -235,6 +257,103 @@ def activate_fx_shadow_context(context: FxShadowPinContext | None) -> Iterator[N
         yield
     finally:
         _ACTIVE_CONTEXT.reset(token)
+
+
+def _row_plane(row: PnlFxRateRow) -> PnlFxRatePlane:
+    """Return the oriented identity of a source row."""
+    return row["base"], row["quote"], row["exchange"]
+
+
+def _pointwise_shadow_rows(
+    requirements: Sequence[PointwiseFxShadowRequirement], rows: Sequence[PnlFxRateRow]
+) -> _PointwiseRows:
+    """Index exact closed minutes and retain at most one overflow sentinel row each."""
+    grouped: _PointwiseRows = {(item.pair, item.minute): [] for item in requirements}
+    for row in rows:
+        pair = currency_pair_key(row["base"], row["quote"])
+        minute = row["open_at"] + timedelta(minutes=1)
+        group = grouped.get((pair, minute))
+        if group is not None and len(group) <= MAX_POINTWISE_SHADOW_ROWS:
+            group.append(row)
+    return grouped
+
+
+def _pointwise_shadow_evaluation(
+    requirement: PointwiseFxShadowRequirement,
+    rows: Sequence[PnlFxRateRow],
+    rates: Mapping[FxRateKey, float],
+    target: str,
+    as_of: datetime,
+) -> FxShadowEvaluation:
+    """Describe the pointwise decision with only the candidate evidence it saw."""
+    evidence = tuple(
+        row
+        for row in rows
+        if requirement.owner is None or _row_plane(row) == requirement.selected_plane
+    )
+    planes = frozenset(_row_plane(row) for row in evidence)
+    exact_rates = {
+        (*plane, requirement.minute): rates[(*plane, requirement.minute)] for plane in planes
+    }
+    minutes = frozenset({requirement.minute})
+    return FxShadowEvaluation(
+        scope_kind="shared_pair" if requirement.owner is None else "instrument_owned",
+        consumer_instrument_public_id=requirement.owner,
+        pair=requirement.pair,
+        target_currency=target,
+        required_minutes=minutes,
+        event_minutes=minutes if requirement.is_event else frozenset(),
+        candidate_planes=planes,
+        selected_plane=requirement.selected_plane,
+        requested_knowledge_at=as_of,
+        rows=evidence,
+        authoritative_rates=exact_rates,
+        election_policy_version=POINTWISE_FX_ELECTION_POLICY_VERSION,
+    )
+
+
+def _pointwise_shadow_evaluations(
+    requirements: Sequence[PointwiseFxShadowRequirement],
+    rows: Sequence[PnlFxRateRow],
+    rates: Mapping[FxRateKey, float],
+    target: str,
+    as_of: datetime,
+) -> list[FxShadowEvaluation]:
+    """Build bounded independent decisions from complete exact-minute evidence."""
+    grouped = _pointwise_shadow_rows(requirements, rows)
+    return [
+        _pointwise_shadow_evaluation(item, grouped[item.pair, item.minute], rates, target, as_of)
+        for item in requirements
+        if len(grouped[item.pair, item.minute]) <= MAX_POINTWISE_SHADOW_ROWS
+    ]
+
+
+def collect_pointwise_fx_shadow(
+    requirements: Callable[[], Iterable[PointwiseFxShadowRequirement]],
+    rows: Sequence[PnlFxRateRow],
+    rates: Mapping[FxRateKey, float],
+    target: str,
+    as_of: datetime,
+) -> None:
+    """Collect exact-minute proofs within the shared tick and evidence limits.
+
+    Args:
+        requirements: Deferred traversal of the decisions made by the consumer.
+        rows: The original FX evidence from both bounded reads.
+        rates: The authoritative folded rate map used by valuation.
+        target: The valuation currency.
+        as_of: The knowledge horizon at which the decision was made.
+    """
+    context = current_fx_shadow_context()
+    if context is None:
+        return
+    available = MAX_POINTWISE_SHADOW_EVALUATIONS - len(context.evaluations)
+    if available > 0:
+        context.collect(
+            lambda: _pointwise_shadow_evaluations(
+                tuple(islice(requirements(), available)), rows, rates, target, as_of
+            )
+        )
 
 
 def _operation(plane: PnlFxRatePlane, source: str, target: str) -> FxConversionOperation:
@@ -492,7 +611,7 @@ def _build_artifact(
             if selected_rows
             else as_of
         ),
-        election_policy_version=FX_ELECTION_POLICY_VERSION,
+        election_policy_version=evaluation.election_policy_version,
         calculation_version=calculation_version,
         selected_source_exchange=(
             None if selected_candidate is None else selected_candidate["source_exchange"]

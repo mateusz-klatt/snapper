@@ -1,7 +1,7 @@
-"""Persist the captured execution evidence in the correction checkpoint.
+"""Persist the captured execution and venue evidence in the correction checkpoint.
 
 Nullable columns keep legacy control rows readable. An explicit empty JSON
-object represents a generation that froze an empty execution prefix.
+object represents a generation that froze an empty execution or venue prefix.
 """
 
 from collections.abc import Sequence
@@ -33,10 +33,20 @@ def upgrade() -> None:
         "portfolio_pnl_correction_frontiers",
         sa.Column("expected_venues_json", sa.Text(), nullable=True),
     )
+    op.add_column(
+        "portfolio_pnl_correction_frontiers",
+        sa.Column("venue_event_watermarks_json", sa.Text(), nullable=True),
+    )
+    op.add_column(
+        "portfolio_pnl_correction_frontiers",
+        sa.Column("fill_witness_digest", sa.String(64), nullable=True),
+    )
 
 
 def downgrade() -> None:
     """Remove the captured replay evidence from correction control."""
+    op.drop_column("portfolio_pnl_correction_frontiers", "fill_witness_digest")
+    op.drop_column("portfolio_pnl_correction_frontiers", "venue_event_watermarks_json")
     op.drop_column("portfolio_pnl_correction_frontiers", "expected_venues_json")
     op.drop_column("portfolio_pnl_correction_frontiers", "has_fill_gap")
     op.drop_column("portfolio_pnl_correction_frontiers", "execution_manifest_digest")

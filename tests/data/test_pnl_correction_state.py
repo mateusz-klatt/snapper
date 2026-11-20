@@ -95,6 +95,7 @@ def test_completed_frontier_can_be_invalidated_without_losing_published_baseline
 def test_input_watermark_mutation_cannot_change_a_created_checkpoint() -> None:
     """A caller retaining a mutable input dictionary cannot rewrite committed control."""
     baseline, pending, raw = {"kraken": 1}, {"kraken": 5}, {"kraken": 7}
+    witness = {"kraken:spot": 12}
     frontier = start_correction_frontier(
         KEY,
         replace(
@@ -102,18 +103,24 @@ def test_input_watermark_mutation_cannot_change_a_created_checkpoint() -> None:
             baseline_watermarks=baseline,
             pending_watermarks=pending,
             raw_execution_watermarks=raw,
+            venue_event_watermarks=witness,
+            fill_witness_digest="a" * 64,
         ),
         None,
     )
     baseline["kraken"] = 100
     pending["kraken"] = 200
     raw["kraken"] = 300
+    witness["kraken:spot"] = 400
     assert frontier.baseline_watermarks == {"kraken": 1}
     assert frontier.pending_watermarks == {"kraken": 5}
     assert frontier.raw_execution_watermarks == {"kraken": 7}
     advanced = advance_correction_frontier(frontier, _chunk(samples._M1, (), None))
     assert advanced.raw_execution_watermarks == {"kraken": 7}
     assert advanced.raw_execution_watermarks is not frontier.raw_execution_watermarks
+    assert advanced.venue_event_watermarks == {"kraken:spot": 12}
+    assert advanced.venue_event_watermarks is not frontier.venue_event_watermarks
+    assert advanced.fill_witness_digest == "a" * 64
 
 
 @pytest.mark.parametrize(
@@ -135,6 +142,9 @@ def test_input_watermark_mutation_cannot_change_a_created_checkpoint() -> None:
         replace(REQUEST, execution_manifest_digest="A" * 64),
         replace(REQUEST, execution_manifest_digest="z" * 64),
         replace(REQUEST, execution_manifest_digest=cast(str, 123)),
+        replace(REQUEST, venue_event_watermarks={}),
+        replace(REQUEST, fill_witness_digest="b" * 64),
+        replace(REQUEST, venue_event_watermarks={}, fill_witness_digest="broken"),
     ],
 )
 def test_invalid_generation_evidence_is_refused(candidate: PnlCorrectionRequest) -> None:
@@ -150,6 +160,14 @@ def test_invalid_watermarks_are_not_coerced(values: dict[str, object]) -> None:
     """A malformed sequence cannot silently become a valid progress watermark."""
     with pytest.raises(ValueError):
         correction_watermarks(cast(dict[str, int], values))
+
+
+def test_new_generation_cannot_forget_its_fill_witnesses() -> None:
+    """A replacement generation must certify both parts of a previously sealed cut."""
+    request = replace(REQUEST, venue_event_watermarks={}, fill_witness_digest="b" * 64)
+    frontier = start_correction_frontier(KEY, request, None)
+    with pytest.raises(ValueError, match="retain its certified fill-witness cut"):
+        start_correction_frontier(KEY, REQUEST, frontier)
 
 
 @pytest.mark.parametrize("wrong_scope", [True, False])

@@ -52,6 +52,7 @@ from snapper.cli.app import settings_rotate_encryption
 from snapper.cli.app import validate_api_keys
 from snapper.cli.app import zmq_logger
 from snapper.core.types import ProcessAutostartProfileEnum
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonSplitEvent
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 
@@ -2088,19 +2089,23 @@ class TestAdminCommands:
             mock_service_class.assert_called_once()
 
     def test_reset_password_mismatch(self) -> None:
-        """Test reset_password fails on password mismatch.
+        """Test reset_password exits with code 1 on password mismatch.
 
         Given: Mismatched password prompts,
         When: reset_password is called,
-        Then: Shows mismatch error message.
+        Then: Prints mismatch error to stderr, exits with code 1, and does not call UserService.
         """
         with (
             patch("snapper.cli.app.typer.prompt") as mock_prompt,
             patch("snapper.cli.app.typer.echo") as mock_echo,
+            patch("snapper.cli.app.UserService") as mock_service_class,
         ):
             mock_prompt.side_effect = ["newpass123", "differentpass"]
-            reset_password(username="testuser", new_password="")
-            mock_echo.assert_called_with("Passwords don't match!")
+            with pytest.raises(typer.Exit) as exc_info:
+                reset_password(username="testuser", new_password="")
+            assert exc_info.value.exit_code == 1
+            mock_echo.assert_called_with("Passwords don't match!", err=True)
+            mock_service_class.assert_not_called()
 
 
 class TestAlembicConfigNotFound:
@@ -3298,7 +3303,7 @@ def test_reset_password_updates_user_password(
 
     Given: User service with existing user,
     When: reset-password command is invoked,
-    Then: Delegates to reset_password_by_username and shows success.
+    Then: Delegates to reset_password_by_username, prints to stdout, and leaves stderr empty.
     """
     mock_user_service.reset_password_by_username = AsyncMock()
     with patch("snapper.cli.app.UserService", return_value=mock_user_service):
@@ -3308,7 +3313,9 @@ def test_reset_password_updates_user_password(
         )
     assert result.exit_code == 0
     assert "Password reset for user 'testuser'" in result.stdout
+    assert "Username: testuser" in result.stdout
     assert "newpass123" not in result.stdout
+    assert result.stderr == ""
     mock_user_service.reset_password_by_username.assert_called_once_with("testuser", "newpass123")
 
 
@@ -3319,7 +3326,7 @@ def test_reset_password_fails_for_nonexistent_user(
 
     Given: User service raising ValueError for missing user,
     When: reset-password command is invoked,
-    Then: Shows user not found message.
+    Then: Prints user not found message to stderr and exits with code 1.
     """
     mock_user_service.reset_password_by_username = AsyncMock(
         side_effect=ValueError("User 'nonexistent' not found")
@@ -3329,8 +3336,9 @@ def test_reset_password_fails_for_nonexistent_user(
             app,
             ["reset-password", "nonexistent", "--new-password", "newpass123"],
         )
-    assert result.exit_code == 0
-    assert "User 'nonexistent' not found" in result.stdout
+    assert result.exit_code == 1
+    assert "User 'nonexistent' not found" in result.stderr
+    assert "User 'nonexistent' not found" not in result.stdout
 
 
 def test_reset_password_handles_generic_exception(
@@ -3340,7 +3348,7 @@ def test_reset_password_handles_generic_exception(
 
     Given: User service raising RuntimeError,
     When: reset-password command is invoked,
-    Then: Shows failure message.
+    Then: Prints failure message to stderr and exits with code 1.
     """
     mock_user_service.reset_password_by_username = AsyncMock(side_effect=RuntimeError("db down"))
     with patch("snapper.cli.app.UserService", return_value=mock_user_service):
@@ -3348,8 +3356,31 @@ def test_reset_password_handles_generic_exception(
             app,
             ["reset-password", "testuser", "--new-password", "newpass123"],
         )
-    assert result.exit_code == 0
-    assert "Failed to reset password: db down" in result.stdout
+    assert result.exit_code == 1
+    assert "Failed to reset password: db down" in result.stderr
+    assert "Failed to reset password: db down" not in result.stdout
+
+
+def test_reset_password_prompt_mismatch_exits_nonzero(
+    cli_runner: CliRunner, mock_user_service: MagicMock
+) -> None:
+    """Test reset-password exits with code 1 when prompted passwords mismatch.
+
+    Given: Mismatched interactive password confirmation inputs,
+    When: reset-password command is invoked without --new-password,
+    Then: Prints mismatch error to stderr, exits with code 1, and skips the service call.
+    """
+    mock_user_service.reset_password_by_username = AsyncMock()
+    with patch("snapper.cli.app.UserService", return_value=mock_user_service):
+        result = cli_runner.invoke(
+            app,
+            ["reset-password", "testuser"],
+            input="first\nsecond\n",
+        )
+    assert result.exit_code == 1
+    assert "Passwords don't match!" in result.stderr
+    assert "Passwords don't match!" not in result.stdout
+    mock_user_service.reset_password_by_username.assert_not_awaited()
 
 
 @pytest.fixture
@@ -3368,6 +3399,7 @@ def mock_setting() -> MagicMock:
     setting.key = "test_key"
     setting.value = None
     setting.is_encrypted = True
+    setting.known_to = KNOWN_TO_MAX
     return setting
 
 
@@ -3418,7 +3450,10 @@ def test_rotate_encryption_dry_run(
     mock_setting.value = encrypted_value
     execute_result = MagicMock()
     execute_result.scalars = MagicMock(
-        return_value=MagicMock(all=MagicMock(return_value=[mock_setting]))
+        return_value=MagicMock(
+            all=MagicMock(return_value=[mock_setting]),
+            first=MagicMock(return_value=mock_setting),
+        )
     )
     mock_session.execute.return_value = execute_result
     with (
@@ -3460,7 +3495,10 @@ def test_rotate_encryption_success(
     mock_setting.value = encrypted_value
     result_mock = MagicMock()
     result_mock.scalars = MagicMock(
-        return_value=MagicMock(all=MagicMock(return_value=[mock_setting]))
+        return_value=MagicMock(
+            all=MagicMock(return_value=[mock_setting]),
+            first=MagicMock(return_value=mock_setting),
+        )
     )
     mock_session.execute.return_value = result_mock
     with (
@@ -3576,7 +3614,10 @@ def test_rotate_encryption_with_custom_old_password(
     mock_setting.value = encrypted_value
     result_mock = MagicMock()
     result_mock.scalars = MagicMock(
-        return_value=MagicMock(all=MagicMock(return_value=[mock_setting]))
+        return_value=MagicMock(
+            all=MagicMock(return_value=[mock_setting]),
+            first=MagicMock(return_value=mock_setting),
+        )
     )
     mock_session.execute.return_value = result_mock
     with (
@@ -3616,7 +3657,10 @@ def test_rotate_encryption_decryption_failure(
     mock_setting.value = "invalid-encrypted-data"
     result_mock = MagicMock()
     result_mock.scalars = MagicMock(
-        return_value=MagicMock(all=MagicMock(return_value=[mock_setting]))
+        return_value=MagicMock(
+            all=MagicMock(return_value=[mock_setting]),
+            first=MagicMock(return_value=mock_setting),
+        )
     )
     mock_session.execute.return_value = result_mock
     with (

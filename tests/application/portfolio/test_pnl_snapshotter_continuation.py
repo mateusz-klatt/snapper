@@ -78,6 +78,15 @@ class _ReplayTape:
         manifest_digest = options.frozen_execution_manifest_digest
         assert manifest_digest == (_MANIFEST_DIGEST if cut is not None else None)
         assert options.frozen_has_fill_gap is (False if cut is not None else None)
+        assert options.pointwise_exact_fx
+        if cut is None:
+            assert options.frozen_fill_witness_cut is None
+        else:
+            assert options.replay_generation_tip == _TIP
+            assert options.frozen_fill_witness_cut == {
+                "watermarks": {"kraken:spot": 10},
+                "digest": "c" * 64,
+            }
         self.reads.append((start, end, as_of, baseline, cut, manifest_digest))
         affected = self.affected if baseline.get("kraken", 0) < self.sequence else None
         points = tuple(
@@ -328,6 +337,8 @@ async def test_restart_matches_uninterrupted_history_after_chunk_interruption(
     assert expected.baseline_watermarks == {"kraken": 1}
     assert expected.raw_execution_watermarks == {"kraken": 101}
     assert expected.execution_manifest_digest == _MANIFEST_DIGEST
+    assert expected.venue_event_watermarks == {"kraken:spot": 10}
+    assert expected.fill_witness_digest == "c" * 64
     assert expected.has_fill_gap is False
     assert expected.expected_venues == frozenset({"kraken"})
     assert expected.next_minute is None

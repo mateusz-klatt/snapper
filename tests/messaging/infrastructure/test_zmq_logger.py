@@ -89,32 +89,50 @@ class TestZmqMessageLogger:
     async def test_logger_receives_messages(self, tmp_path: Path) -> None:
         """Test end-to-end message reception from XPUB socket.
 
-        Given: ZmqMessageLogger connected to test broker,
+        Given: ZmqMessageLogger connected to a test broker on an OS-assigned port,
         When: Broker sends message,
         Then: Logger receives, increments counters, writes to audit file.
         """
         audit_file = tmp_path / "audit.jsonl"
         ctx = zmq.asyncio.Context()
-        broker = ctx.socket(zmq.XPUB)
-        broker.bind("tcp://127.0.0.1:15556")
-        logger = ZmqMessageLogger(
-            log_to_file=True,
-            log_payload=True,
-            audit_file=str(audit_file),
-        )
-        logger.broker_xpub = "tcp://127.0.0.1:15556"
-        logger_task = asyncio.create_task(logger.start())
-        await asyncio.sleep(0.1)
-        test_topic = b"test.topic"
-        test_payload = b'{"test": "data"}'
-        subscription = await broker.recv()
-        assert subscription == b"\x01test.topic" or subscription == b"\x01"
-        await broker.send_multipart([test_topic, test_payload])
-        await asyncio.sleep(0.2)
-        await logger.stop()
-        logger_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await logger_task
+        try:
+            broker = ctx.socket(zmq.XPUB)
+            try:
+                port = broker.bind_to_random_port("tcp://127.0.0.1")
+                logger = ZmqMessageLogger(
+                    log_to_file=True,
+                    log_payload=True,
+                    audit_file=str(audit_file),
+                )
+                logger.broker_xpub = f"tcp://127.0.0.1:{port}"
+                logger_task = asyncio.create_task(logger.start())
+                try:
+                    test_topic = b"test.topic"
+                    test_payload = b'{"test": "data"}'
+                    async with asyncio.timeout(5.0):
+                        subscription = await broker.recv()
+                        assert subscription == b"\x01test.topic" or subscription == b"\x01"
+                        await broker.send_multipart([test_topic, test_payload])
+                    loop = asyncio.get_running_loop()
+                    deadline = loop.time() + 5.0
+                    while loop.time() < deadline and (
+                        logger.message_count < 1
+                        or not audit_file.exists()
+                        or audit_file.stat().st_size == 0
+                    ):
+                        await asyncio.sleep(0.01)
+                finally:
+                    try:
+                        await logger.stop()
+                    finally:
+                        logger_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await logger_task
+            finally:
+                broker.setsockopt(zmq.LINGER, 0)
+                broker.close()
+        finally:
+            ctx.term()
         assert logger.message_count >= 1
         assert logger.bytes_received > 0
         if audit_file.exists():
@@ -126,8 +144,6 @@ class TestZmqMessageLogger:
                 assert "topic" in entry
                 assert "size_bytes" in entry
                 assert entry["topic"] == "test.topic"
-        broker.close()
-        ctx.term()
 
     @pytest.mark.asyncio
     async def test_get_default_parameters(self) -> None:

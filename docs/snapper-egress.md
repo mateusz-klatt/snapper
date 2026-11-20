@@ -75,7 +75,10 @@ on any of the `QuarantineReason` values: `http-429` (a handshake 429
 carrying a positive numeric `Retry-After` header; a 429 without one
 does not quarantine the route),
 `close-1015` (Cloudflare close frame), `http-connect-error` (REST
-connect failure via the pooled transport), and `ws-connect-error` (a WS
+connect failure via the pooled transport), `http-proxy-error` (a REST
+request through the pooled transport whose SOCKS or proxy hop failed
+(`httpx.ProxyError`), quarantined for the same
+`_HTTP_CONNECT_ERROR_QUARANTINE_S`), and `ws-connect-error` (a WS
 connect-level failure — TCP/SOCKS timeout, connection refused, or a
 silent blackhole — through a proxy route, quarantined ~30 s via
 `_WS_CONNECT_ERROR_QUARANTINE_S`). Connect-level failover matters

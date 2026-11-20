@@ -957,6 +957,8 @@ async def test_execution_evidence_round_trips_with_each_financial_revision(
     Then both revisions round-trip the exact evidence and venue set.
     """
     scope = samples._scope()
+    witness = {"kraken:spot": 215} if cut is not None else None
+    witness_digest = "c" * 64 if cut is not None else None
     request = PnlCorrectionRequest(
         samples._M1,
         samples._M3,
@@ -968,6 +970,8 @@ async def test_execution_evidence_round_trips_with_each_financial_revision(
         execution_manifest_digest=manifest,
         has_fill_gap=has_fill_gap,
         expected_venues=venues,
+        venue_event_watermarks=witness,
+        fill_witness_digest=witness_digest,
     )
     started = await repository.invalidate_portfolio_pnl_correction(scope, request, None)
     assert started.raw_execution_watermarks == cut
@@ -977,6 +981,8 @@ async def test_execution_evidence_round_trips_with_each_financial_revision(
     assert loaded == started and loaded is not None
     assert loaded.has_fill_gap is has_fill_gap
     assert loaded.expected_venues == venues
+    assert loaded.venue_event_watermarks == witness
+    assert loaded.fill_witness_digest == witness_digest
 
     plan = await _plan(repository, started, samples._M2, (samples._complete_sample(),))
     advanced = await repository.commit_portfolio_pnl_correction_chunk(scope, started, plan)
@@ -988,6 +994,8 @@ async def test_execution_evidence_round_trips_with_each_financial_revision(
     assert loaded == advanced and loaded is not None
     assert loaded.has_fill_gap is has_fill_gap
     assert loaded.expected_venues == venues
+    assert loaded.venue_event_watermarks == witness
+    assert loaded.fill_witness_digest == witness_digest
 
 
 async def test_reconciled_sample_query_exposes_only_the_settled_prefix(

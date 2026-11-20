@@ -985,6 +985,11 @@ publication recovery. Both requirement and decision digests distinguish the even
 within the combined minute requirements, using the existing manifest digest
 column and identity indexes without a schema migration.
 
+Snapshotter samples at `5C.5` use `pnl-fiat-pointwise-v1` for exact FX shadow
+proofs. Each minute elects its own plane with the existing venue and
+orientation tie-breaking. Instrument-owned canonical restrictions still
+apply. Public timeline reads keep the range election described above.
+
 Mark and event FX evidence retain their separate bounded reads, original
 candidate-discovery windows and shared knowledge horizon. Sparse event reads
 add a conservative union of intervals inside the original event bounds. The

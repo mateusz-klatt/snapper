@@ -493,12 +493,12 @@ e.g. `"zh-Hans"`, `"zh"`, `"pt-BR"`, `"pt"`, `"nb"`, `"no"`).
 
 Returns the same `UserResponse` envelope shape as `GET /api/auth/me`,
 with the updated `default_language` echoed in `payload`.
+The preference update preserves the account's current active status.
 
 **Errors:**
 
-- `404` — caller's user row was not found (rare; only surfaces if
-  an admin concurrently deactivates the user between auth-dep
-  resolution and the update commit).
+- `404` — caller has no current user row.
+- `409` — both attempts conflicted with concurrent account changes.
 - `422` — `default_language` not in the supported-language allowlist.
 
 ### GET /api/auth/users
@@ -611,8 +611,8 @@ and `is_active`.
 
 Update email, role, and active state for an existing user. Requires
 `manage:users` and CSRF for cookie auth. Returns `UserResponse`.
-Deactivation returns `409` when an OAuth grant owner's account changes
-concurrently. Retry the request against the current account state.
+The endpoint retries once when a concurrent version change prevents the
+update. If both attempts conflict, it returns `409`.
 
 ### POST /api/auth/users/{user_id}/deactivate
 
@@ -623,8 +623,9 @@ users return `404`. The service also revokes active sessions and emits
 `admin.user_deactivated` for immediate verify-cache eviction and
 WebSocket close fanout; auth listeners also poll the committed
 `users.is_active=False` row as broker-outage fallback.
-A concurrent change to an OAuth grant owner's account returns `409` and
-the deactivation can be retried.
+The endpoint retries once when a concurrent change to the target or an
+OAuth grant owner prevents deactivation. If both attempts conflict, it
+returns `409`.
 
 ### POST /api/auth/users/{user_id}/change-password
 
@@ -632,12 +633,14 @@ Change a password. Requires `manage:self_account`. Users may change their own pa
 `manage:users` may change another user's password. Requires CSRF for cookie
 auth and is account-rate limited. Body is `ChangePasswordRequest` with current
 and new password.
+Returns `409` if both attempts conflict with concurrent account changes.
 
 ### POST /api/auth/users/{user_id}/admin-reset-password
 
 Admin password reset without the current password. Requires
 `manage:users`, CSRF for cookie auth, and is account-rate limited. Body
 is `AdminResetPasswordRequest`.
+Returns `409` if both attempts conflict with concurrent account changes.
 
 ### CSRF Protection
 
@@ -3051,6 +3054,9 @@ Form-encoded RFC 7009 revocation, authenticated like the token endpoint.
 Revoking a live access or refresh token revokes the whole grant owned by the
 calling client. Unknown, invalid, expired, already revoked and other-client
 tokens succeed with 200 and an empty JSON object, and change nothing.
+If a concurrent owner update conflicts with both revocation attempts, the
+endpoint returns 503 with `{"error": "temporarily_unavailable"}` and
+`Retry-After: 1`. The 503 response includes `Cache-Control: no-store`.
 
 ### Consent API
 
@@ -3081,16 +3087,33 @@ cannot succeed by retrying.
 
 Both decisions return `mcp_oauth_consent_redirect` with `redirect_to`, the
 exact registered callback carrying `code` or `error=access_denied`, `state` and
-`iss`. The `oauth_request` body key is redacted before the provenance
-middleware stores the request.
+`iss`. Mutation bodies on OAuth credential endpoints (including consent
+approve/deny) are skipped by provenance inspection and stored with
+`payload=None` in the control table.
 
 ### Log redaction
 
-The uvicorn access log replaces the query of `/api/mcp/authorize` with
-`[REDACTED]`. The Caddy access log and its default error log replace the
-`state`, `code`, `code_challenge`, `code_verifier`, `request`,
-`client_secret`, `token`, `refresh_token` and `access_token` query values and
-drop the `X-MCP-OAuth-Request` header.
+Control-table persistence suppresses `payload` (`None`, without parsing or
+logging the body) on OAuth credential endpoints (`/api/mcp/token`,
+`/api/mcp/revoke`, `/api/mcp/register`, `/api/mcp/authorize`,
+`/api/mcp-oauth/consent/approve`, and `/api/mcp-oauth/consent/deny`), and
+`core/redact.py` additionally redacts OAuth secret keys (`client_secret`,
+`code_verifier`, `code_challenge`, `client_assertion`, `id_token`, and
+`oauth_request`) recursively if logged elsewhere. The uvicorn access log replaces
+the query string of every OAuth surface path (`/api/mcp`, `/api/mcp-oauth`,
+`/.well-known/oauth-authorization-server`,
+`/.well-known/oauth-protected-resource`, `/.well-known/openid-configuration`,
+and their subpaths) with `[REDACTED]`. The Caddy access log and its default
+error log replace the `state`, `code`, `code_challenge`, `code_verifier`,
+`request`, `client_secret`, `token`, `refresh_token`, `access_token` and
+`oauth_request` query values (effective on the next Caddy deploy) and drop the
+`X-MCP-OAuth-Request` header and response `Location`. Every HTTP response on an
+OAuth surface path — including dependency-layer 401/403/404/422/503 rejections
+and unhandled 500s — carries `Cache-Control: no-store`, `Pragma: no-cache`, and
+`Referrer-Policy: no-referrer` whenever absent. A header the handler already
+set is kept, so MCP streaming responses keep the SDK's own
+`Cache-Control: no-cache, no-transform`. A path carrying a control character,
+such as an encoded line break, is treated as a credential and surface path.
 
 ## AI Delegates
 

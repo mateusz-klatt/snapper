@@ -49,6 +49,8 @@ class PnlCorrectionFrontier:
     manifest for that cut across restarts. ``has_fill_gap`` pins the scope's
     gap verdict at the same evidence capture. ``expected_venues`` fixes the
     spot venues used for every balance basket in the generation.
+    ``venue_event_watermarks`` bounds the physical fill-witness candidates and
+    ``fill_witness_digest`` detects changes inside that bound.
     """
 
     key: PnlCorrectionKey
@@ -66,6 +68,8 @@ class PnlCorrectionFrontier:
     execution_manifest_digest: str | None = None
     has_fill_gap: bool | None = None
     expected_venues: frozenset[str] | None = None
+    venue_event_watermarks: Mapping[str, int] | None = None
+    fill_witness_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,8 @@ class PnlCorrectionRequest:
     execution_manifest_digest: str | None = None
     has_fill_gap: bool | None = None
     expected_venues: frozenset[str] | None = None
+    venue_event_watermarks: Mapping[str, int] | None = None
+    fill_witness_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -244,6 +250,27 @@ def correction_watermarks(values: Mapping[str, int]) -> dict[str, int]:
     return dict(sorted(values.items()))
 
 
+def correction_fill_witness_watermarks(
+    values: Mapping[str, int] | None, digest: str | None
+) -> dict[str, int] | None:
+    """Copy the venue event bounds together with their required membership proof.
+
+    Args:
+        values: Physical upper bounds, or null for a legacy checkpoint.
+        digest: SHA-256 over the candidate rows, or null for a legacy checkpoint.
+
+    Returns:
+        Canonical bounds, or null when neither component is present.
+
+    Raises:
+        ValueError: When one component is missing or either is malformed.
+    """
+    if (values is None) != (digest is None):
+        raise ValueError("P&L correction fill-witness bounds and digest must be paired")
+    validate_correction_manifest_digest(digest)
+    return correction_watermarks(values) if values is not None else None
+
+
 def _require_watermark_progress(baseline: Mapping[str, int], pending: Mapping[str, int]) -> None:
     """Refuse evidence prefixes that forget an already observed venue sequence.
 
@@ -274,6 +301,8 @@ def _require_retained_execution_evidence(
         raise ValueError("P&L correction must retain its fill-gap verdict")
     if current.expected_venues is not None and request.expected_venues is None:
         raise ValueError("P&L correction must retain its certified spot venues")
+    if current.venue_event_watermarks is not None and request.venue_event_watermarks is None:
+        raise ValueError("P&L correction must retain its certified fill-witness cut")
 
 
 def start_correction_frontier(
@@ -299,6 +328,9 @@ def start_correction_frontier(
     validate_correction_peak(request.prior_peak)
     validate_correction_manifest_digest(request.execution_manifest_digest)
     expected_venues = correction_expected_venues(request.expected_venues)
+    witness = correction_fill_witness_watermarks(
+        request.venue_event_watermarks, request.fill_witness_digest
+    )
     if request.as_of.utcoffset() is None or request.start > request.tip:
         raise ValueError("P&L correction requires an aware clock and ordered window")
     baseline = correction_watermarks(request.baseline_watermarks)
@@ -339,6 +371,8 @@ def start_correction_frontier(
         execution_manifest_digest=request.execution_manifest_digest,
         has_fill_gap=request.has_fill_gap,
         expected_venues=expected_venues,
+        venue_event_watermarks=witness,
+        fill_witness_digest=request.fill_witness_digest,
     )
 
 
@@ -383,6 +417,7 @@ def advance_correction_frontier(
     repair_from = _remaining_correction_repair(current, chunk, start)
     complete = chunk.end == current.tip
     raw = current.raw_execution_watermarks
+    witness = current.venue_event_watermarks
     return replace(
         current,
         revision=current.revision + 1,
@@ -396,6 +431,7 @@ def advance_correction_frontier(
         prior_peak=chunk.prior_peak,
         repair_from=repair_from,
         raw_execution_watermarks=dict(raw) if raw is not None else None,
+        venue_event_watermarks=dict(witness) if witness is not None else None,
     )
 
 

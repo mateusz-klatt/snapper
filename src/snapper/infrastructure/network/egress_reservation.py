@@ -28,7 +28,13 @@ from typing import Literal
 
 from loguru import logger
 
-QuarantineReason = Literal["http-429", "close-1015", "http-connect-error", "ws-connect-error"]
+QuarantineReason = Literal[
+    "http-429",
+    "close-1015",
+    "http-connect-error",
+    "http-proxy-error",
+    "ws-connect-error",
+]
 TrafficClass = Literal["public", "private"]
 ConnectionKind = Literal["ws", "rest"]
 
@@ -214,6 +220,9 @@ class EgressReservation:
                 ``close-1015`` for WS close-frame 1015,
                 ``http-connect-error`` for HTTP connect-level
                 failure raised by ``PooledAsyncTransport``,
+                ``http-proxy-error`` for HTTP proxy-hop failure
+                (``httpx.ProxyError``) raised by
+                ``PooledAsyncTransport``,
                 ``ws-connect-error`` for a WS connect-level failure
                 (TCP/SOCKS timeout, refused, or blackhole) raised
                 while opening the handshake through a proxy route.

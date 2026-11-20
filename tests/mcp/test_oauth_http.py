@@ -9,6 +9,7 @@ import base64
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs
 from urllib.parse import urlsplit
@@ -19,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from httpx import Response
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.ai_delegates.service import DelegateOperatorBindingError
 from snapper.application.ai_delegates.service import DelegateProliferationError
@@ -34,6 +36,8 @@ from snapper.data.models import OAuthAuthorizationRequest
 from snapper.data.models import OAuthGrant
 from snapper.data.models import OAuthRefreshToken
 from snapper.mcp.oauth.service import MCPOAuthService
+from snapper.mcp.oauth.transaction import OAuthTransaction
+from snapper.mcp.oauth.transaction import OAuthTransactionConflictError
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server import app as server_app
 from snapper.server import mcp_oauth_routes
@@ -242,6 +246,13 @@ def _tokens(case: HttpCase) -> JsonObject:
     return _exchange(case, _approve(case, _pending(case))["code"][0])
 
 
+def _assert_no_store_headers(response: Response) -> None:
+    """Assert every OAuth surface response carries no-store and no-referrer headers."""
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
 def test_every_oauth_surface_is_404_by_default(disabled: HttpCase) -> None:
     """MCP_OAUTH_ENABLED=false publishes nothing.
 
@@ -252,6 +263,7 @@ def test_every_oauth_surface_is_404_by_default(disabled: HttpCase) -> None:
     for method, path in _ROUTES:
         response = disabled.client.request(method, path)
         assert response.status_code == 404, (method, path)
+        _assert_no_store_headers(response)
 
 
 def test_registration_and_openid_stay_absent(case: HttpCase) -> None:
@@ -523,6 +535,119 @@ async def test_revocation_rules_and_its_availability(case: HttpCase) -> None:
     assert all(row.revoked_at is not None for row in rows)
 
 
+@pytest.mark.parametrize("conflicts", [1, 2], ids=["retry-succeeds", "retry-conflicts"])
+async def test_revocation_retries_one_owner_lock_conflict(
+    case: HttpCase, monkeypatch: pytest.MonkeyPatch, conflicts: int
+) -> None:
+    """Revocation retries in a fresh transaction after an owner lock conflict.
+
+    Given an issued refresh token and one or two injected owner lock conflicts.
+    When the authenticated client revokes the token.
+    Then the retry either commits revocation or returns an uncacheable 503.
+
+    Args:
+        case: Enabled OAuth deployment with an authorized owner.
+        monkeypatch: Fixture for injecting owner lock conflicts.
+        conflicts: Number of lock attempts that raise a conflict.
+    """
+    tokens = _tokens(case)
+    lock_owner = OAuthTransaction.lock_owner_identity
+    sessions: list[AsyncSession] = []
+
+    async def lock_with_conflicts(tx: OAuthTransaction, owner_public_id: str) -> None:
+        """Fail the configured owner lock attempts and record their sessions.
+
+        Args:
+            tx: Revocation transaction trying to lock the owner.
+            owner_public_id: Owner identity to lock.
+
+        Raises:
+            OAuthTransactionConflictError: On an injected owner version conflict.
+        """
+        sessions.append(tx.session)
+        assert owner_public_id == case.owner.user_public_id
+        if len(sessions) <= conflicts:
+            raise OAuthTransactionConflictError("injected owner lock conflict")
+        await lock_owner(tx, owner_public_id)
+
+    monkeypatch.setattr(OAuthTransaction, "lock_owner_identity", lock_with_conflicts)
+    response = case.client.post(
+        "/api/mcp/revoke", headers=_basic(), data={"token": tokens["refresh_token"]}
+    )
+    assert len(sessions) == 2 and sessions[0] is not sessions[1]
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    if conflicts == 1:
+        assert response.status_code == 200 and response.json() == {}
+        assert "retry-after" not in response.headers
+        assert await _grants_revoked(case) == [True]
+    else:
+        assert response.status_code == 503
+        assert response.json() == {"error": "temporarily_unavailable"}
+        assert response.headers["retry-after"] == "1"
+        assert await _grants_revoked(case) == [False]
+
+
+async def test_revocation_rolls_back_first_attempt_before_retry(
+    case: HttpCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry starts after rollback of both real revocation writes.
+
+    Given a refresh token and an injected conflict after its grant and refresh writes.
+    When the authenticated client revokes the token.
+    Then the retry sees both rows live, then revokes both and returns 200.
+
+    Args:
+        case: Enabled OAuth deployment with an authorized owner.
+        monkeypatch: Fixture for injecting the first post-write conflict.
+    """
+    tokens = _tokens(case)
+    revoke_grant = OAuthTransaction.revoke_grant
+    attempts = 0
+
+    async def conflict_after_writes(tx: OAuthTransaction, grant_id: str, now: datetime) -> bool:
+        """Write the revocation and fail only the first attempt.
+
+        Args:
+            tx: Active revocation transaction.
+            grant_id: Grant under revocation.
+            now: Timestamp used for both writes.
+
+        Returns:
+            Whether the successful attempt revoked the grant.
+
+        Raises:
+            OAuthTransactionConflictError: After the first attempt writes both revocations.
+        """
+        nonlocal attempts
+        attempts += 1
+        grant = select(OAuthGrant.revoked_at).where(OAuthGrant.public_id == grant_id)
+        refresh = select(OAuthRefreshToken.revoked_at).where(
+            OAuthRefreshToken.grant_public_id == grant_id
+        )
+        assert (await tx.session.execute(grant)).scalar_one() is None
+        assert (await tx.session.execute(refresh)).scalars().all() == [None]
+        changed = await revoke_grant(tx, grant_id, now)
+        assert changed
+        assert (await tx.session.execute(grant)).scalar_one() == now
+        assert (await tx.session.execute(refresh)).scalars().all() == [now]
+        if attempts == 1:
+            raise OAuthTransactionConflictError("injected after real revoke writes")
+        return changed
+
+    monkeypatch.setattr(OAuthTransaction, "revoke_grant", conflict_after_writes)
+    response = case.client.post(
+        "/api/mcp/revoke", headers=_basic(), data={"token": tokens["refresh_token"]}
+    )
+    assert response.status_code == 200 and response.json() == {}
+    assert attempts == 2
+    assert await _grants_revoked(case) == [True]
+    async with case.harness.repository.session() as session:
+        revoked = (await session.execute(select(OAuthRefreshToken.revoked_at))).scalar_one()
+    assert revoked is not None
+
+
 @pytest.mark.parametrize(
     ("headers", "data", "status_code", "error"),
     [
@@ -643,6 +768,7 @@ def test_token_endpoint_requires_one_valued_form_bodies(
     response = case.client.post("/api/mcp/token", headers=headers, content=content)
     assert response.status_code == 400
     assert response.json() == {"error": "invalid_request"}
+    _assert_no_store_headers(response)
 
 
 def test_token_issuance_is_refused_while_live_integration_is_disabled(case: HttpCase) -> None:
@@ -782,6 +908,7 @@ def test_consent_api_is_disabled_with_the_live_flag(case: HttpCase) -> None:
     response = _describe(case, request_id)
     assert response.status_code == 503
     assert response.json()["error_code"] == "feature_disabled"
+    _assert_no_store_headers(response)
 
 
 def test_consent_requires_ai_integration_management(case: HttpCase) -> None:
@@ -797,6 +924,7 @@ def test_consent_requires_ai_integration_management(case: HttpCase) -> None:
     )
     response = _describe(case, request_id)
     assert response.status_code == 403
+    _assert_no_store_headers(response)
 
 
 def test_consent_mutations_enforce_csrf(case: HttpCase) -> None:
@@ -816,6 +944,7 @@ def test_consent_mutations_enforce_csrf(case: HttpCase) -> None:
         ),
     )
     assert response.status_code == 403
+    _assert_no_store_headers(response)
     case.app.dependency_overrides[validate_csrf_token] = lambda: None
     assert _describe(case, request_id).status_code == 200
 
@@ -840,8 +969,12 @@ async def test_consent_requires_browser_session_and_csrf(case: HttpCase, decisio
     )
     url = f"/api/mcp-oauth/consent/{decision}"
     case.client.headers["Authorization"] = f"Bearer {pair.access_token}"
-    assert _describe(case, request_id).status_code == 401
-    assert case.client.post(url, json=payload).status_code == 401
+    bearer_read = _describe(case, request_id)
+    assert bearer_read.status_code == 401
+    _assert_no_store_headers(bearer_read)
+    bearer_post = case.client.post(url, json=payload)
+    assert bearer_post.status_code == 401
+    _assert_no_store_headers(bearer_post)
     case.client.cookies.set("access_token", pair.access_token)
     assert case.client.post(url, json=payload).status_code == 401
     del case.client.headers["Authorization"]

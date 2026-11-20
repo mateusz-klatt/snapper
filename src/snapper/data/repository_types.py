@@ -913,6 +913,13 @@ class PnlTimelineAppliedAnnulment(TypedDict):
     correction_time: datetime
 
 
+class PnlTimelineFillWitnessCut(TypedDict):
+    """Per-shard bounds and exact membership of the fill-lineage candidates."""
+
+    watermarks: dict[str, int]
+    digest: str
+
+
 class PnlTimelineExecutionPrefix(TypedDict):
     """Frozen per-exchange watermarks and their EFFECTIVE execution prefixes.
 
@@ -934,6 +941,7 @@ class PnlTimelineExecutionPrefix(TypedDict):
     watermarks: dict[str, int]
     executions: list[PnlTimelineOpeningExecutionRow]
     annulments: list[PnlTimelineAppliedAnnulment]
+    fill_witness_cut: NotRequired[PnlTimelineFillWitnessCut]
 
 
 class PnlTimelineExecutionPrefixBundle(TypedDict):
@@ -1293,8 +1301,11 @@ class PortfolioPnlAnchorWriteEvidence(TypedDict):
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
 
 
-PNL_SAMPLE_CALC_VERSION = "5C.4"
+PNL_SAMPLE_CALC_VERSION = "5C.5"
 """Algorithm version stamped on every persisted Phase-5B sample point.
+
+``5C.5`` selects the exact FX venue per valuation or event minute for the
+snapshotter. The same minute is therefore independent of replay chunk size.
 
 ``5C.4`` uses bounded faithful multi-bucket flow recovery after the historical
 passes fail. Its stale-version replay can revisit formerly withheld interior

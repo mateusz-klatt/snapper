@@ -80,7 +80,7 @@ from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOp
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
-from snapper.application.portfolio.pnl_timeline_service import load_basket_fiat_evidence
+from snapper.application.portfolio.pnl_timeline_service import load_basket_fiat_evidence_by_minute
 from snapper.application.process_manager.executor_topology import MINT_WALLET_PIN_SETTING_KEY
 from snapper.application.process_manager.executor_topology import ExecutorCredentialDisposition
 from snapper.application.process_manager.executor_topology import ExecutorTopology
@@ -112,11 +112,18 @@ _SCOPE_SKIP_MINT_IDENTITY: Final[str] = "mint_identity_executor_topology"
 _SCOPE_SKIP_NO_ANCHOR: Final[str] = "no_active_usd_anchor"
 _SCOPE_SKIP_NO_SPOT_VENUES: Final[str] = "no_spot_venues"
 _MINUTE: Final[timedelta] = timedelta(minutes=1)
+_CRYPTO_PLANE_LIMIT_SQLSTATES: Final[frozenset[str]] = frozenset({"57014", "55P03"})
+"""PostgreSQL SQLSTATEs raised when the crypto-plane read exceeds its shared P&L budget.
+
+``57014`` is a statement timeout (``query_canceled``) and ``55P03`` a lock timeout
+(``lock_not_available``); both are expected budget outcomes logged once per streak.
+"""
+
 _FAILURE_MESSAGES: Final[dict[str, str]] = {
     "sample_failed": "PortfolioPnlSnapshotter: wallet %s sample failed; continuing",
     "crypto_plane_timeout": (
-        "PortfolioPnlSnapshotter: wallet %s crypto-plane query timed out for chunk %s through %s; "
-        "not advancing baseline"
+        "PortfolioPnlSnapshotter: wallet %s crypto-plane query timed out (statement or lock limit) "
+        "for chunk %s through %s; not advancing baseline"
     ),
     "supersede_cas": "PortfolioPnlSnapshotter: wallet %s supersede CAS lost at %s; retrying next tick",
     "retract_cas": "PortfolioPnlSnapshotter: wallet %s retract CAS lost at %s; retrying next tick",
@@ -566,6 +573,7 @@ class PortfolioPnlSnapshotter:
                 or frontier.execution_manifest_digest is None
                 or frontier.has_fill_gap is None
                 or frontier.expected_venues is None
+                or frontier.venue_event_watermarks is None
             ):
                 frontier = await self._start_replay(repo, ctx, frontier)
             if frontier is not None:
@@ -590,6 +598,11 @@ class PortfolioPnlSnapshotter:
         if frontier is not None:
             tip = max(tip, frontier.tip)
         pending = await self._probe_replay(repo, ctx, frontier, tip)
+        witness = pending.fill_witness_cut
+        if witness is None:
+            raise PortfolioPnlCorrectionConflictError(
+                "P&L replay could not certify its fill witnesses"
+            )
         start = (
             ctx.t0 + _MINUTE
             if rewind
@@ -611,6 +624,8 @@ class PortfolioPnlSnapshotter:
                 execution_manifest_digest=pending.execution_manifest_digest,
                 has_fill_gap=pending.has_fill_gap,
                 expected_venues=ctx.expected_venues,
+                venue_event_watermarks=witness["watermarks"],
+                fill_witness_digest=witness["digest"],
             ),
             frontier,
         )
@@ -655,6 +670,7 @@ class PortfolioPnlSnapshotter:
         if (
             frontier is None
             or frontier.raw_execution_watermarks is None
+            or frontier.venue_event_watermarks is None
             or frontier.execution_manifest_digest != pending.execution_manifest_digest
             or frontier.has_fill_gap != pending.has_fill_gap
             or frontier.expected_venues != ctx.expected_venues
@@ -746,7 +762,7 @@ class PortfolioPnlSnapshotter:
                 allow_anchor_creation=False,
                 current_truth_horizon=False,
             ),
-            options=options,
+            options=replace(options, pointwise_exact_fx=True),
         )
 
     async def _advance_replay(
@@ -785,12 +801,25 @@ class PortfolioPnlSnapshotter:
         frontier: PnlCorrectionFrontier,
     ) -> tuple[ChunkWindow, PnlWalletSeriesResult]:
         """Subdivide work-budget overflow without scheduling another successful chunk."""
+        venue_watermarks, witness_digest = (
+            frontier.venue_event_watermarks,
+            frontier.fill_witness_digest,
+        )
+        if venue_watermarks is None or witness_digest is None:
+            raise PortfolioPnlCorrectionConflictError(
+                "P&L replay has no certified fill-witness cut"
+            )
         options = PnlSeriesReplayOptions(
             baseline_watermarks=dict(frontier.baseline_watermarks),
             offload_valuation=True,
             frozen_execution_watermarks=frontier.raw_execution_watermarks,
             frozen_execution_manifest_digest=frontier.execution_manifest_digest,
             frozen_has_fill_gap=frontier.has_fill_gap,
+            frozen_fill_witness_cut={
+                "watermarks": dict(venue_watermarks),
+                "digest": witness_digest,
+            },
+            replay_generation_tip=frontier.tip,
         )
         while True:
             try:
@@ -819,6 +848,8 @@ class PortfolioPnlSnapshotter:
                 execution_manifest_digest=frontier.execution_manifest_digest,
                 has_fill_gap=frontier.has_fill_gap,
                 expected_venues=frontier.expected_venues,
+                venue_event_watermarks=frontier.venue_event_watermarks,
+                fill_witness_digest=frontier.fill_witness_digest,
             ),
             frontier,
         )
@@ -876,7 +907,6 @@ class PortfolioPnlSnapshotter:
         chunk = ChunkWindow(physical_evidence.start, physical_evidence.end)
         observations, valuation = await self._load_chunk_evidence(repo, ctx, chunk)
         positions = await self._load_position_versions(repo, ctx, chunk)
-        watermarks = _watermarks_json(result.replay_metadata)
         return plan_correction_chunk(
             PnlCorrectionPlanInputs(
                 evidence=physical_evidence,
@@ -891,7 +921,9 @@ class PortfolioPnlSnapshotter:
                 ],
                 expected_venues=ctx.expected_venues,
                 position_versions=positions,
-                make_row=lambda sample: self._to_row(sample, ctx, watermarks),
+                make_row=lambda sample: self._to_row(
+                    sample, ctx, _watermarks_json(result.replay_metadata, sample.point_time)
+                ),
             )
         )
 
@@ -935,7 +967,7 @@ class PortfolioPnlSnapshotter:
         )
         observations, currencies = _observation_grid(attempts, chunk)
         crypto_planes = await self._load_crypto_planes(repo, ctx, chunk, currencies)
-        fiat_rates, fiat_venues, fiat_versions = await load_basket_fiat_evidence(
+        fiat_rates, fiat_venues, fiat_versions = await load_basket_fiat_evidence_by_minute(
             repo,
             frozenset(currencies),
             chunk.start,
@@ -944,9 +976,10 @@ class PortfolioPnlSnapshotter:
         )
         evidence = ValuationEvidence(
             fiat_rates=fiat_rates,
-            fiat_venues=fiat_venues,
+            fiat_venues={},
             fiat_versions=fiat_versions,
             crypto_planes=crypto_planes,
+            fiat_venues_by_minute=fiat_venues,
         )
         return observations, evidence
 
@@ -965,7 +998,7 @@ class PortfolioPnlSnapshotter:
                 sorted(currencies), chunk.start - _MINUTE, chunk.end - _MINUTE, ctx.as_of
             )
         except DBAPIError as error:
-            if getattr(error.orig, "sqlstate", None) == "57014":
+            if getattr(error.orig, "sqlstate", None) in _CRYPTO_PLANE_LIMIT_SQLSTATES:
                 self._log_class(
                     ctx.wallet_public_id, "crypto_plane_timeout", chunk.start, chunk.end
                 )
@@ -1028,9 +1061,14 @@ def _detection_watermarks(metadata: PnlSeriesReplayMetadata) -> Mapping[str, int
     return metadata.max_scope_sequence_by_exchange
 
 
-def _watermarks_json(metadata: PnlSeriesReplayMetadata | None) -> str:
-    """Serialize one run's advanced per-exchange watermark map canonically (B2)."""
-    watermarks = metadata.max_scope_sequence_by_exchange if metadata is not None else {}
+def _watermarks_json(metadata: PnlSeriesReplayMetadata | None, minute: datetime) -> str:
+    """Serialize the causal execution evidence stamped on one sample minute."""
+    watermarks: Mapping[str, int] = {}
+    if metadata is not None:
+        by_minute = metadata.sample_watermarks_by_minute
+        watermarks = (
+            metadata.max_scope_sequence_by_exchange if by_minute is None else by_minute[minute]
+        )
     return json.dumps(watermarks, allow_nan=False, separators=(",", ":"), sort_keys=True)
 
 

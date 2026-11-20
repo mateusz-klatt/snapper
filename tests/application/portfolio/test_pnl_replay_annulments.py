@@ -4,7 +4,6 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
-from typing import Literal
 
 import pytest
 
@@ -19,6 +18,7 @@ from snapper.application.portfolio.pnl_timeline_service import _execution_manife
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.data.repository_types import PnlTimelineAppliedAnnulment
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
+from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from tests.application.portfolio import test_pnl_timeline_service as fixtures
 
 _WALLET = fixtures._W1
@@ -46,6 +46,8 @@ class _ReplayRepo(fixtures.FakeRepo):
         self.previous_cuts: list[tuple[str, str, dict[str, int], datetime]] = []
         self._refuse_previous_cut = refuse_previous_cut
         self.reported_cut: dict[str, int] | None = None
+        self.drop_witness_cut = False
+        self.fixed_witnesses: list[PnlTimelineFillWitnessCut | None] = []
 
     async def get_pnl_timeline_execution_prefix_at_watermarks(
         self,
@@ -53,13 +55,16 @@ class _ReplayRepo(fixtures.FakeRepo):
         mode: str,
         watermarks: Mapping[str, int],
         as_of: datetime,
+        *,
+        fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
     ) -> PnlTimelineExecutionPrefix:
         """Record the cut and return only annulments proved within its coordinates."""
         self.previous_cuts.append((wallet_public_id, mode, dict(watermarks), as_of))
+        self.fixed_witnesses.append(fill_witness_cut)
         if self._refuse_previous_cut:
             raise ExecutionChainError("historical certification unavailable")
         prefix = self._execution_prefix_at(as_of)
-        return {
+        result: PnlTimelineExecutionPrefix = {
             "watermarks": dict(watermarks) if self.reported_cut is None else self.reported_cut,
             "executions": [
                 row
@@ -72,6 +77,9 @@ class _ReplayRepo(fixtures.FakeRepo):
                 if row["scope_sequence"] <= watermarks.get(row["exchange"], 0)
             ],
         }
+        if fill_witness_cut is not None and not self.drop_witness_cut:
+            result["fill_witness_cut"] = fill_witness_cut
+        return result
 
 
 async def _read_series(
@@ -392,6 +400,86 @@ async def test_frozen_fill_gap_requires_a_saved_raw_cut_even_when_false() -> Non
     assert repo.anchor_calls == []
 
 
+@pytest.mark.parametrize(
+    ("refuse", "drop", "error"),
+    [
+        (False, False, None),
+        (True, False, "could not be recertified"),
+        (False, True, "fill-witness cut changed"),
+    ],
+)
+async def test_resume_uses_the_saved_fill_witness_certificate(
+    refuse: bool, drop: bool, error: str | None
+) -> None:
+    """Enforce the saved physical venue cut.
+
+    Given a frozen execution prefix and saved venue witness certificate.
+    When a resumed series asks the repository to recertify those witnesses.
+    Then only an identical returned certificate may reach valuation.
+    """
+    repo = _ReplayRepo(5, refuse_previous_cut=refuse)
+    repo.drop_witness_cut = drop
+    witnesses = PnlTimelineFillWitnessCut(watermarks={"kraken:spot": 9}, digest="c" * 64)
+    options = replace(_sealed_replay_options({"kraken": 4}), frozen_fill_witness_cut=witnesses)
+    if error is not None:
+        with pytest.raises(PnlFrozenReplayEvidenceChangedError, match=error):
+            await _read_series(repo, options)
+    else:
+        resumed = await _read_series(repo, options)
+        assert resumed.replay_metadata is not None
+        assert resumed.replay_metadata.fill_witness_cut == witnesses
+    assert repo.fixed_witnesses == [witnesses]
+
+
+async def test_frozen_fill_witnesses_require_saved_execution_coordinates() -> None:
+    """Bind venue witnesses to their supporting ledger cut.
+
+    Given a saved witness certificate without its original execution coordinates.
+    When the caller requests replay.
+    Then the series rejects the partial proof before reading the anchor.
+    """
+    repo = _ReplayRepo(5)
+    with pytest.raises(ValueError, match="fill-witness certificate requires its captured raw cut"):
+        await _read_series(
+            repo,
+            PnlSeriesReplayOptions(frozen_fill_witness_cut={"watermarks": {}, "digest": "c" * 64}),
+        )
+    assert repo.anchor_calls == []
+
+
+async def test_sample_watermarks_do_not_depend_on_the_physical_chunk_end() -> None:
+    """Keep sample watermarks causal across replay chunk sizes.
+
+    Given three effective fills and a single frozen execution cut.
+    When the first minute is replayed alone and with two subsequent minutes.
+    Then it records the same prefix while later samples include their own fills.
+    """
+    repo = _ReplayRepo(10)
+    tip = _minute(8)
+    options = replace(_sealed_replay_options({"kraken": 4}), replay_generation_tip=tip)
+    narrow = await _read_series(repo, options)
+    wide = await build_wallet_pnl_series(
+        repo,
+        _WALLET,
+        "live",
+        _minute(6),
+        tip,
+        "1m",
+        _minute(9),
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+
+    assert narrow.replay_metadata is not None
+    assert narrow.replay_metadata.sample_watermarks_by_minute == {_minute(6): {"kraken": 1}}
+    assert wide.replay_metadata is not None
+    assert wide.replay_metadata.sample_watermarks_by_minute == {
+        _minute(6): {"kraken": 1},
+        _minute(7): {"kraken": 2},
+        _minute(8): {"kraken": 4},
+    }
+
+
 @pytest.mark.parametrize("saved_gap", [False, True])
 async def test_resume_does_not_recapture_the_venue_fill_gap(saved_gap: bool) -> None:
     """Newly observable fills cannot change the trust classification of a sealed generation.
@@ -426,14 +514,14 @@ async def test_resume_does_not_recapture_the_venue_fill_gap(saved_gap: bool) -> 
     assert repo.execution_prefix_intents == [_minute(9)]
 
 
-@pytest.mark.parametrize("change", ["coordinates", "annulment"])
+@pytest.mark.parametrize("change", ["coordinates", "annulment", "venue", "uncertified"])
 async def test_probe_rejects_ledger_change_between_capture_and_fill_analysis(
-    monkeypatch: pytest.MonkeyPatch, change: Literal["coordinates", "annulment"]
+    monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
     """Do not persist a fill-gap verdict from a mismatched execution snapshot.
 
     Given: A matching execution and fill commit during the scope gap await, or
-        a newly visible annulment changes the effective fold at the same raw cut.
+        an annulment or a fill witness changes at the same raw cut.
     When: The admission probe observes a gap against its earlier execution cut.
     Then: The probe rejects the mixed evidence and a stable retry sees no gap.
     """
@@ -452,11 +540,15 @@ async def test_probe_rejects_ledger_change_between_capture_and_fill_analysis(
         """Expose a simulated committed ledger change while observing venue witnesses."""
         if change == "coordinates":
             _add_backdated_execution(repo)
-        else:
+        elif change == "annulment":
             repo._executions.pop(2)
             repo.apply_annulments(
                 [fixtures._applied_annulment(scope_sequence=3)], known_from=_minute(8)
             )
+        elif change == "venue":
+            repo._fill_witness_digest = "d" * 64
+        else:
+            repo._execution_prefix_error = ExecutionChainError("fill certification changed")
         repo._has_fill_gap = True
         return await original_gap(wallet_public_id, mode, as_of, prefix)
 
@@ -469,6 +561,7 @@ async def test_probe_rejects_ledger_change_between_capture_and_fill_analysis(
     assert len(repo.fill_gap_calls) == 1
     assert repo.execution_prefix_intents == [_minute(9), _minute(9)]
     repo._has_fill_gap = False
+    repo._execution_prefix_error = None
 
     retry = await _read_series(repo, options)
 

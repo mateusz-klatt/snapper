@@ -10890,6 +10890,17 @@ class TestPostgresPoolClamp:
         assert "max_overflow" not in kwargs
 
 
+_READINESS_HANG_GUARD_S = 5.0
+"""Outer hang guard for ``wait_until_ready`` tests, far above every inner deadline.
+
+The guard only proves the readiness gate terminates. It must not expire near the
+gate's own short deadline: under event-loop starvation both timeouts can become due
+in the same iteration, the task is cancelled twice, and the inner ``asyncio.timeout``
+then leaves ``CancelledError`` unconverted instead of raising ``TimeoutError``. The
+retry-sleep test keeps a 10 s interval, so interruption is still proven.
+"""
+
+
 class _ReadinessProbeSession:
     """Async session for wait_until_ready tests.
 
@@ -10953,7 +10964,7 @@ class TestRepositoryWaitUntilReady:
                 cleaned.set()
 
         repository = _make_repo(factory)
-        await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.01), 1.0)
+        await asyncio.wait_for(repository.wait_until_ready(timeout_s=0.01), _READINESS_HANG_GUARD_S)
         assert cleaned.is_set()
         assert session.execute_calls == 1
 
@@ -10973,7 +10984,7 @@ class TestRepositoryWaitUntilReady:
                 cleaned.set()
 
         repository = _make_repo(factory)
-        async with asyncio.timeout(1.0):
+        async with asyncio.timeout(_READINESS_HANG_GUARD_S):
             with pytest.raises(RuntimeError, match="database not ready") as raised:
                 await repository.wait_until_ready(timeout_s=0.01, interval_s=0)
         assert cleaned.is_set()
@@ -10996,7 +11007,7 @@ class TestRepositoryWaitUntilReady:
                 cleaned.set()
 
         repository = _make_repo(factory)
-        async with asyncio.timeout(1.0):
+        async with asyncio.timeout(_READINESS_HANG_GUARD_S):
             with pytest.raises(DBAPIError) as raised:
                 await repository.wait_until_ready(timeout_s=0.01)
         assert cleaned.is_set()
@@ -11023,7 +11034,7 @@ class TestRepositoryWaitUntilReady:
                 raise failure
 
         repository = _make_repo(factory)
-        async with asyncio.timeout(1.0):
+        async with asyncio.timeout(_READINESS_HANG_GUARD_S):
             with (
                 patch.object(session, "execute", execute),
                 pytest.raises(RuntimeError, match="database not ready") as raised,
@@ -11057,7 +11068,7 @@ class TestRepositoryWaitUntilReady:
                 cleaned.set()
 
         repository = _make_repo(factory)
-        async with asyncio.timeout(1.0):
+        async with asyncio.timeout(_READINESS_HANG_GUARD_S):
             with (
                 patch.object(session, "execute", execute),
                 pytest.raises(RuntimeError, match="database not ready") as raised,
@@ -11073,7 +11084,7 @@ class TestRepositoryWaitUntilReady:
         failure = ConnectionRefusedError("offline")
         session = _ReadinessProbeSession([failure])
         repository = _make_repo(lambda: _readiness_factory(session))
-        async with asyncio.timeout(1.0):
+        async with asyncio.timeout(_READINESS_HANG_GUARD_S):
             with pytest.raises(RuntimeError, match="database not ready") as raised:
                 await repository.wait_until_ready(timeout_s=0.02, interval_s=10.0)
         assert session.execute_calls == 1
@@ -11090,7 +11101,7 @@ class TestRepositoryWaitUntilReady:
             completed.set()
 
         repository = _make_repo(lambda: _readiness_factory(session))
-        async with asyncio.timeout(1.0):
+        async with asyncio.timeout(_READINESS_HANG_GUARD_S):
             with (
                 patch.object(session, "execute", execute),
                 pytest.raises(RuntimeError, match="database not ready"),
@@ -11128,7 +11139,7 @@ class TestRepositoryWaitUntilReady:
                 cleaned.set()
 
         repository = _make_repo(factory)
-        async with asyncio.timeout(1.0):
+        async with asyncio.timeout(_READINESS_HANG_GUARD_S):
             with (
                 patch.object(session, "execute", execute),
                 pytest.raises(RuntimeError, match="database not ready") as raised,
@@ -11159,7 +11170,7 @@ class TestRepositoryWaitUntilReady:
 
         repository = _make_repo(factory)
         with patch.object(session, "execute", execute):
-            async with asyncio.timeout(1.0):
+            async with asyncio.timeout(_READINESS_HANG_GUARD_S):
                 task = asyncio.create_task(repository.wait_until_ready(timeout_s=10.0))
                 await entered.wait()
                 task.cancel()
