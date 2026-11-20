@@ -643,6 +643,7 @@ class PortfolioPnlSnapshotter:
             offload_valuation=True,
             previous_replay_as_of=frontier.as_of if frontier is not None else None,
             verify_replay_probe=True,
+            metadata_only=True,
         )
         result = await self._series(repo, ctx, ChunkWindow(tip, tip), options)
         metadata = result.replay_metadata
