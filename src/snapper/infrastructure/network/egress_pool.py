@@ -586,10 +586,11 @@ class EgressPool(EgressPoolBase):
 
         The reason-specific timestamp markers are recorded only for the cause
         they name: ``http-429`` sets ``last_handshake_429_at`` and ``close-1015``
-        sets ``last_close_1015_at``. Connect-level reasons (``http-connect-error``,
-        ``ws-connect-error``) only advance ``quarantine_until`` so a SOCKS
-        timeout/blackhole is not mis-reported to operators as a Cloudflare 1015
-        close; their cause is carried by the quarantine log line.
+        sets ``last_close_1015_at``. Connect- and proxy-level reasons
+        (``http-connect-error``, ``http-proxy-error``, ``ws-connect-error``)
+        only advance ``quarantine_until`` so a SOCKS or proxy failure is not
+        mis-reported to operators as a Cloudflare 1015 close; their cause is
+        carried by the quarantine log line.
         """
         with self._lock:
             state = self._states.get(route_id)

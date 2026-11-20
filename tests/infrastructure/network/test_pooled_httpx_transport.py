@@ -8,7 +8,8 @@ Covers:
 * SOCKS5 proxy URL injection into the transport factory.
 * Connect-error quarantine + re-raise + still-released reservation.
 * ConnectTimeout same handling as ConnectError.
-* Unrelated exception passthrough with reservation still released.
+* ProxyError quarantine with ``http-proxy-error`` + warning log + re-raise + release.
+* Unrelated TransportError / exception passthrough with reservation still released.
 * ``aclose`` closes every cached transport.
 """
 
@@ -22,12 +23,15 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from loguru import logger
 
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
+from snapper.infrastructure.network.egress_reservation import EgressReservation
+from snapper.infrastructure.network.egress_reservation import QuarantineReason
 from snapper.infrastructure.network.pooled_httpx_transport import _HTTP_CONNECT_ERROR_QUARANTINE_S
 from snapper.infrastructure.network.pooled_httpx_transport import PooledAsyncTransport
 
@@ -91,6 +95,25 @@ class TestPooledAsyncTransport:
     @staticmethod
     def _make_request() -> httpx.Request:
         return httpx.Request("GET", "https://example.com/")
+
+    @staticmethod
+    def _install_quarantine_spy(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> list[tuple[str, float, QuarantineReason]]:
+        quarantine_calls: list[tuple[str, float, QuarantineReason]] = []
+        original_quarantine = EgressReservation.quarantine
+
+        def _spy_quarantine(
+            reservation: EgressReservation,
+            retry_after_s: float,
+            *,
+            reason: QuarantineReason,
+        ) -> None:
+            quarantine_calls.append((reservation.route_id, retry_after_s, reason))
+            original_quarantine(reservation, retry_after_s, reason=reason)
+
+        monkeypatch.setattr(EgressReservation, "quarantine", _spy_quarantine)
+        return quarantine_calls
 
     @pytest.mark.asyncio
     async def test_pool_disabled_uses_direct_transport_without_reservation(self) -> None:
@@ -356,6 +379,110 @@ class TestPooledAsyncTransport:
 
         snap_by_id = {snap.id: snap for snap in pool.snapshot()}
         assert snap_by_id["wg-pl-1"].quarantine_until is not None
+
+    @pytest.mark.asyncio
+    async def test_proxy_error_quarantines_route_with_distinct_reason_and_reraises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec — ``httpx.ProxyError`` quarantines with ``http-proxy-error`` and re-raises.
+
+        Given a pool with a SOCKS5 route + a direct fallback,
+        And the SOCKS5 route is preferred (lower priority),
+        And the underlying transport raises ``httpx.ProxyError``,
+        When a request is handled,
+        Then ``quarantine`` is called once with ``_HTTP_CONNECT_ERROR_QUARANTINE_S``
+        and ``reason="http-proxy-error"``, a warning naming the route,
+        exchange, and cause is logged, the exact ``ProxyError`` instance
+        is re-raised, and the reservation is released.
+        """
+        routes = [
+            RouteConfig(id="default", kind="direct", priority=100),
+            RouteConfig(
+                id="wg-pl-1",
+                kind="socks5",
+                proxy_url="socks5h://snapper-egress:1084",
+                priority=10,
+            ),
+        ]
+        pool = configure_egress_pool(
+            EgressPoolConfig(enabled=True, routes=routes, on_all_quarantined="wait")
+        )
+        assert pool is not None
+
+        quarantine_calls = self._install_quarantine_spy(monkeypatch)
+        proxy_err = httpx.ProxyError("simulated proxy failure")
+        factory = _RecordingFactory(side_effect=proxy_err)
+        transport = PooledAsyncTransport(transport_factory=factory)
+
+        warning_messages: list[str] = []
+        sink_id = logger.add(
+            lambda message: warning_messages.append(str(message)),
+            level="WARNING",
+        )
+        try:
+            proxy_error_request = self._make_request()
+            with pytest.raises(httpx.ProxyError, match="simulated proxy failure") as exc_info:
+                await transport.handle_async_request(proxy_error_request)
+        finally:
+            logger.remove(sink_id)
+
+        assert exc_info.value is proxy_err
+        assert quarantine_calls == [
+            ("wg-pl-1", _HTTP_CONNECT_ERROR_QUARANTINE_S, "http-proxy-error")
+        ]
+        snap_by_id = {snap.id: snap for snap in pool.snapshot()}
+        assert snap_by_id["wg-pl-1"].quarantine_until is not None
+        assert snap_by_id["wg-pl-1"].in_use_count == 0
+        assert snap_by_id["default"].quarantine_until is None
+        assert len(warning_messages) == 1
+        assert "route=wg-pl-1" in warning_messages[0]
+        assert "exchange=walutomat" in warning_messages[0]
+        assert repr(proxy_err) in warning_messages[0]
+
+    @pytest.mark.asyncio
+    async def test_other_transport_error_on_proxy_route_does_not_quarantine(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Spec — non-connect/non-proxy ``httpx.TransportError`` never quarantines.
+
+        Given a pool with a SOCKS5 route + a direct fallback,
+        And the underlying transport raises ``httpx.ReadError`` (a stream
+        read failure after the proxy/connect succeeded),
+        When a request is handled,
+        Then ``quarantine`` is NOT called, the exact ``ReadError`` instance
+        propagates, and the reservation is released.
+        """
+        routes = [
+            RouteConfig(id="default", kind="direct", priority=100),
+            RouteConfig(
+                id="wg-pl-1",
+                kind="socks5",
+                proxy_url="socks5h://snapper-egress:1084",
+                priority=10,
+            ),
+        ]
+        pool = configure_egress_pool(
+            EgressPoolConfig(enabled=True, routes=routes, on_all_quarantined="wait")
+        )
+        assert pool is not None
+
+        quarantine_calls = self._install_quarantine_spy(monkeypatch)
+        read_err = httpx.ReadError("simulated proxy read failure")
+        factory = _RecordingFactory(side_effect=read_err)
+        transport = PooledAsyncTransport(transport_factory=factory)
+
+        read_error_request = self._make_request()
+        with pytest.raises(httpx.ReadError, match="simulated proxy read failure") as exc_info:
+            await transport.handle_async_request(read_error_request)
+
+        assert exc_info.value is read_err
+        assert quarantine_calls == []
+        snap_by_id = {snap.id: snap for snap in pool.snapshot()}
+        assert snap_by_id["wg-pl-1"].quarantine_until is None
+        assert snap_by_id["wg-pl-1"].in_use_count == 0
+        assert snap_by_id["default"].quarantine_until is None
 
     @pytest.mark.asyncio
     async def test_non_connect_error_propagates_without_quarantine(self) -> None:

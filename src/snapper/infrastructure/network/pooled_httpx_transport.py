@@ -15,9 +15,13 @@ The transport:
    pool.
 4. Forwards the request.
 5. On ``httpx.ConnectError`` / ``ConnectTimeout``: quarantines the
-   borrowed route then re-raises, so the next request reserves a
-   fresh route (failover to ``default`` direct when every SOCKS5
-   route is quarantined).
+   borrowed route with ``reason="http-connect-error"`` then re-raises,
+   so the next request reserves a fresh route (failover to ``default``
+   direct when every SOCKS5 route is quarantined). On
+   ``httpx.ProxyError``: quarantines the borrowed route with
+   ``reason="http-proxy-error"`` (kept distinct because ``ProxyError``
+   covers both proxy-handshake/unreachability failures and proxy-to-target
+   dial failures) then re-raises.
 6. Releases the reservation in ``finally``.
 
 Pool-disabled path (``get_egress_pool()`` returns ``None`` or empty):
@@ -84,7 +88,7 @@ class PooledAsyncTransport(httpx.AsyncBaseTransport):
         self._transports: dict[str | None, httpx.AsyncBaseTransport] = {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        """Reserve a route, forward via the matched transport, quarantine on connect errors.
+        """Reserve a route, forward via the matched transport, quarantine on connect/proxy errors.
 
         Args:
             request: The ``httpx.Request`` to dispatch.
@@ -97,6 +101,10 @@ class PooledAsyncTransport(httpx.AsyncBaseTransport):
                 is quarantined so the caller's retry hits a fresh
                 route (or the direct fallback).
             httpx.ConnectTimeout: Same handling as ``ConnectError``.
+            httpx.ProxyError: Re-raised after the borrowed route is
+                quarantined with ``reason="http-proxy-error"`` so a
+                broken SOCKS/proxy hop fails over while staying
+                distinguishable from direct connect errors.
             Exception: Any other exception from the underlying
                 transport propagates unchanged. The reservation is
                 still released in the ``finally`` block.
@@ -126,6 +134,17 @@ class PooledAsyncTransport(httpx.AsyncBaseTransport):
             )
             logger.warning(
                 f"PooledAsyncTransport: connect error on route={reservation.route_id} "
+                f"exchange={exchange_name} — quarantined for "
+                f"{_HTTP_CONNECT_ERROR_QUARANTINE_S}s. Cause: {exc!r}"
+            )
+            raise
+        except httpx.ProxyError as exc:
+            reservation.quarantine(
+                _HTTP_CONNECT_ERROR_QUARANTINE_S,
+                reason="http-proxy-error",
+            )
+            logger.warning(
+                f"PooledAsyncTransport: proxy error on route={reservation.route_id} "
                 f"exchange={exchange_name} — quarantined for "
                 f"{_HTTP_CONNECT_ERROR_QUARANTINE_S}s. Cause: {exc!r}"
             )
