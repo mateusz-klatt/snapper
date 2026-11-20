@@ -3114,6 +3114,11 @@ and unhandled 500s — carries `Cache-Control: no-store`, `Pragma: no-cache`, an
 set is kept, so MCP streaming responses keep the SDK's own
 `Cache-Control: no-cache, no-transform`. A path carrying a control character,
 such as an encoded line break, is treated as a credential and surface path.
+An unhandled exception on an OAuth credential endpoint is logged as one line
+naming only the exception class, method, escaped path and a random `error_id`,
+without its message or traceback. The client gets a plain
+`500 Internal Server Error` that keeps those headers, and the exception is not
+re-raised to uvicorn, whose error log would otherwise print the exception text.
 
 ## AI Delegates
 
