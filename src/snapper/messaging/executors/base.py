@@ -1745,6 +1745,77 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._setup_zmq_sockets(exchange_name)
         return self.exchange_client.supports_websocket_executions
 
+    def _create_supervised_tasks(self, supports_ws: bool) -> list[asyncio.Task[None]]:
+        """Spawn supervised order, heartbeat, execution-stream, recon, and observer loops.
+
+        Args:
+            supports_ws: Whether the connected exchange client supports WebSocket executions.
+
+        Returns:
+            List of spawned asyncio tasks for ``start()`` to await and cancel on exit.
+        """
+        tasks = [
+            asyncio.create_task(
+                self._supervise_loop(
+                    "order_handler",
+                    self._order_handler,
+                    pre_respawn=self._rebuild_order_subscriber,
+                )
+            ),
+            asyncio.create_task(self._supervise_loop("heartbeat", self._heartbeat_loop)),
+        ]
+        if supports_ws:
+            tasks.append(asyncio.create_task(self._supervise_execution_stream()))
+        tasks.append(
+            asyncio.create_task(
+                self._supervise_loop("reconciliation", self._reconciliation_handler)
+            )
+        )
+        if isinstance(self.exchange_client, ExchangeClientBase) and (
+            self.exchange_client.balance_capability is not CapabilityStatus.UNSUPPORTED
+            or self.exchange_client.position_capability is CapabilityStatus.SUPPORTED
+        ):
+            self._portfolio_reconciliation_dispatch_open = True
+            account_observer_task = asyncio.create_task(
+                self._supervise_loop("account_observer", self._account_observer_handler)
+            )
+            self._account_observer_tasks.add(account_observer_task)
+            account_observer_task.add_done_callback(self._account_observer_tasks.discard)
+            tasks.append(account_observer_task)
+        return tasks
+
+    def _release_zmq_resources(self) -> None:
+        """Close ZMQ sockets with LINGER 0, terminate context, and clear references.
+
+        ``start()`` allocates ``context``, ``subscriber``, ``publisher``,
+        and ``msg_publisher`` in ``_setup_zmq_sockets`` before entering
+        ``async with exchange_client:`` and before ``running`` becomes
+        True. When connect or startup preparation raises, ``running``
+        stays False; releasing ZMQ resources unconditionally here (rather
+        than only when ``running`` is True) prevents leaking the Context,
+        its I/O thread, and the unbounded ``rcvhwm=0`` SUB socket across
+        connect-failure restart loops. Clearing every reference to
+        ``None`` keeps repeated ``stop()`` calls idempotent. The context
+        is destroyed with ``linger=0`` rather than terminated: ``term()``
+        blocks the event loop until every socket of the context is
+        closed, so a socket that escaped the explicit closes above would
+        hang this release path forever, while ``destroy`` closes any
+        straggler first.
+        """
+        if self.subscriber is not None:
+            self.subscriber.setsockopt(zmq.LINGER, 0)
+            self.subscriber.close()
+            self.subscriber = None
+        if self.publisher is not None:
+            self.publisher.setsockopt(zmq.LINGER, 0)
+            self.publisher.close()
+            self.publisher = None
+        if self.msg_publisher is not None:
+            self.msg_publisher = None
+        if self.context is not None:
+            self.context.destroy(linger=0)
+            self.context = None
+
     async def start(self) -> None:
         """Start the execution service and subscribe to order topics.
 
@@ -1752,7 +1823,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         recorded-but-unpublished fills and emits gap correctives through
         the normal pipeline, and ``_publish_execution`` refuses to send
         while ``running`` is False. No task observes the flag early —
-        every loop task spawns only after recovery returns.
+        every loop task spawns only after recovery returns. If startup
+        fails before ``running`` becomes True, any ZMQ sockets and
+        context allocated during setup are released before re-raising so
+        retry loops cannot leak ZMQ resources even when a caller omits
+        ``stop()``.
         """
         exchange_name = self._get_exchange_name()
         set_log_context(f"exec:{exchange_name}")
@@ -1760,87 +1835,61 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.warning(f"{exchange_name} execution service already running")
             return
         self._portfolio_reconciliation_dispatch_open = False
-        supports_ws = await self._initialize_execution_client(exchange_name)
-        exchange_client = self._require_exchange_client()
-        self._client_context_active = True
         try:
-            with egress_identity(
-                exchange=exchange_name,
-                traffic_class="private",
-                owner="executor",
-                operation="client_lifecycle",
-            ):
-                async with exchange_client:
-                    await self._prepare_connected_execution_source(exchange_name)
-                    self.running = True
-                    self._task_last_pass["reconciliation"] = time.monotonic()
-                    await self._recover_pending_orders(exchange_name)
-                    try:
-                        tasks = [
-                            asyncio.create_task(
-                                self._supervise_loop(
-                                    "order_handler",
-                                    self._order_handler,
-                                    pre_respawn=self._rebuild_order_subscriber,
-                                )
-                            ),
-                            asyncio.create_task(
-                                self._supervise_loop("heartbeat", self._heartbeat_loop)
-                            ),
-                        ]
-                        if supports_ws:
-                            tasks.append(asyncio.create_task(self._supervise_execution_stream()))
-                        tasks.append(
-                            asyncio.create_task(
-                                self._supervise_loop("reconciliation", self._reconciliation_handler)
-                            )
-                        )
-                        if isinstance(self.exchange_client, ExchangeClientBase) and (
-                            self.exchange_client.balance_capability
-                            is not CapabilityStatus.UNSUPPORTED
-                            or self.exchange_client.position_capability
-                            is CapabilityStatus.SUPPORTED
-                        ):
-                            self._portfolio_reconciliation_dispatch_open = True
-                            account_observer_task = asyncio.create_task(
-                                self._supervise_loop(
-                                    "account_observer", self._account_observer_handler
-                                )
-                            )
-                            self._account_observer_tasks.add(account_observer_task)
-                            account_observer_task.add_done_callback(
-                                self._account_observer_tasks.discard
-                            )
-                            tasks.append(account_observer_task)
-                        try:
-                            await asyncio.gather(*tasks)
-                        except asyncio.CancelledError:
-                            logger.info(f"ExchangeExecutorService[{exchange_name}] tasks cancelled")
-                            raise
-                        finally:
-                            self._portfolio_reconciliation_dispatch_open = False
-                            for task in tasks:
-                                task.cancel()
-                            await asyncio.gather(*tasks, return_exceptions=True)
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        await self.stop()
-                        raise
-        finally:
+            supports_ws = await self._initialize_execution_client(exchange_name)
+            exchange_client = self._require_exchange_client()
+            self._client_context_active = True
             try:
-                await self._close_and_drain_portfolio_reconciliation()
+                with egress_identity(
+                    exchange=exchange_name,
+                    traffic_class="private",
+                    owner="executor",
+                    operation="client_lifecycle",
+                ):
+                    async with exchange_client:
+                        await self._prepare_connected_execution_source(exchange_name)
+                        self.running = True
+                        self._task_last_pass["reconciliation"] = time.monotonic()
+                        await self._recover_pending_orders(exchange_name)
+                        try:
+                            tasks = self._create_supervised_tasks(supports_ws)
+                            try:
+                                await asyncio.gather(*tasks)
+                            except asyncio.CancelledError:
+                                logger.info(
+                                    f"ExchangeExecutorService[{exchange_name}] tasks cancelled"
+                                )
+                                raise
+                            finally:
+                                self._portfolio_reconciliation_dispatch_open = False
+                                for task in tasks:
+                                    task.cancel()
+                                await asyncio.gather(*tasks, return_exceptions=True)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            await self.stop()
+                            raise
             finally:
-                self._client_context_active = False
+                try:
+                    await self._close_and_drain_portfolio_reconciliation()
+                finally:
+                    self._client_context_active = False
+        except BaseException:
+            if not self.running:
+                self._release_zmq_resources()
+            raise
 
     async def stop(self) -> None:
         """Stop the execution service and close ZMQ connections.
 
         The account observer is cancelled and awaited before observer-owned
         reconciliation, precision-evidence, and publication work is drained.
-        The running flag and ZMQ resources then close together so cancellation during either drain
-        cannot make a later stop skip socket teardown. The exchange client is
-        disconnected as an idempotent FALLBACK — but
+        When ``running`` is True, the running flag is cleared and logged, and
+        :meth:`_release_zmq_resources` then runs unconditionally — even when
+        ``running`` is False — so ZMQ sockets and context created before a
+        failed connect are still closed and cleared idempotently. The
+        exchange client is disconnected as an idempotent FALLBACK — but
         ONLY when ``start()`` does not currently own the client
         (``_client_context_active`` False). ``start()`` claims ownership
         BEFORE entering ``async with`` — i.e. before ``connect()`` even
@@ -1866,16 +1915,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         await self._close_and_drain_portfolio_reconciliation()
         if self.running:
             self.running = False
-            if self.subscriber:
-                self.subscriber.setsockopt(zmq.LINGER, 0)
-                self.subscriber.close()
-            if self.publisher:
-                self.publisher.setsockopt(zmq.LINGER, 0)
-                self.publisher.close()
-            if self.context:
-                self.context.term()
             exchange_name = self._get_exchange_name()
             logger.info(f"ExchangeExecutorService[{exchange_name}] stopped")
+        self._release_zmq_resources()
         client = self.exchange_client
         if client is not None and not self._client_context_active:
             try:

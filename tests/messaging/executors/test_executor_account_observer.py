@@ -2894,14 +2894,14 @@ class TestPortfolioReconciliationOrchestration:
         assert ex.running is True
         subscriber.close.assert_not_called()
         publisher.close.assert_not_called()
-        context.term.assert_not_called()
+        context.destroy.assert_not_called()
 
         await ex.stop()
 
         assert ex.running is False
         subscriber.close.assert_called_once()
         publisher.close.assert_called_once()
-        context.term.assert_called_once()
+        context.destroy.assert_called_once_with(linger=0)
 
     @pytest.mark.asyncio
     async def test_start_cancellation_outer_cleanup_drains_owned_work(self) -> None:
