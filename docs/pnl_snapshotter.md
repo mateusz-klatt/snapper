@@ -53,11 +53,11 @@ end with that transaction and do not change other repository reads. A statement
 timeout (SQLSTATE `57014`) or lock timeout (`55P03`) aborts the affected scope's
 remaining work for the tick, logs its wallet and chunk range once per failure
 streak, and contributes to the existing per-tick failed-scope count. Other
-database errors abort the scope the same way without that timeout diagnostic. Catch-up samples
-and the detector baseline cannot advance past the failed evidence load.
-Earlier committed correction chunks remain durable. The next tick can retry
-the failed work; this query limit does not provide a resumable correction
-cursor or a wall-clock bound for the complete tick.
+database errors abort the scope the same way without that timeout diagnostic.
+Catch-up samples and the detector baseline cannot advance past the failed
+evidence load. Earlier committed correction chunks remain durable. The next
+tick can retry the failed work; this query limit does not provide a resumable
+correction cursor or a wall-clock bound for the complete tick.
 
 Release acceptance remains separate from local tests: the exact source needs
 the full quality gate and independent review, and the runtime owner controls
