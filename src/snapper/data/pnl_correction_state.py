@@ -43,6 +43,12 @@ class PnlCorrectionFrontier:
     ``pending_watermarks`` is the evidence prefix being reconciled. A null next
     minute means scan completion; ``repair_from`` retains any unresolved work.
     ``prior_peak`` is the causal peak strictly before the next admitted minute.
+    ``raw_execution_watermarks`` freezes the physical execution prefix for every
+    chunk. A null cut identifies legacy checkpoints. An empty map freezes an
+    empty execution prefix. ``execution_manifest_digest`` pins the authority
+    manifest for that cut across restarts. ``has_fill_gap`` pins the scope's
+    gap verdict at the same evidence capture. ``expected_venues`` fixes the
+    spot venues used for every balance basket in the generation.
     """
 
     key: PnlCorrectionKey
@@ -56,6 +62,10 @@ class PnlCorrectionFrontier:
     pending_watermarks: Mapping[str, int]
     prior_peak: float | None
     repair_from: datetime | None
+    raw_execution_watermarks: Mapping[str, int] | None = None
+    execution_manifest_digest: str | None = None
+    has_fill_gap: bool | None = None
+    expected_venues: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -64,7 +74,9 @@ class PnlCorrectionRequest:
 
     The initial baseline is used only when this exact scope has no checkpoint.
     Later invalidations retain its durable baseline, including at completion.
-    Upstream invalidation discovery and deduplication remain the caller's job.
+    The raw execution cut is separate from the effective replay watermarks,
+    which can exclude annulled executions. Upstream invalidation discovery
+    and deduplication remain the caller's job.
     """
 
     start: datetime
@@ -73,6 +85,10 @@ class PnlCorrectionRequest:
     baseline_watermarks: Mapping[str, int]
     pending_watermarks: Mapping[str, int]
     prior_peak: float | None
+    raw_execution_watermarks: Mapping[str, int] | None = None
+    execution_manifest_digest: str | None = None
+    has_fill_gap: bool | None = None
+    expected_venues: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +176,50 @@ def validate_correction_peak(value: float | None) -> None:
         raise ValueError("P&L correction peak must be finite or absent")
 
 
+def validate_correction_manifest_digest(value: str | None) -> None:
+    """Require a lowercase SHA-256 manifest digest when present.
+
+    Args:
+        value: The digest of the captured execution manifest, or a legacy null.
+
+    Raises:
+        ValueError: If a supplied digest has the wrong length or alphabet.
+    """
+    if value is not None and (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError("P&L correction manifest digest must be lowercase SHA-256")
+
+
+def correction_expected_venues(value: frozenset[str] | None) -> frozenset[str] | None:
+    """Validate the immutable spot venue set captured for a correction generation.
+
+    Args:
+        value: A nonempty canonical spot venue set, or a legacy null.
+
+    Returns:
+        The certified venue set, or legacy absence.
+
+    Raises:
+        ValueError: If the supplied set is empty or contains an invalid venue.
+    """
+    if value is not None and (
+        not isinstance(value, frozenset)
+        or not value
+        or any(
+            not isinstance(venue, str)
+            or not venue
+            or venue != venue.lower()
+            or any(character.isspace() for character in venue)
+            for venue in value
+        )
+    ):
+        raise ValueError("P&L correction requires a nonempty canonical spot venue set")
+    return value
+
+
 def correction_watermarks(values: Mapping[str, int]) -> dict[str, int]:
     """Validate and copy a watermark map so caller mutation cannot alter a plan.
 
@@ -198,6 +258,24 @@ def _require_watermark_progress(baseline: Mapping[str, int], pending: Mapping[st
         raise ValueError("P&L correction evidence watermarks must not move backwards")
 
 
+def _require_retained_execution_evidence(
+    current: PnlCorrectionFrontier,
+    request: PnlCorrectionRequest,
+    raw: Mapping[str, int] | None,
+) -> None:
+    """Require renewed proof for the evidence coordinates of a certified generation."""
+    if current.raw_execution_watermarks is not None:
+        if raw is None:
+            raise ValueError("P&L correction must retain its raw execution watermarks")
+        _require_watermark_progress(current.raw_execution_watermarks, raw)
+    if current.execution_manifest_digest is not None and request.execution_manifest_digest is None:
+        raise ValueError("P&L correction must retain its execution manifest digest")
+    if current.has_fill_gap is not None and request.has_fill_gap is None:
+        raise ValueError("P&L correction must retain its fill-gap verdict")
+    if current.expected_venues is not None and request.expected_venues is None:
+        raise ValueError("P&L correction must retain its certified spot venues")
+
+
 def start_correction_frontier(
     key: PnlCorrectionKey,
     request: PnlCorrectionRequest,
@@ -219,10 +297,17 @@ def start_correction_frontier(
     validate_correction_minute(request.start)
     validate_correction_minute(request.tip)
     validate_correction_peak(request.prior_peak)
+    validate_correction_manifest_digest(request.execution_manifest_digest)
+    expected_venues = correction_expected_venues(request.expected_venues)
     if request.as_of.utcoffset() is None or request.start > request.tip:
         raise ValueError("P&L correction requires an aware clock and ordered window")
     baseline = correction_watermarks(request.baseline_watermarks)
     pending = correction_watermarks(request.pending_watermarks)
+    raw = (
+        correction_watermarks(request.raw_execution_watermarks)
+        if request.raw_execution_watermarks is not None
+        else None
+    )
     start, tip, peak = request.start, request.tip, request.prior_peak
     if current is not None:
         if current.key != key or request.as_of < current.as_of:
@@ -231,6 +316,7 @@ def start_correction_frontier(
             raise ValueError("P&L correction must retain its pending withheld repair boundary")
         baseline = dict(current.baseline_watermarks)
         _require_watermark_progress(current.pending_watermarks, pending)
+        _require_retained_execution_evidence(current, request, raw)
         tip = max(tip, current.tip)
         if current.next_minute is not None and current.next_minute <= start:
             start, peak = current.next_minute, current.prior_peak
@@ -249,6 +335,10 @@ def start_correction_frontier(
         pending_watermarks=pending,
         prior_peak=peak,
         repair_from=current.repair_from if current is not None else None,
+        raw_execution_watermarks=raw,
+        execution_manifest_digest=request.execution_manifest_digest,
+        has_fill_gap=request.has_fill_gap,
+        expected_venues=expected_venues,
     )
 
 
@@ -292,6 +382,7 @@ def advance_correction_frontier(
     _validate_correction_withheld(chunk, start)
     repair_from = _remaining_correction_repair(current, chunk, start)
     complete = chunk.end == current.tip
+    raw = current.raw_execution_watermarks
     return replace(
         current,
         revision=current.revision + 1,
@@ -304,6 +395,7 @@ def advance_correction_frontier(
         pending_watermarks=dict(current.pending_watermarks),
         prior_peak=chunk.prior_peak,
         repair_from=repair_from,
+        raw_execution_watermarks=dict(raw) if raw is not None else None,
     )
 
 

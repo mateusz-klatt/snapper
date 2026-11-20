@@ -322,8 +322,10 @@ from snapper.data.pnl_correction_state import PnlCorrectionRequest
 from snapper.data.pnl_correction_state import PnlCorrectionSampleVersion
 from snapper.data.pnl_correction_state import PortfolioPnlCorrectionConflictError
 from snapper.data.pnl_correction_state import advance_correction_frontier
+from snapper.data.pnl_correction_state import correction_expected_venues
 from snapper.data.pnl_correction_state import correction_watermarks
 from snapper.data.pnl_correction_state import start_correction_frontier
+from snapper.data.pnl_correction_state import validate_correction_manifest_digest
 from snapper.data.pnl_correction_state import validate_correction_minute
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import PNL_SAMPLE_DIAGNOSTIC_REQUIRED_KEYS
@@ -3429,7 +3431,8 @@ class PortfolioPnlSampleQuery:
     (``known_to == KNOWN_TO_MAX``) ``sample`` rows for exactly this
     ``(wallet_public_id, mode, valuation_ccy)`` identity, ``epoch_public_id`` and
     ``calc_version`` (decision R4). No caller-clock ``as_of`` is applied: a sample
-    is finalized truth, not a historical projection.
+    is finalized truth, not a historical projection. Serving reads can request
+    only the prefix settled by the active correction checkpoint.
     """
 
     wallet_public_id: str
@@ -3437,6 +3440,7 @@ class PortfolioPnlSampleQuery:
     valuation_ccy: str
     epoch_public_id: str
     calc_version: str
+    require_reconciled: bool = False
 
 
 _CANDLE_VERSION_KEY_FIELDS: Final[tuple[str, ...]] = (
@@ -18396,8 +18400,8 @@ class SQLAlchemyRepository(Repository):
     def _portfolio_pnl_sample_query_filters(
         query: PortfolioPnlSampleQuery,
     ) -> list[ColumnElement[bool]]:
-        """The exact R4 active-sample predicate set for the read surfaces."""
-        return [
+        """The exact R4 active-sample predicates with optional atomic correction gating."""
+        filters: list[ColumnElement[bool]] = [
             PortfolioPnlPoint.known_to == KNOWN_TO_MAX,
             PortfolioPnlPoint.point_kind == "sample",
             PortfolioPnlPoint.wallet_public_id
@@ -18408,6 +18412,25 @@ class SQLAlchemyRepository(Repository):
             PortfolioPnlPoint.epoch_public_id == query.epoch_public_id,
             PortfolioPnlPoint.calc_version == query.calc_version,
         ]
+        if query.require_reconciled:
+            point = PortfolioPnlPoint
+            frontier = PortfolioPnlCorrectionFrontier
+            filters.append(
+                ~exists()
+                .where(
+                    frontier.wallet_public_id == point.wallet_public_id,
+                    frontier.mode == point.mode,
+                    frontier.valuation_ccy == point.valuation_ccy,
+                    frontier.epoch_public_id == point.epoch_public_id,
+                    frontier.calc_version == point.calc_version,
+                    or_(
+                        frontier.next_minute <= point.point_time,
+                        frontier.repair_from <= point.point_time,
+                    ),
+                )
+                .correlate(point)
+            )
+        return filters
 
     async def _begin_portfolio_pnl_sample_write_transaction(
         self, s: AsyncSession, scope: PortfolioPnlSampleScope, *, bounded: bool = False
@@ -18788,6 +18811,21 @@ class SQLAlchemyRepository(Repository):
             raise ValueError("P&L correction has malformed persisted watermarks")
         return correction_watermarks(value)
 
+    @staticmethod
+    def _pnl_correction_expected_venues(payload: str | None) -> frozenset[str] | None:
+        """Read the certified venue set without silently altering its membership."""
+        if payload is None:
+            return None
+        value: object = json.loads(
+            payload, parse_constant=SQLAlchemyRepository._reject_portfolio_pnl_json_constant
+        )
+        if not isinstance(value, list) or any(not isinstance(venue, str) for venue in value):
+            raise ValueError("P&L correction has malformed persisted spot venues")
+        venues = frozenset(value)
+        if len(venues) != len(value):
+            raise ValueError("P&L correction has duplicate persisted spot venues")
+        return correction_expected_venues(venues)
+
     @classmethod
     def _pnl_correction_from_model(
         cls, model: PortfolioPnlCorrectionFrontier
@@ -18807,6 +18845,9 @@ class SQLAlchemyRepository(Repository):
             model.epoch_public_id,
             model.calc_version,
         )
+        raw = model.raw_execution_watermarks_json
+        manifest = model.execution_manifest_digest
+        validate_correction_manifest_digest(manifest)
         return PnlCorrectionFrontier(
             key=key,
             generation=model.generation,
@@ -18819,6 +18860,12 @@ class SQLAlchemyRepository(Repository):
             pending_watermarks=cls._pnl_correction_watermarks(model.pending_watermarks_json),
             prior_peak=model.prior_peak,
             repair_from=model.repair_from,
+            raw_execution_watermarks=(
+                cls._pnl_correction_watermarks(raw) if raw is not None else None
+            ),
+            execution_manifest_digest=manifest,
+            has_fill_gap=model.has_fill_gap,
+            expected_venues=cls._pnl_correction_expected_venues(model.expected_venues_json),
         )
 
     @staticmethod
@@ -18831,6 +18878,8 @@ class SQLAlchemyRepository(Repository):
         Returns:
             All mutable control columns for the same transaction.
         """
+        raw = frontier.raw_execution_watermarks
+        venues = frontier.expected_venues
         return {
             "generation": frontier.generation,
             "revision": frontier.revision,
@@ -18844,6 +18893,12 @@ class SQLAlchemyRepository(Repository):
             "pending_watermarks_json": json.dumps(
                 dict(frontier.pending_watermarks), sort_keys=True
             ),
+            "raw_execution_watermarks_json": (
+                json.dumps(dict(raw), sort_keys=True) if raw is not None else None
+            ),
+            "execution_manifest_digest": frontier.execution_manifest_digest,
+            "has_fill_gap": frontier.has_fill_gap,
+            "expected_venues_json": json.dumps(sorted(venues)) if venues is not None else None,
             "prior_peak": frontier.prior_peak,
             "repair_from": frontier.repair_from,
         }
@@ -18973,10 +19028,15 @@ class SQLAlchemyRepository(Repository):
         """
         canonical = self._normalize_portfolio_pnl_sample_scope(scope)
         validate_correction_minute(request.start)
+        validate_correction_manifest_digest(request.execution_manifest_digest)
+        expected_venues = correction_expected_venues(request.expected_venues)
+        raw = request.raw_execution_watermarks
         request = replace(
             request,
             baseline_watermarks=correction_watermarks(request.baseline_watermarks),
             pending_watermarks=correction_watermarks(request.pending_watermarks),
+            raw_execution_watermarks=correction_watermarks(raw) if raw is not None else None,
+            expected_venues=expected_venues,
         )
         if request.start <= canonical.anchor_point_time:
             raise PortfolioPnlSampleScopeError("P&L correction must start after its anchor")

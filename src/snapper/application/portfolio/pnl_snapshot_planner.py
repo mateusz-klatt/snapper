@@ -1251,7 +1251,8 @@ def _assemble_complete_minute(
             peak=prior_peak,
         )
     equity, position_value = totals
-    drawdown = resolve_drawdown(prior_peak, equity)
+    cash = equity - position_value
+    drawdown = resolve_drawdown(prior_peak, cash + position_value)
     if drawdown.demoted or drawdown.drawdown is None:
         code: SampleReasonCode = (
             "non_finite" if drawdown.reason == "prior_peak_non_finite" else "drawdown_unpriceable"
@@ -1265,7 +1266,6 @@ def _assemble_complete_minute(
             ),
             peak=prior_peak,
         )
-    cash = equity - position_value
     coverage = _coverage(
         partition.leveraged_excluded,
         partition.non_finite_excluded,

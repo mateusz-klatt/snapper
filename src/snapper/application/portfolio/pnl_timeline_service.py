@@ -51,6 +51,7 @@ dropped.
 """
 
 import asyncio
+import hashlib
 import json
 import math
 from bisect import bisect_left
@@ -512,11 +513,27 @@ class PnlSeriesReplayOptions:
     moves only the already-loaded synchronous valuation onto a worker, keeping
     all asynchronous repository access on the caller's event loop. The
     snapshotter opts in so a catch-up does not stall the live order handlers.
+    ``previous_replay_as_of`` is the completed durable generation's knowledge
+    horizon. A snapshotter probe supplies it with that generation's detector
+    watermarks to find newly known annulments inside the already scanned cut.
+    ``frozen_execution_watermarks`` identifies the full certified raw ledger cut
+    captured by a probe. Resumed chunks recertify exactly those coordinates
+    under the generation's recorded knowledge horizon.
+    ``frozen_execution_manifest_digest`` pins the certified annulments for those
+    coordinates so a resumed chunk cannot mix two effective histories.
+    ``frozen_has_fill_gap`` reuses the scope-level gap fact certified by the probe.
+    ``verify_replay_probe`` recertifies a new generation's cut after fill-gap
+    analysis so observations cannot be bound to a superseded prefix.
     """
 
     preloaded_evidence: _SeriesReadEvidence | None = None
     baseline_watermarks: Mapping[str, int] | None = None
     offload_valuation: bool = False
+    previous_replay_as_of: datetime | None = None
+    frozen_execution_watermarks: Mapping[str, int] | None = None
+    frozen_execution_manifest_digest: str | None = None
+    frozen_has_fill_gap: bool | None = None
+    verify_replay_probe: bool = False
 
 
 _NO_SERIES_REPLAY_OPTIONS: Final[PnlSeriesReplayOptions] = PnlSeriesReplayOptions()
@@ -608,6 +625,7 @@ class _SeriesReplayInputs:
     ``applied_annulments`` is read straight off the certified prefix this replay
     consumed, so the series can disclose exactly the corrections its own fold
     applied rather than a set some later read might compute differently.
+    ``raw_watermarks`` certifies the physical prefix before that annulment fold.
     """
 
     loaded_execution_rows: list[PnlTimelineOpeningExecutionRow]
@@ -617,10 +635,15 @@ class _SeriesReplayInputs:
     fill_gap_reason: PnlIncompletenessReasonEntry | None
     late_pre_activation_reason: PnlIncompletenessReasonEntry | None
     applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...]
+    raw_watermarks: Mapping[str, int]
 
 
 class PnlAnchorEvidenceError(ValueError):
     """The durable evidence plane cannot support a truthful activation anchor."""
+
+
+class PnlFrozenReplayEvidenceChangedError(RuntimeError):
+    """The certified generation or admission probe spans different execution evidence."""
 
 
 def _canonical_anchor_json(model: BaseModel) -> str:
@@ -1144,7 +1167,7 @@ class _EquityOverlayRequest:
     is None`` (a live current-truth read) and which every historical, snapshotter,
     or other internal caller leaves ``False``. It is deliberately decoupled from
     anchor-creation permission, so granting anchor creation never, by itself,
-    resolves an overlay.
+    resolves an overlay. A global fill-evidence gap also disables disclosure.
     """
 
     wallet_public_id: str
@@ -1364,10 +1387,26 @@ class PnlSeriesReplayMetadata:
     earliest clamped effective time among executions ABOVE the caller's baseline,
     or ``None`` when no suffix execution crosses it. The caller supersedes forward
     only when that minute is at or before its last persisted minute.
+
+    A probe against a prior durable generation also sets ``detection_watermarks``.
+    This cut retains already scanned raw sequences after their effective rows are
+    annulled. It admits new sequences only through the current effective end.
+    A newly known annulment inside that prior cut can move the earliest affected
+    minute back to the first post-activation minute.
+    ``raw_execution_watermarks`` gives the complete certified ledger coordinates
+    before effective-time clipping, including immutable rows excluded by annulments.
+    It is the evidence cut a snapshotter must recertify when replay resumes.
+    ``execution_manifest_digest`` names the certified annulments that were
+    applied to that same raw cut.
+    ``has_fill_gap`` records whether the associated venue witness read proved a gap.
     """
 
     max_scope_sequence_by_exchange: dict[str, int]
     earliest_affected_minute: datetime | None
+    detection_watermarks: dict[str, int] | None = None
+    raw_execution_watermarks: dict[str, int] | None = None
+    execution_manifest_digest: str | None = None
+    has_fill_gap: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1396,6 +1435,8 @@ def _derive_series_replay_metadata(
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
     baseline_watermarks: Mapping[str, int],
     to_time: datetime,
+    *,
+    rewind_scope_regressions: bool = False,
 ) -> PnlSeriesReplayMetadata:
     """Derive the late-fill boundary from the clamped suffix and one baseline.
 
@@ -1411,6 +1452,9 @@ def _derive_series_replay_metadata(
         baseline_watermarks: Per-exchange watermark the caller's persisted samples
             already reflect.
         to_time: Inclusive series end bounding the advanced watermark.
+        rewind_scope_regressions: Include a late execution's raw event time when
+            it precedes its clamped time. Previously served minutes in this gap
+            can become untrusted under the replay's scope-order check.
 
     Returns:
         The advanced per-exchange watermark and the earliest affected minute.
@@ -1425,13 +1469,128 @@ def _derive_series_replay_metadata(
             if current is None or scope_sequence > current:
                 max_scope_sequence[exchange] = scope_sequence
         if scope_sequence > baseline_watermarks.get(exchange, 0):
-            affected_minute = _ceil_to_minute(effective_time)
+            affected_time = (
+                min(row["timestamp"], effective_time)
+                if rewind_scope_regressions
+                else effective_time
+            )
+            affected_minute = _ceil_to_minute(affected_time)
             if earliest_affected is None or affected_minute < earliest_affected:
                 earliest_affected = affected_minute
     return PnlSeriesReplayMetadata(
         max_scope_sequence_by_exchange=max_scope_sequence,
         earliest_affected_minute=earliest_affected,
     )
+
+
+def _durable_detection_watermarks(
+    prior: Mapping[str, int], effective: Mapping[str, int], certified: Mapping[str, int]
+) -> dict[str, int]:
+    """Keep already processed coordinates without admitting effective future fills."""
+    if any(certified.get(exchange, 0) < sequence for exchange, sequence in prior.items()):
+        raise PnlAnchorEvidenceError("P&L detector cut exceeds its certified physical prefix")
+    result = dict(prior)
+    for exchange, sequence in effective.items():
+        result[exchange] = max(result.get(exchange, 0), sequence)
+    return result
+
+
+def _applied_annulment_identity(
+    annulment: PnlTimelineAppliedAnnulment,
+) -> tuple[str, str, str, str, int]:
+    """Return one correction's full certified ledger identity."""
+    return (
+        annulment["public_id"],
+        annulment["target_execution_public_id"],
+        annulment["target_execution_digest"],
+        annulment["exchange"],
+        annulment["scope_sequence"],
+    )
+
+
+def _execution_manifest_digest(annulments: Sequence[PnlTimelineAppliedAnnulment]) -> str:
+    """Hash all certified correction identities in canonical order, including an empty set."""
+    identities = sorted(_applied_annulment_identity(annulment) for annulment in annulments)
+    canonical = json.dumps(identities, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+async def _new_annulments_inside_replay_cut(
+    repo: Repository,
+    anchor_load: _AnchorLoadResult,
+    replay: _SeriesReplayInputs,
+    baseline: Mapping[str, int],
+    previous_as_of: datetime,
+) -> bool:
+    """Check whether the current certified fold changed the pre-existing detector cut.
+
+    Args:
+        repo: Source of exact historical physical-prefix and manifest proof.
+        anchor_load: Active money scope and its frozen coverage.
+        replay: Current replay's certified annulment fold.
+        baseline: Raw coordinates previously admitted through the old effective tip.
+        previous_as_of: Prior generation's historical knowledge horizon.
+
+    Returns:
+        Whether current corrections require rewinding an already scanned suffix.
+    """
+    scope = anchor_load.scope
+    anchor = cast(_ResolvedPnlAnchor, anchor_load.anchor)
+    current_ids = {
+        row["public_id"]
+        for row in replay.applied_annulments
+        if anchor.watermarks.get(row["exchange"], 0)
+        < row["scope_sequence"]
+        <= baseline.get(row["exchange"], 0)
+    }
+    if not current_ids:
+        return False
+    try:
+        previous = await repo.get_pnl_timeline_execution_prefix_at_watermarks(
+            scope.wallet_public_id, scope.mode, baseline, previous_as_of
+        )
+    except ExecutionChainError:
+        return True
+    return not current_ids.issubset(row["public_id"] for row in previous["annulments"])
+
+
+async def _series_replay_metadata(
+    repo: Repository,
+    anchor_load: _AnchorLoadResult,
+    replay: _SeriesReplayInputs,
+    options: PnlSeriesReplayOptions,
+    to_time: datetime,
+) -> PnlSeriesReplayMetadata | None:
+    """Derive legacy sample metadata or the durable correction detector's probe."""
+    baseline = options.baseline_watermarks
+    if baseline is None:
+        return None
+    previous_as_of = options.previous_replay_as_of
+    metadata = _derive_series_replay_metadata(
+        replay.loaded_execution_rows,
+        baseline,
+        to_time,
+        rewind_scope_regressions=previous_as_of is not None,
+    )
+    metadata = replace(
+        metadata,
+        raw_execution_watermarks=dict(replay.raw_watermarks),
+        execution_manifest_digest=_execution_manifest_digest(replay.applied_annulments),
+        has_fill_gap=replay.fill_gap_reason is not None,
+    )
+    if previous_as_of is None:
+        return metadata
+    if previous_as_of > anchor_load.scope.knowledge_horizon:
+        raise ValueError("P&L previous replay horizon cannot follow the current one")
+    detection = _durable_detection_watermarks(
+        baseline, metadata.max_scope_sequence_by_exchange, replay.raw_watermarks
+    )
+    earliest = metadata.earliest_affected_minute
+    if await _new_annulments_inside_replay_cut(repo, anchor_load, replay, baseline, previous_as_of):
+        anchor = cast(_ResolvedPnlAnchor, anchor_load.anchor)
+        first = anchor.opening.t0 + timedelta(minutes=1)
+        earliest = first if earliest is None else min(first, earliest)
+    return replace(metadata, detection_watermarks=detection, earliest_affected_minute=earliest)
 
 
 def _rate_minute(moment: datetime) -> datetime:
@@ -2086,12 +2245,19 @@ async def _scope_has_fill_gap(
         The stamped global reason when the scope has a proven fill gap,
         otherwise ``None``.
     """
-    if not await repo.pnl_timeline_scope_has_fill_gap(
-        wallet_public_id,
-        mode,
-        as_of,
-        execution_prefix,
-    ):
+    return _fill_gap_reason(
+        await repo.pnl_timeline_scope_has_fill_gap(
+            wallet_public_id,
+            mode,
+            as_of,
+            execution_prefix,
+        )
+    )
+
+
+def _fill_gap_reason(has_gap: bool) -> PnlIncompletenessReasonEntry | None:
+    """Express a certified gap as the global incomplete-valuation reason."""
+    if not has_gap:
         return None
     return PnlIncompletenessReasonEntry(
         reason="fill_evidence_gap",
@@ -5202,13 +5368,7 @@ def _anchor_covered_annulment_identities(
     """
     return tuple(
         sorted(
-            (
-                row["public_id"],
-                row["target_execution_public_id"],
-                row["target_execution_digest"],
-                row["exchange"],
-                row["scope_sequence"],
-            )
+            _applied_annulment_identity(row)
             for row in applied
             if row["scope_sequence"] <= anchor.watermarks.get(row["exchange"], 0)
         )
@@ -5272,21 +5432,21 @@ def _require_anchor_manifest_unchanged(
 
 async def _load_series_replay_inputs(
     repo: Repository,
-    scope: _AnchorScope,
+    anchor_load: _AnchorLoadResult,
     to_time: datetime,
-    anchor: _ResolvedPnlAnchor,
-    execution_prefix: PnlTimelineExecutionPrefix | None,
+    options: PnlSeriesReplayOptions,
 ) -> _SeriesReplayInputs:
     """Load and bound the post-watermark accounting evidence for one series.
 
-    Takes the whole :class:`_AnchorScope` rather than its parts so the read
-    horizon and the INTENT it was taken with cannot be separated on the way down
-    — the manifest narrowing depends on both, and a caller that could pass one
-    without the other would silently inherit the conservative default.
+    The anchor load carries the exact horizon and its intent. Resumed chunks
+    recertify the execution prefix and reuse the probe's fill-gap assessment.
     """
+    scope = anchor_load.scope
+    anchor = cast(_ResolvedPnlAnchor, anchor_load.anchor)
     wallet_public_id = scope.wallet_public_id
     mode = scope.mode
     as_of = scope.knowledge_horizon
+    execution_prefix = await _series_execution_prefix(repo, anchor_load, options)
     loaded_prefix = (
         await repo.get_pnl_timeline_execution_prefix(
             wallet_public_id,
@@ -5296,12 +5456,11 @@ async def _load_series_replay_inputs(
         if execution_prefix is None
         else execution_prefix
     )
-    fill_gap_reason = await _scope_has_fill_gap(
-        repo,
-        wallet_public_id,
-        mode,
-        as_of,
-        loaded_prefix,
+    frozen_gap = options.frozen_has_fill_gap
+    fill_gap_reason = (
+        await _scope_has_fill_gap(repo, wallet_public_id, mode, as_of, loaded_prefix)
+        if frozen_gap is None
+        else _fill_gap_reason(frozen_gap)
     )
     for exchange, anchor_watermark in anchor.watermarks.items():
         if loaded_prefix["watermarks"].get(exchange, 0) < anchor_watermark:
@@ -5309,6 +5468,8 @@ async def _load_series_replay_inputs(
                 "current execution prefix regressed below the activation watermark"
             )
     _require_anchor_manifest_unchanged(anchor, loaded_prefix["annulments"])
+    if options.verify_replay_probe and options.frozen_execution_watermarks is None:
+        await _verify_replay_probe(repo, scope, loaded_prefix)
     loaded_execution_rows = [
         row
         for row in loaded_prefix["executions"]
@@ -5345,7 +5506,58 @@ async def _load_series_replay_inputs(
         fill_gap_reason=fill_gap_reason,
         late_pre_activation_reason=late_pre_activation_reason,
         applied_annulments=tuple(loaded_prefix["annulments"]),
+        raw_watermarks=loaded_prefix["watermarks"],
     )
+
+
+def _validate_frozen_replay_policy(
+    options: PnlSeriesReplayOptions, policy: PnlSeriesReadPolicy
+) -> None:
+    """Keep generation admission and resumed evidence reads historically scoped."""
+    frozen = options.frozen_execution_watermarks
+    if frozen is None and options.frozen_execution_manifest_digest is not None:
+        raise ValueError("A frozen P&L execution manifest requires its captured raw cut")
+    if frozen is None and options.frozen_has_fill_gap is not None:
+        raise ValueError("A frozen P&L fill-gap assessment requires its captured raw cut")
+    if (frozen is not None or options.verify_replay_probe) and (
+        policy.allow_anchor_creation or policy.current_truth or policy.current_truth_horizon
+    ):
+        raise ValueError("A P&L replay probe or frozen cut requires a read-only historical policy")
+
+
+async def _series_execution_prefix(
+    repo: Repository, anchor_load: _AnchorLoadResult, options: PnlSeriesReplayOptions
+) -> PnlTimelineExecutionPrefix | None:
+    """Recertify an exact captured cut or use the ordinary preloaded series prefix."""
+    frozen = options.frozen_execution_watermarks
+    if frozen is None:
+        return anchor_load.execution_prefix
+    scope = anchor_load.scope
+    expected = dict(frozen)
+    prefix = await repo.get_pnl_timeline_execution_prefix_at_watermarks(
+        scope.wallet_public_id, scope.mode, expected, scope.knowledge_horizon
+    )
+    if prefix["watermarks"] != expected:
+        raise PnlAnchorEvidenceError("P&L frozen execution prefix did not match the captured cut")
+    manifest = options.frozen_execution_manifest_digest
+    if manifest is not None and _execution_manifest_digest(prefix["annulments"]) != manifest:
+        raise PnlFrozenReplayEvidenceChangedError("P&L frozen execution manifest changed")
+    return prefix
+
+
+async def _verify_replay_probe(
+    repo: Repository, scope: _AnchorScope, original: PnlTimelineExecutionPrefix
+) -> None:
+    """Reject a probe when its execution evidence changed during its venue witness read."""
+    recertified = await repo.get_pnl_timeline_execution_prefix(
+        scope.wallet_public_id, scope.mode, scope.requested_horizon
+    )
+    if recertified["watermarks"] != original["watermarks"] or _execution_manifest_digest(
+        recertified["annulments"]
+    ) != _execution_manifest_digest(original["annulments"]):
+        raise PnlFrozenReplayEvidenceChangedError(
+            "P&L execution evidence changed during replay admission"
+        )
 
 
 def _series_display_activity_spans(
@@ -5745,7 +5957,7 @@ async def _resolve_equity_overlay(
     overlay without a read. The single ``get_portfolio_pnl_samples`` call applies
     the exact R4 predicate set (active, ``point_kind='sample'``, exact scope, the
     USD anchor's epoch, the exact sample ``calc_version``, ``complete`` status)
-    over the requested grid window, so there is one bounded sample read per request.
+    over the requested grid and withholds the outstanding correction suffix.
 
     Samples exist in USD alone, so the query is always USD-scoped and a non-USD
     request is served by converting the folded overlay at each minute's proven
@@ -5782,6 +5994,7 @@ async def _resolve_equity_overlay(
             _USD_VALUATION_BASIS,
         ),
         calc_version=PNL_SAMPLE_CALC_VERSION,
+        require_reconciled=True,
     )
     samples = await repo.get_portfolio_pnl_samples(
         query,
@@ -5953,8 +6166,8 @@ async def build_wallet_pnl_series(
             boundary read is issued twice; its ``baseline_watermarks`` supplies the
             caller's persisted per-exchange watermark map (R3) so, when the scope
             has a post-activation window, the result carries typed replay metadata.
-            Omitting either leaves the corresponding behaviour off — no preloaded
-            evidence and a ``None`` ``replay_metadata`` respectively.
+            The snapshotter supplies a frozen cut to recertify one generation's
+            exact physical execution coordinates at the original horizon.
 
     Returns:
         The built :class:`PnlTimelineResult` at the requested granularity.
@@ -5962,10 +6175,13 @@ async def build_wallet_pnl_series(
     Raises:
         PnlTimelineWorkBudgetError: When raw grid minute-instrument work is
             above :data:`PNL_TIMELINE_MAX_WORK_UNITS`.
-        ValueError: When ``granularity`` is not a supported value (surfaced by
-            the pure builder).
+        PnlFrozenReplayEvidenceChangedError: When a frozen execution cut has a
+            different certified annulment manifest.
+        ValueError: When granularity is unsupported or the requested policy
+            conflicts with a frozen execution cut.
     """
     with pnl_read_phase("series_anchor"):
+        _validate_frozen_replay_policy(options, policy)
         wallet_public_id = normalize_portfolio_pnl_wallet_public_id(wallet_public_id)
         _enforce_total_work_budget(from_time, to_time, 0)
         anchor_load = await _load_or_create_anchor(
@@ -6000,20 +6216,8 @@ async def build_wallet_pnl_series(
                 valuation_ccy,
             )
     with pnl_read_phase("series_replay"):
-        replay = await _load_series_replay_inputs(
-            repo,
-            anchor_load.scope,
-            to_time,
-            anchor,
-            anchor_load.execution_prefix,
-        )
-        replay_metadata = (
-            _derive_series_replay_metadata(
-                replay.loaded_execution_rows, options.baseline_watermarks, to_time
-            )
-            if options.baseline_watermarks is not None
-            else None
-        )
+        replay = await _load_series_replay_inputs(repo, anchor_load, to_time, options)
+        replay_metadata = await _series_replay_metadata(repo, anchor_load, replay, options, to_time)
         opening_instrument_ids, instrument_ids = _series_instrument_ids(
             anchor, replay, from_time, to_time
         )
@@ -6131,6 +6335,12 @@ async def build_wallet_pnl_series(
         carry_valuation=policy.carry_valuation,
     )
 
+    global_reasons = tuple(
+        reason
+        for reason in (replay.fill_gap_reason, replay.late_pre_activation_reason)
+        if reason is not None
+    )
+
     def value_series() -> tuple[PnlTimelineResult, tuple[PnlFxRateSource, ...]]:
         """Value already-loaded evidence without touching the async repository.
 
@@ -6191,12 +6401,8 @@ async def build_wallet_pnl_series(
                 mark_evidence=mark_evidence,
             )
             _record_carry_timing(result.points, carry_valuation=policy.carry_valuation)
-            for global_reason in (
-                replay.fill_gap_reason,
-                replay.late_pre_activation_reason,
-            ):
-                if global_reason is not None:
-                    result = _withhold_series_for_global_reason(result, global_reason)
+            for global_reason in global_reasons:
+                result = _withhold_series_for_global_reason(result, global_reason)
             result = _with_instrument_display_identities(
                 result,
                 display_identities,
@@ -6236,7 +6442,7 @@ async def build_wallet_pnl_series(
                     activation_t0=anchor.opening.t0,
                     from_time=from_time,
                     to_time=to_time,
-                    current_truth=policy.current_truth,
+                    current_truth=policy.current_truth and not global_reasons,
                     as_of=as_of,
                     points=result.points,
                 ),

@@ -1722,6 +1722,10 @@ class PortfolioPnlCorrectionFrontier(Base):
     as_of: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
     baseline_watermarks_json: Mapped[str] = mapped_column(Text, nullable=False)
     pending_watermarks_json: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_execution_watermarks_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_manifest_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    has_fill_gap: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    expected_venues_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     prior_peak: Mapped[float | None] = mapped_column(Float, nullable=True)
     repair_from: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 

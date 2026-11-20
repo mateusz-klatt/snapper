@@ -933,3 +933,197 @@ async def test_evidence_overflow_is_refused_instead_of_silently_truncated(
         await repository.get_portfolio_pnl_correction_evidence(
             samples._scope(), samples._M1, samples._M3
         )
+
+
+@pytest.mark.parametrize(
+    ("cut", "manifest", "has_fill_gap", "venues"),
+    [
+        (None, None, None, None),
+        ({}, "a" * 64, False, frozenset({"kraken"})),
+        ({"kraken": 8, "walutomat": 4}, "f" * 64, True, frozenset({"walutomat", "kraken"})),
+    ],
+)
+async def test_execution_evidence_round_trips_with_each_financial_revision(
+    repository: SQLAlchemyRepository,
+    cut: dict[str, int] | None,
+    manifest: str | None,
+    has_fill_gap: bool | None,
+    venues: frozenset[str] | None,
+) -> None:
+    """Read back legacy nulls and certified replay evidence.
+
+    Given a checkpoint with legacy nulls or captured execution evidence and spot venues.
+    When the repository starts a generation and commits its first financial chunk.
+    Then both revisions round-trip the exact evidence and venue set.
+    """
+    scope = samples._scope()
+    request = PnlCorrectionRequest(
+        samples._M1,
+        samples._M3,
+        samples._M5,
+        {},
+        {},
+        None,
+        raw_execution_watermarks=cut,
+        execution_manifest_digest=manifest,
+        has_fill_gap=has_fill_gap,
+        expected_venues=venues,
+    )
+    started = await repository.invalidate_portfolio_pnl_correction(scope, request, None)
+    assert started.raw_execution_watermarks == cut
+    assert started.execution_manifest_digest == manifest
+    assert started.has_fill_gap is has_fill_gap
+    loaded = await repository.get_portfolio_pnl_correction_frontier(scope)
+    assert loaded == started and loaded is not None
+    assert loaded.has_fill_gap is has_fill_gap
+    assert loaded.expected_venues == venues
+
+    plan = await _plan(repository, started, samples._M2, (samples._complete_sample(),))
+    advanced = await repository.commit_portfolio_pnl_correction_chunk(scope, started, plan)
+    assert advanced.revision == started.revision + 1
+    assert advanced.raw_execution_watermarks == cut
+    assert advanced.execution_manifest_digest == manifest
+    assert advanced.has_fill_gap is has_fill_gap
+    loaded = await repository.get_portfolio_pnl_correction_frontier(scope)
+    assert loaded == advanced and loaded is not None
+    assert loaded.has_fill_gap is has_fill_gap
+    assert loaded.expected_venues == venues
+
+
+async def test_reconciled_sample_query_exposes_only_the_settled_prefix(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Expose equity through the settled correction prefix.
+
+    Given three stored samples and a correction spanning the last two minutes.
+    When a read follows correction advancement, a withheld minute, and its repair.
+    Then serving reads expose only the settled prefix and ordinary reads retain all three rows.
+    """
+    scope = samples._scope()
+    query = samples._query()
+    published = replace(query, require_reconciled=True)
+    rows = tuple(
+        samples._complete_sample(minute) for minute in (samples._M1, samples._M2, samples._M3)
+    )
+    await repository.record_portfolio_pnl_samples(rows, scope)
+    assert await repository.get_portfolio_pnl_samples(published, samples._M1, samples._M3) == list(
+        rows
+    )
+
+    request = PnlCorrectionRequest(samples._M2, samples._M3, samples._M5, {}, {}, 1250.0)
+    started = await repository.invalidate_portfolio_pnl_correction(scope, request, None)
+    assert await repository.get_portfolio_pnl_samples(published, samples._M1, samples._M3) == list(
+        rows[:1]
+    )
+    plan = await _plan(repository, started, samples._M2)
+    advanced = await repository.commit_portfolio_pnl_correction_chunk(scope, started, plan)
+    assert await repository.get_portfolio_pnl_samples(published, samples._M1, samples._M3) == list(
+        rows[:2]
+    )
+
+    withheld = replace(
+        await _plan(repository, advanced, samples._M3), withheld_minutes=(samples._M3,)
+    )
+    blocked = await repository.commit_portfolio_pnl_correction_chunk(scope, advanced, withheld)
+    assert blocked.next_minute is None and blocked.repair_from == samples._M3
+    assert await repository.get_portfolio_pnl_samples(published, samples._M1, samples._M3) == list(
+        rows[:2]
+    )
+    assert await repository.get_portfolio_pnl_samples(query, samples._M1, samples._M3) == list(rows)
+
+    repaired = await repository.invalidate_portfolio_pnl_correction(
+        scope, replace(request, start=samples._M3), blocked
+    )
+    acknowledged = replace(await _plan(repository, repaired, samples._M3), reconciles_repair=True)
+    settled = await repository.commit_portfolio_pnl_correction_chunk(scope, repaired, acknowledged)
+    assert settled.next_minute is None and settled.repair_from is None
+    assert await repository.get_portfolio_pnl_samples(published, samples._M1, samples._M3) == list(
+        rows
+    )
+
+
+async def test_reconciled_sample_query_ignores_unrelated_correction_keys(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Scope serving visibility to the exact correction key.
+
+    Given a stored sample and five active frontiers that each differ in one key field.
+    When the repository queries the sample with reconciliation required.
+    Then the sample remains visible for its own wallet, mode, currency, epoch and algorithm.
+    """
+    scope = samples._scope()
+    query = replace(samples._query(), require_reconciled=True)
+    row = samples._complete_sample()
+    await repository.record_portfolio_pnl_samples([row], scope)
+    matching: dict[str, object] = {
+        "wallet_public_id": query.wallet_public_id,
+        "mode": query.mode,
+        "valuation_ccy": query.valuation_ccy,
+        "epoch_public_id": query.epoch_public_id,
+        "calc_version": query.calc_version,
+    }
+    unrelated: tuple[dict[str, str], ...] = (
+        {"wallet_public_id": samples._OTHER_WALLET},
+        {"mode": "paper"},
+        {"valuation_ccy": "EUR"},
+        {"epoch_public_id": samples._OTHER_EPOCH},
+        {"calc_version": "5C.3"},
+    )
+    async with repository.session() as session:
+        for difference in unrelated:
+            session.add(
+                PortfolioPnlCorrectionFrontier(
+                    **{**matching, **difference},
+                    generation=1,
+                    revision=1,
+                    window_start=samples._M1,
+                    next_minute=samples._M1,
+                    tip=samples._M3,
+                    as_of=samples._M5,
+                    baseline_watermarks_json="{}",
+                    pending_watermarks_json="{}",
+                    raw_execution_watermarks_json="{}",
+                )
+            )
+        await session.commit()
+    assert await repository.get_portfolio_pnl_samples(query, samples._M1, samples._M3) == [row]
+
+
+async def test_corrupt_execution_manifest_is_refused_on_read(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Refuse a malformed execution manifest when reading a checkpoint.
+
+    Given a stored checkpoint whose manifest has been corrupted.
+    When the repository reads the checkpoint at its exact scope.
+    Then it raises a digest validation error.
+    """
+    await _start(repository)
+    async with repository.session() as session:
+        await session.execute(
+            text("UPDATE portfolio_pnl_correction_frontiers SET execution_manifest_digest = 'bad'")
+        )
+        await session.commit()
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
+        await repository.get_portfolio_pnl_correction_frontier(samples._scope())
+
+
+@pytest.mark.parametrize("payload", ["{}", "[1]", '["kraken", "kraken"]', "[]", '["Kraken"]'])
+async def test_corrupt_spot_venue_set_is_refused_on_read(
+    repository: SQLAlchemyRepository, payload: str
+) -> None:
+    """Refuse an invalid spot venue set instead of guessing the basket denominator.
+
+    Given a stored checkpoint with corrupt venue evidence.
+    When the repository loads its exact scope.
+    Then it raises a venue validation error.
+    """
+    await _start(repository)
+    async with repository.session() as session:
+        await session.execute(
+            text("UPDATE portfolio_pnl_correction_frontiers SET expected_venues_json = :venues"),
+            {"venues": payload},
+        )
+        await session.commit()
+    with pytest.raises(ValueError, match="spot venue"):
+        await repository.get_portfolio_pnl_correction_frontier(samples._scope())

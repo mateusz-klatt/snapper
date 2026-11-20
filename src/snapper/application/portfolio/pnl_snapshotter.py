@@ -6,36 +6,17 @@ Owns ONE :class:`Repository` for its lifetime and mirrors
 symmetric reverse-order stop. Single-writer safety comes from the instance-0
 lifespan gate plus the sample DAL's per-scope advisory lock.
 
-Per tick the snapshotter discovers every scope that already holds an ACTIVE USD
-live activation anchor (decision R7 — it NEVER creates one), resolves the scope's
-expected SPOT venue set (active wallet credentials minus paper minus futures-class
-venues minus credentials excluded by the shared executor topology, decision R11),
-and for each scope:
+A tick discovers executor-backed spot scopes with an active USD live anchor.
+It resumes each scope's durable correction frontier before selecting new work.
+A generation fixes the finalized tip, its evidence horizon and the pending
+execution watermark. Each tick commits at most one bounded chunk per scope.
+The sample edits, causal peak, detection baseline and next minute commit
+together, including when a chunk writes no sample rows.
 
-  1. reads the durable progress (the last active sample);
-  2. runs the EXISTING 5A series engine over the finalized catch-up window in
-     budget-bounded chunks (decision D1/R5), passing the in-memory baseline
-     watermark map so the engine reports the late-fill boundary (R3);
-  3. loads the temporal observation basket and the crypto→USD price evidence;
-  4. hands the pure planner every typed input and persists its rows through
-     :meth:`Repository.record_portfolio_pnl_samples`;
-  5. recomputes-forward and supersedes any minute a late fill invalidated (D9),
-     and self-heals retryable ``incomplete`` minutes inside the 15-minute
-     lookback (D10).
-
-Every scope is isolated: one scope's failure logs at most once per failing streak
-and never aborts the tick, and a work-budget overflow subdivides the chunk instead
-of crash-looping.
-
-The full basket prices off the crypto→USD plane, the USD identity AND the fiat
-forex plane (walutomat EUR-PLN and any fiat leg), and the position/cash partition
-uses the temporal, spec-proven spot inventory active AT EACH minute. The durable
-cold-start baseline is each sample's persisted per-exchange watermark map, so a
-restart neither rewrites history nor misses a late fill that landed during
-downtime. Every correction (late fill or self-heal) recomputes forward from the
-earliest affected minute through the tip under an optimistic supersede CAS, and a
-batch conflict or a lost CAS leaves the durable progress untouched for a clean
-retry next tick.
+A new generation scans forward or starts at the earliest late fill, retryable
+incomplete minute or outstanding repair. Its execution baseline advances only
+when that generation is reconciled. A restarted process reads the persisted
+frontier rather than inferring progress from a later sample.
 
 Correction-flow limitation (D2): 5B v1 does NOT detect a corrected mark candle —
 a finalized 1m close a venue later revises. An already-``complete`` persisted
@@ -55,16 +36,16 @@ import contextlib
 import json
 import logging
 import os
-from collections import deque
+from bisect import bisect_right
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Final
-from typing import cast
 from uuid import uuid7
 
 from sqlalchemy.exc import DBAPIError
@@ -74,17 +55,17 @@ from snapper.application.portfolio.basket_valuation import PositionInventoryEntr
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
 from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shadow_context
+from snapper.application.portfolio.pnl_correction_planner import PlannedPnlCorrection
+from snapper.application.portfolio.pnl_correction_planner import PnlCorrectionPlanInputs
+from snapper.application.portfolio.pnl_correction_planner import plan_correction_chunk
+from snapper.application.portfolio.pnl_snapshot_planner import FINALIZATION_LAG
 from snapper.application.portfolio.pnl_snapshot_planner import SELF_HEAL_LOOKBACK
-from snapper.application.portfolio.pnl_snapshot_planner import ChunkPlan
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
 from snapper.application.portfolio.pnl_snapshot_planner import MinuteInputs
 from snapper.application.portfolio.pnl_snapshot_planner import PlannedSample
 from snapper.application.portfolio.pnl_snapshot_planner import PositionVersion
 from snapper.application.portfolio.pnl_snapshot_planner import SelfHealCandidate
 from snapper.application.portfolio.pnl_snapshot_planner import WithheldMinute
-from snapper.application.portfolio.pnl_snapshot_planner import plan_catchup_chunks
-from snapper.application.portfolio.pnl_snapshot_planner import plan_catchup_window
-from snapper.application.portfolio.pnl_snapshot_planner import plan_chunk_samples
 from snapper.application.portfolio.pnl_snapshot_planner import plan_late_fill_recompute
 from snapper.application.portfolio.pnl_snapshot_planner import plan_self_heal_minutes
 from snapper.application.portfolio.pnl_snapshotter_config import ENABLED_ENV_VAR
@@ -92,8 +73,7 @@ from snapper.application.portfolio.pnl_snapshotter_config import FX_SHADOW_PINNI
 from snapper.application.portfolio.pnl_snapshotter_config import INTERVAL_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_enabled
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_interval
-from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
-from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MAX_WORK_UNITS
+from snapper.application.portfolio.pnl_timeline_service import PnlFrozenReplayEvidenceChangedError
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayMetadata
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
@@ -107,7 +87,11 @@ from snapper.application.process_manager.executor_topology import ExecutorTopolo
 from snapper.application.process_manager.executor_topology import resolve_executor_topology
 from snapper.application.services.settings import SettingsService
 from snapper.core.json_types import JsonValue
-from snapper.data.repository import PortfolioPnlSampleConflictError
+from snapper.data.pnl_correction_state import MAX_CORRECTION_CHUNK_MINUTES
+from snapper.data.pnl_correction_state import PnlCorrectionEvidence
+from snapper.data.pnl_correction_state import PnlCorrectionFrontier
+from snapper.data.pnl_correction_state import PnlCorrectionRequest
+from snapper.data.pnl_correction_state import PortfolioPnlCorrectionConflictError
 from snapper.data.repository import PortfolioPnlSampleQuery
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import Repository
@@ -128,9 +112,6 @@ _SCOPE_SKIP_MINT_IDENTITY: Final[str] = "mint_identity_executor_topology"
 _SCOPE_SKIP_NO_ANCHOR: Final[str] = "no_active_usd_anchor"
 _SCOPE_SKIP_NO_SPOT_VENUES: Final[str] = "no_spot_venues"
 _MINUTE: Final[timedelta] = timedelta(minutes=1)
-_POOL_KEY_ESTIMATE: Final[int] = 1
-"""Chunk-sizing pool estimate; the work-budget split is the true safety net."""
-
 _FAILURE_MESSAGES: Final[dict[str, str]] = {
     "sample_failed": "PortfolioPnlSnapshotter: wallet %s sample failed; continuing",
     "crypto_plane_timeout": (
@@ -148,42 +129,6 @@ _FAILURE_MESSAGES: Final[dict[str, str]] = {
 }
 """Per-failure-class log-once message templates (B4/C2): the first ``%s`` is the
 wallet, the second (conflict classes only) the offending minute(s)."""
-
-
-_ROW_PRESERVING_WITHHOLD_REASONS: Final[frozenset[PnlIncompletenessReason]] = frozenset(
-    {"attribution_sum_unrepresentable", "instrument_sum_unrepresentable"}
-)
-"""Withhold causes that must NOT cost a already-persisted minute its row.
-
-Both mean the buckets and the aggregate agree exactly and no float assignment
-can express that agreement. Nothing about the money is in doubt, so retracting
-a row that was published under an arithmetic which COULD express it would
-destroy history to satisfy a representation limit.
-
-Every other member of :data:`PnlIncompletenessReason` is excluded deliberately,
-including the ``*_reconciliation_failed`` pair: those mean the two sides
-disagree about how much money there is, which is exactly the stale-row case
-N1 exists to clear.
-"""
-
-
-def _preserves_persisted_row(withheld: WithheldMinute) -> bool:
-    """Return whether a withheld minute may keep an already-persisted row.
-
-    Fails closed toward N1 in both directions: a minute with NO recorded reason
-    is not preserved, because an unexplained withhold is not evidence that the
-    money is sound, and a mixed reason set is not preserved either, because one
-    representable-sum cause does not neutralise a co-occurring basis fault.
-
-    Args:
-        withheld: One minute the planner produced no row for.
-
-    Returns:
-        Whether every recorded cause is a representation limit.
-    """
-    return bool(withheld.reason_codes) and all(
-        code in _ROW_PRESERVING_WITHHOLD_REASONS for code in withheld.reason_codes
-    )
 
 
 def is_futures_class_exchange(exchange: str) -> bool:
@@ -270,17 +215,6 @@ class _ScopeContext:
     t0: datetime
     expected_venues: frozenset[str]
     as_of: datetime
-    last_minute: datetime | None
-    durable_baseline: dict[str, int]
-    stale_version: bool
-
-
-@dataclass(frozen=True, slots=True)
-class _Catchup:
-    """One tick's held catch-up engine runs and their advanced watermark."""
-
-    chunks: list[tuple[ChunkWindow, PnlWalletSeriesResult]]
-    metadata: PnlSeriesReplayMetadata | None
 
 
 class PortfolioPnlSnapshotter:
@@ -320,7 +254,8 @@ class PortfolioPnlSnapshotter:
         self._loop_task: asyncio.Task[None] | None = None
         self._session_id = str(uuid7())
         self._sequence = 0
-        self._baselines: dict[str, dict[str, int]] = {}
+        self._last_scheduled_wallet: str | None = None
+        self._replay_chunk_limits: dict[str, int] = {}
         self._unsupported_logged: set[str] = set()
         self._mint_identity_logged: set[str] = set()
         self._no_anchor_logged: set[str] = set()
@@ -403,7 +338,10 @@ class PortfolioPnlSnapshotter:
         )
         try:
             with activate_fx_shadow_context(self._fx_shadow_context):
-                await self._tick_valuation(repo, as_of)
+                async with asyncio.timeout(self._interval_seconds):
+                    await self._tick_valuation(repo, as_of)
+        except TimeoutError:
+            logger.warning("PortfolioPnlSnapshotter: replay tick exceeded its time budget")
         finally:
             context = self._fx_shadow_context
             self._fx_shadow_context = None
@@ -419,7 +357,8 @@ class PortfolioPnlSnapshotter:
         mint_excluded_wallets = _mint_excluded_spot_wallets(credentials, topology)
         self._prune_absent_scopes(set(venues_by_wallet))
         failures = 0
-        for wallet in sorted(venues_by_wallet):
+        for wallet in self._wallet_order(venues_by_wallet):
+            self._last_scheduled_wallet = wallet
             try:
                 conflicted = await self._process_wallet(
                     repo,
@@ -428,7 +367,12 @@ class PortfolioPnlSnapshotter:
                     as_of,
                     wallet in mint_excluded_wallets,
                 )
-            except Exception:
+            except asyncio.CancelledError:
+                self._reduce_replay_chunk(wallet)
+                raise
+            except Exception as exc:
+                if isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "57014":
+                    self._reduce_replay_chunk(wallet)
                 failures += 1
                 self._log_class(wallet, "sample_failed", is_exception=True)
                 continue
@@ -440,6 +384,21 @@ class PortfolioPnlSnapshotter:
             logger.warning(
                 "PortfolioPnlSnapshotter: %s scope(s) failed this tick; continuing", failures
             )
+
+    def _wallet_order(self, wallets: Mapping[str, frozenset[str]]) -> list[str]:
+        """Resume after the last scheduled scope so a slow wallet cannot starve its peers."""
+        ordered = sorted(wallets)
+        previous = self._last_scheduled_wallet
+        offset = bisect_right(ordered, previous) if previous is not None else 0
+        return ordered[offset:] + ordered[:offset]
+
+    def _replay_chunk_limit(self, wallet: str) -> int:
+        """Return the scope's retry limit without changing its durable cursor."""
+        return self._replay_chunk_limits.get(wallet, MAX_CORRECTION_CHUNK_MINUTES)
+
+    def _reduce_replay_chunk(self, wallet: str) -> None:
+        """Retry less valuation work after cancellation or a database query deadline."""
+        self._replay_chunk_limits[wallet] = max(1, self._replay_chunk_limit(wallet) // 2)
 
     async def _read_mint_wallet_pin(self) -> JsonValue:
         """Read the current mint pin directly from storage, failing open."""
@@ -501,10 +460,10 @@ class PortfolioPnlSnapshotter:
             for wallet, value in self._withheld_logged.items()
             if wallet in current_wallets
         }
-        self._baselines = {
-            key: value
-            for key, value in self._baselines.items()
-            if key.split("|", 1)[0] in current_wallets
+        self._replay_chunk_limits = {
+            wallet: limit
+            for wallet, limit in self._replay_chunk_limits.items()
+            if wallet in current_wallets
         }
 
     async def _process_wallet(
@@ -546,18 +505,17 @@ class PortfolioPnlSnapshotter:
                     reason=_SCOPE_SKIP_NO_SPOT_VENUES,
                 )
             return False
-        ctx = await self._build_scope_context(repo, wallet, anchor, expected_venues, as_of)
+        ctx = self._build_scope_context(wallet, anchor, expected_venues, as_of)
         return await self._sample_scope(repo, ctx)
 
-    async def _build_scope_context(
-        self,
-        repo: Repository,
+    @staticmethod
+    def _build_scope_context(
         wallet: str,
         anchor: PortfolioPnlAnchorRow,
         expected_venues: frozenset[str],
         as_of: datetime,
     ) -> _ScopeContext:
-        """Assemble the immutable per-scope binding, reading durable progress."""
+        """Bind checkpoint reads and financial writes to the same active anchor."""
         epoch = anchor["epoch_public_id"]
         t0 = anchor["point_time"]
         scope = PortfolioPnlSampleScope(
@@ -574,16 +532,6 @@ class PortfolioPnlSnapshotter:
             epoch_public_id=epoch,
             calc_version=PNL_SAMPLE_CALC_VERSION,
         )
-        active_latest = await repo.get_latest_active_portfolio_pnl_sample_any_version(scope)
-        stale_version = (
-            active_latest is not None and active_latest["calc_version"] != PNL_SAMPLE_CALC_VERSION
-        )
-        latest = await repo.get_latest_portfolio_pnl_sample(query)
-        progress = active_latest if stale_version else latest
-        last_minute = progress["point_time"] if progress is not None else None
-        durable_baseline = (
-            _parse_baseline(progress["watermarks_json"]) if progress is not None else {}
-        )
         return _ScopeContext(
             wallet_public_id=wallet,
             scope=scope,
@@ -591,9 +539,6 @@ class PortfolioPnlSnapshotter:
             t0=t0,
             expected_venues=expected_venues,
             as_of=as_of,
-            last_minute=last_minute,
-            durable_baseline=durable_baseline,
-            stale_version=stale_version,
         )
 
     def _log_once(self, seen: set[str], wallet: str, detail: str, *, reason: str) -> None:
@@ -608,93 +553,129 @@ class PortfolioPnlSnapshotter:
             extra={"scope_skip_reason": reason},
         )
 
-    def _scope_key(self, ctx: _ScopeContext) -> str:
-        """Return the in-memory baseline key for one scope."""
-        return "|".join((ctx.wallet_public_id, _LIVE_MODE, _USD, ctx.query.epoch_public_id))
-
     async def _sample_scope(self, repo: Repository, ctx: _ScopeContext) -> bool:
-        """Catch up and recompute-forward any late-fill or self-heal correction.
-
-        The durable baseline (the last sample's persisted watermark map, cached in
-        memory) drives late-fill detection, so a restart no longer treats every
-        post-anchor execution as a late fill (B2). Any correction — a late fill or
-        a healed retryable minute — recomputes FORWARD from the earliest affected
-        minute through the tip (A1). If ANY reconcile conflict occurs (a lost
-        supersede/retract CAS or a restored-minute insert conflict) the scope ABORTS
-        BEFORE catch-up (decision C1): no catch-up rows are written and the durable
-        baseline is left untouched, so the whole flow retries from durable state
-        next tick and the late fill is not silently skipped. Catch-up minutes are
-        inserted last so their causal peak reflects the corrections.
-
-        Returns:
-            Whether this scope hit a reconcile or catch-up conflict this tick.
-        """
-        scope_key = self._scope_key(ctx)
-        baseline = self._baselines.get(scope_key, ctx.durable_baseline)
-        window = plan_catchup_window(ctx.as_of, ctx.last_minute, ctx.t0)
-        catchup = (
-            await self._compute_catchup(repo, ctx, window, baseline) if window is not None else None
-        )
-        recompute_from = await self._recompute_start(repo, ctx, catchup)
-        if recompute_from is not None and ctx.last_minute is not None:
-            if await self._recompute_forward(repo, ctx, recompute_from, ctx.last_minute, baseline):
-                return True
-        if catchup is not None:
-            return await self._insert_catchup(repo, ctx, scope_key, catchup)
+        """Commit at most one replay chunk, resuming durable work before probing new evidence."""
+        try:
+            frontier = await repo.get_portfolio_pnl_correction_frontier(ctx.scope)
+            if frontier is not None and ctx.as_of < frontier.as_of:
+                return False
+            if (
+                frontier is None
+                or frontier.next_minute is None
+                or frontier.raw_execution_watermarks is None
+                or frontier.execution_manifest_digest is None
+                or frontier.has_fill_gap is None
+                or frontier.expected_venues is None
+            ):
+                frontier = await self._start_replay(repo, ctx, frontier)
+            if frontier is not None:
+                await self._advance_replay(repo, ctx, frontier)
+        except PortfolioPnlCorrectionConflictError, PnlFrozenReplayEvidenceChangedError:
+            self._log_class(ctx.wallet_public_id, "catchup_conflict", "durable frontier")
+            return True
         return False
 
-    async def _compute_catchup(
+    async def _start_replay(
         self,
         repo: Repository,
         ctx: _ScopeContext,
-        window: ChunkWindow,
-        baseline: Mapping[str, int],
-    ) -> _Catchup:
-        """Run the engine over the catch-up window, holding points for late planning.
-
-        Points are held (not yet planned) so their causal peak is read AFTER any
-        recompute-forward commits. Budget overflows subdivide the chunk.
-        """
-        pending: deque[ChunkWindow] = deque(
-            plan_catchup_chunks(window, _POOL_KEY_ESTIMATE, work_budget=PNL_TIMELINE_MAX_WORK_UNITS)
-        )
-        chunks: list[tuple[ChunkWindow, PnlWalletSeriesResult]] = []
-        metadata: PnlSeriesReplayMetadata | None = None
-        while pending:
-            chunk = pending.popleft()
-            try:
-                result = await self._series(repo, ctx, chunk, baseline)
-            except PnlTimelineWorkBudgetError:
-                pending.extendleft(reversed(self._split_chunk(chunk)))
-                continue
-            chunks.append((chunk, result))
-            if result.replay_metadata is not None:
-                metadata = result.replay_metadata
-        return _Catchup(chunks=chunks, metadata=metadata)
-
-    async def _recompute_start(
-        self, repo: Repository, ctx: _ScopeContext, catchup: _Catchup | None
-    ) -> datetime | None:
-        """Return the earliest minute a late fill or self-heal must recompute from."""
-        earliest_affected = (
-            catchup.metadata.earliest_affected_minute
-            if catchup is not None and catchup.metadata is not None
-            else None
-        )
-        late_start = plan_late_fill_recompute(earliest_affected, ctx.last_minute)
-        self_heal_start = await self._self_heal_start(repo, ctx)
-        candidates = [start for start in (late_start, self_heal_start) if start is not None]
-        if ctx.stale_version:
-            candidates.append(ctx.t0 + _MINUTE)
-        return min(candidates) if candidates else None
-
-    async def _self_heal_start(self, repo: Repository, ctx: _ScopeContext) -> datetime | None:
-        """Return the earliest retryable incomplete minute in the lookback (D10)."""
-        if ctx.last_minute is None:
+        frontier: PnlCorrectionFrontier | None,
+        *,
+        rewind: bool = False,
+    ) -> PnlCorrectionFrontier | None:
+        """Select an inclusive finalized target and freeze its execution evidence prefix."""
+        tip = ctx.as_of.replace(second=0, microsecond=0) - FINALIZATION_LAG
+        if tip <= ctx.t0:
             return None
+        if frontier is not None:
+            tip = max(tip, frontier.tip)
+        pending = await self._probe_replay(repo, ctx, frontier, tip)
+        start = (
+            ctx.t0 + _MINUTE
+            if rewind
+            else await self._replay_start(repo, ctx, frontier, tip, pending)
+        )
+        if start is None:
+            return None
+        first_minute = await repo.get_portfolio_pnl_correction_evidence(ctx.scope, start, start)
+        return await repo.invalidate_portfolio_pnl_correction(
+            ctx.scope,
+            PnlCorrectionRequest(
+                start=start,
+                tip=tip,
+                as_of=ctx.as_of,
+                baseline_watermarks=frontier.baseline_watermarks if frontier is not None else {},
+                pending_watermarks=_detection_watermarks(pending),
+                prior_peak=first_minute.prior_peak,
+                raw_execution_watermarks=pending.raw_execution_watermarks,
+                execution_manifest_digest=pending.execution_manifest_digest,
+                has_fill_gap=pending.has_fill_gap,
+                expected_venues=ctx.expected_venues,
+            ),
+            frontier,
+        )
+
+    async def _probe_replay(
+        self,
+        repo: Repository,
+        ctx: _ScopeContext,
+        frontier: PnlCorrectionFrontier | None,
+        tip: datetime,
+    ) -> PnlSeriesReplayMetadata:
+        """Read a single finalized minute to detect late executions even at a stationary tip."""
+        options = PnlSeriesReplayOptions(
+            baseline_watermarks=dict(frontier.pending_watermarks) if frontier is not None else {},
+            offload_valuation=True,
+            previous_replay_as_of=frontier.as_of if frontier is not None else None,
+            verify_replay_probe=True,
+        )
+        result = await self._series(repo, ctx, ChunkWindow(tip, tip), options)
+        metadata = result.replay_metadata
+        if (
+            metadata is None
+            or metadata.raw_execution_watermarks is None
+            or metadata.execution_manifest_digest is None
+            or metadata.has_fill_gap is None
+        ):
+            raise PortfolioPnlCorrectionConflictError("P&L replay could not certify its evidence")
+        if metadata.has_fill_gap:
+            return replace(metadata, earliest_affected_minute=ctx.t0 + _MINUTE)
+        return metadata
+
+    async def _replay_start(
+        self,
+        repo: Repository,
+        ctx: _ScopeContext,
+        frontier: PnlCorrectionFrontier | None,
+        tip: datetime,
+        pending: PnlSeriesReplayMetadata,
+    ) -> datetime | None:
+        """Recompute the oldest unresolved minute through the selected finalized tip."""
+        first = ctx.t0 + _MINUTE
+        if (
+            frontier is None
+            or frontier.raw_execution_watermarks is None
+            or frontier.execution_manifest_digest != pending.execution_manifest_digest
+            or frontier.has_fill_gap != pending.has_fill_gap
+            or frontier.expected_venues != ctx.expected_venues
+        ):
+            return first
+        late = plan_late_fill_recompute(pending.earliest_affected_minute, frontier.tip)
+        healed = await self._self_heal_start(repo, ctx, frontier.tip)
+        forward = frontier.tip + _MINUTE if frontier.tip < tip else None
+        candidates = (
+            minute for minute in (late, healed, frontier.repair_from, forward) if minute is not None
+        )
+        start = min(candidates, default=None)
+        return max(start, first) if start is not None else None
+
+    async def _self_heal_start(
+        self, repo: Repository, ctx: _ScopeContext, last_minute: datetime
+    ) -> datetime | None:
+        """Return the earliest retryable incomplete minute in the lookback (D10)."""
         cutoff = ctx.as_of.replace(second=0, microsecond=0) - SELF_HEAL_LOOKBACK
         incompletes = await repo.get_portfolio_pnl_samples(
-            ctx.query, cutoff, ctx.last_minute, status="incomplete"
+            ctx.query, cutoff, last_minute, status="incomplete"
         )
         candidates = [
             SelfHealCandidate(
@@ -749,9 +730,9 @@ class PortfolioPnlSnapshotter:
         repo: Repository,
         ctx: _ScopeContext,
         chunk: ChunkWindow,
-        baseline: Mapping[str, int],
+        options: PnlSeriesReplayOptions,
     ) -> PnlWalletSeriesResult:
-        """Run the 5A engine over one chunk with the R3 baseline watermark map."""
+        """Run the 5A engine over one chunk at the specified knowledge horizon."""
         return await build_wallet_pnl_series(
             repo,
             ctx.wallet_public_id,
@@ -763,257 +744,84 @@ class PortfolioPnlSnapshotter:
             valuation_ccy=_USD,
             policy=PnlSeriesReadPolicy(
                 allow_anchor_creation=False,
-                current_truth_horizon=True,
+                current_truth_horizon=False,
             ),
-            options=PnlSeriesReplayOptions(
-                baseline_watermarks=dict(baseline), offload_valuation=True
-            ),
+            options=options,
         )
 
-    async def _recompute_forward(
-        self,
-        repo: Repository,
-        ctx: _ScopeContext,
-        start: datetime,
-        tip: datetime,
-        baseline: Mapping[str, int],
-    ) -> bool:
-        """Recompute ``[start .. tip]`` and reconcile the changed minutes under CAS.
-
-        A changed equity at ``start`` shifts the causal peak of every later minute,
-        so the whole suffix through the tip is recomputed. On the FIRST reconcile
-        conflict the recompute STOPS (leaving the tip's watermark untouched) and
-        returns ``True`` so the scope skips catch-up and retries next tick (C1).
-
-        The persisted side is read at ANY version, always. Reconciling only
-        against rows stamped with the current version would leave a row written
-        under a previous one invisible: the merge would then treat its minute as
-        absent, take the INSERT path against a row that is still active, and
-        conflict on every tick with no path forward, while a retraction that
-        minute genuinely needed could never fire. ``stale_version`` cannot stand
-        in for this, because it is derived from the LATEST active row alone and
-        goes false again as soon as newer minutes are written above an older row
-        left in the middle of the window.
-
-        Returns:
-            Whether any chunk hit a reconcile conflict.
-        """
-        rows = await repo.get_active_portfolio_pnl_samples_any_version(ctx.scope, start, tip)
-        current = {row["point_time"]: row for row in rows}
-        pending: deque[ChunkWindow] = deque(
-            plan_catchup_chunks(
-                ChunkWindow(start=start, end=tip),
-                _POOL_KEY_ESTIMATE,
-                work_budget=PNL_TIMELINE_MAX_WORK_UNITS,
+    async def _advance_replay(
+        self, repo: Repository, ctx: _ScopeContext, frontier: PnlCorrectionFrontier
+    ) -> None:
+        """Resume one bounded chunk at the generation's fixed evidence horizon."""
+        start = frontier.next_minute
+        venues = frontier.expected_venues
+        if start is None or venues is None:
+            raise PortfolioPnlCorrectionConflictError("P&L replay has no certified pending window")
+        limit = self._replay_chunk_limit(ctx.wallet_public_id)
+        end = min(start + (limit - 1) * _MINUTE, frontier.tip)
+        frozen = replace(ctx, as_of=frontier.as_of, expected_venues=venues)
+        try:
+            chunk, result = await self._replay_series(
+                repo, frozen, ChunkWindow(start, end), frontier
             )
+        except PnlFrozenReplayEvidenceChangedError:
+            await self._start_replay(repo, ctx, frontier, rewind=True)
+            return
+        evidence = await repo.get_portfolio_pnl_correction_evidence(
+            ctx.scope, chunk.start, chunk.end
         )
-        while pending:
-            chunk = pending.popleft()
-            try:
-                result = await self._series(repo, ctx, chunk, baseline)
-            except PnlTimelineWorkBudgetError:
-                pending.extendleft(reversed(self._split_chunk(chunk)))
-                continue
-            if await self._reconcile_changed(repo, ctx, result, chunk, current):
-                return True
-        return False
+        if evidence.prior_peak != frontier.prior_peak:
+            await self._rewind_replay(repo, frozen, frontier)
+            return
+        plan = await self._plan_chunk(repo, frozen, result, evidence)
+        await repo.commit_portfolio_pnl_correction_chunk(ctx.scope, frontier, plan.chunk)
+        self._report_withheld(ctx.wallet_public_id, plan.withheld, bool(plan.chunk.edits))
 
-    async def _reconcile_changed(
+    async def _replay_series(
         self,
         repo: Repository,
         ctx: _ScopeContext,
-        result: PnlWalletSeriesResult,
         chunk: ChunkWindow,
-        current: Mapping[datetime, PortfolioPnlSampleRow],
-    ) -> bool:
-        """Reconcile one recomputed chunk against its active rows under CAS.
-
-        A full three-way merge over the recompute window: a planned minute absent
-        from the persisted rows is INSERTED (a formerly-untrusted minute that a
-        late execution restored — catch-up can never revisit it, decision P1); a
-        planned minute that changed is superseded; a persisted minute the recompute
-        no longer produces is RETRACTED so no stale monetary row keeps serving or
-        contaminating the causal peak (N1); an identical recompute is skipped. The
-        FIRST conflict (lost CAS or batch conflict) aborts and returns ``True`` (C1).
-
-        N1 has ONE exception, and it exists because retraction here is
-        operationally irreversible: the write is an SCD2 close with no successor,
-        catch-up can never revisit a withheld minute, and self-heal only finds
-        persisted ``incomplete`` rows while a withheld minute persists nothing at
-        all. A minute withheld SOLELY because no float assignment can express an
-        agreement the arithmetic still reaches
-        (:func:`_preserves_persisted_row`) keeps its persisted row. Every other
-        withheld reason, any mixed reason set, and absence from the plan
-        entirely still retract — so a genuine basis change, a scope-order
-        regression or a disagreement about how much money there is all behave
-        exactly as before. The preserved row is left at the version that wrote
-        it; restamping it would claim an arithmetic verified a value it provably
-        cannot reproduce.
-
-        Returns:
-            Whether a reconcile conflict occurred.
-        """
-        watermarks_json = _watermarks_json(result.replay_metadata)
-        prior_peak = await repo.get_portfolio_pnl_sample_peak(ctx.query, chunk.start)
-        plan = await self._plan_chunk(repo, ctx, result, chunk, prior_peak)
-        planned = {sample.point_time: sample for sample in plan.samples}
-        preserved = {
-            minute.point_time for minute in plan.withheld if _preserves_persisted_row(minute)
-        }
-        for point_time, existing in sorted(current.items()):
-            if not chunk.start <= point_time <= chunk.end:
-                continue
-            sample = planned.get(point_time)
-            if sample is None and point_time in preserved:
-                continue
-            if await self._reconcile_minute(repo, ctx, existing, sample, watermarks_json):
-                return True
-        inserts = [
-            self._to_row(sample, ctx, watermarks_json)
-            for point_time, sample in sorted(planned.items())
-            if point_time not in current
-        ]
-        return bool(inserts) and await self._record_recompute_inserts(repo, ctx, inserts)
-
-    async def _reconcile_minute(
-        self,
-        repo: Repository,
-        ctx: _ScopeContext,
-        existing: PortfolioPnlSampleRow,
-        sample: PlannedSample | None,
-        watermarks_json: str,
-    ) -> bool:
-        """Retract, supersede, or keep one persisted minute against its plan.
-
-        The caller has already excluded the one minute that keeps its row (a
-        row-preserving withhold with no planned sample), so ``None`` here
-        means the recompute genuinely no longer produces the minute and the
-        N1 retraction applies.
-
-        Returns:
-            Whether a reconcile conflict occurred.
-        """
-        if sample is None:
-            return await self._retract(repo, ctx, existing["point_time"], existing)
-        replacement = self._to_row(sample, ctx, watermarks_json)
-        if _sample_is_settled(existing, replacement):
-            return False
-        return await self._supersede(repo, ctx, replacement, existing)
-
-    async def _record_recompute_inserts(
-        self, repo: Repository, ctx: _ScopeContext, rows: list[PortfolioPnlSampleRow]
-    ) -> bool:
-        """Insert the restored minutes via the batch writer; report any conflict (P1/B1)."""
-        outcome = await repo.record_portfolio_pnl_samples(rows, ctx.scope)
-        if outcome["conflicts"]:
-            self._log_class(ctx.wallet_public_id, "recompute_insert", outcome["conflicts"])
-            return True
-        return False
-
-    async def _supersede(
-        self,
-        repo: Repository,
-        ctx: _ScopeContext,
-        replacement: PortfolioPnlSampleRow,
-        existing: PortfolioPnlSampleRow,
-    ) -> bool:
-        """CAS-supersede one changed minute; report a lost CAS for retry (B3/C1).
-
-        Returns:
-            Whether the optimistic CAS was lost.
-        """
-        try:
-            await repo.supersede_portfolio_pnl_sample(
-                ctx.scope,
-                replacement,
-                derived_suffix_reconciliation=True,
-                expected_public_id=existing["public_id"],
-            )
-            return False
-        except PortfolioPnlSampleConflictError:
-            self._log_class(ctx.wallet_public_id, "supersede_cas", replacement["point_time"])
-            return True
-
-    async def _retract(
-        self,
-        repo: Repository,
-        ctx: _ScopeContext,
-        point_time: datetime,
-        existing: PortfolioPnlSampleRow,
-    ) -> bool:
-        """CAS-retract one now-untrusted minute; report a lost CAS for retry (N1/C1).
-
-        Returns:
-            Whether the optimistic CAS was lost.
-        """
-        try:
-            await repo.retract_portfolio_pnl_sample(
-                ctx.scope,
-                point_time,
-                expected_public_id=existing["public_id"],
-                bus_time=ctx.as_of,
-            )
-            return False
-        except PortfolioPnlSampleConflictError:
-            self._log_class(ctx.wallet_public_id, "retract_cas", point_time)
-            return True
-
-    async def _insert_catchup(
-        self, repo: Repository, ctx: _ScopeContext, scope_key: str, catchup: _Catchup
-    ) -> bool:
-        """Plan and insert the held catch-up chunks; advance baseline if conflict-free.
-
-        STOPS at the FIRST batch conflict — no LATER chunk may be written once any
-        chunk conflicts, so durable progress never crosses a gap (a chunk N
-        conflict must not let chunk N+1 commit its advanced watermark). The scope
-        retries next tick and re-plans from the last contiguous committed chunk.
-        The baseline advances only when every chunk committed cleanly (B1/C1).
-
-        Every chunk's withheld minutes are collected whether or not it wrote, so
-        the alarm reports the whole tick's holes rather than the last chunk's.
-
-        A tick that leaves ANY planned minute unwritten also leaves the baseline
-        alone. The baseline is a late-fill DETECTOR, and advancing it past the
-        executions that produced an unwritten minute destroys the only trigger
-        that would ever revisit that minute: catch-up resumes after the latest
-        ACTIVE row, so a retracted interior minute is already behind the resume
-        point, and self-heal can only see minutes that persisted an ``incomplete``
-        row — which a withheld minute never does. The result would be a hole that
-        is silent AND permanent.
-
-        The cost is small, which is not obvious and was got wrong once:
-        ``_recompute_forward`` ends at ``ctx.last_minute``, the last PERSISTED
-        minute, and :func:`plan_late_fill_recompute` refuses an affected minute
-        later than that. So an unadvanced baseline re-runs a span bounded by the
-        persisted tip, never the whole dark tail.
-
-        Returns:
-            Whether a chunk's batch write reported a conflict.
-        """
-        withheld: list[WithheldMinute] = []
-        committed = False
-        conflicted = False
-        for chunk, result in catchup.chunks:
-            watermarks_json = _watermarks_json(result.replay_metadata)
-            prior_peak = await repo.get_portfolio_pnl_sample_peak(ctx.query, chunk.start)
-            plan = await self._plan_chunk(repo, ctx, result, chunk, prior_peak)
-            withheld.extend(plan.withheld)
-            rows = [self._to_row(sample, ctx, watermarks_json) for sample in plan.samples]
-            if not rows:
-                continue
-            outcome = await repo.record_portfolio_pnl_samples(rows, ctx.scope)
-            if outcome["conflicts"]:
-                self._log_class(ctx.wallet_public_id, "catchup_conflict", outcome["conflicts"])
-                conflicted = True
-                break
-            committed = True
-        self._report_withheld(ctx.wallet_public_id, withheld, committed)
-        if conflicted or withheld:
-            return conflicted
-        self._baselines[scope_key] = (
-            catchup.metadata.max_scope_sequence_by_exchange if catchup.metadata is not None else {}
+        frontier: PnlCorrectionFrontier,
+    ) -> tuple[ChunkWindow, PnlWalletSeriesResult]:
+        """Subdivide work-budget overflow without scheduling another successful chunk."""
+        options = PnlSeriesReplayOptions(
+            baseline_watermarks=dict(frontier.baseline_watermarks),
+            offload_valuation=True,
+            frozen_execution_watermarks=frontier.raw_execution_watermarks,
+            frozen_execution_manifest_digest=frontier.execution_manifest_digest,
+            frozen_has_fill_gap=frontier.has_fill_gap,
         )
-        return False
+        while True:
+            try:
+                result = await self._series(repo, ctx, chunk, options)
+            except PnlTimelineWorkBudgetError:
+                chunk = self._split_chunk(chunk)[0]
+                continue
+            if result.replay_metadata is None:
+                raise PortfolioPnlCorrectionConflictError("P&L replay anchor is unavailable")
+            return chunk, result
+
+    async def _rewind_replay(
+        self, repo: Repository, ctx: _ScopeContext, frontier: PnlCorrectionFrontier
+    ) -> None:
+        """Rebuild the causal prefix after a concurrent change to an earlier peak."""
+        await repo.invalidate_portfolio_pnl_correction(
+            ctx.scope,
+            PnlCorrectionRequest(
+                start=ctx.t0 + _MINUTE,
+                tip=frontier.tip,
+                as_of=frontier.as_of,
+                baseline_watermarks=frontier.baseline_watermarks,
+                pending_watermarks=frontier.pending_watermarks,
+                prior_peak=None,
+                raw_execution_watermarks=frontier.raw_execution_watermarks,
+                execution_manifest_digest=frontier.execution_manifest_digest,
+                has_fill_gap=frontier.has_fill_gap,
+                expected_venues=frontier.expected_venues,
+            ),
+            frontier,
+        )
 
     def _report_withheld(
         self, wallet: str, withheld: Sequence[WithheldMinute], committed: bool
@@ -1062,22 +870,30 @@ class PortfolioPnlSnapshotter:
         repo: Repository,
         ctx: _ScopeContext,
         result: PnlWalletSeriesResult,
-        chunk: ChunkWindow,
-        prior_peak: float | None,
-    ) -> ChunkPlan:
-        """Load a chunk's observation, price and position evidence and plan it."""
-        observations, evidence = await self._load_chunk_evidence(repo, ctx, chunk)
-        position_versions = await self._load_position_versions(repo, ctx, chunk)
-        minute_inputs = [
-            MinuteInputs(
-                point=point,
-                attempts=observations.get(point.point_time, {}),
-                evidence=evidence,
+        physical_evidence: PnlCorrectionEvidence,
+    ) -> PlannedPnlCorrection:
+        """Plan each minute against the exact financial versions and causal prefix read."""
+        chunk = ChunkWindow(physical_evidence.start, physical_evidence.end)
+        observations, valuation = await self._load_chunk_evidence(repo, ctx, chunk)
+        positions = await self._load_position_versions(repo, ctx, chunk)
+        watermarks = _watermarks_json(result.replay_metadata)
+        return plan_correction_chunk(
+            PnlCorrectionPlanInputs(
+                evidence=physical_evidence,
+                minute_inputs=[
+                    MinuteInputs(
+                        point=point,
+                        attempts=observations.get(point.point_time, {}),
+                        evidence=valuation,
+                    )
+                    for point in result.points
+                    if chunk.start <= point.point_time <= chunk.end
+                ],
+                expected_venues=ctx.expected_venues,
+                position_versions=positions,
+                make_row=lambda sample: self._to_row(sample, ctx, watermarks),
             )
-            for point in result.points
-            if chunk.start <= point.point_time <= chunk.end
-        ]
-        return plan_chunk_samples(minute_inputs, ctx.expected_venues, position_versions, prior_peak)
+        )
 
     async def _load_position_versions(
         self, repo: Repository, ctx: _ScopeContext, chunk: ChunkWindow
@@ -1110,18 +926,14 @@ class PortfolioPnlSnapshotter:
         ValuationEvidence,
     ]:
         """Load the temporal basket per minute and the shared crypto price plane."""
-        exchanges = sorted(ctx.expected_venues)
-        observations: dict[datetime, dict[str, VenueAccountObservationAttemptRow]] = {}
-        currencies: set[str] = set()
-        minute = chunk.start
-        while minute <= chunk.end:
-            attempts = await repo.get_venue_account_observation_attempts_at(
-                ctx.wallet_public_id, exchanges, _LIVE_MODE, minute
-            )
-            observations[minute] = attempts
-            for attempt in attempts.values():
-                currencies |= _observed_currencies(attempt)
-            minute += _MINUTE
+        attempts = await repo.get_venue_account_observation_attempt_stream(
+            ctx.wallet_public_id,
+            sorted(ctx.expected_venues),
+            _LIVE_MODE,
+            chunk.start,
+            chunk.end,
+        )
+        observations, currencies = _observation_grid(attempts, chunk)
         crypto_planes = await self._load_crypto_planes(repo, ctx, chunk, currencies)
         fiat_rates, fiat_venues, fiat_versions = await load_basket_fiat_evidence(
             repo,
@@ -1209,22 +1021,11 @@ class PortfolioPnlSnapshotter:
         }
 
 
-_SAMPLE_VALUE_KEYS: Final[tuple[str, ...]] = (
-    "valuation_status",
-    "realized_pnl",
-    "fee_pnl",
-    "accrual_pnl",
-    "external_flow_adjustment",
-    "unrealized_pnl",
-    "cash_usd",
-    "position_value_usd",
-    "drawdown",
-    "mark_source",
-    "mark_time",
-    "audit_json",
-    "watermarks_json",
-)
-"""The value columns that decide whether a recompute actually changed a sample."""
+def _detection_watermarks(metadata: PnlSeriesReplayMetadata) -> Mapping[str, int]:
+    """Use the certified durable prefix when a previous checkpoint was supplied."""
+    if metadata.detection_watermarks is not None:
+        return metadata.detection_watermarks
+    return metadata.max_scope_sequence_by_exchange
 
 
 def _watermarks_json(metadata: PnlSeriesReplayMetadata | None) -> str:
@@ -1233,71 +1034,25 @@ def _watermarks_json(metadata: PnlSeriesReplayMetadata | None) -> str:
     return json.dumps(watermarks, allow_nan=False, separators=(",", ":"), sort_keys=True)
 
 
-def _parse_baseline(watermarks_json: str) -> dict[str, int]:
-    """Parse a persisted watermark map into the durable cold-start baseline (B2).
-
-    A malformed or non-map payload yields an empty baseline (fail-safe: the tick
-    then treats the whole suffix as potentially late, all idempotent).
-
-    Args:
-        watermarks_json: The latest active sample's persisted watermark map.
-
-    Returns:
-        The per-exchange watermark map, empty on any parse fault.
-    """
-    try:
-        payload = json.loads(watermarks_json)
-    except ValueError, TypeError:
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    return {
-        exchange: sequence
-        for exchange, sequence in payload.items()
-        if isinstance(exchange, str)
-        and isinstance(sequence, int)
-        and not isinstance(sequence, bool)
-    }
-
-
-def _sample_values_equal(
-    existing: PortfolioPnlSampleRow, replacement: PortfolioPnlSampleRow
-) -> bool:
-    """Return whether a recompute produced a byte-identical value for one minute."""
-    left = cast(Mapping[str, object], existing)
-    right = cast(Mapping[str, object], replacement)
-    return all(left[key] == right[key] for key in _SAMPLE_VALUE_KEYS)
-
-
-def _sample_is_settled(existing: PortfolioPnlSampleRow, replacement: PortfolioPnlSampleRow) -> bool:
-    """Return whether a recompute leaves a persisted minute needing no write.
-
-    Equal VALUES are not sufficient. The read surfaces filter on
-    ``calc_version``, so a row the current algorithm reproduces exactly but
-    which is still stamped with an older version is invisible to every
-    version-pinned read — including the scope's own progress. That keeps
-    ``stale_version`` true, which re-schedules the same from-``t0`` recompute on
-    every tick, which reproduces the same rows, forever. A version bump on a
-    series whose values do not change is precisely the case that loops.
-
-    Restamping such a row is honest rather than cosmetic: the current algorithm
-    ran over the same evidence and produced the same number, so the new version
-    genuinely verified it. The rows this must NOT touch never arrive here — a
-    minute the arithmetic can no longer reproduce is withheld, lands in the
-    ``sample is None`` branch, and is settled by :func:`_preserves_persisted_row`
-    instead.
-
-    Args:
-        existing: The persisted row.
-        replacement: The row the recompute produced for the same minute.
-
-    Returns:
-        Whether both the values and the algorithm version already agree.
-    """
-    return (
-        _sample_values_equal(existing, replacement)
-        and existing["calc_version"] == replacement["calc_version"]
-    )
+def _observation_grid(
+    attempts: Sequence[VenueAccountObservationAttemptRow], chunk: ChunkWindow
+) -> tuple[dict[datetime, dict[str, VenueAccountObservationAttemptRow]], set[str]]:
+    """Fold the ordered attempt stream into one latest observation per exchange per minute."""
+    stream = iter(attempts)
+    upcoming = next(stream, None)
+    latest: dict[str, VenueAccountObservationAttemptRow] = {}
+    grid: dict[datetime, dict[str, VenueAccountObservationAttemptRow]] = {}
+    currencies: set[str] = set()
+    minute = chunk.start
+    while minute <= chunk.end:
+        while upcoming is not None and upcoming["timestamp"] <= minute:
+            latest[upcoming["exchange"]] = upcoming
+            upcoming = next(stream, None)
+        grid[minute] = latest.copy()
+        for attempt in latest.values():
+            currencies.update(_observed_currencies(attempt))
+        minute += _MINUTE
+    return grid, currencies
 
 
 def _observed_currencies(attempt: VenueAccountObservationAttemptRow) -> set[str]:

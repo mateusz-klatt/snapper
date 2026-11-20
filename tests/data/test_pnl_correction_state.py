@@ -94,14 +94,26 @@ def test_completed_frontier_can_be_invalidated_without_losing_published_baseline
 
 def test_input_watermark_mutation_cannot_change_a_created_checkpoint() -> None:
     """A caller retaining a mutable input dictionary cannot rewrite committed control."""
-    baseline, pending = {"kraken": 1}, {"kraken": 5}
+    baseline, pending, raw = {"kraken": 1}, {"kraken": 5}, {"kraken": 7}
     frontier = start_correction_frontier(
-        KEY, replace(REQUEST, baseline_watermarks=baseline, pending_watermarks=pending), None
+        KEY,
+        replace(
+            REQUEST,
+            baseline_watermarks=baseline,
+            pending_watermarks=pending,
+            raw_execution_watermarks=raw,
+        ),
+        None,
     )
     baseline["kraken"] = 100
     pending["kraken"] = 200
+    raw["kraken"] = 300
     assert frontier.baseline_watermarks == {"kraken": 1}
     assert frontier.pending_watermarks == {"kraken": 5}
+    assert frontier.raw_execution_watermarks == {"kraken": 7}
+    advanced = advance_correction_frontier(frontier, _chunk(samples._M1, (), None))
+    assert advanced.raw_execution_watermarks == {"kraken": 7}
+    assert advanced.raw_execution_watermarks is not frontier.raw_execution_watermarks
 
 
 @pytest.mark.parametrize(
@@ -118,6 +130,11 @@ def test_input_watermark_mutation_cannot_change_a_created_checkpoint() -> None:
         replace(REQUEST, prior_peak=float("inf")),
         replace(REQUEST, pending_watermarks={}),
         replace(REQUEST, baseline_watermarks={"kraken": 6}),
+        replace(REQUEST, raw_execution_watermarks={"kraken": True}),
+        replace(REQUEST, execution_manifest_digest="a" * 63),
+        replace(REQUEST, execution_manifest_digest="A" * 64),
+        replace(REQUEST, execution_manifest_digest="z" * 64),
+        replace(REQUEST, execution_manifest_digest=cast(str, 123)),
     ],
 )
 def test_invalid_generation_evidence_is_refused(candidate: PnlCorrectionRequest) -> None:
@@ -254,3 +271,121 @@ def test_rewind_retains_repair_until_explicitly_reconciled_through_the_tip() -> 
     repaired = advance_correction_frontier(partial, last)
     assert repaired.repair_from is None
     assert repaired.baseline_watermarks == {"kraken": 5}
+
+
+@pytest.mark.parametrize("cut", [None, {}, {"kraken": 6}, {"walutomat": 8}])
+def test_an_established_raw_execution_cut_cannot_be_forgotten(cut: dict[str, int] | None) -> None:
+    """Reject a generation that discards certified execution evidence.
+
+    Given a checkpoint with a nonempty physical execution prefix.
+    When a successor omits the prefix, removes its venue or lowers its sequence.
+    Then the transition raises a watermark validation error.
+    """
+    current = start_correction_frontier(
+        KEY, replace(REQUEST, raw_execution_watermarks={"kraken": 7}), None
+    )
+    with pytest.raises(ValueError, match="raw execution watermarks|watermarks must not move"):
+        start_correction_frontier(KEY, replace(REQUEST, raw_execution_watermarks=cut), current)
+
+
+def test_a_new_generation_can_certify_a_longer_raw_execution_prefix() -> None:
+    """Certify an extended execution prefix in a new generation.
+
+    Given a checkpoint that records one venue's raw sequence and a legacy null manifest.
+    When an explicit invalidation supplies a longer prefix and certifies its manifest.
+    Then the generation advances with the new evidence and the original checkpoint is preserved.
+    """
+    current = start_correction_frontier(
+        KEY, replace(REQUEST, raw_execution_watermarks={"kraken": 7}), None
+    )
+    request = replace(
+        REQUEST,
+        raw_execution_watermarks={"kraken": 10, "walutomat": 2},
+        execution_manifest_digest="a" * 64,
+    )
+    renewed = start_correction_frontier(KEY, request, current)
+    assert renewed.raw_execution_watermarks == {"kraken": 10, "walutomat": 2}
+    assert renewed.generation == current.generation + 1
+    assert current.raw_execution_watermarks == {"kraken": 7}
+    assert renewed.execution_manifest_digest == "a" * 64
+    assert current.execution_manifest_digest is None
+
+
+def test_new_generation_requires_a_manifest_after_an_attested_cut() -> None:
+    """Preserve the pinned manifest across chunks.
+
+    Given a generation with a certified execution manifest.
+    When it advances a chunk and a successor is proposed with or without a new manifest.
+    Then advancement retains the digest and a successor requires a certified replacement.
+    """
+    request = replace(REQUEST, execution_manifest_digest="a" * 64)
+    started = start_correction_frontier(KEY, request, None)
+    partial = advance_correction_frontier(started, _chunk(samples._M1, (), None))
+    assert partial.execution_manifest_digest == "a" * 64
+    with pytest.raises(ValueError, match="retain its execution manifest digest"):
+        start_correction_frontier(KEY, REQUEST, partial)
+    renewed = start_correction_frontier(
+        KEY, replace(request, execution_manifest_digest="b" * 64), partial
+    )
+    assert renewed.execution_manifest_digest == "b" * 64
+
+
+@pytest.mark.parametrize("has_fill_gap", [False, True])
+def test_certified_fill_gap_verdict_survives_chunk_advancement(has_fill_gap: bool) -> None:
+    """Preserve the pinned fill-gap verdict across chunks.
+
+    Given a generation with a verdict of true or false.
+    When a chunk advances and a successor is proposed with an absent or updated verdict.
+    Then the chunk retains its verdict and the successor requires an explicit verdict.
+    """
+    request = replace(REQUEST, has_fill_gap=has_fill_gap)
+    started = start_correction_frontier(KEY, request, None)
+    partial = advance_correction_frontier(started, _chunk(samples._M1, (), None))
+    assert partial.has_fill_gap is has_fill_gap
+    with pytest.raises(ValueError, match="retain its fill-gap verdict"):
+        start_correction_frontier(KEY, REQUEST, partial)
+    changed = replace(request, has_fill_gap=not has_fill_gap)
+    renewed = start_correction_frontier(KEY, changed, partial)
+    assert renewed.has_fill_gap is changed.has_fill_gap
+
+
+@pytest.mark.parametrize(
+    "venues",
+    [
+        cast(frozenset[str], ["kraken"]),
+        frozenset(),
+        frozenset({cast(str, 3)}),
+        frozenset({""}),
+        frozenset({"Kraken"}),
+        frozenset({"krak en"}),
+    ],
+)
+def test_certified_spot_venue_set_must_be_nonempty_and_canonical(venues: frozenset[str]) -> None:
+    """Refuse a malformed spot basket denominator at generation start.
+
+    Given a request with a malformed or empty claimed spot venue set.
+    When the state transition attempts to start a generation.
+    Then it rejects the invalid set before admitting any replay work.
+    """
+    with pytest.raises(ValueError, match="nonempty canonical spot venue set"):
+        start_correction_frontier(KEY, replace(REQUEST, expected_venues=venues), None)
+
+
+def test_certified_spot_venue_set_survives_chunk_advancement() -> None:
+    """Keep the original spot venue denominator through every chunk.
+
+    Given a generation whose basket has two certified spot venues.
+    When a chunk advances and a successor attempts to omit or replace its spot venue set.
+    Then the chunk retains both venues and the successor requires an explicit certified set.
+    """
+    venues = frozenset({"kraken", "walutomat"})
+    request = replace(REQUEST, expected_venues=venues)
+    started = start_correction_frontier(KEY, request, None)
+    partial = advance_correction_frontier(started, _chunk(samples._M1, (), None))
+    assert partial.expected_venues == venues
+    with pytest.raises(ValueError, match="retain its certified spot venues"):
+        start_correction_frontier(KEY, REQUEST, partial)
+    replacement = frozenset({"kraken"})
+    renewed = start_correction_frontier(KEY, replace(request, expected_venues=replacement), partial)
+    assert renewed.expected_venues == replacement
+    assert partial.expected_venues == venues
