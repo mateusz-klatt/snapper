@@ -1,6 +1,7 @@
 """Tests for OutboxDispatcher — durable trade command delivery."""
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -62,6 +63,18 @@ def _make_cmd_row(public_id: str = "cmd-1") -> TradeCommandRow:
     }
 
 
+async def _wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
+    """Poll predicate until it returns True or the deadline expires.
+
+    Args:
+        predicate: Zero-argument callable returning True once the awaited effect occurs.
+        timeout: Maximum wait duration in seconds before raising TimeoutError.
+    """
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0.005)
+
+
 @pytest.mark.asyncio
 async def test_dispatch_publishes_and_updates_status() -> None:
     """Dispatcher publishes undispatched command and marks it dispatched.
@@ -90,7 +103,7 @@ async def test_dispatch_publishes_and_updates_status() -> None:
 
     async def _run_briefly() -> None:
         task = asyncio.create_task(dispatcher.run())
-        await asyncio.sleep(0.05)
+        await _wait_until(lambda: repo.bulk_dispatch_trade_commands.await_count >= 1)
         dispatcher.stop()
         await task
 
@@ -131,7 +144,7 @@ async def test_dispatch_handles_publish_failure() -> None:
 
     async def _run_briefly() -> None:
         task = asyncio.create_task(dispatcher.run())
-        await asyncio.sleep(0.05)
+        await _wait_until(lambda: repo.update_trade_command_status.await_count >= 1)
         dispatcher.stop()
         await task
 
@@ -144,11 +157,11 @@ async def test_dispatch_handles_publish_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_notify_wakes_dispatcher() -> None:
-    """Notify signal wakes the dispatcher immediately.
+    """Notify signal wakes the dispatcher before the poll interval.
 
     Given: a dispatcher with a long poll interval,
     When: notify() is called after a command is written,
-    Then: the command is dispatched within milliseconds, not at poll interval.
+    Then: the command is dispatched well before the 10 s poll interval expires.
     """
     cmd = _make_cmd_row()
     call_count = 0
@@ -171,7 +184,7 @@ async def test_notify_wakes_dispatcher() -> None:
         task = asyncio.create_task(dispatcher.run())
         await asyncio.sleep(0.01)
         dispatcher.notify()
-        await asyncio.sleep(0.05)
+        await _wait_until(lambda: publish_fn.await_count >= 1)
         dispatcher.stop()
         await task
 
@@ -193,7 +206,7 @@ async def test_stop_gracefully() -> None:
     dispatcher = OutboxDispatcher(repository=repo, publish_fn=None, poll_interval=0.01)
 
     task = asyncio.create_task(dispatcher.run())
-    await asyncio.sleep(0.03)
+    await _wait_until(lambda: repo.get_undispatched_commands.await_count >= 1)
     dispatcher.stop()
     await asyncio.wait_for(task, timeout=1.0)
 
@@ -224,7 +237,7 @@ async def test_no_publish_fn_skips_publish() -> None:
     dispatcher = OutboxDispatcher(repository=repo, publish_fn=None, poll_interval=0.01)
 
     task = asyncio.create_task(dispatcher.run())
-    await asyncio.sleep(0.05)
+    await _wait_until(lambda: repo.bulk_dispatch_trade_commands.await_count >= 1)
     dispatcher.stop()
     await task
 
@@ -283,7 +296,7 @@ async def test_dispatch_post_publish_db_failure_no_revert() -> None:
     dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn, poll_interval=0.01)
 
     task = asyncio.create_task(dispatcher.run())
-    await asyncio.sleep(0.05)
+    await _wait_until(lambda: repo.bulk_dispatch_trade_commands.await_count >= 1)
     dispatcher.stop()
     await task
 
@@ -318,7 +331,7 @@ async def test_dispatch_revert_db_failure_logged() -> None:
     dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn, poll_interval=0.01)
 
     task = asyncio.create_task(dispatcher.run())
-    await asyncio.sleep(0.05)
+    await _wait_until(lambda: repo.update_trade_command_status.await_count >= 1)
     dispatcher.stop()
     await task
 
