@@ -717,6 +717,8 @@ class UserService:
             target = User.username == user_id
             if is_active is False:
                 await self._prepare_oauth_authority_reduction(session, target)
+            else:
+                await self._begin_user_write(session)
             db_user = await self._lock_current_user(session, target)
             if db_user is None:
                 return None
@@ -791,6 +793,7 @@ class UserService:
             UserAuthorityConflictError: If the current user version changed.
         """
         async with self.repository.session() as session:
+            await self._begin_user_write(session)
             target = User.username == user_id
             db_user = await self._lock_current_user(session, target)
             if db_user is None:
@@ -984,15 +987,39 @@ class UserService:
         await get_token_manager().revoke_user_sessions(user_public_id, self.repository)
         return True
 
-    async def _prepare_oauth_authority_reduction(
-        self, session: AsyncSession, target: ColumnElement[bool]
-    ) -> None:
-        """Serialize SQLite writers and follow OAuth's owner-before-delegate lock order."""
+    async def _begin_user_write(self, session: AsyncSession) -> None:
+        """Start an immediate SQLite write or pin PostgreSQL to READ COMMITTED.
+
+        SQLite keeps legacy transaction control here and ignores ``FOR UPDATE``,
+        so plain reads do not open a transaction or block concurrent writers.
+        Emitting ``BEGIN IMMEDIATE`` first serializes user SCD2 writers. On
+        PostgreSQL, pinning ``READ COMMITTED`` prevents ``REPEATABLE READ``
+        or ``SERIALIZABLE`` role/database defaults from failing with SQLSTATE
+        40001 instead of letting ``_lock_current_user`` detect and retry races.
+
+        Args:
+            session: Open database session for the write attempt.
+        """
         dialect = self.repository.dialect_name
         if dialect == "sqlite":
             await session.execute(text("BEGIN IMMEDIATE"))
         elif dialect == "postgresql":
             await session.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+
+    async def _prepare_oauth_authority_reduction(
+        self, session: AsyncSession, target: ColumnElement[bool]
+    ) -> None:
+        """Pin transaction isolation/lock start and follow owner-before-delegate lock order.
+
+        Args:
+            session: Open transaction for the authority-reducing write.
+            target: Predicate identifying the target user row.
+
+        Raises:
+            UserAuthorityConflictError: If an active grant owner version changed.
+        """
+        await self._begin_user_write(session)
+        if self.repository.dialect_name == "postgresql":
             delegate_id = (
                 select(User.public_id)
                 .where(target, *where_active_now(User))
@@ -1167,7 +1194,7 @@ class UserService:
     async def _change_password_once(
         self, user_id: str, old_password: str, new_password: str
     ) -> bool:
-        """Verify and replace the password on the locked active user version.
+        """Verify outside the write lock, then replace the password on the locked version.
 
         Args:
             user_id: Target username.
@@ -1180,18 +1207,32 @@ class UserService:
         Raises:
             UserAuthorityConflictError: If the current user version changed.
         """
+        target = User.username == user_id
         async with self.repository.session() as session:
-            target = User.username == user_id
+            read_hash = await session.scalar(
+                select(User.password_hash).where(
+                    target,
+                    User.is_active,
+                    *where_active_now(User),
+                )
+            )
+        if read_hash is None:
+            return False
+        if not self._verify_password(old_password, read_hash):
+            return False
+        new_hash = self.hash_password(new_password)
+        async with self.repository.session() as session:
+            await self._begin_user_write(session)
             db_user = await self._lock_current_user(session, target, (User.is_active,))
             if db_user is None:
                 return False
-            if not self._verify_password(old_password, db_user.password_hash):
-                return False
+            if db_user.password_hash != read_hash:
+                raise UserAuthorityConflictError("User version changed. Retry the request.")
             now = datetime.now(UTC)
             new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
-                "password_hash": self.hash_password(new_password),
+                "password_hash": new_hash,
                 "role": db_user.role,
                 "is_active": db_user.is_active,
                 "default_language": db_user.default_language,
@@ -1236,7 +1277,9 @@ class UserService:
             ValueError: If the username is absent.
             UserAuthorityConflictError: If the current user version changed.
         """
+        password_hash = self.hash_password(new_password)
         async with self.repository.session() as session:
+            await self._begin_user_write(session)
             target = User.username == user_id
             db_user = await self._lock_current_user(session, target)
             if db_user is None:
@@ -1245,7 +1288,7 @@ class UserService:
             new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
-                "password_hash": self.hash_password(new_password),
+                "password_hash": password_hash,
                 "role": db_user.role,
                 "is_active": db_user.is_active,
                 "default_language": db_user.default_language,
@@ -1289,7 +1332,9 @@ class UserService:
             ValueError: If the username is absent.
             UserAuthorityConflictError: If the current user version changed.
         """
+        password_hash = self.hash_password(new_password)
         async with self.repository.session() as session:
+            await self._begin_user_write(session)
             target = User.username == username
             db_user = await self._lock_current_user(session, target)
             if db_user is None:
@@ -1298,7 +1343,7 @@ class UserService:
             new_values: dict[str, object | None] = {
                 "username": db_user.username,
                 "email": db_user.email,
-                "password_hash": self.hash_password(new_password),
+                "password_hash": password_hash,
                 "role": db_user.role,
                 "is_active": db_user.is_active,
                 "default_language": db_user.default_language,

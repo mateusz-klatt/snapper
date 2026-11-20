@@ -52,6 +52,46 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import UserDeactivatedData
 
 _BCRYPT_FAKE_DIGEST = "bcrypt-fake"
+_WriterPath = Literal[
+    "deactivate",
+    "update_deactivate",
+    "update_profile",
+    "preferences",
+    "change_password",
+    "admin_reset_password",
+    "reset_password_by_username",
+]
+_TX_START_STATEMENTS = frozenset(
+    {
+        "BEGIN IMMEDIATE",
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+    }
+)
+
+
+async def _invoke_writer_path(service: UserService, path: _WriterPath, target: MagicMock) -> None:
+    """Invoke one UserService SCD2 writer path for transaction-start verification.
+
+    Args:
+        service: UserService under test.
+        path: Logical writer operation to exercise.
+        target: Mock target user row supplying public_id and username.
+    """
+    if path == "deactivate":
+        assert await service.deactivate_user(target.public_id, reason=None)
+    elif path == "update_deactivate":
+        result = await service.update_user(target.username, is_active=False)
+        assert result is not None and not result.is_active
+    elif path == "update_profile":
+        assert await service.update_user(target.username, email="updated@example.com") is not None
+    elif path == "preferences":
+        assert await service.update_self_preferences(target.username, "pl") is not None
+    elif path == "change_password":
+        assert await service.change_password(target.username, "old", "new") is True
+    elif path == "admin_reset_password":
+        await service.admin_reset_password(target.username, "new")
+    else:
+        await service.reset_password_by_username(target.username, "new")
 
 
 class _RecordingPublisher:
@@ -757,6 +797,77 @@ class TestUserAuthorityRetry:
         first.commit.assert_not_awaited()
         second.commit.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("dialect", ["sqlite", "postgresql"])
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "deactivate",
+            "update_deactivate",
+            "update_profile",
+            "preferences",
+            "change_password",
+            "admin_reset_password",
+            "reset_password_by_username",
+        ],
+    )
+    async def test_user_writers_emit_single_transaction_start_per_attempt(
+        self,
+        dialect: Literal["sqlite", "postgresql"],
+        path: _WriterPath,
+        _patch_token_manager_lookup: MagicMock,
+    ) -> None:
+        """Every User SCD2 writer emits exactly one dialect transaction start first.
+
+        Given a SQLite or PostgreSQL repository mock and an active target user.
+        When any of the User SCD2 writer paths executes a write attempt.
+        Then BEGIN IMMEDIATE (SQLite) or READ COMMITTED (PostgreSQL) is first and runs once.
+
+        Args:
+            dialect: Database dialect name under test.
+            path: User SCD2 writer operation under test.
+            _patch_token_manager_lookup: Mocked legacy token manager lookup.
+        """
+        target = _make_db_user("target")
+        successor = _make_db_user(
+            "target", is_active=path not in {"deactivate", "update_deactivate"}
+        )
+        service, _, _, _, manager = _build_service(existing_db_user=target)
+        _patch_token_manager_lookup.return_value = manager
+        write_session, write_context = _lock_attempt(target, None)
+        write_session.scalars.return_value = []
+        auxiliary_sessions: list[AsyncMock] = []
+        contexts: list[MagicMock] = []
+        if dialect == "sqlite" and path == "deactivate":
+            preflight, preflight_context = _lock_attempt(None, target.id)
+            auxiliary_sessions.append(preflight)
+            contexts.append(preflight_context)
+        if path == "change_password":
+            read_session, read_context = _lock_attempt(None, target.id)
+            read_session.scalar.return_value = target.password_hash
+            auxiliary_sessions.append(read_session)
+            contexts.append(read_context)
+        contexts.append(write_context)
+        with (
+            patch.object(service.repository, "dialect_name", dialect),
+            patch.object(service.repository, "session", side_effect=contexts),
+            patch.object(service, "_verify_password", return_value=True),
+            patch.object(service, "hash_password", return_value=_BCRYPT_FAKE_DIGEST),
+            patch("snapper.auth.user_service.close_and_insert", return_value=successor),
+        ):
+            await _invoke_writer_path(service, path, target)
+        expected_start = (
+            "BEGIN IMMEDIATE"
+            if dialect == "sqlite"
+            else "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+        )
+        executed = [str(awaited.args[0]) for awaited in write_session.execute.await_args_list]
+        assert executed[0] == expected_start
+        assert [stmt for stmt in executed if stmt in _TX_START_STATEMENTS] == [expected_start]
+        for auxiliary in auxiliary_sessions:
+            aux_executed = [str(awaited.args[0]) for awaited in auxiliary.execute.await_args_list]
+            assert not any(stmt in _TX_START_STATEMENTS for stmt in aux_executed)
+
 
 @pytest.mark.parametrize(
     ("path", "command_type", "payload", "expected"),
@@ -809,9 +920,19 @@ def test_account_write_routes_resolve_authority_conflicts(
     successor = _make_db_user("target")
     successor.default_language = "en"
     service, _, _, _, _ = _build_service(existing_db_user=target)
+    read_session = AsyncMock()
+    read_session.scalar.return_value = target.password_hash
+    read_context = MagicMock()
+    read_context.__aenter__.return_value = read_session
+    read_context.__aexit__.return_value = False
     first, first_context = _lock_attempt(None, target.id)
     second, second_context = (
         _lock_attempt(target, None) if conflicts == 1 else _lock_attempt(None, target.id)
+    )
+    contexts = (
+        [read_context, first_context, read_context, second_context]
+        if command_type == "change_password_request"
+        else [first_context, second_context]
     )
     principal = _make_principal(target.username)
     app = FastAPI()
@@ -821,9 +942,7 @@ def test_account_write_routes_resolve_authority_conflicts(
     app.dependency_overrides[validate_csrf_token] = lambda: None
     with (
         patch("snapper.auth.routes.get_user_service", return_value=service),
-        patch.object(
-            service.repository, "session", side_effect=[first_context, second_context]
-        ) as open_session,
+        patch.object(service.repository, "session", side_effect=contexts) as open_session,
         patch.object(service, "_verify_password", return_value=True),
         patch.object(service, "hash_password", return_value=_BCRYPT_FAKE_DIGEST),
         patch("snapper.auth.user_service.close_and_insert", return_value=successor) as mutate,
@@ -840,7 +959,10 @@ def test_account_write_routes_resolve_authority_conflicts(
                 "payload": payload,
             },
         )
-    assert open_session.call_count == 2
+    assert open_session.call_count == len(contexts)
+    if command_type == "change_password_request":
+        assert read_session.scalar.await_count == 2
+        read_session.commit.assert_not_awaited()
     first.scalar.assert_awaited_once()
     first.commit.assert_not_awaited()
     if conflicts == 2:

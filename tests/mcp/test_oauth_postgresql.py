@@ -38,7 +38,9 @@ from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.roles import UserRole
 from snapper.auth.routes import router as auth_router
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.auth.schemas.user import UserProfile
 from snapper.auth.tokens import TokenManager
+from snapper.auth.user_service import UserAuthorityConflictError
 from snapper.auth.user_service import UserService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AiDelegate
@@ -934,8 +936,67 @@ async def test_delegate_deactivation_retries_a_closed_owner_lock(
     grant, rows = await _grant_rows(pg_frame, owner_id)
     assert grant.revoked_at is not None
     assert len(rows) == 1 and rows[0].revoked_at == grant.revoked_at
+    delegate = await _current_user(pg_frame, identity.principal.user_public_id)
+    assert not delegate.is_active
     with pytest.raises(MCPOAuthError, match="invalid_token"):
         await pg_frame.first.verify_access_token(tokens.access_token)
+
+
+@pytest.mark.parametrize("writer", ["update_self_preferences", "change_password"])
+async def test_user_writers_under_repeatable_read_retry_instead_of_40001(
+    pg_frame: PGFrame, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    """Ordinary user writers pin READ COMMITTED on a REPEATABLE READ pool.
+
+    Uses ``pg_frame.other_repository`` (already configured with
+    ``SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL REPEATABLE READ``
+    and the second pool's ``application_name`` because
+    ``SQLAlchemyRepository.__init__`` takes only ``db_url``) and verifies that a
+    default session on that pool runs under ``repeatable read``. While pool A holds
+    the active user's row lock, the writer waits on the row lock, pool A replaces
+    the row and commits, and the writer retries instead of failing with SQLSTATE 40001.
+
+    Given a user row locked by pool A and a writer on a REPEATABLE READ pool.
+    When the writer blocks on the lock and pool A replaces and commits the row.
+    Then the writer retries or raises UserAuthorityConflictError, never DBAPIError, leaving one current row.
+
+    Args:
+        pg_frame: Isolated database with a READ COMMITTED and REPEATABLE READ pool.
+        monkeypatch: Binds the user services to each independent repository pool.
+        writer: Ordinary User SCD2 writer under test.
+    """
+    first = _user_service(pg_frame.repository, monkeypatch)
+    created = await first.create_user(f"rr-{uuid7().hex[:8]}", "initial-password")
+    async with pg_frame.other_repository.session() as check:
+        assert await check.scalar(text("SHOW transaction_isolation")) == "repeatable read"
+    second = _user_service(pg_frame.other_repository, monkeypatch)
+    writing: asyncio.Task[UserProfile | bool | None] | None = None
+    async with pg_frame.repository.session() as holder:
+        owner = await holder.scalar(
+            select(User).where(User.public_id == created.public_id).with_for_update()
+        )
+        assert owner is not None
+        try:
+            writing = asyncio.create_task(
+                second.update_self_preferences(created.username, "pl")
+                if writer == "update_self_preferences"
+                else second.change_password(created.username, "initial-password", "next-password")
+            )
+            await _wait_for_native_lock(pg_frame)
+            await _replace_owner_version(holder, owner)
+            await holder.commit()
+            outcome = await asyncio.wait_for(writing, 10)
+        except UserAuthorityConflictError:
+            outcome = None
+        finally:
+            await _cancel_all([writing])
+    current = await _current_user(pg_frame, created.public_id)
+    if outcome is not None:
+        if writer == "update_self_preferences":
+            assert current.default_language == "pl"
+        else:
+            assert outcome is True
+            assert second._verify_password("next-password", current.password_hash)
 
 
 async def test_postgresql_membership_close_revokes_its_oauth_authority(pg_frame: PGFrame) -> None:
