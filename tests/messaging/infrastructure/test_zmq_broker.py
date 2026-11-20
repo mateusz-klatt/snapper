@@ -19,6 +19,7 @@ from loguru import logger as loguru_logger
 from snapper.config.settings import get_settings
 from snapper.messaging.infrastructure.broker import ZmqBrokerProcess
 from snapper.messaging.infrastructure.broker import ZmqBrokerThread
+from snapper.messaging.infrastructure.broker import _resolve_bound_endpoint
 from snapper.messaging.schemas.data import TickData
 
 
@@ -167,8 +168,103 @@ class TestZMQBrokerSync:
             broker.start()
             status = broker.get_status()
             assert status.running is True
+            assert not broker.xsub_endpoint.endswith(":0")
+            assert not broker.xpub_endpoint.endswith(":0")
+            assert status.xsub_endpoint == broker.xsub_endpoint
+            assert status.xpub_endpoint == broker.xpub_endpoint
         finally:
             broker.stop()
+
+    def test_sync_broker_preserves_non_ephemeral_endpoints(self) -> None:
+        """Test ZmqBrokerThread leaves non-ephemeral endpoints unchanged on start.
+
+        Given: A ZmqBrokerThread configured with inproc endpoints.
+        When: start() binds the sockets and runs endpoint resolution.
+        Then: xsub_endpoint, xpub_endpoint, and get_status() preserve the configured values.
+        """
+        broker = ZmqBrokerThread(
+            xsub_endpoint="inproc://sync-xsub-unchanged",
+            xpub_endpoint="inproc://sync-xpub-unchanged",
+        )
+        try:
+            broker.start()
+            status = broker.get_status()
+            assert status.running is True
+            assert broker.xsub_endpoint == "inproc://sync-xsub-unchanged"
+            assert broker.xpub_endpoint == "inproc://sync-xpub-unchanged"
+            assert status.xsub_endpoint == "inproc://sync-xsub-unchanged"
+            assert status.xpub_endpoint == "inproc://sync-xpub-unchanged"
+        finally:
+            broker.stop()
+
+    def test_sync_broker_resolves_wildcard_endpoints(self) -> None:
+        """Test ZmqBrokerThread resolves tcp wildcard ports on start.
+
+        Given: A ZmqBrokerThread configured with ``:*`` wildcard tcp endpoints.
+        When: start() binds the sockets.
+        Then: xsub_endpoint, xpub_endpoint, and get_status() report concrete ports.
+        """
+        broker = ZmqBrokerThread(
+            xsub_endpoint="tcp://127.0.0.1:*", xpub_endpoint="tcp://127.0.0.1:*"
+        )
+        try:
+            broker.start()
+            status = broker.get_status()
+            assert status.running is True
+            assert broker.xsub_endpoint.startswith("tcp://127.0.0.1:")
+            assert broker.xpub_endpoint.startswith("tcp://127.0.0.1:")
+            assert not broker.xsub_endpoint.endswith(":*")
+            assert not broker.xpub_endpoint.endswith(":*")
+            assert status.xsub_endpoint == broker.xsub_endpoint
+            assert status.xpub_endpoint == broker.xpub_endpoint
+        finally:
+            broker.stop()
+
+    def test_sync_broker_resolves_endpoints_before_proxy_starts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test ZmqBrokerThread resolves ports before starting proxy thread and logging.
+
+        Given: A ZmqBrokerThread configured with ephemeral ``:0`` tcp endpoints
+            whose ``_proxy_loop`` is wrapped on the instance to record the
+            endpoints it sees when the proxy thread begins.
+        When: start() binds sockets, spawns the proxy thread, and logs startup.
+        Then: The proxy thread already sees concrete endpoints and the INFO
+            startup log records the same resolved endpoints.
+
+        The wrapper is installed on this broker instance only, so no other
+        thread in the test process is observed or affected.
+        """
+        broker = ZmqBrokerThread(
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
+        )
+        original_loop = broker._proxy_loop
+        observed_at_proxy_start: list[tuple[str, str]] = []
+        proxy_started = threading.Event()
+
+        def _recording_loop() -> None:
+            observed_at_proxy_start.append((broker.xsub_endpoint, broker.xpub_endpoint))
+            proxy_started.set()
+            original_loop()
+
+        monkeypatch.setattr(broker, "_proxy_loop", _recording_loop)
+        captured: list[str] = []
+        handler_id = loguru_logger.add(captured.append, format="{message}", level="INFO")
+        try:
+            broker.start()
+            assert proxy_started.wait(timeout=5.0)
+        finally:
+            loguru_logger.remove(handler_id)
+            broker.stop()
+        assert len(observed_at_proxy_start) == 1
+        seen_xsub, seen_xpub = observed_at_proxy_start[0]
+        assert seen_xsub.startswith("tcp://127.0.0.1:")
+        assert seen_xpub.startswith("tcp://127.0.0.1:")
+        assert not seen_xsub.endswith(":0")
+        assert not seen_xpub.endswith(":0")
+        assert any(
+            line.strip() == f"ZMQ Broker started: {seen_xsub} -> {seen_xpub}" for line in captured
+        )
 
     def test_sync_broker_proxy_functionality(self) -> None:
         """Test ZmqBrokerThread proxy thread is alive.
@@ -785,18 +881,18 @@ def test_resolve_endpoint_returns_configured_when_socket_has_no_getsockopt() -> 
     """Test fallback resolution without getsockopt support.
 
     Given: A socket stub without a getsockopt attribute.
-    When: _resolve_endpoint is called for an OS-assigned tcp endpoint.
+    When: _resolve_bound_endpoint is called for an OS-assigned tcp endpoint.
     Then: The configured endpoint is returned unchanged.
     """
     configured = "tcp://127.0.0.1:0"
-    assert ZmqBrokerProcess._resolve_endpoint(object(), configured) == configured
+    assert _resolve_bound_endpoint(object(), configured) == configured
 
 
 def test_resolve_endpoint_handles_string_and_unknown_getsockopt_values() -> None:
     """Test endpoint resolution for string and unknown LAST_ENDPOINT values.
 
     Given: Socket stubs returning different LAST_ENDPOINT value types.
-    When: _resolve_endpoint inspects the getsockopt result.
+    When: _resolve_bound_endpoint inspects the getsockopt result.
     Then: String endpoints are returned and unknown types fall back to configured.
     """
 
@@ -809,10 +905,10 @@ def test_resolve_endpoint_handles_string_and_unknown_getsockopt_values() -> None
             return self.value
 
     configured = "tcp://127.0.0.1:0"
-    assert ZmqBrokerProcess._resolve_endpoint(_SocketStub("tcp://127.0.0.1:5555"), configured) == (
+    assert _resolve_bound_endpoint(_SocketStub("tcp://127.0.0.1:5555"), configured) == (
         "tcp://127.0.0.1:5555"
     )
-    assert ZmqBrokerProcess._resolve_endpoint(_SocketStub(1234), configured) == configured
+    assert _resolve_bound_endpoint(_SocketStub(1234), configured) == configured
 
 
 def test_handle_subscription_frame_records_direct_subscribe() -> None:
@@ -1020,31 +1116,34 @@ def test_zmq_broker_thread_proxy_loop_forwards_real_sockets() -> None:
     """Test ``ZmqBrokerThread._proxy_loop`` forwards a real PUB->SUB round-trip.
 
     Given: A ``ZmqBrokerThread`` started on ephemeral tcp endpoints.
-    When: A PUB connects to XSUB and resends a frame until a SUB connected
-        to XPUB can read it, within a 5 s deadline.
-    Then: The SUB receives the frame, exercising the CLI threaded
-        broker's forwarding hot path.
+    When: A PUB connects to the resolved ``broker.xsub_endpoint`` and resends
+        a frame until a SUB connected to ``broker.xpub_endpoint`` can read it,
+        within a 5 s deadline.
+    Then: Both endpoints are resolved to concrete ``tcp://127.0.0.1:<port>``
+        addresses reflected in ``get_status()``, and the SUB receives the
+        frame, exercising the CLI threaded broker's forwarding hot path.
 
     Exercises the CLI-side threaded broker (used by ``cli/app.py``)
-    via real sockets so the legacy class keeps its production
-    behaviour after the production class refactor.
-
-    ``ZmqBrokerThread`` does not resolve OS-assigned ports, so the test
-    reads ``LAST_ENDPOINT`` from the bound sockets. That option is written
-    only by ``bind()``, which this thread ran before the proxy thread
-    started, and the proxy loop never changes it.
+    via real sockets so it preserves production forwarding behaviour
+    while exposing concrete OS-assigned endpoints immediately after
+    ``start()`` returns.
     """
     broker = ZmqBrokerThread(xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0")
     try:
         broker.start()
-        assert broker.xsub_socket is not None
-        assert broker.xpub_socket is not None
+        assert broker.xsub_endpoint.startswith("tcp://127.0.0.1:")
+        assert broker.xpub_endpoint.startswith("tcp://127.0.0.1:")
+        assert not broker.xsub_endpoint.endswith(":0")
+        assert not broker.xpub_endpoint.endswith(":0")
+        status = broker.get_status()
+        assert status.xsub_endpoint == broker.xsub_endpoint
+        assert status.xpub_endpoint == broker.xpub_endpoint
         context = zmq.Context()
         try:
             pub = context.socket(zmq.PUB)
-            pub.connect(broker.xsub_socket.getsockopt_string(zmq.LAST_ENDPOINT))
+            pub.connect(broker.xsub_endpoint)
             sub = context.socket(zmq.SUB)
-            sub.connect(broker.xpub_socket.getsockopt_string(zmq.LAST_ENDPOINT))
+            sub.connect(broker.xpub_endpoint)
             sub.setsockopt_string(zmq.SUBSCRIBE, "TOPIC")
             deadline = time.monotonic() + 5.0
             ready = 0
