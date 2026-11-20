@@ -1808,7 +1808,7 @@ class TestBudgetSplitAndHelpers:
 class TestEvidenceAndPartition:
     """Crypto plane, fiat forex plane, and the temporal position partition."""
 
-    @pytest.mark.parametrize("sqlstate", ["57014", "XX000"])
+    @pytest.mark.parametrize("sqlstate", ["57014", "55P03", "XX000"])
     @pytest.mark.parametrize("recompute", [False, True])
     async def test_crypto_query_failure_preserves_rows_and_baseline(
         self,
@@ -1820,13 +1820,14 @@ class TestEvidenceAndPartition:
         """A failed evidence read cannot publish catch-up or advance its detector.
 
         Given either new catch-up or an older calculation-version suffix
-        When the crypto evidence statement is cancelled or otherwise fails
-        Then durable rows and baselines stay unchanged and each tick reports failure.
+        When the crypto evidence statement is cancelled, times out on a lock or otherwise fails
+        Then durable rows and baselines stay unchanged and each tick reports failure,
+            and only the two budget SQLSTATEs log the once-per-streak timeout diagnostic.
 
         Args:
             monkeypatch: Isolate the repository read failure.
             caplog: Capture scope and chunk diagnostics.
-            sqlstate: PostgreSQL cancellation or unrelated database failure.
+            sqlstate: PostgreSQL statement timeout, lock timeout or unrelated failure.
             recompute: Exercise suffix correction before catch-up publication.
         """
 
@@ -1866,7 +1867,7 @@ class TestEvidenceAndPartition:
             for record in caplog.records
             if "crypto-plane query timed out" in record.message
         ]
-        assert len(timeouts) == (1 if sqlstate == "57014" else 0)
+        assert len(timeouts) == (1 if sqlstate in {"57014", "55P03"} else 0)
         if timeouts:
             assert _WALLET in timeouts[0]
             assert str(_minute(1)) in timeouts[0]

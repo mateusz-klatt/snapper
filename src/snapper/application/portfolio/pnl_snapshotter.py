@@ -130,12 +130,18 @@ _SCOPE_SKIP_NO_SPOT_VENUES: Final[str] = "no_spot_venues"
 _MINUTE: Final[timedelta] = timedelta(minutes=1)
 _POOL_KEY_ESTIMATE: Final[int] = 1
 """Chunk-sizing pool estimate; the work-budget split is the true safety net."""
+_CRYPTO_PLANE_LIMIT_SQLSTATES: Final[frozenset[str]] = frozenset({"57014", "55P03"})
+"""PostgreSQL SQLSTATEs raised when the crypto-plane read exceeds its shared P&L budget.
+
+``57014`` is a statement timeout (``query_canceled``) and ``55P03`` a lock timeout
+(``lock_not_available``); both are expected budget outcomes logged once per streak.
+"""
 
 _FAILURE_MESSAGES: Final[dict[str, str]] = {
     "sample_failed": "PortfolioPnlSnapshotter: wallet %s sample failed; continuing",
     "crypto_plane_timeout": (
-        "PortfolioPnlSnapshotter: wallet %s crypto-plane query timed out for chunk %s through %s; "
-        "not advancing baseline"
+        "PortfolioPnlSnapshotter: wallet %s crypto-plane query timed out (statement or lock limit) "
+        "for chunk %s through %s; not advancing baseline"
     ),
     "supersede_cas": "PortfolioPnlSnapshotter: wallet %s supersede CAS lost at %s; retrying next tick",
     "retract_cas": "PortfolioPnlSnapshotter: wallet %s retract CAS lost at %s; retrying next tick",
@@ -1153,7 +1159,7 @@ class PortfolioPnlSnapshotter:
                 sorted(currencies), chunk.start - _MINUTE, chunk.end - _MINUTE, ctx.as_of
             )
         except DBAPIError as error:
-            if getattr(error.orig, "sqlstate", None) == "57014":
+            if getattr(error.orig, "sqlstate", None) in _CRYPTO_PLANE_LIMIT_SQLSTATES:
                 self._log_class(
                     ctx.wallet_public_id, "crypto_plane_timeout", chunk.start, chunk.end
                 )
