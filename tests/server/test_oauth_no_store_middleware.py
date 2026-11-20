@@ -1,8 +1,10 @@
 """Tests for shared OAuth path matching and OAuthNoStoreMiddleware / OAuthNoStoreFastAPI."""
 
+import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import uuid4
 from uuid import uuid7
 
 import pytest
@@ -10,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from httpx import Response
+from loguru import logger
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.routing import Route
@@ -487,3 +490,52 @@ def test_real_app_unhandled_500_on_oauth_path_carries_no_store_headers(
     plain_500 = error_client.get("/api/non-oauth-boom")
     assert plain_500.status_code == 500
     _assert_no_added_oauth_headers(plain_500)
+
+
+def test_real_app_credential_exception_never_reaches_uvicorn_log(
+    real_app_case: tuple[FastAPI, TestClient, _Flags, AuthPrincipal],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Verify the full ``create_app()`` stack contains a token-endpoint exception.
+
+    Given: The real ``create_app()`` stack, including provenance, rate-limit and
+        request-context middlewares, where the token endpoint's repository
+        dependency raises ``RuntimeError`` carrying a sentinel,
+    When: A form POST carrying the sentinel is sent with
+        ``raise_server_exceptions=True``,
+    Then: No exception escapes the app, so uvicorn has nothing to log; the
+        response is a 500 with no-store headers; and neither loguru nor standard
+        logging output contains the sentinel, while one containment record names
+        ``RuntimeError``.
+
+    Args:
+        real_app_case: Fixture providing the real app, client, flags, and owner.
+        caplog: Pytest standard logging capture fixture.
+    """
+    app, _client, _flags, _owner = real_app_case
+    sentinel = f"SENTINEL-{uuid4().hex}"
+
+    def _boom_repository() -> None:
+        """Raise an unhandled exception inside the token endpoint dependency."""
+        raise RuntimeError(sentinel)
+
+    app.dependency_overrides[get_repository_dependency] = _boom_repository
+    caplog.set_level(logging.DEBUG)
+    messages: list[str] = []
+    sink_id = logger.add(lambda msg: messages.append(str(msg)), level="DEBUG")
+    try:
+        response = TestClient(app, raise_server_exceptions=True).post(
+            "/api/mcp/token",
+            data={"grant_type": "authorization_code", "code": sentinel},
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert response.status_code == 500
+    _assert_no_store_headers(response)
+    assert sentinel not in response.text
+    assert all(sentinel not in message for message in messages)
+    assert sentinel not in caplog.text
+    containment = [m for m in messages if "on OAuth credential request" in m]
+    assert len(containment) == 1
+    assert "RuntimeError" in containment[0]
