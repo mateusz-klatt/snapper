@@ -1029,6 +1029,14 @@ snapper reset-password USERNAME [OPTIONS]
 snapper reset-password john
 ```
 
+**Exit codes:**
+
+- `0` — The password was reset.
+- `1` — The confirmation does not match, the user does not exist, or the reset
+    fails (for example, after a concurrent account change).
+
+Errors are printed to stderr.
+
 ### `token preflight`
 
 Read-only verification of an existing access credential against the deployment's

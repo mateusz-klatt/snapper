@@ -1135,13 +1135,17 @@ def reset_password(
     Args:
         username: Username to reset password for.
         new_password: New password (prompts if empty).
+
+    Raises:
+        typer.Exit: With code 1 when the password confirmation does not
+            match, the user is unknown, or resetting the password fails.
     """
     if not new_password:
         new_password = typer.prompt("Enter new password", hide_input=True)
         confirm = typer.prompt("Confirm password", hide_input=True)
         if new_password != confirm:
-            typer.echo("Passwords don't match!")
-            return
+            typer.echo("Passwords don't match!", err=True)
+            raise typer.Exit(code=1)
 
     async def reset_user_password() -> None:
         user_service = UserService()
@@ -1150,9 +1154,11 @@ def reset_password(
             typer.echo(f"Password reset for user '{username}'")
             typer.echo(f"Username: {username}")
         except ValueError as e:
-            typer.echo(str(e))
+            typer.echo(str(e), err=True)
+            raise typer.Exit(code=1) from e
         except Exception as e:
-            typer.echo(f"Failed to reset password: {e}")
+            typer.echo(f"Failed to reset password: {e}", err=True)
+            raise typer.Exit(code=1) from e
 
     asyncio.run(reset_user_password())
 
