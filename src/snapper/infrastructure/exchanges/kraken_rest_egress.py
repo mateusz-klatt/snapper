@@ -328,6 +328,32 @@ def is_provable_presend_connect_error(error: BaseException) -> bool:
     return False
 
 
+def _is_proxy_hop_error(error: BaseException) -> bool:
+    """Return whether an exception chain indicates a proxy-hop failure.
+
+    Args:
+        error: Exception raised by CCXT, requests, urllib3, or the OS layer.
+
+    Returns:
+        True when ``requests.exceptions.ProxyError`` or
+        ``urllib3.exceptions.ProxyError`` appears anywhere in the cause chain.
+        Kept separate from ``is_provable_presend_connect_error`` because a proxy
+        error does not prove request bytes never left the host for private-read
+        fallback.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(
+            current,
+            requests.exceptions.ProxyError | urllib3.exceptions.ProxyError,
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _run_public_read[ResultT](
     *,
     exchange: str,
@@ -365,6 +391,11 @@ def _run_public_read[ResultT](
                 reservation.quarantine(
                     _KRAKEN_REST_CONNECT_ERROR_QUARANTINE_S,
                     reason="http-connect-error",
+                )
+            elif _is_proxy_hop_error(exc):
+                reservation.quarantine(
+                    _KRAKEN_REST_CONNECT_ERROR_QUARANTINE_S,
+                    reason="http-proxy-error",
                 )
             raise
     finally:

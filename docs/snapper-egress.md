@@ -78,7 +78,11 @@ does not quarantine the route),
 connect failure via the pooled transport), `http-proxy-error` (a REST
 request through the pooled transport whose SOCKS or proxy hop failed
 (`httpx.ProxyError`), quarantined for the same
-`_HTTP_CONNECT_ERROR_QUARANTINE_S`), and `ws-connect-error` (a WS
+`_HTTP_CONNECT_ERROR_QUARANTINE_S`, or a Kraken public REST read routed
+by `kraken_rest_egress` with `requests.exceptions.ProxyError` or
+`urllib3.exceptions.ProxyError` in the cause chain, quarantined for
+`_KRAKEN_REST_CONNECT_ERROR_QUARANTINE_S`; proxy errors never make a
+private read fallback-eligible), and `ws-connect-error` (a WS
 connect-level failure — TCP/SOCKS timeout, connection refused, or a
 silent blackhole — through a proxy route, quarantined ~30 s via
 `_WS_CONNECT_ERROR_QUARANTINE_S`). Connect-level failover matters
