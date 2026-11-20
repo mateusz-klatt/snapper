@@ -574,7 +574,8 @@ async def revoke(
         An empty object on success, including for unknown tokens.
 
     Raises:
-        OAuthProtocolError: RFC errors for bad requests or client authentication.
+        OAuthProtocolError: RFC errors for bad requests or client authentication, or
+            503 when the revocation retry also conflicts.
     """
     response.headers.update(_NO_STORE)
     method: str | None = None
@@ -590,6 +591,12 @@ async def revoke(
             )
         )
     except MCPOAuthError as error:
+        if str(error) == "temporarily_unavailable":
+            raise OAuthProtocolError(
+                "temporarily_unavailable",
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                {"Retry-After": "1"},
+            ) from error
         raise _protocol_error(str(error), method) from error
     return RevocationResponse()
 

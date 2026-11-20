@@ -493,12 +493,12 @@ e.g. `"zh-Hans"`, `"zh"`, `"pt-BR"`, `"pt"`, `"nb"`, `"no"`).
 
 Returns the same `UserResponse` envelope shape as `GET /api/auth/me`,
 with the updated `default_language` echoed in `payload`.
+The preference update preserves the account's current active status.
 
 **Errors:**
 
-- `404` — caller's user row was not found (rare; only surfaces if
-  an admin concurrently deactivates the user between auth-dep
-  resolution and the update commit).
+- `404` — caller has no current user row.
+- `409` — both attempts conflicted with concurrent account changes.
 - `422` — `default_language` not in the supported-language allowlist.
 
 ### GET /api/auth/users
@@ -611,8 +611,8 @@ and `is_active`.
 
 Update email, role, and active state for an existing user. Requires
 `manage:users` and CSRF for cookie auth. Returns `UserResponse`.
-Deactivation returns `409` when an OAuth grant owner's account changes
-concurrently. Retry the request against the current account state.
+The endpoint retries once when a concurrent version change prevents the
+update. If both attempts conflict, it returns `409`.
 
 ### POST /api/auth/users/{user_id}/deactivate
 
@@ -623,8 +623,9 @@ users return `404`. The service also revokes active sessions and emits
 `admin.user_deactivated` for immediate verify-cache eviction and
 WebSocket close fanout; auth listeners also poll the committed
 `users.is_active=False` row as broker-outage fallback.
-A concurrent change to an OAuth grant owner's account returns `409` and
-the deactivation can be retried.
+The endpoint retries once when a concurrent change to the target or an
+OAuth grant owner prevents deactivation. If both attempts conflict, it
+returns `409`.
 
 ### POST /api/auth/users/{user_id}/change-password
 
@@ -632,12 +633,14 @@ Change a password. Requires `manage:self_account`. Users may change their own pa
 `manage:users` may change another user's password. Requires CSRF for cookie
 auth and is account-rate limited. Body is `ChangePasswordRequest` with current
 and new password.
+Returns `409` if both attempts conflict with concurrent account changes.
 
 ### POST /api/auth/users/{user_id}/admin-reset-password
 
 Admin password reset without the current password. Requires
 `manage:users`, CSRF for cookie auth, and is account-rate limited. Body
 is `AdminResetPasswordRequest`.
+Returns `409` if both attempts conflict with concurrent account changes.
 
 ### CSRF Protection
 
@@ -3051,6 +3054,9 @@ Form-encoded RFC 7009 revocation, authenticated like the token endpoint.
 Revoking a live access or refresh token revokes the whole grant owned by the
 calling client. Unknown, invalid, expired, already revoked and other-client
 tokens succeed with 200 and an empty JSON object, and change nothing.
+If a concurrent owner update conflicts with both revocation attempts, the
+endpoint returns 503 with `{"error": "temporarily_unavailable"}` and
+`Retry-After: 1`. The 503 response includes `Cache-Control: no-store`.
 
 ### Consent API
 
