@@ -1,43 +1,33 @@
 # Portfolio P&L snapshotter catch-up
 
 The snapshotter remains disabled unless `PNL_SNAPSHOTTER_ENABLED` is enabled
-explicitly. This change does not activate it, create an anchor, alter the sample
-calculation version, or change the financial valuation rules.
+explicitly. It writes calculation version `5C.5` for scopes with an existing
+activation anchor.
 
-Each tick selects at most 1440 finalized minutes for each supported wallet
-scope. The interval is inclusive: its end is at most 1439 minutes after its
-start. A shorter finalized tail keeps its actual end, and the two-minute
-finalization lag still applies. Work-budget subdivision stays inside this
-selected window. The service commits that window before selecting the next
-day on a later tick, rather than computing and retaining the entire backlog.
+A replay generation fixes the finalized target minute and knowledge horizon.
+The two-minute finalization lag still applies. Each tick commits at most one
+inclusive chunk of at most 1,440 minutes per eligible USD live scope. When
+valuation exceeds the minute-instrument work budget, it retries a smaller
+chunk without advancing progress. The next tick begins at the explicit
+persisted checkpoint, even when the last committed chunk wrote no samples.
 
-The latest durable sample remains the progress boundary. A restart resumes
-after that boundary; an unsuccessful insert cannot move it forward. A
-100-day gap therefore needs at least 100 successful ticks per scope. The tick
-interval is a scheduling interval, not a promised completion time.
+The scheduler resumes in-progress work before selecting another generation.
+Late fills, newly admitted execution annulments, retryable incomplete
+minutes, and outstanding withheld repairs can move the next generation's
+start earlier. Its detector watermark advances only when all work through the
+target is reconciled. Each sample watermark is clipped to the execution
+prefix effective at that minute. A partially completed correction cannot
+advertise that it processed a new execution or completed a missing minute.
 
-Late-fill and retryable-minute corrections retain their existing precedence.
-The snapshotter computes the selected catch-up evidence, reconciles any
-affected persisted suffix, and only then inserts new samples. A correction
-conflict prevents catch-up writes. The detector baseline must not advance past
-withheld minutes, and execution watermarks remain clamped to the selected
-window's effective end.
-
-The synchronous valuation of already-loaded evidence runs on a worker thread
-for snapshotter requests. Repository reads and writes stay on the caller's
-event loop. The normal API path keeps its existing execution mode. Both paths
-use the same valuation code, including FX conversion, diagnostic context and
-point assembly. Cancelling the snapshotter waits for an already-running
-valuation before propagating cancellation, so its request-local contexts are
-not closed while its worker still uses them.
-
-The new limit bounds catch-up minutes and retained catch-up results per scope.
-It does not truncate late-fill or self-heal suffix reconciliation: that work
-must reach the existing persisted tip before catch-up can publish. Such a
-correction may still span multiple chunks and take longer than one scheduling
-interval. Evidence loading and asynchronous correction writes also retain
-their existing scope; this is not a hard wall-clock deadline for an entire
-tick or a fixed bound on all historical inputs.
+Each chunk loads account observations as an ordered stream, with one
+latest-at-start row per eligible exchange. It uses the same temporal sample
+selection as a per-minute read, including later failures. The synchronous 5A
+valuation runs on a worker thread, with repository operations on the caller's
+event loop. The scheduler requests cancellation when a tick exceeds the
+configured interval. After a cancelled or timed-out chunk, its scope retries
+with a smaller window and scheduling resumes at the next wallet. A worker
+already in flight must exit before its valuation context can close, so the
+interval is a scheduling budget rather than a hard wall-clock guarantee.
 
 The crypto-to-USD candle read first selects a distinct set of candidate
 instrument identities from historical metadata known at the tick's `as_of`.
@@ -63,14 +53,35 @@ Release acceptance remains separate from local tests: the exact source needs
 the full quality gate and independent review, and the runtime owner controls
 deployment and the explicit snapshotter enablement.
 
-## Correction continuation repository foundation
+## Durable correction continuation
 
-Migration `0069` adds `portfolio_pnl_correction_frontiers`, a mutable control
-table keyed by wallet, mode, valuation currency, anchor epoch and calculation
-version. It does not rewrite existing financial samples. The current
-snapshotter is not wired to this foundation: its correction loop remains as
-described above. A later integration must impose a per-tick scheduling budget;
-this repository contract alone is not a wall-clock limit for a tick.
+Migration `0069` adds `portfolio_pnl_correction_frontiers`, a control table
+keyed by wallet, mode, valuation currency, anchor epoch and calculation
+version. Migration `0070` adds the certified raw execution watermark cut,
+the annulment manifest digest, the fill-gap result sampled with that cut,
+the spot venues used to value the basket, and the venue event bounds and
+candidate digest that certify the fill witnesses.
+The raw cut is separate from the detector and financial sample watermarks.
+Neither migration rewrites financial samples. A legacy checkpoint without
+the frozen evidence fields is rebuilt from the first post-anchor minute.
+
+A generation takes the raw cut during its initial evidence probe and reopens
+that exact cut at its frozen knowledge horizon for every chunk. It uses the
+same fill-gap result and venue set, and verifies the annulment manifest and
+physical witness membership before planning rows. A later event above the
+saved bound belongs to a future generation. A lower event ID that becomes
+visible inside the bound changes the digest and requires recertification.
+The admission probe repeats the raw cut, manifest and witness capture after
+reading fill-gap evidence. If a saved certificate can no longer be proved,
+the writer attempts to start a new generation from the anchor. It leaves the
+checkpoint and samples intact until the new prefix can be certified.
+A backdated execution with valid witnesses is considered on the next
+evidence probe.
+
+The witness digest covers venue events eligible to certify the captured
+execution lineage. An unrelated unmatched fill can appear after the
+independent scope-level gap read without changing that digest. Current
+equity reads recheck the global fill gap before exposing persisted samples.
 
 Each correction checkpoint carries a generation, a revision, an explicit next
 minute, its target and knowledge horizon, the detector's durable and pending
@@ -123,10 +134,19 @@ An old epoch/version left unchanged must be explicitly
 retained for repair, rather than acknowledged as reconciled. No missing point
 is converted to a zero or used as an implicit progress marker.
 
-A foreign-epoch row can be retained as withheld, but this primitive cannot
-retire it. Snapshotter integration must define a separately reviewed way to
-handle that boundary before activation; retaining it indefinitely would also
-retain the repair obligation and prevent baseline advancement.
+A foreign-epoch row is kept as an explicit unresolved minute. A cursor can
+continue scanning, while the older evidence stays intact and the detector
+baseline remains pinned. This requires investigation before that scope can
+be considered fully reconciled.
+
+Current-truth equity reads suppress the suffix from the earliest next or
+repair minute in the same SQL statement that reads complete USD samples.
+That boundary also limits the USD samples eligible for EUR and PLN conversion.
+A current-truth fill evidence gap or a late pre-activation execution
+suppresses the whole equity overlay.
+A prefix retained before the boundary carries the peak computed from the
+same stored cash and position values the database uses. A slice with missing
+or withheld data therefore cannot expose an older dependent drawdown.
 
 PostgreSQL correction transactions cap statement timeouts at 20 seconds and
 lock waits at one second, preserving any shorter existing limits. The settings
@@ -134,7 +154,7 @@ are transaction-local. SQLite uses the same `BEGIN IMMEDIATE` sample fence.
 These limits do not constitute a hard in-flight deadline for a complete chunk
 or authorize applying the migration or enabling the snapshotter in production.
 
-## Faithful flow recovery and the 5C.4 transition
+## Sample calculation version
 
 Timeline version `5A.16` and sample version `5C.4` share bounded faithful
 multi-bucket recovery after every historical total/absorber pass fails. The
@@ -146,21 +166,62 @@ Completed positive and negative projections reuse only the last immutable
 exact-unit/key-order input per family. Budget interruption retains the legacy
 reason without treating an unfinished search as an impossible representation.
 
-The sample-version change makes stale-epoch recomputation revisit previously
-withheld interior minutes that have no row. It does not relabel existing
-history: only a recomputed replacement receives `5C.4`. A disabled snapshotter
-cannot heal old samples. The current overlay reads only the selected sample
-version, so old `5C.3` rows may be retained as evidence while remaining absent
-from a `5C.4` overlay.
+Sample version `5C.5` retains faithful flow recovery and selects exact FX
+evidence independently for each mark, execution, accrual and basket minute.
+Evidence is loaded in batches. Other minutes in the batch cannot choose which
+venue prices a given minute. An instrument-owned canonical FX plane keeps its
+precedence. A missing required exact rate withholds the affected valuation.
+The public timeline keeps its existing `5A.16` calculation and FX policy.
 
-This source change does not establish bounded replay or safe runtime enablement.
-A release must account for temporarily missing overlay coverage, retained-row
-peak/drawdown semantics, repair visibility, foreign-epoch refusal and actual
-in-flight resource bounds. The continuation repository primitive remains
-dormant until its orchestration and serving contracts are independently proven.
+The snapshotter checks price references and display identity through the
+generation's fixed target. A symbol or venue revision therefore produces the
+same trust decision at every chunk width. Pointwise FX shadow proofs use the
+`pnl-fiat-pointwise-v1` policy, with at most 64 evaluations per tick and
+64 rows per pair and minute. FX proof backfill accepts only known versions
+that used the range-wide policy. That excludes pointwise 5C.5 consumers.
+
+Each snapshotter minute has a separate faithful flow-recovery allowance.
+Its financial result is independent of the recovery work performed for
+other minutes in the same chunk. A separate limit on recovery work for an
+entire chunk triggers subdivision before any rows from that attempt are
+committed.
+
+Only a recomputed row receives `5C.5`. The current overlay reads the selected
+sample version. Older rows remain available as historical evidence until the
+writer recomputes them.
+
+## Known limits
+
+A newly matched fill above the frozen witness bound can leave published
+samples below the cursor stale until the next generation reads the fill.
+
+A backdated accrual committed between chunks can reach the remaining chunks
+without an invalidation of previously committed minutes.
+
+Price reference and display identity decisions use revisions known through
+the generation tip. A revision later in the generation can therefore
+withhold an earlier sample consistently across chunk sizes.
+
+## Replay acceptance
+
+Exercise the exact candidate on an isolated local PostgreSQL database on WSL.
+Seed one executor-backed synthetic spot wallet with observations and a ledger
+prefix across multiple chunks. Compare an uninterrupted replay with an
+interrupted one that stops before a commit and with one that loses the
+acknowledgement after a commit. Reopen with a fresh writer and database
+session. Check that point values, causal peak and drawdown match the
+uninterrupted run and that checkpoints advance exactly once per commit.
+Verify that a withheld interior minute keeps the old detector baseline across
+restart and that the equity read excludes dependent samples during repair.
+Repeat with late ID-less partial fills, including a committed witness within a
+saved bound, and compare a full chunk with a restart using smaller chunks and
+competing FX venues. Compare both basket equity and accounting flows.
+
+Run the complete quality gate on the same source. Production enablement
+requires a separate decision after this verification.
 
 A standalone writer-disabled release may publish reconstructed live P&L while
-all sample writers remain off. With zero qualifying `5C.4` rows, persisted
+all sample writers remain off. With zero qualifying `5C.5` rows, persisted
 equity/cash/position/drawdown overlay fields stay null and `sampled` stays false;
 these values are unavailable, not reconstructed equity. Runtime preflight must
 verify both writer settings and the absence of qualifying rows. Enabling a

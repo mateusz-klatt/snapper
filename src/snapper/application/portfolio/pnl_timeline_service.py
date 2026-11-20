@@ -51,9 +51,11 @@ dropped.
 """
 
 import asyncio
+import hashlib
 import json
 import math
 from bisect import bisect_left
+from bisect import bisect_right
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
@@ -80,11 +82,14 @@ from pydantic import field_validator
 
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.basket_valuation import CandleVersionIdentity
+from snapper.application.portfolio.basket_valuation import FiatVenuesByMinute
 from snapper.application.portfolio.basket_valuation import FiatVersionMap
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.fill_booking import booked_signed_quantity
 from snapper.application.portfolio.fill_booking import resolve_position_quantity_unit
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowEvaluation
+from snapper.application.portfolio.fx_conversion_shadow import PointwiseFxShadowRequirement
+from snapper.application.portfolio.fx_conversion_shadow import collect_pointwise_fx_shadow
 from snapper.application.portfolio.fx_conversion_shadow import current_fx_shadow_context
 from snapper.application.portfolio.fx_rates import FX_CARRY_BOUND
 from snapper.application.portfolio.fx_rates import CarriedConversion
@@ -136,6 +141,9 @@ from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEn
 from snapper.application.portfolio.pnl_timeline import PnlInstrumentContribution
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline import PnlTimelineResult
+from snapper.application.portfolio.pnl_timeline import (
+    PnlTimelineWorkBudgetError as _PnlTimelineWorkBudgetError,
+)
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
 from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
@@ -164,11 +172,14 @@ from snapper.data.repository_types import PnlTimelineExecutionLineageRow
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineExecutionPrefixBundle
 from snapper.data.repository_types import PnlTimelineExecutionRow
+from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 from snapper.data.repository_types import PortfolioPnlAnchorRow
 from snapper.data.repository_types import PortfolioPnlAnchorWriteEvidence
 from snapper.data.repository_types import PortfolioPnlSampleRow
+
+PnlTimelineWorkBudgetError = _PnlTimelineWorkBudgetError
 
 _timed_build_pnl_timeline = pnl_read_core(build_pnl_timeline)
 
@@ -512,11 +523,37 @@ class PnlSeriesReplayOptions:
     moves only the already-loaded synchronous valuation onto a worker, keeping
     all asynchronous repository access on the caller's event loop. The
     snapshotter opts in so a catch-up does not stall the live order handlers.
+    ``previous_replay_as_of`` is the completed durable generation's knowledge
+    horizon. A snapshotter probe supplies it with that generation's detector
+    watermarks to find newly known annulments inside the already scanned cut.
+    ``frozen_execution_watermarks`` identifies the full certified raw ledger cut
+    captured by a probe. Resumed chunks recertify exactly those coordinates
+    under the generation's recorded knowledge horizon.
+    ``frozen_execution_manifest_digest`` pins the certified annulments for those
+    coordinates so a resumed chunk cannot mix two effective histories.
+    ``frozen_has_fill_gap`` reuses the scope-level gap fact certified by the probe.
+    ``frozen_fill_witness_cut`` pins the venue event bounds and membership proof
+    used to certify the captured execution cut.
+    ``replay_generation_tip`` fixes the price and display reference proof scope
+    across resumed chunks at the generation's finalized tip. It also sets the
+    faithful-recovery allowance and terminal state per persisted sample.
+    ``verify_replay_probe`` recertifies a new generation's cut after fill-gap
+    analysis so observations cannot be bound to a superseded prefix.
+    ``pointwise_exact_fx`` values each required minute independently of the
+    physical replay chunk. It is an exact-only snapshotter calculation policy.
     """
 
     preloaded_evidence: _SeriesReadEvidence | None = None
     baseline_watermarks: Mapping[str, int] | None = None
     offload_valuation: bool = False
+    previous_replay_as_of: datetime | None = None
+    frozen_execution_watermarks: Mapping[str, int] | None = None
+    frozen_execution_manifest_digest: str | None = None
+    frozen_has_fill_gap: bool | None = None
+    frozen_fill_witness_cut: PnlTimelineFillWitnessCut | None = None
+    replay_generation_tip: datetime | None = None
+    verify_replay_probe: bool = False
+    pointwise_exact_fx: bool = False
 
 
 _NO_SERIES_REPLAY_OPTIONS: Final[PnlSeriesReplayOptions] = PnlSeriesReplayOptions()
@@ -608,19 +645,29 @@ class _SeriesReplayInputs:
     ``applied_annulments`` is read straight off the certified prefix this replay
     consumed, so the series can disclose exactly the corrections its own fold
     applied rather than a set some later read might compute differently.
+    ``raw_watermarks`` certifies the physical prefix before that annulment fold.
     """
 
     loaded_execution_rows: list[PnlTimelineOpeningExecutionRow]
     replayed_execution_rows: list[PnlTimelineOpeningExecutionRow]
     accrual_rows: list[PnlTimelineAccrualRow]
+    reference_tip: datetime
+    reference_execution_rows: list[PnlTimelineOpeningExecutionRow]
+    reference_accrual_rows: list[PnlTimelineAccrualRow]
     lineage: dict[str, TimelineExecutionLineage]
     fill_gap_reason: PnlIncompletenessReasonEntry | None
     late_pre_activation_reason: PnlIncompletenessReasonEntry | None
     applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...]
+    raw_watermarks: Mapping[str, int]
+    fill_witness_cut: PnlTimelineFillWitnessCut | None = None
 
 
 class PnlAnchorEvidenceError(ValueError):
     """The durable evidence plane cannot support a truthful activation anchor."""
+
+
+class PnlFrozenReplayEvidenceChangedError(RuntimeError):
+    """The certified generation or admission probe spans different execution evidence."""
 
 
 def _canonical_anchor_json(model: BaseModel) -> str:
@@ -1144,7 +1191,7 @@ class _EquityOverlayRequest:
     is None`` (a live current-truth read) and which every historical, snapshotter,
     or other internal caller leaves ``False``. It is deliberately decoupled from
     anchor-creation permission, so granting anchor creation never, by itself,
-    resolves an overlay.
+    resolves an overlay. A global fill-evidence gap also disables disclosure.
     """
 
     wallet_public_id: str
@@ -1265,10 +1312,6 @@ class PnlWalletTimelineResult:
     applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...] = ()
 
 
-class PnlTimelineWorkBudgetError(ValueError):
-    """The requested raw grid and instrument fan-out exceed the work budget."""
-
-
 def _empty_pnl_series(granularity: str, valuation_ccy: str) -> PnlWalletSeriesResult:
     """Return the honest no-anchor result without inventing pre-activation points."""
     if granularity not in {"1m", "5m", "1h", "1d"}:
@@ -1317,7 +1360,7 @@ def _execution_rows_with_effective_time(
     The single source of the service-level clamp: each durable shard pool's
     running maximum event time is carried forward so an out-of-order row is placed
     at that maximum. Both the accounting window bound
-    (:func:`_execution_rows_effective_through`) and the replay-metadata boundary
+    (:func:`_series_replay_execution_windows`) and the replay-metadata boundary
     (:func:`_derive_series_replay_metadata`) read this exact result, so the clamp
     arithmetic is written once and never duplicated.
 
@@ -1338,16 +1381,17 @@ def _execution_rows_with_effective_time(
     return paired
 
 
-def _execution_rows_effective_through(
+def _series_replay_execution_windows(
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
     to_time: datetime,
-) -> list[PnlTimelineOpeningExecutionRow]:
-    """Bound accounting consumers by the kernel's monotone-clamped event time."""
-    return [
-        row
-        for row, effective_time in _execution_rows_with_effective_time(execution_rows)
-        if effective_time <= to_time
-    ]
+    reference_tip: datetime,
+) -> tuple[list[PnlTimelineOpeningExecutionRow], list[PnlTimelineOpeningExecutionRow]]:
+    """Return the accounting and reference windows under the same effective clock."""
+    paired = _execution_rows_with_effective_time(execution_rows)
+    replayed = [row for row, effective_time in paired if effective_time <= to_time]
+    if reference_tip == to_time:
+        return replayed, replayed
+    return replayed, [row for row, effective_time in paired if effective_time <= reference_tip]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1364,10 +1408,32 @@ class PnlSeriesReplayMetadata:
     earliest clamped effective time among executions ABOVE the caller's baseline,
     or ``None`` when no suffix execution crosses it. The caller supersedes forward
     only when that minute is at or before its last persisted minute.
+
+    A probe against a prior durable generation also sets ``detection_watermarks``.
+    This cut retains already scanned raw sequences after their effective rows are
+    annulled. It admits new sequences only through the current effective end.
+    A newly known annulment inside that prior cut can move the earliest affected
+    minute back to the first post-activation minute.
+    ``raw_execution_watermarks`` gives the complete certified ledger coordinates
+    before effective-time clipping, including immutable rows excluded by annulments.
+    It is the evidence cut a snapshotter must recertify when replay resumes.
+    ``execution_manifest_digest`` names the certified annulments that were
+    applied to that same raw cut.
+    ``has_fill_gap`` records whether the associated venue witness read proved a gap.
+    ``fill_witness_cut`` identifies the bounded physical venue event candidates
+    used by that execution certificate.
+    ``sample_watermarks_by_minute`` gives each persisted writer minute its own
+    causal execution boundary, independent of the chunk end.
     """
 
     max_scope_sequence_by_exchange: dict[str, int]
     earliest_affected_minute: datetime | None
+    detection_watermarks: dict[str, int] | None = None
+    raw_execution_watermarks: dict[str, int] | None = None
+    execution_manifest_digest: str | None = None
+    has_fill_gap: bool | None = None
+    fill_witness_cut: PnlTimelineFillWitnessCut | None = None
+    sample_watermarks_by_minute: dict[datetime, dict[str, int]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1396,6 +1462,8 @@ def _derive_series_replay_metadata(
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
     baseline_watermarks: Mapping[str, int],
     to_time: datetime,
+    *,
+    rewind_scope_regressions: bool = False,
 ) -> PnlSeriesReplayMetadata:
     """Derive the late-fill boundary from the clamped suffix and one baseline.
 
@@ -1411,6 +1479,9 @@ def _derive_series_replay_metadata(
         baseline_watermarks: Per-exchange watermark the caller's persisted samples
             already reflect.
         to_time: Inclusive series end bounding the advanced watermark.
+        rewind_scope_regressions: Include a late execution's raw event time when
+            it precedes its clamped time. Previously served minutes in this gap
+            can become untrusted under the replay's scope-order check.
 
     Returns:
         The advanced per-exchange watermark and the earliest affected minute.
@@ -1425,13 +1496,159 @@ def _derive_series_replay_metadata(
             if current is None or scope_sequence > current:
                 max_scope_sequence[exchange] = scope_sequence
         if scope_sequence > baseline_watermarks.get(exchange, 0):
-            affected_minute = _ceil_to_minute(effective_time)
+            affected_time = (
+                min(row["timestamp"], effective_time)
+                if rewind_scope_regressions
+                else effective_time
+            )
+            affected_minute = _ceil_to_minute(affected_time)
             if earliest_affected is None or affected_minute < earliest_affected:
                 earliest_affected = affected_minute
     return PnlSeriesReplayMetadata(
         max_scope_sequence_by_exchange=max_scope_sequence,
         earliest_affected_minute=earliest_affected,
     )
+
+
+def _durable_detection_watermarks(
+    prior: Mapping[str, int], effective: Mapping[str, int], certified: Mapping[str, int]
+) -> dict[str, int]:
+    """Keep already processed coordinates without admitting effective future fills."""
+    if any(certified.get(exchange, 0) < sequence for exchange, sequence in prior.items()):
+        raise PnlAnchorEvidenceError("P&L detector cut exceeds its certified physical prefix")
+    result = dict(prior)
+    for exchange, sequence in effective.items():
+        result[exchange] = max(result.get(exchange, 0), sequence)
+    return result
+
+
+def _applied_annulment_identity(
+    annulment: PnlTimelineAppliedAnnulment,
+) -> tuple[str, str, str, str, int]:
+    """Return one correction's full certified ledger identity."""
+    return (
+        annulment["public_id"],
+        annulment["target_execution_public_id"],
+        annulment["target_execution_digest"],
+        annulment["exchange"],
+        annulment["scope_sequence"],
+    )
+
+
+def _execution_manifest_digest(annulments: Sequence[PnlTimelineAppliedAnnulment]) -> str:
+    """Hash all certified correction identities in canonical order, including an empty set."""
+    identities = sorted(_applied_annulment_identity(annulment) for annulment in annulments)
+    canonical = json.dumps(identities, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+async def _new_annulments_inside_replay_cut(
+    repo: Repository,
+    anchor_load: _AnchorLoadResult,
+    replay: _SeriesReplayInputs,
+    baseline: Mapping[str, int],
+    previous_as_of: datetime,
+) -> bool:
+    """Check whether the current certified fold changed the pre-existing detector cut.
+
+    Args:
+        repo: Source of exact historical physical-prefix and manifest proof.
+        anchor_load: Active money scope and its frozen coverage.
+        replay: Current replay's certified annulment fold.
+        baseline: Raw coordinates previously admitted through the old effective tip.
+        previous_as_of: Prior generation's historical knowledge horizon.
+
+    Returns:
+        Whether current corrections require rewinding an already scanned suffix.
+    """
+    scope = anchor_load.scope
+    anchor = cast(_ResolvedPnlAnchor, anchor_load.anchor)
+    current_ids = {
+        row["public_id"]
+        for row in replay.applied_annulments
+        if anchor.watermarks.get(row["exchange"], 0)
+        < row["scope_sequence"]
+        <= baseline.get(row["exchange"], 0)
+    }
+    if not current_ids:
+        return False
+    try:
+        previous = await repo.get_pnl_timeline_execution_prefix_at_watermarks(
+            scope.wallet_public_id, scope.mode, baseline, previous_as_of
+        )
+    except ExecutionChainError:
+        return True
+    return not current_ids.issubset(row["public_id"] for row in previous["annulments"])
+
+
+async def _series_replay_metadata(
+    repo: Repository,
+    anchor_load: _AnchorLoadResult,
+    replay: _SeriesReplayInputs,
+    options: PnlSeriesReplayOptions,
+    window: tuple[datetime, datetime],
+) -> PnlSeriesReplayMetadata | None:
+    """Derive legacy sample metadata or the durable correction detector's probe."""
+    baseline = options.baseline_watermarks
+    if baseline is None:
+        return None
+    _, to_time = window
+    previous_as_of = options.previous_replay_as_of
+    metadata = _derive_series_replay_metadata(
+        replay.loaded_execution_rows,
+        baseline,
+        to_time,
+        rewind_scope_regressions=previous_as_of is not None,
+    )
+    metadata = replace(
+        metadata,
+        raw_execution_watermarks=dict(replay.raw_watermarks),
+        execution_manifest_digest=_execution_manifest_digest(replay.applied_annulments),
+        has_fill_gap=replay.fill_gap_reason is not None,
+        fill_witness_cut=replay.fill_witness_cut,
+        sample_watermarks_by_minute=(
+            _sample_watermarks_for_window(replay.loaded_execution_rows, window)
+            if options.replay_generation_tip is not None
+            else None
+        ),
+    )
+    if previous_as_of is None:
+        return metadata
+    if previous_as_of > anchor_load.scope.knowledge_horizon:
+        raise ValueError("P&L previous replay horizon cannot follow the current one")
+    detection = _durable_detection_watermarks(
+        baseline, metadata.max_scope_sequence_by_exchange, replay.raw_watermarks
+    )
+    earliest = metadata.earliest_affected_minute
+    if await _new_annulments_inside_replay_cut(repo, anchor_load, replay, baseline, previous_as_of):
+        anchor = cast(_ResolvedPnlAnchor, anchor_load.anchor)
+        first = anchor.opening.t0 + timedelta(minutes=1)
+        earliest = first if earliest is None else min(first, earliest)
+    return replace(metadata, detection_watermarks=detection, earliest_affected_minute=earliest)
+
+
+def _sample_watermarks_for_window(
+    rows: Sequence[PnlTimelineOpeningExecutionRow], window: tuple[datetime, datetime]
+) -> dict[datetime, dict[str, int]]:
+    """Fold the effective execution prefix independently for each exact writer minute."""
+    start, end = window
+    changes: dict[datetime, dict[str, int]] = {}
+    for row, effective in _execution_rows_with_effective_time(rows):
+        minute = max(start, _ceil_to_minute(effective))
+        if minute > end:
+            continue
+        exchange, scope_sequence = row["exchange"], row["scope_sequence"]
+        minute_changes = changes.setdefault(minute, {})
+        minute_changes[exchange] = max(minute_changes.get(exchange, 0), scope_sequence)
+    result: dict[datetime, dict[str, int]] = {}
+    cumulative: dict[str, int] = {}
+    minute = start
+    while minute <= end:
+        for exchange, sequence in changes.get(minute, {}).items():
+            cumulative[exchange] = max(cumulative.get(exchange, 0), sequence)
+        result[minute] = cumulative.copy()
+        minute += timedelta(minutes=1)
+    return result
 
 
 def _rate_minute(moment: datetime) -> datetime:
@@ -1601,6 +1818,50 @@ async def load_basket_fiat_evidence(
         resolved,
         _build_fiat_versions(rows),
     )
+
+
+async def load_basket_fiat_evidence_by_minute(
+    repo: Repository,
+    currencies: frozenset[str],
+    start: datetime,
+    end: datetime,
+    as_of: datetime,
+) -> tuple[FxRateMap, FiatVenuesByMinute, FiatVersionMap]:
+    """Load bounded snapshotter basket FX evidence and elect each minute independently.
+
+    Args:
+        repo: Repository providing finalized forex planes and candle rows.
+        currencies: Distinct currencies of the observed basket balances.
+        start: Inclusive first replay minute.
+        end: Inclusive last replay minute.
+        as_of: Frozen knowledge horizon for all versions read.
+
+    Returns:
+        Conflict-checked exact closes, minute-specific oriented pins, and version identities.
+    """
+    minutes = _basket_fiat_grid_minutes(start, end)
+    requirements = {
+        currency_pair_key(currency, "USD"): minutes
+        for currency in currencies
+        if currency and currency != "USD"
+    }
+    candidates = await _discover_fx_candidates(repo, requirements, as_of)
+    candidate_planes = _candidate_planes(candidates, {})
+    rows = await _load_fx_candidate_rows(repo, requirements, candidate_planes, as_of)
+    rates = build_fx_rates(rows)
+    resolved = _pointwise_basket_fx_venues(requirements, rates)
+    collect_pointwise_fx_shadow(
+        lambda: (
+            PointwiseFxShadowRequirement(pair, minute, plane)
+            for minute, venues in sorted(resolved.items())
+            for pair, plane in sorted(venues.items())
+        ),
+        rows,
+        rates,
+        "USD",
+        as_of,
+    )
+    return rates, resolved, _build_fiat_versions(rows)
 
 
 def _as_fx_book(rates: FxRateMap | FxCarryBook) -> FxCarryBook:
@@ -2086,12 +2347,19 @@ async def _scope_has_fill_gap(
         The stamped global reason when the scope has a proven fill gap,
         otherwise ``None``.
     """
-    if not await repo.pnl_timeline_scope_has_fill_gap(
-        wallet_public_id,
-        mode,
-        as_of,
-        execution_prefix,
-    ):
+    return _fill_gap_reason(
+        await repo.pnl_timeline_scope_has_fill_gap(
+            wallet_public_id,
+            mode,
+            as_of,
+            execution_prefix,
+        )
+    )
+
+
+def _fill_gap_reason(has_gap: bool) -> PnlIncompletenessReasonEntry | None:
+    """Express a certified gap as the global incomplete-valuation reason."""
+    if not has_gap:
         return None
     return PnlIncompletenessReasonEntry(
         reason="fill_evidence_gap",
@@ -2165,6 +2433,22 @@ async def _load_mark_candles(
     return list(candles)
 
 
+type _FxPlanesByInstrumentMinute = dict[tuple[str, datetime], dict[FxPairKey, PnlFxRatePlane]]
+"""Selected conversion planes for each consuming instrument at each required minute."""
+
+
+def _fx_venues_at(
+    venues_by_instrument: Mapping[str, FxVenueMap],
+    venues_by_instrument_minute: _FxPlanesByInstrumentMinute | None,
+    instrument_public_id: str,
+    minute: datetime,
+) -> FxVenueMap:
+    """Read one consumer's exact minute pins or its legacy window-wide pins."""
+    if venues_by_instrument_minute is None:
+        return venues_by_instrument.get(instrument_public_id, {})
+    return venues_by_instrument_minute.get((instrument_public_id, minute), {})
+
+
 @dataclass(frozen=True, slots=True)
 class _MarkValuation:
     """Everything needed to turn one raw close into a valuation-currency mark."""
@@ -2173,6 +2457,7 @@ class _MarkValuation:
     valuation_ccy: str
     book: FxCarryBook
     venues_by_instrument: Mapping[str, FxVenueMap]
+    venues_by_instrument_minute: _FxPlanesByInstrumentMinute | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2204,7 +2489,12 @@ def _record_mark(
     """
     instrument_public_id, minute = key
     quote_currency = valuation.quote_by_instrument[instrument_public_id]
-    venues = valuation.venues_by_instrument.get(instrument_public_id, {})
+    venues = _fx_venues_at(
+        valuation.venues_by_instrument,
+        valuation.venues_by_instrument_minute,
+        instrument_public_id,
+        minute,
+    )
     converted = valuation.book.convert(
         close, quote_currency, valuation.valuation_ccy, minute, venues
     )
@@ -3678,6 +3968,84 @@ def _freshest_carriers(
     return {plane for plane in finalists if covered[plane].carry_cost == cheapest}
 
 
+def _fx_plane_tiebreak(
+    plane: PnlFxRatePlane,
+    valuation_ccy: str,
+    *,
+    prefer_walutomat: bool,
+) -> tuple[bool, str, bool, PnlFxRatePlane]:
+    """Order equally covered planes by venue preference and direct orientation."""
+    return (
+        prefer_walutomat and plane[2] != "walutomat",
+        plane[2],
+        plane[1] != valuation_ccy,
+        plane,
+    )
+
+
+def _pointwise_fx_venues(
+    requirements: Mapping[FxPairKey, set[datetime]],
+    rates: FxRateMap,
+    valuation_ccy: str,
+) -> dict[datetime, dict[FxPairKey, PnlFxRatePlane]]:
+    """Elect from usable exact closes at each consumed minute in one pass."""
+    resolved: dict[datetime, dict[FxPairKey, PnlFxRatePlane]] = {}
+    for (base, quote, exchange, minute), close in rates.items():
+        pair = currency_pair_key(base, quote)
+        required = requirements.get(pair)
+        if required is None or minute not in required or not is_positive_finite(close):
+            continue
+        plane = (base, quote, exchange)
+        at_minute = resolved.setdefault(minute, {})
+        previous = at_minute.get(pair)
+        prefer_walutomat = "PLN" in pair
+        if previous is None or _fx_plane_tiebreak(
+            plane, valuation_ccy, prefer_walutomat=prefer_walutomat
+        ) < _fx_plane_tiebreak(previous, valuation_ccy, prefer_walutomat=prefer_walutomat):
+            at_minute[pair] = plane
+    return resolved
+
+
+def _basket_observed_fx_planes(
+    rates: FxRateMap,
+) -> dict[FxPairKey, dict[datetime, PnlFxRatePlane]]:
+    """Index forex identities loaded for the basket's requested pairs."""
+    observed: dict[FxPairKey, dict[datetime, PnlFxRatePlane]] = {}
+    for base, quote, exchange, minute in rates:
+        pair = currency_pair_key(base, quote)
+        plane = (base, quote, exchange)
+        pair_planes = observed.setdefault(pair, {})
+        previous = pair_planes.get(minute)
+        prefer_walutomat = "PLN" in pair
+        if previous is None or _fx_plane_tiebreak(
+            plane, "USD", prefer_walutomat=prefer_walutomat
+        ) < _fx_plane_tiebreak(previous, "USD", prefer_walutomat=prefer_walutomat):
+            pair_planes[minute] = plane
+    return observed
+
+
+def _pointwise_basket_fx_venues(
+    requirements: Mapping[FxPairKey, set[datetime]], rates: FxRateMap
+) -> dict[datetime, dict[FxPairKey, PnlFxRatePlane]]:
+    """Keep known forex legs on the fiat path without carrying their rates.
+
+    An exact or recent earlier fiat candle can establish that a currency has a
+    forex plane. When all exact rates are missing or unusable, pin only that
+    observed identity. The basket's exact lookup still refuses the conversion.
+    A future row and the physical chunk's bounds never classify this minute.
+    """
+    resolved = _pointwise_fx_venues(requirements, rates, "USD")
+    for pair, observed in _basket_observed_fx_planes(rates).items():
+        observed_minutes = sorted(observed)
+        for minute in requirements[pair]:
+            if pair in resolved.get(minute, {}):
+                continue
+            index = bisect_right(observed_minutes, minute)
+            if index and observed_minutes[index - 1] > minute - _FX_CARRY_WINDOW:
+                resolved.setdefault(minute, {})[pair] = observed[observed_minutes[index - 1]]
+    return resolved
+
+
 def _preferred_fx_plane(
     pair: FxPairKey,
     minutes: set[datetime],
@@ -3710,19 +4078,13 @@ def _preferred_fx_plane(
     finalists = {plane for plane, coverage in scored.items() if coverage == best_coverage}
     if not best_exact:
         finalists = _freshest_carriers(finalists, covered)
-    if best_exact == len(minutes) and "PLN" in pair:
-        walutomat = {plane for plane in finalists if plane[2] == "walutomat"}
-        if walutomat:
-            finalists = walutomat
-    selected_exchange = min(plane[2] for plane in finalists)
-    venue_finalists = {plane for plane in finalists if plane[2] == selected_exchange}
-    source_currency = pair[1] if pair[0] == valuation_ccy else pair[0]
-    direct = {
-        plane
-        for plane in venue_finalists
-        if (plane[0], plane[1]) == (source_currency, valuation_ccy)
-    }
-    return min(direct or venue_finalists)
+    prefer_walutomat = best_exact == len(minutes) and "PLN" in pair
+    return min(
+        finalists,
+        key=lambda plane: _fx_plane_tiebreak(
+            plane, valuation_ccy, prefer_walutomat=prefer_walutomat
+        ),
+    )
 
 
 def _event_complete_fx_planes(
@@ -3972,6 +4334,16 @@ class _SeriesFxEvidence:
     book: FxCarryBook
     planes_by_instrument: _FxPlanesByInstrument
     used_planes: set[tuple[FxPairKey, PnlFxRatePlane]]
+    planes_by_instrument_minute: _FxPlanesByInstrumentMinute | None = None
+
+    def venues_at(self, instrument_public_id: str, minute: datetime) -> FxVenueMap:
+        """Return the pins applying to an event at its own conversion minute."""
+        return _fx_venues_at(
+            self.planes_by_instrument,
+            self.planes_by_instrument_minute,
+            instrument_public_id,
+            minute,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -4083,34 +4455,25 @@ async def _load_request_fx_rates(
     return election.rates, election.planes_by_instrument, election.used_planes
 
 
-async def _elect_fx_planes(repo: Repository, request: _FxRequest) -> _FxElection:
-    """Run plane discovery, loading and election for one request.
-
-    Args:
-        repo: Repository providing bounded FX plane and candle reads.
-        request: Consumers and knowledge horizon of this read.
-
-    Returns:
-        Exact rates, per-instrument selections and the evidence behind them.
-    """
-    event_requirements = request.event_requirements
+async def _read_fx_candidate_evidence(
+    repo: Repository,
+    request: _FxRequest,
+    minute_sets: _FxMinuteSets,
+    *,
+    has_general_consumers: bool,
+) -> tuple[list[PnlFxRateRow], dict[FxPairKey, set[PnlFxRatePlane]]]:
+    """Load the same bounded mark and event evidence for either election policy."""
     identity_planes = request.identity_planes
     as_of = request.as_of
-    valuation_ccy = request.valuation_ccy
-    minute_sets = _fx_minute_sets(request)
-    instrument_requirements = minute_sets.exact
-    consumer_requirements = minute_sets.consumers
     mark_pair_requirements = minute_sets.mark_reads
-    event_pair_requirements = _collapse_fx_minutes(event_requirements)
+    event_pair_requirements = _collapse_fx_minutes(request.event_requirements)
     requirements = _merge_fx_minutes(mark_pair_requirements, event_pair_requirements)
     if not requirements:
-        return _FxElection({}, {}, set(), [], {}, {})
+        return [], {}
     event_open_intervals = _event_fx_open_intervals(event_pair_requirements, requirements)
-    general_requirements = _general_fx_minutes(minute_sets.voters, identity_planes)
-    general_event_requirements = _general_fx_minutes(event_requirements, identity_planes)
     mark_candidates: list[PnlFxRatePlane] = []
     event_candidates: list[PnlFxRatePlane] = []
-    if general_requirements:
+    if has_general_consumers:
         with pnl_read_phase("fx_discovery_mark"):
             mark_candidates = await _discover_fx_candidates(
                 repo,
@@ -4148,6 +4511,33 @@ async def _elect_fx_planes(repo: Repository, request: _FxRequest) -> _FxElection
         )
     pnl_read_count("fx_event_rows", event_rows)
     rows = [*mark_rows, *event_rows]
+    return rows, candidate_planes
+
+
+async def _elect_fx_planes(repo: Repository, request: _FxRequest) -> _FxElection:
+    """Run plane discovery, loading and election for one request.
+
+    Args:
+        repo: Repository providing bounded FX plane and candle reads.
+        request: Consumers and knowledge horizon of this read.
+
+    Returns:
+        Exact rates, per-instrument selections and the evidence behind them.
+    """
+    event_requirements = request.event_requirements
+    identity_planes = request.identity_planes
+    as_of = request.as_of
+    valuation_ccy = request.valuation_ccy
+    minute_sets = _fx_minute_sets(request)
+    instrument_requirements = minute_sets.exact
+    consumer_requirements = minute_sets.consumers
+    if not consumer_requirements:
+        return _FxElection({}, {}, set(), [], {}, {})
+    general_requirements = _general_fx_minutes(minute_sets.voters, identity_planes)
+    general_event_requirements = _general_fx_minutes(event_requirements, identity_planes)
+    rows, candidate_planes = await _read_fx_candidate_evidence(
+        repo, request, minute_sets, has_general_consumers=bool(general_requirements)
+    )
     with pnl_read_phase("fx_election"):
         shared_planes = _resolve_fx_planes(
             general_requirements,
@@ -4529,15 +4919,86 @@ async def _load_request_fx_book(repo: Repository, request: _FxRequest) -> _Serie
     )
 
 
+def _pointwise_fx_venues_by_instrument(
+    requirements: _FxInstrumentRequirements,
+    shared: FiatVenuesByMinute,
+    identity_planes: Mapping[str, PnlFxRatePlane],
+) -> _FxPlanesByInstrumentMinute:
+    """Bind each exact consumer to a shared pin or its own mandatory orientation."""
+    venues: _FxPlanesByInstrumentMinute = {}
+    for instrument, pairs in requirements.items():
+        own = identity_planes.get(instrument)
+        own_pair = currency_pair_key(own[0], own[1]) if own is not None else None
+        for pair, minutes in pairs.items():
+            for minute in minutes:
+                plane = own if pair == own_pair else shared.get(minute, {}).get(pair)
+                if plane is not None:
+                    venues.setdefault((instrument, minute), {})[pair] = plane
+    return venues
+
+
+def _series_pointwise_shadow_requirements(
+    request: _FxRequest,
+    exact: _FxInstrumentRequirements,
+    general: _FxMinuteRequirements,
+    shared: FiatVenuesByMinute,
+) -> Iterable[PointwiseFxShadowRequirement]:
+    """Yield the actual independent shared and instrument-owned minute decisions."""
+    general_events = _general_fx_minutes(request.event_requirements, request.identity_planes)
+    for pair, minutes in sorted(general.items()):
+        events = general_events.get(pair, set())
+        for minute in sorted(minutes):
+            yield PointwiseFxShadowRequirement(
+                pair, minute, shared.get(minute, {}).get(pair), is_event=minute in events
+            )
+    for instrument, plane in sorted(request.identity_planes.items()):
+        pair = currency_pair_key(plane[0], plane[1])
+        events = request.event_requirements.get(instrument, {}).get(pair, set())
+        for minute in sorted(exact.get(instrument, {}).get(pair, set())):
+            yield PointwiseFxShadowRequirement(
+                pair, minute, plane, owner=instrument, is_event=minute in events
+            )
+
+
+@pnl_read_stage("fx")
+async def _load_pointwise_series_fx(repo: Repository, request: _FxRequest) -> _SeriesFxEvidence:
+    """Read FX in batches and choose causal minute pins for exact replay only."""
+    minute_sets = _fx_minute_sets(request)
+    general = _general_fx_minutes(minute_sets.exact, request.identity_planes)
+    rows, _ = await _read_fx_candidate_evidence(
+        repo, request, minute_sets, has_general_consumers=bool(general)
+    )
+    rates = build_fx_rates(rows)
+    shared = _pointwise_fx_venues(general, rates, request.valuation_ccy)
+    venues = _pointwise_fx_venues_by_instrument(minute_sets.exact, shared, request.identity_planes)
+    collect_pointwise_fx_shadow(
+        lambda: _series_pointwise_shadow_requirements(request, minute_sets.exact, general, shared),
+        rows,
+        rates,
+        request.valuation_ccy,
+        request.as_of,
+    )
+    used_planes = {
+        (pair, plane)
+        for (_, minute), selections in venues.items()
+        for pair, plane in selections.items()
+        if is_positive_finite(rates.get((*plane, minute)))
+    }
+    return _SeriesFxEvidence(exact_fx_book(rates), {}, used_planes, venues)
+
+
 async def _load_series_fx(
     repo: Repository,
     request: _FxRequest,
     *,
     carry_valuation: bool,
+    pointwise_exact_fx: bool,
 ) -> _SeriesFxEvidence:
     """Load one series read's FX evidence under its valuation policy."""
     if carry_valuation:
         return await _load_request_fx_book(repo, request)
+    if pointwise_exact_fx:
+        return await _load_pointwise_series_fx(repo, request)
     rates, planes_by_instrument, used_planes = await _load_request_fx_rates(
         repo,
         request.mark_requirements,
@@ -5202,13 +5663,7 @@ def _anchor_covered_annulment_identities(
     """
     return tuple(
         sorted(
-            (
-                row["public_id"],
-                row["target_execution_public_id"],
-                row["target_execution_digest"],
-                row["exchange"],
-                row["scope_sequence"],
-            )
+            _applied_annulment_identity(row)
             for row in applied
             if row["scope_sequence"] <= anchor.watermarks.get(row["exchange"], 0)
         )
@@ -5272,36 +5727,26 @@ def _require_anchor_manifest_unchanged(
 
 async def _load_series_replay_inputs(
     repo: Repository,
-    scope: _AnchorScope,
+    anchor_load: _AnchorLoadResult,
     to_time: datetime,
-    anchor: _ResolvedPnlAnchor,
-    execution_prefix: PnlTimelineExecutionPrefix | None,
+    options: PnlSeriesReplayOptions,
 ) -> _SeriesReplayInputs:
     """Load and bound the post-watermark accounting evidence for one series.
 
-    Takes the whole :class:`_AnchorScope` rather than its parts so the read
-    horizon and the INTENT it was taken with cannot be separated on the way down
-    — the manifest narrowing depends on both, and a caller that could pass one
-    without the other would silently inherit the conservative default.
+    The anchor load carries the exact horizon and its intent. Resumed chunks
+    recertify the execution prefix and reuse the probe's fill-gap assessment.
     """
+    scope = anchor_load.scope
+    anchor = cast(_ResolvedPnlAnchor, anchor_load.anchor)
     wallet_public_id = scope.wallet_public_id
     mode = scope.mode
     as_of = scope.knowledge_horizon
-    loaded_prefix = (
-        await repo.get_pnl_timeline_execution_prefix(
-            wallet_public_id,
-            mode,
-            scope.requested_horizon,
-        )
-        if execution_prefix is None
-        else execution_prefix
-    )
-    fill_gap_reason = await _scope_has_fill_gap(
-        repo,
-        wallet_public_id,
-        mode,
-        as_of,
-        loaded_prefix,
+    loaded_prefix = await _series_execution_prefix(repo, anchor_load, options)
+    frozen_gap = options.frozen_has_fill_gap
+    fill_gap_reason = (
+        await _scope_has_fill_gap(repo, wallet_public_id, mode, as_of, loaded_prefix)
+        if frozen_gap is None
+        else _fill_gap_reason(frozen_gap)
     )
     for exchange, anchor_watermark in anchor.watermarks.items():
         if loaded_prefix["watermarks"].get(exchange, 0) < anchor_watermark:
@@ -5309,14 +5754,16 @@ async def _load_series_replay_inputs(
                 "current execution prefix regressed below the activation watermark"
             )
     _require_anchor_manifest_unchanged(anchor, loaded_prefix["annulments"])
+    if options.verify_replay_probe and options.frozen_execution_watermarks is None:
+        await _verify_replay_probe(repo, scope, loaded_prefix)
     loaded_execution_rows = [
         row
         for row in loaded_prefix["executions"]
         if row["scope_sequence"] > anchor.watermarks.get(row["exchange"], 0)
     ]
-    replayed_execution_rows = _execution_rows_effective_through(
-        loaded_execution_rows,
-        to_time,
+    reference_tip = options.replay_generation_tip or to_time
+    replayed_execution_rows, reference_execution_rows = _series_replay_execution_windows(
+        loaded_execution_rows, to_time, reference_tip
     )
     late_pre_activation_reason = (
         PnlIncompletenessReasonEntry(
@@ -5332,20 +5779,116 @@ async def _load_series_replay_inputs(
         dict.fromkeys(row["order_public_id"] for row in replayed_execution_rows)
     )
     lineage_rows = await repo.get_pnl_timeline_execution_lineage(order_public_ids, as_of)
-    accrual_rows = [
+    reference_accrual_rows = [
         row
         for row in await repo.get_accruals_for_pnl(wallet_public_id, mode, as_of)
-        if anchor.opening.t0 < row["accrued_at"] <= to_time
+        if anchor.opening.t0 < row["accrued_at"] <= reference_tip
     ]
     return _SeriesReplayInputs(
         loaded_execution_rows=loaded_execution_rows,
         replayed_execution_rows=replayed_execution_rows,
-        accrual_rows=accrual_rows,
+        accrual_rows=[row for row in reference_accrual_rows if row["accrued_at"] <= to_time],
+        reference_tip=reference_tip,
+        reference_execution_rows=reference_execution_rows,
+        reference_accrual_rows=reference_accrual_rows,
         lineage=_build_execution_lineage(lineage_rows),
         fill_gap_reason=fill_gap_reason,
         late_pre_activation_reason=late_pre_activation_reason,
         applied_annulments=tuple(loaded_prefix["annulments"]),
+        raw_watermarks=loaded_prefix["watermarks"],
+        fill_witness_cut=loaded_prefix.get("fill_witness_cut"),
     )
+
+
+def _validate_frozen_replay_policy(
+    options: PnlSeriesReplayOptions, policy: PnlSeriesReadPolicy, to_time: datetime, as_of: datetime
+) -> None:
+    """Keep generation admission and resumed evidence reads historically scoped."""
+    frozen = options.frozen_execution_watermarks
+    if frozen is None and options.frozen_execution_manifest_digest is not None:
+        raise ValueError("A frozen P&L execution manifest requires its captured raw cut")
+    if frozen is None and options.frozen_has_fill_gap is not None:
+        raise ValueError("A frozen P&L fill-gap assessment requires its captured raw cut")
+    if frozen is None and options.frozen_fill_witness_cut is not None:
+        raise ValueError("A frozen P&L fill-witness certificate requires its captured raw cut")
+    reference_tip = options.replay_generation_tip
+    if reference_tip is not None:
+        if frozen is None:
+            raise ValueError("P&L generation references require a captured raw execution cut")
+        if not to_time <= reference_tip <= as_of:
+            raise ValueError("P&L generation tip must cover the chunk within its knowledge horizon")
+    if (frozen is not None or options.verify_replay_probe) and (
+        policy.allow_anchor_creation or policy.current_truth or policy.current_truth_horizon
+    ):
+        raise ValueError("A P&L replay probe or frozen cut requires a read-only historical policy")
+
+
+async def _series_execution_prefix(
+    repo: Repository, anchor_load: _AnchorLoadResult, options: PnlSeriesReplayOptions
+) -> PnlTimelineExecutionPrefix:
+    """Recertify an exact captured cut or use the ordinary preloaded series prefix."""
+    frozen = options.frozen_execution_watermarks
+    scope = anchor_load.scope
+    if frozen is None:
+        if options.verify_replay_probe:
+            return await _capture_replay_prefix(repo, scope)
+        if anchor_load.execution_prefix is not None:
+            return anchor_load.execution_prefix
+        return await repo.get_pnl_timeline_execution_prefix(
+            scope.wallet_public_id, scope.mode, scope.requested_horizon
+        )
+    expected = dict(frozen)
+    witness = options.frozen_fill_witness_cut
+    try:
+        prefix = await repo.get_pnl_timeline_execution_prefix_at_watermarks(
+            scope.wallet_public_id,
+            scope.mode,
+            expected,
+            scope.knowledge_horizon,
+            fill_witness_cut=witness,
+        )
+    except ExecutionChainError as error:
+        raise PnlFrozenReplayEvidenceChangedError(
+            "P&L frozen execution and fill witnesses could not be recertified"
+        ) from error
+    if prefix["watermarks"] != expected:
+        raise PnlAnchorEvidenceError("P&L frozen execution prefix did not match the captured cut")
+    if prefix.get("fill_witness_cut") != witness:
+        raise PnlFrozenReplayEvidenceChangedError("P&L frozen fill-witness cut changed")
+    manifest = options.frozen_execution_manifest_digest
+    if manifest is not None and _execution_manifest_digest(prefix["annulments"]) != manifest:
+        raise PnlFrozenReplayEvidenceChangedError("P&L frozen execution manifest changed")
+    return prefix
+
+
+async def _capture_replay_prefix(
+    repo: Repository, scope: _AnchorScope
+) -> PnlTimelineExecutionPrefix:
+    """Capture both the execution prefix and its physical fill witness cut."""
+    return await repo.get_pnl_timeline_execution_prefix(
+        scope.wallet_public_id, scope.mode, scope.requested_horizon, capture_fill_witness_cut=True
+    )
+
+
+async def _verify_replay_probe(
+    repo: Repository, scope: _AnchorScope, original: PnlTimelineExecutionPrefix
+) -> None:
+    """Reject a probe when its execution evidence changed during its venue witness read."""
+    try:
+        recertified = await _capture_replay_prefix(repo, scope)
+    except ExecutionChainError as error:
+        raise PnlFrozenReplayEvidenceChangedError(
+            "P&L evidence could not be recertified during replay admission"
+        ) from error
+    if (
+        recertified["watermarks"] != original["watermarks"]
+        or recertified.get("fill_witness_cut") != original.get("fill_witness_cut")
+        or _execution_manifest_digest(recertified["annulments"])
+        != _execution_manifest_digest(original["annulments"])
+    ):
+        raise PnlFrozenReplayEvidenceChangedError(
+            "P&L execution evidence changed during replay admission"
+        )
 
 
 def _series_display_activity_spans(
@@ -5745,7 +6288,7 @@ async def _resolve_equity_overlay(
     overlay without a read. The single ``get_portfolio_pnl_samples`` call applies
     the exact R4 predicate set (active, ``point_kind='sample'``, exact scope, the
     USD anchor's epoch, the exact sample ``calc_version``, ``complete`` status)
-    over the requested grid window, so there is one bounded sample read per request.
+    over the requested grid and withholds the outstanding correction suffix.
 
     Samples exist in USD alone, so the query is always USD-scoped and a non-USD
     request is served by converting the folded overlay at each minute's proven
@@ -5782,6 +6325,7 @@ async def _resolve_equity_overlay(
             _USD_VALUATION_BASIS,
         ),
         calc_version=PNL_SAMPLE_CALC_VERSION,
+        require_reconciled=True,
     )
     samples = await repo.get_portfolio_pnl_samples(
         query,
@@ -5953,8 +6497,8 @@ async def build_wallet_pnl_series(
             boundary read is issued twice; its ``baseline_watermarks`` supplies the
             caller's persisted per-exchange watermark map (R3) so, when the scope
             has a post-activation window, the result carries typed replay metadata.
-            Omitting either leaves the corresponding behaviour off — no preloaded
-            evidence and a ``None`` ``replay_metadata`` respectively.
+            The snapshotter supplies a frozen cut to recertify one generation's
+            exact physical execution coordinates at the original horizon.
 
     Returns:
         The built :class:`PnlTimelineResult` at the requested granularity.
@@ -5962,10 +6506,13 @@ async def build_wallet_pnl_series(
     Raises:
         PnlTimelineWorkBudgetError: When raw grid minute-instrument work is
             above :data:`PNL_TIMELINE_MAX_WORK_UNITS`.
-        ValueError: When ``granularity`` is not a supported value (surfaced by
-            the pure builder).
+        PnlFrozenReplayEvidenceChangedError: When a frozen execution cut has a
+            different certified annulment manifest.
+        ValueError: When granularity is unsupported or the requested policy
+            conflicts with a frozen execution cut.
     """
     with pnl_read_phase("series_anchor"):
+        _validate_frozen_replay_policy(options, policy, to_time, as_of)
         wallet_public_id = normalize_portfolio_pnl_wallet_public_id(wallet_public_id)
         _enforce_total_work_budget(from_time, to_time, 0)
         anchor_load = await _load_or_create_anchor(
@@ -6000,19 +6547,9 @@ async def build_wallet_pnl_series(
                 valuation_ccy,
             )
     with pnl_read_phase("series_replay"):
-        replay = await _load_series_replay_inputs(
-            repo,
-            anchor_load.scope,
-            to_time,
-            anchor,
-            anchor_load.execution_prefix,
-        )
-        replay_metadata = (
-            _derive_series_replay_metadata(
-                replay.loaded_execution_rows, options.baseline_watermarks, to_time
-            )
-            if options.baseline_watermarks is not None
-            else None
+        replay = await _load_series_replay_inputs(repo, anchor_load, to_time, options)
+        replay_metadata = await _series_replay_metadata(
+            repo, anchor_load, replay, options, (from_time, to_time)
         )
         opening_instrument_ids, instrument_ids = _series_instrument_ids(
             anchor, replay, from_time, to_time
@@ -6022,13 +6559,13 @@ async def build_wallet_pnl_series(
             await repo.get_instrument_symbol_refs(instrument_ids, as_of) if instrument_ids else []
         )
         suffix_refs, untrusted_price_reasons_by_instrument = _partition_series_execution_price_refs(
-            replay.replayed_execution_rows,
+            replay.reference_execution_rows,
             refs,
         )
         opening_spans = {
             instrument_public_id: (
                 anchor.opening.t0,
-                max(anchor.opening.t0, to_time),
+                max(anchor.opening.t0, replay.reference_tip),
             )
             for instrument_public_id in opening_instrument_ids
         }
@@ -6070,8 +6607,8 @@ async def build_wallet_pnl_series(
         ]
         display_activity_spans = _series_display_activity_spans(
             anchor.opening,
-            replay.replayed_execution_rows,
-            replay.accrual_rows,
+            replay.reference_execution_rows,
+            replay.reference_accrual_rows,
         )
         display_identities = _instrument_display_identities(display_activity_spans, refs)
         mark_requirements = _mark_fx_minutes(
@@ -6129,6 +6666,13 @@ async def build_wallet_pnl_series(
             carried_mark_requirements=mark_carry.fx_requirements,
         ),
         carry_valuation=policy.carry_valuation,
+        pointwise_exact_fx=options.pointwise_exact_fx,
+    )
+
+    global_reasons = tuple(
+        reason
+        for reason in (replay.fill_gap_reason, replay.late_pre_activation_reason)
+        if reason is not None
     )
 
     def value_series() -> tuple[PnlTimelineResult, tuple[PnlFxRateSource, ...]]:
@@ -6148,6 +6692,7 @@ async def build_wallet_pnl_series(
                     valuation_ccy,
                     fx_evidence.book,
                     fx_evidence.planes_by_instrument,
+                    fx_evidence.planes_by_instrument_minute,
                 ),
                 mark_carry,
                 anchor.marks,
@@ -6161,7 +6706,9 @@ async def build_wallet_pnl_series(
                     fx_evidence.book,
                     base_asset=base_by_instrument.get(row["instrument_public_id"]),
                     price_currency=quote_by_instrument.get(row["instrument_public_id"]),
-                    venues=fx_evidence.planes_by_instrument.get(row["instrument_public_id"], {}),
+                    venues=fx_evidence.venues_at(
+                        row["instrument_public_id"], _rate_minute(row["timestamp"])
+                    ),
                 )
                 for row in replay.loaded_execution_rows
             ]
@@ -6170,7 +6717,9 @@ async def build_wallet_pnl_series(
                     row,
                     valuation_ccy,
                     fx_evidence.book,
-                    fx_evidence.planes_by_instrument.get(row["instrument_public_id"], {}),
+                    fx_evidence.venues_at(
+                        row["instrument_public_id"], _rate_minute(row["accrued_at"])
+                    ),
                 )
                 for row in replay.accrual_rows
             ]
@@ -6179,6 +6728,7 @@ async def build_wallet_pnl_series(
                 to_time=to_time,
                 granularity=granularity,
                 valuation_ccy=valuation_ccy,
+                recovery_budget_per_point=options.replay_generation_tip is not None,
             )
             result = _timed_build_pnl_timeline(
                 executions,
@@ -6191,12 +6741,8 @@ async def build_wallet_pnl_series(
                 mark_evidence=mark_evidence,
             )
             _record_carry_timing(result.points, carry_valuation=policy.carry_valuation)
-            for global_reason in (
-                replay.fill_gap_reason,
-                replay.late_pre_activation_reason,
-            ):
-                if global_reason is not None:
-                    result = _withhold_series_for_global_reason(result, global_reason)
+            for global_reason in global_reasons:
+                result = _withhold_series_for_global_reason(result, global_reason)
             result = _with_instrument_display_identities(
                 result,
                 display_identities,
@@ -6236,7 +6782,7 @@ async def build_wallet_pnl_series(
                     activation_t0=anchor.opening.t0,
                     from_time=from_time,
                     to_time=to_time,
-                    current_truth=policy.current_truth,
+                    current_truth=policy.current_truth and not global_reasons,
                     as_of=as_of,
                     points=result.points,
                 ),

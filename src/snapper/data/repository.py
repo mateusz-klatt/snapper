@@ -86,6 +86,7 @@ from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
+from hashlib import sha256
 from inspect import isawaitable
 from itertools import pairwise
 from struct import pack
@@ -104,6 +105,8 @@ from uuid import uuid7
 from loguru import logger
 from sqlalchemy import ARRAY
 from sqlalchemy import CTE
+from sqlalchemy import JSON
+from sqlalchemy import BigInteger
 from sqlalchemy import ColumnElement
 from sqlalchemy import Insert
 from sqlalchemy import Row
@@ -150,6 +153,7 @@ from sqlalchemy.orm import sessionmaker as sync_sessionmaker
 from sqlalchemy.orm.state import InstanceState
 from sqlalchemy.orm.util import AliasedInsp
 from sqlalchemy.pool import StaticPool
+from sqlalchemy.sql.selectable import Subquery
 
 from snapper.api.schemas.android_devices import AndroidDeviceInfo
 from snapper.api.schemas.android_devices import AndroidPushConfiguration
@@ -322,8 +326,11 @@ from snapper.data.pnl_correction_state import PnlCorrectionRequest
 from snapper.data.pnl_correction_state import PnlCorrectionSampleVersion
 from snapper.data.pnl_correction_state import PortfolioPnlCorrectionConflictError
 from snapper.data.pnl_correction_state import advance_correction_frontier
+from snapper.data.pnl_correction_state import correction_expected_venues
+from snapper.data.pnl_correction_state import correction_fill_witness_watermarks
 from snapper.data.pnl_correction_state import correction_watermarks
 from snapper.data.pnl_correction_state import start_correction_frontier
+from snapper.data.pnl_correction_state import validate_correction_manifest_digest
 from snapper.data.pnl_correction_state import validate_correction_minute
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import PNL_SAMPLE_DIAGNOSTIC_REQUIRED_KEYS
@@ -448,6 +455,7 @@ from snapper.data.repository_types import PnlTimelineExecutionLineageRow
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineExecutionPrefixBundle
 from snapper.data.repository_types import PnlTimelineExecutionRow
+from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
 from snapper.data.repository_types import PnlVenueOrderMinimumVersionRow
@@ -774,6 +782,15 @@ class _PnlTimelineExecutionPrefixSource:
     order_instrument_ids_by_scope: dict[str, set[str]]
     annulment_rows: list[ExecutionAnnulment]
     annulment_witnesses: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _PnlTimelineExecutionCut:
+    """Exact execution bounds and one optional fill-matching replay proof."""
+
+    watermarks: Mapping[str, int]
+    capture_fill_witness_cut: bool = False
+    fill_witness_cut: PnlTimelineFillWitnessCut | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3481,7 +3498,8 @@ class PortfolioPnlSampleQuery:
     (``known_to == KNOWN_TO_MAX``) ``sample`` rows for exactly this
     ``(wallet_public_id, mode, valuation_ccy)`` identity, ``epoch_public_id`` and
     ``calc_version`` (decision R4). No caller-clock ``as_of`` is applied: a sample
-    is finalized truth, not a historical projection.
+    is finalized truth, not a historical projection. Serving reads can request
+    only the prefix settled by the active correction checkpoint.
     """
 
     wallet_public_id: str
@@ -3489,6 +3507,7 @@ class PortfolioPnlSampleQuery:
     valuation_ccy: str
     epoch_public_id: str
     calc_version: str
+    require_reconciled: bool = False
 
 
 _CANDLE_VERSION_KEY_FIELDS: Final[tuple[str, ...]] = (
@@ -5304,6 +5323,8 @@ class Repository(ABC):
         wallet_public_id: str,
         mode: str,
         as_of: datetime | None,
+        *,
+        capture_fill_witness_cut: bool = False,
     ) -> PnlTimelineExecutionPrefix:
         """Capture and replay an exact execution prefix for a P&L scope.
 
@@ -5314,6 +5335,7 @@ class Repository(ABC):
         scope_sequence)`` and fails closed when any frozen range is inactive,
         non-contiguous, duplicated, lacks exactly one active Order lineage, or
         cannot prove one exact durable fill shard owned by the requested wallet.
+        Opt-in replay callers also receive the exact fill candidate cut.
         """
         ...
 
@@ -5329,8 +5351,10 @@ class Repository(ABC):
         mode: str,
         watermarks: Mapping[str, int],
         as_of: datetime,
+        *,
+        fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
     ) -> PnlTimelineExecutionPrefix:
-        """Prove one caller-supplied durable watermark map without extending it."""
+        """Prove supplied execution bounds and any exact fill candidate cut."""
         ...
 
     @abstractmethod
@@ -18448,8 +18472,8 @@ class SQLAlchemyRepository(Repository):
     def _portfolio_pnl_sample_query_filters(
         query: PortfolioPnlSampleQuery,
     ) -> list[ColumnElement[bool]]:
-        """The exact R4 active-sample predicate set for the read surfaces."""
-        return [
+        """The exact R4 active-sample predicates with optional atomic correction gating."""
+        filters: list[ColumnElement[bool]] = [
             PortfolioPnlPoint.known_to == KNOWN_TO_MAX,
             PortfolioPnlPoint.point_kind == "sample",
             PortfolioPnlPoint.wallet_public_id
@@ -18460,6 +18484,25 @@ class SQLAlchemyRepository(Repository):
             PortfolioPnlPoint.epoch_public_id == query.epoch_public_id,
             PortfolioPnlPoint.calc_version == query.calc_version,
         ]
+        if query.require_reconciled:
+            point = PortfolioPnlPoint
+            frontier = PortfolioPnlCorrectionFrontier
+            filters.append(
+                ~exists()
+                .where(
+                    frontier.wallet_public_id == point.wallet_public_id,
+                    frontier.mode == point.mode,
+                    frontier.valuation_ccy == point.valuation_ccy,
+                    frontier.epoch_public_id == point.epoch_public_id,
+                    frontier.calc_version == point.calc_version,
+                    or_(
+                        frontier.next_minute <= point.point_time,
+                        frontier.repair_from <= point.point_time,
+                    ),
+                )
+                .correlate(point)
+            )
+        return filters
 
     async def _begin_portfolio_pnl_sample_write_transaction(
         self, s: AsyncSession, scope: PortfolioPnlSampleScope, *, bounded: bool = False
@@ -18840,6 +18883,21 @@ class SQLAlchemyRepository(Repository):
             raise ValueError("P&L correction has malformed persisted watermarks")
         return correction_watermarks(value)
 
+    @staticmethod
+    def _pnl_correction_expected_venues(payload: str | None) -> frozenset[str] | None:
+        """Read the certified venue set without silently altering its membership."""
+        if payload is None:
+            return None
+        value: object = json.loads(
+            payload, parse_constant=SQLAlchemyRepository._reject_portfolio_pnl_json_constant
+        )
+        if not isinstance(value, list) or any(not isinstance(venue, str) for venue in value):
+            raise ValueError("P&L correction has malformed persisted spot venues")
+        venues = frozenset(value)
+        if len(venues) != len(value):
+            raise ValueError("P&L correction has duplicate persisted spot venues")
+        return correction_expected_venues(venues)
+
     @classmethod
     def _pnl_correction_from_model(
         cls, model: PortfolioPnlCorrectionFrontier
@@ -18859,6 +18917,13 @@ class SQLAlchemyRepository(Repository):
             model.epoch_public_id,
             model.calc_version,
         )
+        raw = model.raw_execution_watermarks_json
+        manifest = model.execution_manifest_digest
+        venue_events = model.venue_event_watermarks_json
+        venue_watermarks = (
+            cls._pnl_correction_watermarks(venue_events) if venue_events is not None else None
+        )
+        validate_correction_manifest_digest(manifest)
         return PnlCorrectionFrontier(
             key=key,
             generation=model.generation,
@@ -18871,6 +18936,16 @@ class SQLAlchemyRepository(Repository):
             pending_watermarks=cls._pnl_correction_watermarks(model.pending_watermarks_json),
             prior_peak=model.prior_peak,
             repair_from=model.repair_from,
+            raw_execution_watermarks=(
+                cls._pnl_correction_watermarks(raw) if raw is not None else None
+            ),
+            execution_manifest_digest=manifest,
+            has_fill_gap=model.has_fill_gap,
+            expected_venues=cls._pnl_correction_expected_venues(model.expected_venues_json),
+            venue_event_watermarks=correction_fill_witness_watermarks(
+                venue_watermarks, model.fill_witness_digest
+            ),
+            fill_witness_digest=model.fill_witness_digest,
         )
 
     @staticmethod
@@ -18883,6 +18958,9 @@ class SQLAlchemyRepository(Repository):
         Returns:
             All mutable control columns for the same transaction.
         """
+        raw = frontier.raw_execution_watermarks
+        venues = frontier.expected_venues
+        venue_watermarks = frontier.venue_event_watermarks
         return {
             "generation": frontier.generation,
             "revision": frontier.revision,
@@ -18896,6 +18974,18 @@ class SQLAlchemyRepository(Repository):
             "pending_watermarks_json": json.dumps(
                 dict(frontier.pending_watermarks), sort_keys=True
             ),
+            "raw_execution_watermarks_json": (
+                json.dumps(dict(raw), sort_keys=True) if raw is not None else None
+            ),
+            "execution_manifest_digest": frontier.execution_manifest_digest,
+            "has_fill_gap": frontier.has_fill_gap,
+            "expected_venues_json": json.dumps(sorted(venues)) if venues is not None else None,
+            "venue_event_watermarks_json": (
+                json.dumps(dict(venue_watermarks), sort_keys=True)
+                if venue_watermarks is not None
+                else None
+            ),
+            "fill_witness_digest": frontier.fill_witness_digest,
             "prior_peak": frontier.prior_peak,
             "repair_from": frontier.repair_from,
         }
@@ -19025,10 +19115,18 @@ class SQLAlchemyRepository(Repository):
         """
         canonical = self._normalize_portfolio_pnl_sample_scope(scope)
         validate_correction_minute(request.start)
+        validate_correction_manifest_digest(request.execution_manifest_digest)
+        expected_venues = correction_expected_venues(request.expected_venues)
+        raw = request.raw_execution_watermarks
         request = replace(
             request,
             baseline_watermarks=correction_watermarks(request.baseline_watermarks),
             pending_watermarks=correction_watermarks(request.pending_watermarks),
+            raw_execution_watermarks=correction_watermarks(raw) if raw is not None else None,
+            expected_venues=expected_venues,
+            venue_event_watermarks=correction_fill_witness_watermarks(
+                request.venue_event_watermarks, request.fill_witness_digest
+            ),
         )
         if request.start <= canonical.anchor_point_time:
             raise PortfolioPnlSampleScopeError("P&L correction must start after its anchor")
@@ -19676,24 +19774,15 @@ class SQLAlchemyRepository(Repository):
         )
         return [(execution, order, instrument) for execution, order, instrument in result.all()]
 
-    @staticmethod
     async def _read_pnl_timeline_fill_lineage(
+        self,
         s: AsyncSession,
         client_order_ids: list[str],
         as_of: datetime,
+        fill_witness_cut: PnlTimelineFillWitnessCut | None,
     ) -> list[VenueEvent]:
         """Read each shared shard's sealed fill prefix for target client ids."""
-        watermark_map = (
-            select(
-                VenueEvent.shard_key.label("shard_key"),
-                func.max(VenueEvent.id).label("event_id"),
-            )
-            .where(
-                VenueEvent.timestamp <= as_of,
-            )
-            .group_by(VenueEvent.shard_key)
-            .subquery()
-        )
+        watermark_map = self._pnl_timeline_fill_lineage_bounds(as_of, fill_witness_cut)
         fill_rows: list[VenueEvent] = []
         for start in range(0, len(client_order_ids), _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE):
             chunk = client_order_ids[start : start + _ORDER_LIFECYCLE_LOOKUP_CHUNK_SIZE]
@@ -19713,6 +19802,55 @@ class SQLAlchemyRepository(Repository):
             )
             fill_rows.extend(result.scalars().all())
         return fill_rows
+
+    def _pnl_timeline_fill_lineage_bounds(
+        self, as_of: datetime, fill_witness_cut: PnlTimelineFillWitnessCut | None
+    ) -> Subquery:
+        """Use saved candidate bounds or get one live sealed upper ID per shard."""
+        if fill_witness_cut is not None:
+            encoded = literal(json.dumps(fill_witness_cut["watermarks"], sort_keys=True))
+            function = (
+                func.json_each_text(encoded.cast(JSON))
+                if self.dialect_name == "postgresql"
+                else func.json_each(encoded)
+            )
+            bounds = function.table_valued("key", "value")
+            return select(
+                bounds.c.key.label("shard_key"), bounds.c.value.cast(BigInteger).label("event_id")
+            ).subquery()
+        return (
+            select(
+                VenueEvent.shard_key.label("shard_key"),
+                func.max(VenueEvent.id).label("event_id"),
+            )
+            .where(
+                VenueEvent.timestamp <= as_of,
+            )
+            .group_by(VenueEvent.shard_key)
+            .subquery()
+        )
+
+    @staticmethod
+    def _pnl_timeline_fill_witness_cut(
+        fill_rows: Sequence[VenueEvent], cut: _PnlTimelineExecutionCut
+    ) -> PnlTimelineFillWitnessCut | None:
+        """Capture exact append-only row membership or reject a changed frozen cut.
+
+        Shorten each sealed shard's upper bound to its highest candidate ID. No
+        candidate in the original read falls beyond that bound, and the digest
+        detects a newly visible lower ID that an upper bound alone cannot seal.
+        """
+        if not cut.capture_fill_witness_cut and cut.fill_witness_cut is None:
+            return None
+        watermarks: dict[str, int] = {}
+        for row in fill_rows:
+            watermarks[row.shard_key] = max(watermarks.get(row.shard_key, 0), row.id)
+        membership = sorted((row.id, row.public_id) for row in fill_rows)
+        digest = sha256(json.dumps(membership, separators=(",", ":")).encode()).hexdigest()
+        captured = PnlTimelineFillWitnessCut(watermarks=watermarks, digest=digest)
+        if cut.fill_witness_cut is not None and cut.fill_witness_cut != captured:
+            raise ExecutionChainError("changed_execution_fill_witness_cut")
+        return captured
 
     @staticmethod
     async def _read_pnl_timeline_scope_fill_prefix(
@@ -21652,6 +21790,8 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         mode: str,
         horizon: _ExecutionKnowledgeHorizon,
+        *,
+        capture_fill_witness_cut: bool = False,
     ) -> PnlTimelineExecutionPrefix:
         """Capture, prove, and fold one exact effective execution-prefix snapshot."""
         captured_rows = (
@@ -21675,7 +21815,11 @@ class SQLAlchemyRepository(Repository):
             if watermark is not None
         }
         return await self._load_pnl_timeline_execution_prefix_for_watermarks(
-            s, wallet_public_id, mode, watermarks, horizon
+            s,
+            wallet_public_id,
+            mode,
+            _PnlTimelineExecutionCut(watermarks, capture_fill_witness_cut),
+            horizon,
         )
 
     async def _load_pnl_timeline_execution_prefix_for_watermarks(
@@ -21683,15 +21827,16 @@ class SQLAlchemyRepository(Repository):
         s: AsyncSession,
         wallet_public_id: str,
         mode: str,
-        watermarks: Mapping[str, int],
+        cut: _PnlTimelineExecutionCut,
         horizon: _ExecutionKnowledgeHorizon,
     ) -> PnlTimelineExecutionPrefix:
         """Prove and fold an exact watermark map inside one read snapshot."""
+        watermarks = dict(cut.watermarks)
         source_rows = await self._read_pnl_timeline_execution_prefix(
             s,
             wallet_public_id,
             mode,
-            dict(watermarks),
+            watermarks,
         )
         client_order_ids = list(
             dict.fromkeys(
@@ -21704,7 +21849,9 @@ class SQLAlchemyRepository(Repository):
             s,
             client_order_ids,
             horizon.as_of,
+            cut.fill_witness_cut,
         )
+        fill_witness_cut = self._pnl_timeline_fill_witness_cut(fill_rows, cut)
         order_instrument_ids_by_scope = await self._read_pnl_timeline_order_instrument_lineage(
             s,
             wallet_public_id,
@@ -21736,7 +21883,7 @@ class SQLAlchemyRepository(Repository):
             _PnlTimelineExecutionPrefixSource(
                 wallet_public_id=wallet_public_id,
                 mode=mode,
-                watermarks=dict(watermarks),
+                watermarks=watermarks,
                 source_rows=source_rows,
                 fill_rows=fill_rows,
                 native_symbols_by_symbol_public_id=native_symbols_by_symbol_public_id,
@@ -21745,11 +21892,12 @@ class SQLAlchemyRepository(Repository):
                 annulment_witnesses=annulment_witnesses,
             )
         )
-        return {
-            "watermarks": dict(watermarks),
-            "executions": executions,
-            "annulments": annulments,
-        }
+        prefix = PnlTimelineExecutionPrefix(
+            watermarks=watermarks, executions=executions, annulments=annulments
+        )
+        if fill_witness_cut is not None:
+            prefix["fill_witness_cut"] = fill_witness_cut
+        return prefix
 
     async def list_fx_proof_backfill_consumers(self) -> list[FxProofBackfillConsumer]:
         """Aggregate active P&L cuts in SQL without materializing point entities."""
@@ -21875,18 +22023,22 @@ class SQLAlchemyRepository(Repository):
         mode: str,
         watermarks: Mapping[str, int],
         as_of: datetime,
+        *,
+        fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
     ) -> PnlTimelineExecutionPrefix:
         """Certify a persisted cut while refusing to capture any newer execution."""
         normalized = dict(sorted(watermarks.items()))
         if any(not exchange or watermark < 0 for exchange, watermark in normalized.items()):
             raise ValueError("execution watermark map is invalid")
         async with self.session() as s, s.begin():
-            await self._begin_effective_execution_snapshot(s)
+            await self._begin_effective_execution_snapshot(
+                s, pin_sqlite=fill_witness_cut is not None
+            )
             return await self._load_pnl_timeline_execution_prefix_for_watermarks(
                 s,
                 wallet_public_id,
                 mode,
-                normalized,
+                _PnlTimelineExecutionCut(normalized, fill_witness_cut=fill_witness_cut),
                 _resolved_knowledge_horizon(as_of),
             )
 
@@ -21895,6 +22047,8 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         mode: str,
         as_of: datetime | None,
+        *,
+        capture_fill_witness_cut: bool = False,
     ) -> PnlTimelineExecutionPrefix:
         """Capture watermarks first, then certify each range's effective history.
 
@@ -21923,17 +22077,22 @@ class SQLAlchemyRepository(Repository):
 
         Every read backing that proof runs inside ONE snapshot, for the reason
         stated on :meth:`_begin_effective_execution_snapshot`.
+        Replay admission also captures the exact fill candidate membership
+        from that same read when ``capture_fill_witness_cut`` is true.
         """
         async with self.session() as s, s.begin():
-            await self._begin_effective_execution_snapshot(s)
+            await self._begin_effective_execution_snapshot(s, pin_sqlite=capture_fill_witness_cut)
             return await self._load_pnl_timeline_execution_prefix_snapshot(
                 s,
                 wallet_public_id,
                 mode,
                 _resolved_knowledge_horizon(as_of),
+                capture_fill_witness_cut=capture_fill_witness_cut,
             )
 
-    async def _begin_effective_execution_snapshot(self, s: AsyncSession) -> None:
+    async def _begin_effective_execution_snapshot(
+        self, s: AsyncSession, *, pin_sqlite: bool = False
+    ) -> None:
         """Pin one effective-execution read to a single consistent view.
 
         Every read that decides which bookings still count does it in several
@@ -21952,16 +22111,17 @@ class SQLAlchemyRepository(Repository):
         consumption are separate statements: recovery and the scope listing
         would otherwise validate under one snapshot and filter under another.
         Mirrors the spot reconciliation bundle, which pins its own multi-read
-        evidence the same way. SQLite needs no analogue — one connection
-        serializes with any writer, so the reads already share one view — which
-        is why the SQLite suites pin the statement ORDERING and not the
-        isolation level.
+        evidence the same way. Resumable replay also starts an explicit SQLite
+        transaction so the legacy driver cannot take a new view between SELECTs.
 
         Args:
             s: The session whose read transaction is being pinned.
+            pin_sqlite: Whether a replay witness requires an explicit SQLite read transaction.
         """
         if self.dialect_name == "postgresql":
             await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        elif pin_sqlite:
+            await s.execute(text("BEGIN"))
 
     async def get_pnl_timeline_execution_prefix_bundle(
         self,

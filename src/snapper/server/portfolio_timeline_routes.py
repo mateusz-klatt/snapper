@@ -65,6 +65,7 @@ from snapper.api.schemas.pnl_timeline import PnlTimelineResponse
 from snapper.application.portfolio.pnl_carry import carry_valuation_enabled
 from snapper.application.portfolio.pnl_read_timing import observe_pnl_read
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
+from snapper.application.portfolio.pnl_timeline import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_TIMELINE_MARK_SOURCE
 from snapper.application.portfolio.pnl_timeline_service import PnlEquityCoverage
@@ -73,7 +74,6 @@ from snapper.application.portfolio.pnl_timeline_service import PnlPointEquityOve
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
 from snapper.application.portfolio.pnl_timeline_service import PnlSignalMarker
 from snapper.application.portfolio.pnl_timeline_service import PnlTimelineMarker
-from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_timeline

@@ -1518,12 +1518,13 @@ async def test_the_derived_planes_rebuild_only_the_real_shards(
     assert len(executions) == 5
 
 
+@pytest.mark.parametrize("capture_witness_cut", [False, True])
 async def test_certification_pins_one_snapshot_before_reading_evidence(
-    repository: SQLAlchemyRepository,
+    repository: SQLAlchemyRepository, capture_witness_cut: bool
 ) -> None:
     """Every read behind the proof answers for the same instant.
 
-    Given: A PostgreSQL certification read.
+    Given: A PostgreSQL certification read with or without a fill witness cut.
     When: The effective prefix is loaded.
     Then: The transaction is pinned to REPEATABLE READ READ ONLY BEFORE any
         evidence statement runs. The proof reads the prefix, its fill lineage,
@@ -1549,9 +1550,12 @@ async def test_certification_pins_one_snapshot_before_reading_evidence(
         wallet_public_id: str,
         mode: str,
         horizon: object,
+        *,
+        capture_fill_witness_cut: bool,
     ) -> PnlTimelineExecutionPrefix:
         """Record that evidence loading begins only after the pin is set."""
         del loaded_session, wallet_public_id, mode, horizon
+        assert capture_fill_witness_cut is capture_witness_cut
         events.append("load")
         return {"watermarks": {}, "executions": [], "annulments": []}
 
@@ -1573,7 +1577,9 @@ async def test_certification_pins_one_snapshot_before_reading_evidence(
     ):
         session_context.return_value.__aenter__.return_value = session
         session_context.return_value.__aexit__.return_value = None
-        await repository.get_pnl_timeline_execution_prefix(_MAIN_WALLET, "live", _AS_OF)
+        await repository.get_pnl_timeline_execution_prefix(
+            _MAIN_WALLET, "live", _AS_OF, capture_fill_witness_cut=capture_witness_cut
+        )
 
     assert events == ["SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY", "load"]
 

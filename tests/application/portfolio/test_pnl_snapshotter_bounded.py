@@ -3,7 +3,6 @@
 import asyncio
 import threading
 from collections.abc import Callable
-from collections.abc import Sequence
 from datetime import datetime
 from datetime import timedelta
 from typing import cast
@@ -12,15 +11,13 @@ import pytest
 
 from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio import pnl_timeline_service
-from snapper.application.portfolio.pnl_snapshot_planner import MAX_CATCHUP_CHUNK_MINUTES
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
 from snapper.application.portfolio.pnl_timeline import PnlTimelineResult
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
-from snapper.data.repository import PortfolioPnlSampleScope
+from snapper.data.pnl_correction_state import MAX_CORRECTION_CHUNK_MINUTES
 from snapper.data.repository import Repository
-from snapper.data.repository_types import PortfolioPnlSampleRow
 from tests.application.portfolio import test_pnl_snapshotter as snapshot_fixtures
 from tests.application.portfolio import test_pnl_timeline_service as series_fixtures
 
@@ -29,36 +26,16 @@ class _ProgressRepository(snapshot_fixtures._FakeRepo):
     """Retain durable progress without retaining prior batches of test payloads."""
 
     def __init__(self) -> None:
-        """Start with an anchor and record only successful commit windows."""
+        """Start with the active scope and no previously committed sample."""
         super().__init__(
             credentials=[snapshot_fixtures._cred("kraken")],
             anchor=snapshot_fixtures._anchor(),
         )
-        self.committed_windows: list[tuple[datetime, datetime]] = []
-        self.inserted_count = 0
 
-    async def record_portfolio_pnl_samples(
-        self, rows: Sequence[PortfolioPnlSampleRow], scope: PortfolioPnlSampleScope
-    ) -> dict[str, tuple[datetime, ...]]:
-        """Commit one batch or fail without moving durable progress.
-
-        Args:
-            rows: The actual samples planned by the snapshotter.
-            scope: The sample writer's bound scope.
-
-        Returns:
-            The writer's inserted, existing and conflicting minute sets.
-        """
-        del scope
-        assert rows
-        minutes = tuple(row["point_time"] for row in rows)
-        if self.conflict_batch:
-            return {"inserted": (), "already_present": (), "conflicts": minutes}
-        self._latest = rows[-1]
-        self.persisted = [rows[-1]]
-        self.committed_windows.append((minutes[0], minutes[-1]))
-        self.inserted_count += len(rows)
-        return {"inserted": minutes, "already_present": (), "conflicts": ()}
+    @property
+    def committed_windows(self) -> list[tuple[datetime, datetime]]:
+        """Expose the actual inclusive ranges committed by the correction writer."""
+        return [(chunk.evidence.start, chunk.end) for chunk in self.committed_chunks]
 
 
 def _snapshotter(repo: _ProgressRepository, now: datetime) -> PortfolioPnlSnapshotter:
@@ -127,10 +104,13 @@ async def test_multi_day_gap_drains_one_day_per_tick(monkeypatch: pytest.MonkeyP
         finish = snapshot_fixtures._T0 + timedelta(days=day + 1)
         assert windows[-1] == (start, finish)
         assert repo.committed_windows[-1] == (start, finish)
-        assert len(windows) == day + 1
-        assert repo.inserted_count == (day + 1) * MAX_CATCHUP_CHUNK_MINUTES
+        assert len(windows) == day + 2
+        assert len(repo.persisted) == (day + 1) * MAX_CORRECTION_CHUNK_MINUTES
+    assert windows[0] == (end, end)
     await snap._tick_once()
-    assert len(windows) == total_days
+    assert len(windows) == total_days + 2
+    assert windows[-1] == (end, end)
+    assert len(repo.committed_windows) == total_days
     assert repo.committed_windows[-1][1] == end
 
 
@@ -152,7 +132,7 @@ async def test_restart_retries_failed_day_from_last_commit(monkeypatch: pytest.M
     await first._tick_once()
     repo.conflict_batch = True
     await first._tick_once()
-    assert repo.inserted_count == MAX_CATCHUP_CHUNK_MINUTES
+    assert len(repo.persisted) == MAX_CORRECTION_CHUNK_MINUTES
     assert len(repo.committed_windows) == 1
     failed_window = windows[-1]
     repo.conflict_batch = False
@@ -160,7 +140,7 @@ async def test_restart_retries_failed_day_from_last_commit(monkeypatch: pytest.M
     await resumed._tick_once()
     assert windows[-1] == failed_window
     assert repo.committed_windows[-1] == failed_window
-    assert repo.inserted_count == 2 * MAX_CATCHUP_CHUNK_MINUTES
+    assert len(repo.persisted) == 2 * MAX_CORRECTION_CHUNK_MINUTES
 
 
 def _series_repository(

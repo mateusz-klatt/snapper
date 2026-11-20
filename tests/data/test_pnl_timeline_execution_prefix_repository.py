@@ -24,6 +24,7 @@ from uuid import uuid7
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +50,7 @@ from snapper.data.repository import _PnlTimelineNativeExactFillKey
 from snapper.data.repository import _PnlTimelineScopeExactFillKey
 from snapper.data.repository import _PnlTimelineScopeExecTradeFillKey
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
+from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 
 _AS_OF = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
@@ -1670,6 +1672,72 @@ async def test_prefix_rejects_unconsumed_idless_fill_witness(
 
     with pytest.raises(ExecutionChainError, match="unconsumed_execution_fill_lineage"):
         await repository.get_pnl_timeline_execution_prefix(_WALLET, "live", _AS_OF)
+
+
+@pytest.mark.parametrize("late_id", [1, 3])
+async def test_frozen_idless_fill_witness_rejects_only_late_membership_inside_cut(
+    repository: SQLAlchemyRepository, late_id: int
+) -> None:
+    """Freeze an ID-less fill while detecting a late commit below its upper ID."""
+    first_execution = _execution("kraken", 1)
+    first_fill = _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD)
+    first_fill.id = 2
+    first_execution.exec_id = first_execution.trade_id = None
+    first_fill.exec_id = first_fill.trade_id = None
+    async with repository.session() as s:
+        s.add_all([_instrument(), _order(), first_execution, first_fill])
+        await s.commit()
+
+    admitted = await repository.get_pnl_timeline_execution_prefix(
+        _WALLET, "live", _AS_OF, capture_fill_witness_cut=True
+    )
+    witness_cut = admitted["fill_witness_cut"]
+    assert witness_cut["watermarks"] == {_KRAKEN_SHARD: 2}
+
+    late_execution = _execution("kraken", 2)
+    late_fill = _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=2)
+    late_fill.id = late_id
+    late_execution.exec_id = late_execution.trade_id = None
+    late_fill.exec_id = late_fill.trade_id = None
+    async with repository.session() as s:
+        s.add_all([late_execution, late_fill])
+        await s.commit()
+
+    fresh = await repository.get_pnl_timeline_execution_prefix(_WALLET, "live", _AS_OF)
+    assert fresh["watermarks"] == {"kraken": 2}
+    assert [row["public_id"] for row in fresh["executions"]] == [
+        first_execution.public_id,
+        late_execution.public_id,
+    ]
+    with pytest.raises(ExecutionChainError, match="unconsumed_execution_fill_lineage"):
+        await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+            _WALLET, "live", admitted["watermarks"], _AS_OF
+        )
+
+    if late_id < first_fill.id:
+        with pytest.raises(ExecutionChainError, match="changed_execution_fill_witness_cut"):
+            await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+                _WALLET, "live", admitted["watermarks"], _AS_OF, fill_witness_cut=witness_cut
+            )
+    else:
+        replayed = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+            _WALLET, "live", admitted["watermarks"], _AS_OF, fill_witness_cut=witness_cut
+        )
+        assert replayed == admitted
+
+
+def test_frozen_fill_witness_bounds_bind_as_postgresql_json(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Use one typed JSON binding for a frozen map of any supported shard count."""
+    witness_cut = PnlTimelineFillWitnessCut(watermarks={_KRAKEN_SHARD: 2}, digest="d" * 64)
+    with patch.object(SQLAlchemyRepository, "dialect_name", new_callable=PropertyMock) as dialect:
+        dialect.return_value = "postgresql"
+        statement = repository._pnl_timeline_fill_lineage_bounds(_AS_OF, witness_cut).select()
+    compiled = statement.compile(dialect=postgresql.dialect())
+    assert "json_each_text(CAST(" in str(compiled)
+    assert "AS JSON)" in str(compiled)
+    assert list(compiled.params.values()) == ['{"kraken.BTC-USD.live": 2}']
 
 
 @pytest.mark.parametrize("execution_size", [0.5, 2.0])

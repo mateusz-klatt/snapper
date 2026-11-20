@@ -37,6 +37,7 @@ from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
+from snapper.application.portfolio.pnl_timeline import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import _UNSAMPLED_EQUITY_COVERAGE
 from snapper.application.portfolio.pnl_timeline_service import PNL_ANCHOR_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_SAMPLE_CALC_VERSION
@@ -53,7 +54,6 @@ from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPoli
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayMetadata
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
 from snapper.application.portfolio.pnl_timeline_service import PnlSignalMarker
-from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
 from snapper.application.portfolio.pnl_timeline_service import _build_equity_overlay
 from snapper.application.portfolio.pnl_timeline_service import _build_execution_lineage
 from snapper.application.portfolio.pnl_timeline_service import _ceil_to_minute
@@ -84,6 +84,7 @@ from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_timeline
 from snapper.application.portfolio.pnl_timeline_service import ensure_wallet_pnl_anchor
 from snapper.application.portfolio.pnl_timeline_service import load_basket_fiat_evidence
+from snapper.application.portfolio.pnl_timeline_service import load_basket_fiat_evidence_by_minute
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.models import Instrument
@@ -599,6 +600,7 @@ class FakeRepo:
         self._anchor = anchor
         self._record_winner = record_winner
         self._execution_prefix_error = execution_prefix_error
+        self._fill_witness_digest = "c" * 64
         self._execution_watermarks = execution_watermarks
         self._applied_annulments: list[PnlTimelineAppliedAnnulment] = []
         self._annulments_known_from = _EMPTY_ANCHOR_T0
@@ -664,6 +666,8 @@ class FakeRepo:
         wallet_public_id: str,
         mode: str,
         as_of: datetime | None,
+        *,
+        capture_fill_witness_cut: bool = False,
     ) -> PnlTimelineExecutionPrefix:
         """Resolve the nullable intent and prove one exact request prefix."""
         self.execution_prefix_intents.append(as_of)
@@ -673,6 +677,8 @@ class FakeRepo:
             raise self._execution_prefix_error
         prefix = self._execution_prefix_at(resolved_as_of)
         self._validate_exact_fill_witnesses(prefix, resolved_as_of)
+        if capture_fill_witness_cut:
+            prefix["fill_witness_cut"] = {"watermarks": {}, "digest": self._fill_witness_digest}
         self.execution_prefixes.append(prefix)
         return prefix
 
@@ -2548,7 +2554,10 @@ class TestCrossCurrencyPrices:
             [("EUR", "PLN"), ("PLN", "EUR")],
         ]
 
-    async def test_zero_coverage_identity_does_not_displace_peer_plane(self) -> None:
+    @pytest.mark.parametrize("pointwise_exact_fx", [False, True])
+    async def test_zero_coverage_identity_does_not_displace_peer_plane(
+        self, pointwise_exact_fx: bool
+    ) -> None:
         """An empty canonical plane withholds its claimant but not a covered peer."""
         repo = FakeRepo(
             executions=[
@@ -2578,16 +2587,19 @@ class TestCrossCurrencyPrices:
                 _fx_row("EUR", "PLN", 0, 2.0, exchange="polygon"),
             ],
         )
-        result = await build_wallet_pnl_series(
-            repo,
-            _W1,
-            "live",
-            _T0,
-            _T0,
-            "1m",
-            _m(1),
-            valuation_ccy="EUR",
-        )
+        shadow = FxShadowPinContext(calculation_version=PNL_SAMPLE_CALC_VERSION, evaluations=[])
+        with activate_fx_shadow_context(shadow):
+            result = await build_wallet_pnl_series(
+                repo,
+                _W1,
+                "live",
+                _T0,
+                _T0,
+                "1m",
+                _m(1),
+                valuation_ccy="EUR",
+                options=PnlSeriesReplayOptions(pointwise_exact_fx=pointwise_exact_fx),
+            )
         point = result.points[0]
         assert point.valuation_status == "incomplete"
         assert point.unrealized_pnl is None
@@ -2601,6 +2613,16 @@ class TestCrossCurrencyPrices:
             (source.base_currency, source.quote_currency, source.exchange)
             for source in result.rate_sources
         ] == [("EUR", "PLN", "polygon")]
+        if pointwise_exact_fx:
+            (owned,) = [
+                evaluation
+                for evaluation in shadow.evaluations
+                if evaluation.scope_kind == "instrument_owned"
+            ]
+            assert owned.consumer_instrument_public_id == _I2
+            assert owned.selected_plane == ("EUR", "PLN", "walutomat")
+            assert not owned.rows
+            assert fx_shadow_evaluation_completeness(owned) == "refused"
 
     async def test_complete_identity_and_peer_publish_mixed_plane_total(self) -> None:
         """Individually proven Walutomat and Polygon legs form one honest total."""
@@ -3322,7 +3344,10 @@ class TestCrossCurrencyPrices:
         assert result.points[1].net_pnl == 16.0
         assert [source.exchange for source in result.rate_sources] == ["polygon"]
 
-    async def test_conflicting_full_key_does_not_count_as_coverage(self) -> None:
+    @pytest.mark.parametrize("pointwise_exact_fx", [False, True])
+    async def test_conflicting_full_key_does_not_count_as_coverage(
+        self, pointwise_exact_fx: bool
+    ) -> None:
         """A duplicate conflict cannot outrank a genuinely complete venue."""
         repo = FakeRepo(
             executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 10.0, 0.0, "")],
@@ -3345,10 +3370,15 @@ class TestCrossCurrencyPrices:
             "1m",
             _m(2),
             valuation_ccy="USD",
+            options=PnlSeriesReplayOptions(pointwise_exact_fx=pointwise_exact_fx),
         )
         assert [point.valuation_status for point in result.points] == ["complete", "complete"]
-        assert result.points[1].unrealized_pnl == 4.0
-        assert result.points[1].net_pnl == 4.0
+        expected = -8.0 if pointwise_exact_fx else 4.0
+        assert result.points[1].unrealized_pnl == expected
+        assert result.points[1].net_pnl == expected
+        assert {source.exchange for source in result.rate_sources} == (
+            {"alpha", "zeta"} if pointwise_exact_fx else {"zeta"}
+        )
 
     async def test_two_held_canonical_venues_each_use_their_own_plane(self) -> None:
         """Divergent venue series independently certify both held instruments."""
@@ -4439,15 +4469,83 @@ class TestForeignFeeConversion:
         ]
         assert after.rate_sources == ()
 
-    async def test_rate_from_another_minute_is_not_borrowed(self) -> None:
-        """A rate that only covers a later minute cannot price an earlier fee."""
+    @pytest.mark.parametrize("pointwise_exact_fx", [False, True])
+    async def test_rate_from_another_minute_is_not_borrowed(self, pointwise_exact_fx: bool) -> None:
+        """Keep a foreign fee unknown without a close for its own minute.
+
+        Given a EUR fee and a rate only for a later minute.
+        When the P&L series uses either range or pointwise exact FX.
+        Then the fee remains unpriced and the series publishes no rate source.
+        """
         repo = self._repo([_fx_row("EUR", "USD", 3, 1.25)])
-        result = await build_wallet_pnl_series(repo, _W1, "live", _T0, _m(0), "1m", _T0)
+        result = await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _m(0),
+            "1m",
+            _T0,
+            options=PnlSeriesReplayOptions(pointwise_exact_fx=pointwise_exact_fx),
+        )
         assert result.points[0].valuation_status == "incomplete"
+        assert result.points[0].fee_pnl is None
+        assert result.rate_sources == ()
 
 
 class TestFxRangeCoversPreWindowFlows:
     """Cover the production defect: a foreign fee that predates the window."""
+
+    async def test_pointwise_fx_uses_the_consumer_minute_after_a_split(self) -> None:
+        """Widening a replay window cannot reprice an earlier fee, accrual or mark."""
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 1.0, "EUR")],
+            accruals=[_accrual_row(_I1, 1, 2.0, "EUR")],
+            refs=[_ref(_I1, "BTC-EUR", "EUR")],
+            candles=[_candle(_m(0), 110.0), _candle(_m(1), 120.0)],
+            fx_rows=[
+                _fx_row("EUR", "USD", 0, 1.25, exchange="coinbase"),
+                _fx_row("EUR", "USD", 1, 1.25, exchange="coinbase"),
+                _fx_row("EUR", "USD", 0, 1.5),
+                _fx_row("EUR", "USD", 1, 1.5),
+                _fx_row("EUR", "USD", 2, 1.5),
+            ],
+        )
+        options = PnlSeriesReplayOptions(pointwise_exact_fx=True)
+        policy = PnlSeriesReadPolicy(allow_anchor_creation=False)
+        shadow = FxShadowPinContext(calculation_version=PNL_SAMPLE_CALC_VERSION, evaluations=[])
+        with activate_fx_shadow_context(shadow):
+            wide = await build_wallet_pnl_series(
+                repo, _W1, "live", _m(1), _m(2), "1m", _m(3), policy=policy, options=options
+            )
+        first = await build_wallet_pnl_series(
+            repo, _W1, "live", _m(1), _m(1), "1m", _m(3), policy=policy, options=options
+        )
+        second = await build_wallet_pnl_series(
+            repo, _W1, "live", _m(2), _m(2), "1m", _m(3), policy=policy, options=options
+        )
+        public = await build_wallet_pnl_series(
+            repo, _W1, "live", _m(1), _m(2), "1m", _m(3), policy=policy
+        )
+
+        assert wide.points == first.points + second.points
+        assert [point.fee_pnl for point in wide.points] == [-1.25, -1.25]
+        assert [point.accrual_pnl for point in wide.points] == [-2.5, -2.5]
+        assert [point.unrealized_pnl for point in wide.points] == [12.5, 55.0]
+        assert public.points[0].fee_pnl == -1.5
+        assert {
+            evaluation.required_minutes: (evaluation.selected_plane, evaluation.event_minutes)
+            for evaluation in shadow.evaluations
+        } == {
+            frozenset({_m(0)}): (("EUR", "USD", "coinbase"), frozenset({_m(0)})),
+            frozenset({_m(1)}): (("EUR", "USD", "coinbase"), frozenset({_m(1)})),
+            frozenset({_m(2)}): (("EUR", "USD", "kraken"), frozenset()),
+        }
+        assert all(
+            {row["open_at"] + timedelta(minutes=1) for row in evaluation.rows}
+            == evaluation.required_minutes
+            for evaluation in shadow.evaluations
+        )
 
     async def test_fee_before_the_window_still_converts(self) -> None:
         """A fill older than `from_time` is replayed, so its fee needs ITS rate.
@@ -6661,6 +6759,57 @@ class TestLoadBasketFiatEvidence:
         )
         assert venues == {}
         assert versions == {}
+
+    async def test_pointwise_basket_keeps_venue_and_availability_across_a_split(self) -> None:
+        """Only the consumed minute chooses its rate, and a past plane cannot supply a rate."""
+        repo = FakeRepo(
+            fx_rows=[
+                _fx_row("USD", "PLN", 1, 4.0, exchange="walutomat"),
+                _fx_row("USD", "PLN", 1, 8.0),
+                _fx_row("USD", "PLN", 2, 8.0),
+            ]
+        )
+        amounts = {1: 100.0, 2: 50.0, 3: None}
+        shadow = FxShadowPinContext(calculation_version=PNL_SAMPLE_CALC_VERSION, evaluations=[])
+        with activate_fx_shadow_context(shadow):
+            wide_rates, wide_venues, wide_versions = await load_basket_fiat_evidence_by_minute(
+                repo, frozenset({"PLN"}), _m(1), _m(3), _m(4)
+            )
+        wide = ValuationEvidence(wide_rates, {}, wide_versions, {}, wide_venues)
+        for minute, expected in amounts.items():
+            point_time = _m(minute)
+            rates, venues, versions = await load_basket_fiat_evidence_by_minute(
+                repo, frozenset({"PLN"}), point_time, point_time, _m(4)
+            )
+            split = ValuationEvidence(rates, {}, versions, {}, venues)
+            wide_leg = value_currency("walutomat", "PLN", 400.0, point_time, wide)
+            assert wide_leg == value_currency("walutomat", "PLN", 400.0, point_time, split)
+            assert wide_leg.usd_value == expected
+        assert value_currency("walutomat", "PLN", 400.0, _m(3), wide).reason == "missing_fiat_rate"
+        first, second, missing = shadow.evaluations
+        assert first.selected_plane == ("USD", "PLN", "walutomat")
+        assert second.selected_plane == ("USD", "PLN", "kraken")
+        assert missing.required_minutes == frozenset({_m(3)})
+        assert not missing.rows
+        assert fx_shadow_evaluation_completeness(missing) == "refused"
+
+    async def test_pointwise_basket_keeps_lookback_boundary_across_a_split(self) -> None:
+        """A candidate whose close is at the lookback boundary has one classification."""
+        repo = FakeRepo(fx_rows=[_fx_row("USD", "PLN", 1, 4.0, exchange="walutomat")])
+        point_time = _m(1) + pnl_timeline_service._FX_CARRY_WINDOW
+        earlier = point_time - timedelta(minutes=1)
+        as_of = point_time + timedelta(minutes=1)
+        rates, venues, versions = await load_basket_fiat_evidence_by_minute(
+            repo, frozenset({"PLN"}), earlier, point_time, as_of
+        )
+        wide = ValuationEvidence(rates, {}, versions, {}, venues)
+        rates, venues, versions = await load_basket_fiat_evidence_by_minute(
+            repo, frozenset({"PLN"}), point_time, point_time, as_of
+        )
+        split = ValuationEvidence(rates, {}, versions, {}, venues)
+        assert value_currency("walutomat", "PLN", 400.0, point_time, wide) == value_currency(
+            "walutomat", "PLN", 400.0, point_time, split
+        )
 
 
 def _default_epoch() -> str:

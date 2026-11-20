@@ -4,6 +4,7 @@ import asyncio
 import json
 import unittest.mock as mock
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -14,27 +15,37 @@ from uuid import UUID
 import pytest
 from sqlalchemy.exc import DBAPIError
 
+from snapper.application.portfolio import pnl_correction_planner
 from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
 from snapper.application.portfolio.pnl_snapshot_planner import WithheldMinute
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
 from snapper.application.portfolio.pnl_snapshotter import _extract_reason_codes
 from snapper.application.portfolio.pnl_snapshotter import _observed_currencies
-from snapper.application.portfolio.pnl_snapshotter import _parse_baseline
-from snapper.application.portfolio.pnl_snapshotter import _sample_values_equal
 from snapper.application.portfolio.pnl_snapshotter import _watermarks_json
 from snapper.application.portfolio.pnl_snapshotter import is_futures_class_exchange
 from snapper.application.portfolio.pnl_snapshotter import resolve_spot_venues
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
+from snapper.application.portfolio.pnl_timeline import PnlTimelineWorkBudgetError
+from snapper.application.portfolio.pnl_timeline_service import PnlFrozenReplayEvidenceChangedError
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayMetadata
-from snapper.application.portfolio.pnl_timeline_service import PnlTimelineWorkBudgetError
+from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.application.process_manager.executor_topology import MINT_WALLET_PIN_SETTING_KEY
 from snapper.application.process_manager.executor_topology import ExecutorTopology
 from snapper.application.services.settings import SettingsService
 from snapper.core.json_types import JsonValue
-from snapper.data.repository import PortfolioPnlSampleConflictError
+from snapper.data.pnl_correction_state import PnlCorrectionChunk
+from snapper.data.pnl_correction_state import PnlCorrectionEdit
+from snapper.data.pnl_correction_state import PnlCorrectionEvidence
+from snapper.data.pnl_correction_state import PnlCorrectionFrontier
+from snapper.data.pnl_correction_state import PnlCorrectionKey
+from snapper.data.pnl_correction_state import PnlCorrectionRequest
+from snapper.data.pnl_correction_state import PnlCorrectionSampleVersion
+from snapper.data.pnl_correction_state import PortfolioPnlCorrectionConflictError
+from snapper.data.pnl_correction_state import advance_correction_frontier
+from snapper.data.pnl_correction_state import start_correction_frontier
 from snapper.data.repository import PortfolioPnlSampleQuery
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import Repository
@@ -51,6 +62,7 @@ _WALLET = "0000face-0000-7000-8000-0000000000a1"
 _MINT_WALLET = "ffffface-0000-7000-8000-0000000000b2"
 _EPOCH = "00000000-0000-7000-8000-000000000102"
 _SESSION = "00000000-0000-7000-8000-000000000103"
+_EXECUTION_MANIFEST_DIGEST = "a" * 64
 _UNRESTRICTED_TOPOLOGY = ExecutorTopology("", frozenset())
 
 
@@ -240,11 +252,18 @@ def _attempt(minute: datetime, wallet: str = _WALLET) -> VenueAccountObservation
     }
 
 
-def _meta(seq: int | None = None, affected: datetime | None = None) -> PnlSeriesReplayMetadata:
+def _meta(
+    seq: int | None = None, affected: datetime | None = None, *, has_fill_gap: bool = False
+) -> PnlSeriesReplayMetadata:
     """Build one replay-metadata result with an optional watermark and boundary."""
     watermarks = {"kraken": seq} if seq is not None else {}
     return PnlSeriesReplayMetadata(
-        max_scope_sequence_by_exchange=watermarks, earliest_affected_minute=affected
+        max_scope_sequence_by_exchange=watermarks,
+        earliest_affected_minute=affected,
+        raw_execution_watermarks=watermarks.copy(),
+        execution_manifest_digest=_EXECUTION_MANIFEST_DIGEST,
+        has_fill_gap=has_fill_gap,
+        fill_witness_cut={"watermarks": {"kraken:spot": 10}, "digest": "c" * 64},
     )
 
 
@@ -274,6 +293,11 @@ def _series(
     )
 
 
+def _sample_scope(wallet: str = _WALLET) -> PortfolioPnlSampleScope:
+    """Create the anchor-bound scope with the same identity as the scheduler."""
+    return PortfolioPnlSampleScope(wallet, "live", "USD", _EPOCH, _T0)
+
+
 class _FakeRepo:
     """Hand-rolled async repository double recording the snapshotter's calls."""
 
@@ -282,7 +306,6 @@ class _FakeRepo:
         *,
         credentials: Sequence[WalletCredentialRow] | None = None,
         anchor: PortfolioPnlAnchorRow | None = None,
-        latest: PortfolioPnlSampleRow | None = None,
         persisted: Sequence[PortfolioPnlSampleRow] | None = None,
         balances_json: (
             str | None
@@ -291,9 +314,12 @@ class _FakeRepo:
         """Wire the canned reads and empty call logs."""
         self._credentials = list(credentials or [])
         self._anchor = anchor
-        self._latest = latest
-        self._peak: float | None = None
-        self.persisted = list(persisted or [])
+        self._frontiers: dict[PnlCorrectionKey, PnlCorrectionFrontier] = {}
+        self._samples = {
+            self._sample_key(row): PnlCorrectionSampleVersion(index, row.copy())
+            for index, row in enumerate(persisted or (), start=1)
+        }
+        self._next_row_id = len(self._samples) + 1
         self._balances_json = balances_json
         self.crypto_rows: list[dict[str, Any]] = []
         self.position_versions: list[dict[str, Any]] = []
@@ -301,8 +327,8 @@ class _FakeRepo:
         self.conflict_batch = False
         self.conflict_minutes: set[datetime] = set()
         self.recorded: list[list[PortfolioPnlSampleRow]] = []
-        self.superseded: list[tuple[PortfolioPnlSampleRow, bool, str]] = []
-        self.retracted: list[tuple[datetime, str, datetime]] = []
+        self.attempted_chunks: list[PnlCorrectionChunk] = []
+        self.committed_chunks: list[PnlCorrectionChunk] = []
         self.peak_before: list[datetime] = []
         self.observation_cuts: list[datetime] = []
         self.observation_scopes: list[tuple[str, tuple[str, ...]]] = []
@@ -348,73 +374,213 @@ class _FakeRepo:
         del wallet, mode, ccy, as_of
         return self._anchor
 
-    async def get_latest_portfolio_pnl_sample(
-        self, query: PortfolioPnlSampleQuery
-    ) -> PortfolioPnlSampleRow | None:
-        """Return the canned durable-progress sample."""
-        return (
-            self._latest
-            if self._latest is None or self._latest["calc_version"] == query.calc_version
-            else None
+    @property
+    def persisted(self) -> list[PortfolioPnlSampleRow]:
+        """Return the active physical versions after successful transactions."""
+        return [version.row for version in self._samples.values()]
+
+    @property
+    def superseded(self) -> list[PnlCorrectionEdit]:
+        """Return the committed CAS replacements."""
+        return [
+            edit
+            for chunk in self.committed_chunks
+            for edit in chunk.edits
+            if edit.expected_row is not None and edit.replacement is not None
+        ]
+
+    @property
+    def retracted(self) -> list[PnlCorrectionEdit]:
+        """Return the committed CAS retractions."""
+        return [
+            edit
+            for chunk in self.committed_chunks
+            for edit in chunk.edits
+            if edit.expected_row is not None and edit.replacement is None
+        ]
+
+    @staticmethod
+    def _sample_key(row: PortfolioPnlSampleRow) -> tuple[str, str, str, datetime]:
+        """Match the repository's active unique minute identity."""
+        return row["wallet_public_id"], row["mode"], row["valuation_ccy"], row["point_time"]
+
+    @staticmethod
+    def _correction_key(scope: PortfolioPnlSampleScope) -> PnlCorrectionKey:
+        """Bind the frontier to the same five-part identity as the production writer."""
+        return PnlCorrectionKey(
+            scope.wallet_public_id,
+            scope.mode,
+            scope.valuation_ccy,
+            scope.epoch_public_id,
+            PNL_SAMPLE_CALC_VERSION,
         )
 
-    async def get_latest_active_portfolio_pnl_sample_any_version(
-        self, scope: PortfolioPnlSampleScope
-    ) -> PortfolioPnlSampleRow | None:
-        """Return the canned active progress across versions."""
-        candidates = [
-            row for row in self.persisted if row["epoch_public_id"] == scope.epoch_public_id
-        ]
-        if (
-            self._latest is not None
-            and self._latest["epoch_public_id"] == scope.epoch_public_id
-            and self._latest not in candidates
-        ):
-            candidates.append(self._latest)
-        return max(candidates, key=lambda row: row["point_time"]) if candidates else None
-
-    async def get_active_portfolio_pnl_samples_any_version(
-        self, scope: PortfolioPnlSampleScope, start: datetime, end: datetime
-    ) -> list[PortfolioPnlSampleRow]:
-        """Return canned active rows in the window across versions."""
+    @staticmethod
+    def _scope_rows(
+        rows: Sequence[PnlCorrectionSampleVersion],
+        scope: PortfolioPnlSampleScope | PortfolioPnlSampleQuery,
+    ) -> list[PnlCorrectionSampleVersion]:
+        """Read all active versions for a wallet, mode and valuation currency."""
         return [
-            row
-            for row in self.persisted
-            if row["epoch_public_id"] == scope.epoch_public_id and start <= row["point_time"] <= end
+            version
+            for version in rows
+            if (
+                version.row["wallet_public_id"],
+                version.row["mode"],
+                version.row["valuation_ccy"],
+            )
+            == (scope.wallet_public_id, scope.mode, scope.valuation_ccy)
         ]
 
-    async def get_portfolio_pnl_sample_peak(self, query: Any, before: datetime) -> float | None:
-        """Return the canned causal peak, recording the ``before`` bound."""
-        del query
-        self.peak_before.append(before)
-        return self._peak
+    def _peak_before(
+        self,
+        scope: PortfolioPnlSampleScope,
+        versions: Sequence[PnlCorrectionSampleVersion],
+        before: datetime,
+    ) -> float | None:
+        """Calculate the exact-epoch, exact-algorithm complete-sample causal peak."""
+        equities = [
+            cash + position
+            for version in self._scope_rows(versions, scope)
+            if scope.anchor_point_time < version.row["point_time"] < before
+            and version.row["epoch_public_id"] == scope.epoch_public_id
+            and version.row["calc_version"] == PNL_SAMPLE_CALC_VERSION
+            and version.row["valuation_status"] == "complete"
+            and (cash := version.row["cash_usd"]) is not None
+            and (position := version.row["position_value_usd"]) is not None
+        ]
+        return max(equities, default=None)
+
+    def _evidence(
+        self, scope: PortfolioPnlSampleScope, start: datetime, end: datetime
+    ) -> PnlCorrectionEvidence:
+        """Snapshot complete physical evidence across epochs and versions."""
+        samples = list(self._samples.values())
+        versions = tuple(
+            PnlCorrectionSampleVersion(version.row_id, version.row.copy())
+            for version in sorted(
+                self._scope_rows(samples, scope), key=lambda item: item.row["point_time"]
+            )
+            if start <= version.row["point_time"] <= end
+        )
+        return PnlCorrectionEvidence(
+            self._correction_key(scope),
+            start,
+            end,
+            versions,
+            self._peak_before(scope, samples, start),
+        )
+
+    def frontier(self, wallet: str = _WALLET) -> PnlCorrectionFrontier:
+        """Return the exact durable state for the test's active scope."""
+        return self._frontiers[self._correction_key(_sample_scope(wallet))]
+
+    def seed_completed_replay(self, tip: datetime, *, seq: int = 4) -> None:
+        """Set a settled cursor independent of the existing financial sample rows."""
+        scope = _sample_scope()
+        evidence = self._evidence(scope, tip, tip)
+        watermark = {"kraken": seq}
+        initial = start_correction_frontier(
+            evidence.key,
+            PnlCorrectionRequest(
+                tip,
+                tip,
+                tip + timedelta(minutes=2),
+                watermark,
+                watermark,
+                evidence.prior_peak,
+                raw_execution_watermarks=watermark,
+                execution_manifest_digest=_EXECUTION_MANIFEST_DIGEST,
+                has_fill_gap=False,
+                expected_venues=frozenset({"kraken"}),
+                venue_event_watermarks={"kraken:spot": 10},
+                fill_witness_digest="c" * 64,
+            ),
+            None,
+        )
+        final_peak = self._peak_before(
+            scope, list(self._samples.values()), tip + timedelta(minutes=1)
+        )
+        self._frontiers[evidence.key] = advance_correction_frontier(
+            initial, PnlCorrectionChunk(tip, (), final_peak, evidence)
+        )
+
+    async def get_portfolio_pnl_correction_frontier(
+        self, scope: PortfolioPnlSampleScope
+    ) -> PnlCorrectionFrontier | None:
+        """Return the exact scope's durable checkpoint."""
+        return self._frontiers.get(self._correction_key(scope))
+
+    async def invalidate_portfolio_pnl_correction(
+        self,
+        scope: PortfolioPnlSampleScope,
+        request: PnlCorrectionRequest,
+        expected: PnlCorrectionFrontier | None,
+    ) -> PnlCorrectionFrontier:
+        """Create or rewind under the exact checkpoint and causal-peak guards."""
+        key = self._correction_key(scope)
+        if self._frontiers.get(key) != expected:
+            raise PortfolioPnlCorrectionConflictError("synthetic stale frontier")
+        frontier = start_correction_frontier(key, request, expected)
+        if self._peak_before(scope, list(self._samples.values()), frontier.window_start) != (
+            frontier.prior_peak
+        ):
+            raise PortfolioPnlCorrectionConflictError("synthetic stale initial peak")
+        self._frontiers[key] = frontier
+        return frontier
+
+    async def get_portfolio_pnl_correction_evidence(
+        self, scope: PortfolioPnlSampleScope, start: datetime, end: datetime
+    ) -> PnlCorrectionEvidence:
+        """Return exact physical versions and record the causal prefix boundary."""
+        self.peak_before.append(start)
+        return self._evidence(scope, start, end)
 
     async def get_portfolio_pnl_samples(
-        self, query: Any, start: datetime, end: datetime, *, status: str | None = None
+        self,
+        query: PortfolioPnlSampleQuery,
+        start: datetime,
+        end: datetime,
+        *,
+        status: str | None = None,
     ) -> list[PortfolioPnlSampleRow]:
-        """Return persisted rows in the window filtered by status."""
-        del query
+        """Return exact-scope active samples filtered to the requested status."""
         self.sample_windows.append((start, end, status))
         return [
-            row
-            for row in self.persisted
-            if start <= row["point_time"] <= end
-            and (status is None or row["valuation_status"] == status)
+            version.row
+            for version in self._scope_rows(list(self._samples.values()), query)
+            if start <= version.row["point_time"] <= end
+            and version.row["epoch_public_id"] == query.epoch_public_id
+            and version.row["calc_version"] == query.calc_version
+            and (status is None or version.row["valuation_status"] == status)
         ]
 
-    async def get_venue_account_observation_attempts_at(
-        self, wallet: str, exchanges: Sequence[str], mode: str, at: datetime
-    ) -> dict[str, VenueAccountObservationAttemptRow]:
-        """Return an authoritative kraken attempt at the requested minute."""
-        del mode
-        self.observation_cuts.append(at)
-        self.observation_scopes.append((wallet, tuple(exchanges)))
-        attempts: dict[str, VenueAccountObservationAttemptRow] = {}
-        for exchange in exchanges:
-            attempt = _attempt(at, wallet)
-            attempt["balances_json"] = self._balances_json
-            attempts[exchange] = attempt
-        return attempts
+    async def get_venue_account_observation_attempt_stream(
+        self,
+        wallet: str,
+        exchanges: Sequence[str],
+        mode: str,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> list[VenueAccountObservationAttemptRow]:
+        """Emit each exchange's opening seed and later attempts in bus order."""
+        rows: list[VenueAccountObservationAttemptRow] = []
+        minute = window_start
+        venues = tuple(sorted(exchanges))
+        minute_duration = timedelta(minutes=1)
+        while minute <= window_end:
+            self.observation_cuts.append(minute)
+            self.observation_scopes.append((wallet, venues))
+            row_id = ((minute - _T0) // minute_duration) * 100
+            for index, exchange in enumerate(venues, start=1):
+                attempt = _attempt(minute, wallet)
+                attempt["id"] = row_id + index
+                attempt["exchange"] = exchange
+                attempt["mode"] = mode
+                attempt["balances_json"] = self._balances_json
+                rows.append(attempt)
+            minute += minute_duration
+        return rows
 
     async def get_pnl_crypto_usd_plane_candles(
         self, currencies: Sequence[str], start: datetime, end: datetime, as_of: datetime
@@ -478,46 +644,57 @@ class _FakeRepo:
             )
         ]
 
-    async def record_portfolio_pnl_samples(
-        self, rows: Sequence[PortfolioPnlSampleRow], scope: Any
-    ) -> dict[str, tuple[datetime, ...]]:
-        """Record inserted rows; report a conflict when configured (B1)."""
-        del scope
-        self.recorded.append(list(rows))
-        minutes = tuple(row["point_time"] for row in rows)
-        if self.conflict_batch:
-            return {"inserted": (), "already_present": (), "conflicts": minutes}
-        self.persisted.extend(rows)
-        return {"inserted": minutes, "already_present": (), "conflicts": ()}
-
-    async def supersede_portfolio_pnl_sample(
+    async def commit_portfolio_pnl_correction_chunk(
         self,
-        scope: Any,
-        replacement: PortfolioPnlSampleRow,
-        *,
-        derived_suffix_reconciliation: bool,
-        expected_public_id: str,
-    ) -> PortfolioPnlSampleRow:
-        """Record a supersede; raise a CAS conflict when configured (B3)."""
-        del scope
-        if replacement["point_time"] in self.conflict_minutes:
-            raise PortfolioPnlSampleConflictError("synthetic CAS conflict")
-        self.superseded.append((replacement, derived_suffix_reconciliation, expected_public_id))
-        return replacement
-
-    async def retract_portfolio_pnl_sample(
-        self,
-        scope: Any,
-        point_time: datetime,
-        *,
-        expected_public_id: str,
-        bus_time: datetime,
-    ) -> None:
-        """Record a retract; raise a CAS conflict when configured (N1)."""
-        del scope
-        if point_time in self.conflict_minutes:
-            raise PortfolioPnlSampleConflictError("synthetic retract CAS conflict")
-        self.retracted.append((point_time, expected_public_id, bus_time))
+        scope: PortfolioPnlSampleScope,
+        expected: PnlCorrectionFrontier,
+        chunk: PnlCorrectionChunk,
+    ) -> PnlCorrectionFrontier:
+        """Publish exact-version sample edits and their cursor together."""
+        self.attempted_chunks.append(chunk)
+        key = self._correction_key(scope)
+        evidence = self._evidence(scope, chunk.evidence.start, chunk.end)
+        if (
+            self._frontiers.get(key) != expected
+            or evidence != chunk.evidence
+            or evidence.prior_peak != expected.prior_peak
+        ):
+            raise PortfolioPnlCorrectionConflictError("synthetic stale chunk evidence")
+        frontier = advance_correction_frontier(expected, chunk)
+        staged = self._samples.copy()
+        row_id = self._next_row_id
+        inserted: list[PortfolioPnlSampleRow] = []
+        for edit in chunk.edits:
+            if edit.point_time in self.conflict_minutes or (
+                self.conflict_batch and edit.expected_row is None
+            ):
+                raise PortfolioPnlCorrectionConflictError("synthetic sample CAS conflict")
+            sample_key = (scope.wallet_public_id, scope.mode, scope.valuation_ccy, edit.point_time)
+            previous = edit.expected_row
+            if staged.get(sample_key) != previous:
+                raise PortfolioPnlCorrectionConflictError("synthetic stale physical row")
+            replacement = edit.replacement
+            if replacement is None:
+                del staged[sample_key]
+                continue
+            row = replacement.copy()
+            if previous is None:
+                inserted.append(row)
+            else:
+                row["public_id"] = previous.row["public_id"]
+                row["timestamp"] = max(row["timestamp"], previous.row["timestamp"])
+            staged[sample_key] = PnlCorrectionSampleVersion(row_id, row)
+            row_id += 1
+        peak = self._peak_before(scope, list(staged.values()), chunk.end + timedelta(minutes=1))
+        if peak != frontier.prior_peak:
+            raise PortfolioPnlCorrectionConflictError("synthetic resulting peak disagreement")
+        self._samples = staged
+        self._next_row_id = row_id
+        self._frontiers[key] = frontier
+        self.committed_chunks.append(chunk)
+        if inserted:
+            self.recorded.append(inserted)
+        return frontier
 
 
 class _FakeSettingsService:
@@ -669,16 +846,14 @@ def _install_series(monkeypatch: pytest.MonkeyPatch, *, first: PnlSeriesReplayMe
     """Patch the series function; the first call carries ``first`` metadata."""
     state = {"first": True}
 
-    def fake(*args: Any, **kwargs: Any) -> Any:
+    async def fake(*args: object, **kwargs: object) -> PnlWalletSeriesResult:
+        """Return the same execution prefix when the checkpoint is resumed."""
         del kwargs
         from_time, to_time = args[3], args[4]
-        attach = first if state["first"] else _meta()
+        assert isinstance(from_time, datetime) and isinstance(to_time, datetime)
+        attach = first if state["first"] else replace(first, earliest_affected_minute=None)
         state["first"] = False
-
-        async def _run() -> PnlWalletSeriesResult:
-            return _series(from_time, to_time, metadata=attach)
-
-        return _run()
+        return _series(from_time, to_time, metadata=attach)
 
     monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
 
@@ -857,6 +1032,112 @@ class TestLifecycle:
         snap = PortfolioPnlSnapshotter(repo=None, disabled=True)
         with pytest.raises(RuntimeError, match="disabled mode"):
             await snap._tick_once()
+
+    @pytest.mark.asyncio
+    async def test_tick_timeout_cancels_blocked_read(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The tick budget cancels a suspended repository read.
+
+        Given: A repository read that waits indefinitely for a result.
+        When: An actual zero-second asyncio budget expires.
+        Then: The read receives cancellation, and the tick returns without a write.
+
+        Args:
+            monkeypatch: Test fixture for replacing the blocked read.
+            caplog: Capture of the budget-exhausted diagnostic.
+        """
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5))
+        snap._interval_seconds = 0
+        begun = asyncio.Event()
+        cancelled = asyncio.Event()
+        unblock = asyncio.Event()
+
+        async def blocking_read(as_of: datetime) -> list[WalletCredentialRow]:
+            """Wait until the tick deadline cancels repository I/O."""
+            del as_of
+            begun.set()
+            try:
+                await unblock.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return []
+
+        monkeypatch.setattr(repo, "list_active_wallet_credentials", blocking_read)
+        with caplog.at_level("WARNING", logger=pnl_snapshotter.__name__):
+            await asyncio.wait_for(snap._tick_once(), timeout=5)
+        assert begun.is_set()
+        assert cancelled.is_set()
+        assert not repo.attempted_chunks
+        assert not repo.persisted
+        assert "replay tick exceeded its time budget" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_slow_scope_reduces_its_chunk_and_yields_to_next_wallet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Retry slow work at a smaller size without starving the next wallet.
+
+        Given: Two eligible wallets and a budget that expires during the first.
+        When: The service retries the schedule with the earlier wallet reduced.
+        Then: It tries the other wallet first and resumes the slow one at half size.
+
+        Args:
+            monkeypatch: Test fixture for controlling the work in each scope.
+        """
+        repo = _FakeRepo(
+            credentials=[_cred("kraken", wallet="wallet-a"), _cred("kraken", wallet="wallet-b")],
+            anchor=_anchor(),
+        )
+        snap = _snapshotter(repo, _minute(5))
+        snap._interval_seconds = 0
+        monkeypatch.setattr(pnl_snapshotter, "MAX_CORRECTION_CHUNK_MINUTES", 4)
+        scheduled: list[tuple[str, int]] = []
+        blocked = asyncio.Event()
+
+        async def process(
+            unused_repo: Repository,
+            wallet: str,
+            unused_venues: frozenset[str],
+            unused_as_of: datetime,
+            unused_mint_excluded: bool,
+        ) -> bool:
+            """Suspend the first scope only at its original chunk size."""
+            limit = snap._replay_chunk_limit(wallet)
+            scheduled.append((wallet, limit))
+            if wallet == "wallet-a" and limit == 4:
+                await blocked.wait()
+            return False
+
+        monkeypatch.setattr(snap, "_process_wallet", process)
+        await asyncio.wait_for(snap._tick_once(), timeout=5)
+        assert scheduled == [("wallet-a", 4)]
+        await asyncio.wait_for(snap._tick_once(), timeout=5)
+        assert scheduled == [("wallet-a", 4), ("wallet-b", 4), ("wallet-a", 2)]
+
+    @pytest.mark.parametrize(("sqlstate", "next_limit"), [("57014", 4), ("XX000", 8)])
+    @pytest.mark.asyncio
+    async def test_query_deadline_reduces_the_next_attempt(
+        self, monkeypatch: pytest.MonkeyPatch, sqlstate: str, next_limit: int
+    ) -> None:
+        """Shrink replay after PostgreSQL times out ahead of the outer tick budget.
+
+        Given: A scope with a bounded chunk and a failed database statement.
+        When: The scheduler sees query cancellation or an unrelated driver error.
+        Then: Only the query timeout reduces the retry size, with no sample write.
+        """
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(5))
+        monkeypatch.setattr(pnl_snapshotter, "MAX_CORRECTION_CHUNK_MINUTES", 8)
+        driver_error = RuntimeError("synthetic query failure")
+        monkeypatch.setattr(driver_error, "sqlstate", sqlstate, raising=False)
+        failure = DBAPIError("SELECT synthetic", {}, driver_error, False)
+        monkeypatch.setattr(snap, "_process_wallet", mock.AsyncMock(side_effect=failure))
+        await snap._tick_once()
+        assert snap._replay_chunk_limit(_WALLET) == next_limit
+        assert not repo.attempted_chunks
 
     @pytest.mark.asyncio
     async def test_tick_once_flushes_enabled_shadow_context(
@@ -1042,6 +1323,7 @@ class TestTickDiscoveryAndIsolation:
         with _patched_series():
             await snap._tick_once()
             settings_service.pin = _MINT_WALLET
+            snap._clock = _clock(_minute(8))
             await snap._tick_once()
         assert sum(row["wallet_public_id"] == _WALLET for row in repo.persisted) == 6
         assert sum(row["wallet_public_id"] == _MINT_WALLET for row in repo.persisted) == 3
@@ -1122,7 +1404,7 @@ class TestTickDiscoveryAndIsolation:
         repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
         snap = _snapshotter(repo, _minute(5))
         snap._failure_logged.add((_WALLET, "sample_failed"))
-        snap._failure_logged.add((_WALLET, "supersede_cas"))
+        snap._failure_logged.add((_WALLET, "catchup_conflict"))
         with _patched_series():
             await snap._tick_once()
         assert all(wallet != _WALLET for wallet, _cls in snap._failure_logged)
@@ -1132,13 +1414,13 @@ class TestTickDiscoveryAndIsolation:
         """In-memory state for a wallet absent from discovery is pruned (B5)."""
         repo = _FakeRepo(credentials=[], anchor=None)
         snap = _snapshotter(repo, _minute(5))
-        snap._no_anchor_logged.add("gone-wallet")
-        snap._mint_identity_logged.add("gone-wallet")
-        snap._baselines["gone-wallet|live|USD|epoch"] = {"kraken": 3}
+        snap._no_anchor_logged.add(_WALLET)
+        snap._mint_identity_logged.add(_WALLET)
+        repo.seed_completed_replay(_minute(3), seq=3)
         await snap._tick_once()
         assert snap._no_anchor_logged == set()
         assert snap._mint_identity_logged == set()
-        assert snap._baselines == {}
+        assert repo.frontier().baseline_watermarks == {"kraken": 3}
 
 
 class TestCatchupAndCorrections:
@@ -1156,33 +1438,281 @@ class TestCatchupAndCorrections:
         assert all(row["valuation_status"] == "complete" for row in inserted)
         assert inserted[0]["cash_usd"] == 1000.0
         assert inserted[0]["watermarks_json"] == '{"kraken":7}'
-        assert snap._baselines[f"{_WALLET}|live|USD|{_EPOCH}"] == {"kraken": 7}
+        assert repo.frontier().baseline_watermarks == {"kraken": 7}
+        assert repo.frontier().next_minute is None
+        assert repo.frontier().repair_from is None
         assert _minute(1) in repo.peak_before
 
     @pytest.mark.asyncio
     async def test_durable_baseline_drives_the_series(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The latest sample's persisted watermark map seeds the engine call (B2)."""
-        latest = _persisted_sample(_minute(2), status="complete", watermarks_json='{"kraken":4}')
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=[latest]
-        )
+        """A replacement service seeds its replay from the durable checkpoint."""
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        repo.seed_completed_replay(_minute(2), seq=4)
         snap = _snapshotter(repo, _minute(6))
         seen: list[dict[str, int]] = []
 
-        def fake(*args: Any, **kwargs: Any) -> Any:
-            seen.append(dict(kwargs["options"].baseline_watermarks))
+        async def fake(*args: object, **kwargs: object) -> PnlWalletSeriesResult:
+            """Record both the detection and correction baseline."""
+            options = kwargs["options"]
+            assert isinstance(options, PnlSeriesReplayOptions)
+            seen.append(dict(options.baseline_watermarks))
             from_time, to_time = args[3], args[4]
-
-            async def _run() -> PnlWalletSeriesResult:
-                return _series(from_time, to_time, metadata=_meta(seq=4))
-
-            return _run()
+            assert isinstance(from_time, datetime) and isinstance(to_time, datetime)
+            return _series(from_time, to_time, metadata=_meta(seq=5))
 
         monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
         await snap._tick_once()
-        assert seen[0] == {"kraken": 4}
+        assert seen == [{"kraken": 4}, {"kraken": 4}]
+        assert repo.frontier().baseline_watermarks == {"kraken": 5}
+
+    @pytest.mark.asyncio
+    async def test_finalized_tip_at_anchor_waits_for_a_post_anchor_minute(self) -> None:
+        """Wait for the first finalized post-anchor minute.
+
+        Given: The finalized tip equals the wallet's activation minute.
+        When: The snapshotter processes the wallet.
+        Then: It opens no replay and creates no checkpoint.
+        """
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _T0 + pnl_snapshotter.FINALIZATION_LAG)
+        with mock.patch.object(pnl_snapshotter, "build_wallet_pnl_series") as series:
+            await snap._tick_once()
+
+        series.assert_not_called()
+        assert await repo.get_portfolio_pnl_correction_frontier(_sample_scope()) is None
+        assert not repo.attempted_chunks
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("next_minute", "venues"), [(None, frozenset({"kraken"})), (_minute(2), None)]
+    )
+    async def test_advance_replay_requires_pending_minute_and_certified_venues(
+        self, next_minute: datetime | None, venues: frozenset[str] | None
+    ) -> None:
+        """Reject a replay that cannot certify its pending window.
+
+        Given: The checkpoint lacks its next minute or its certified venues.
+        When: The scheduler attempts to advance it.
+        Then: It reports a conflict before attempting any financial write.
+
+        Args:
+            next_minute: Pending minute, or absence for a completed cursor.
+            venues: Certified venue set, or absence for an uncertified cursor.
+        """
+        repo = _FakeRepo()
+        repo.seed_completed_replay(_minute(2))
+        original = repo.frontier()
+        snap = _snapshotter(repo, original.as_of)
+        ctx = snap._build_scope_context(_WALLET, _anchor(), frozenset({"kraken"}), original.as_of)
+        frontier = replace(original, next_minute=next_minute, expected_venues=venues)
+
+        with pytest.raises(PortfolioPnlCorrectionConflictError, match="no certified pending"):
+            await snap._advance_replay(cast(Repository, repo), ctx, frontier)
+
+        assert not repo.attempted_chunks
+        assert repo.frontier() == original
+
+    @pytest.mark.asyncio
+    async def test_advance_replay_rejects_missing_fill_witness_cut(self) -> None:
+        """Reject a pending checkpoint whose witnesses cannot be reopened."""
+        repo = _FakeRepo()
+        repo.seed_completed_replay(_minute(2))
+        original = repo.frontier()
+        snap = _snapshotter(repo, original.as_of)
+        ctx = snap._build_scope_context(_WALLET, _anchor(), frozenset({"kraken"}), original.as_of)
+        frontier = replace(
+            original,
+            next_minute=_minute(2),
+            venue_event_watermarks=None,
+            fill_witness_digest=None,
+        )
+        with pytest.raises(PortfolioPnlCorrectionConflictError, match="no certified fill-witness"):
+            await snap._advance_replay(cast(Repository, repo), ctx, frontier)
+        assert not repo.attempted_chunks
+        assert repo.frontier() == original
+
+    @pytest.mark.asyncio
+    async def test_uncertified_legacy_pending_cut_is_restarted_from_anchor(self) -> None:
+        """Refresh a legacy checkpoint that had no durable venue witness proof."""
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        repo.seed_completed_replay(_minute(3))
+        original = repo.frontier()
+        repo._frontiers[original.key] = replace(
+            original, next_minute=_minute(2), venue_event_watermarks=None, fill_witness_digest=None
+        )
+        snap = _snapshotter(repo, original.as_of)
+
+        with _patched_series(seq=4):
+            await snap._tick_once()
+
+        certified = repo.frontier()
+        assert certified.generation == original.generation + 1
+        assert certified.window_start == _minute(1)
+        assert certified.venue_event_watermarks == {"kraken:spot": 10}
+
+    @pytest.mark.asyncio
+    async def test_clock_before_frontier_defers_replay(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A backwards clock leaves the durable frontier and samples intact.
+
+        Given: A settled scope with a later recorded knowledge horizon.
+        When: A replacement service ticks at an earlier instant.
+        Then: It skips detection, invalidation, and publication for that scope.
+
+        Args:
+            monkeypatch: Observe whether the replay engine is called.
+        """
+        old = _persisted_sample(_minute(3), status="complete")
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=[old])
+        repo.seed_completed_replay(_minute(3))
+        frontier = repo.frontier()
+        snap = _snapshotter(repo, frontier.as_of - timedelta(seconds=1))
+        series = mock.AsyncMock(return_value=_series(_minute(3), _minute(3), metadata=_meta(seq=4)))
+        monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", series)
+
+        await snap._tick_once()
+
+        series.assert_not_awaited()
+        assert repo.frontier() == frontier
+        assert repo.persisted == [old]
+        assert not repo.attempted_chunks
+
+    @pytest.mark.parametrize("change", ["gap", "manifest"])
+    @pytest.mark.asyncio
+    async def test_stationary_probe_rewinds_when_certified_history_changes(
+        self, monkeypatch: pytest.MonkeyPatch, change: str
+    ) -> None:
+        """A changed historical fact rewinds from the first sample minute.
+
+        Given: A settled tip, the same execution sequence, and no earlier affected minute.
+        When: Its stationary probe reveals a fill gap or a changed manifest.
+        Then: A new generation recomputes from the first minute after activation.
+
+        Args:
+            monkeypatch: Supply the changed evidence at a stationary tip.
+            change: The certified fact which changed between generations.
+        """
+        old = _persisted_sample(_minute(3), status="complete")
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=[old])
+        repo.seed_completed_replay(_minute(3))
+        frontier = repo.frontier()
+        snap = _snapshotter(repo, frontier.as_of)
+        windows: list[tuple[datetime, datetime]] = []
+
+        async def fake(*args: object, **kwargs: object) -> PnlWalletSeriesResult:
+            """Keep execution coordinates fixed while changing the certified evidence."""
+            start, end = args[3], args[4]
+            assert isinstance(start, datetime) and isinstance(end, datetime)
+            windows.append((start, end))
+            options = kwargs["options"]
+            assert isinstance(options, PnlSeriesReplayOptions)
+            assert options.verify_replay_probe is (start == end == _minute(3))
+            is_gap = change == "gap"
+            metadata = _meta(seq=4, has_fill_gap=is_gap)
+            if change == "manifest":
+                metadata = replace(metadata, execution_manifest_digest="b" * 64)
+            return _series(start, end, metadata=metadata, untrusted=is_gap)
+
+        monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
+        await snap._tick_once()
+
+        assert windows == [(_minute(3), _minute(3)), (_minute(1), _minute(3))]
+        assert repo.frontier().generation == frontier.generation + 1
+        assert repo.frontier().window_start == _minute(1)
+        assert repo.frontier().baseline_watermarks == {"kraken": 4}
+        assert repo.committed_chunks[0].evidence.start == _minute(1)
+
+    @pytest.mark.asyncio
+    async def test_resumed_chunk_uses_the_generation_venue_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A restart does not reinterpret the plan's basket denominator.
+
+        Given: A partial replay started with two eligible spot venues.
+        When: The next service discovers only one eligible venue.
+        Then: Its remaining chunk uses both venues saved on the generation.
+        """
+        monkeypatch.setattr(pnl_snapshotter, "MAX_CORRECTION_CHUNK_MINUTES", 2)
+        repo = _FakeRepo(credentials=[_cred("kraken"), _cred("walutomat")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(6))
+        with _patched_series(seq=4):
+            await snap._tick_once()
+        before = repo.frontier()
+        assert before.expected_venues == frozenset({"kraken", "walutomat"})
+        assert before.next_minute == _minute(3)
+
+        repo._credentials = [_cred("kraken")]
+        repo.observation_scopes.clear()
+        resumed = _snapshotter(repo, _minute(7))
+        with _patched_series(seq=4):
+            await resumed._tick_once()
+        assert repo.frontier().generation == before.generation
+        assert repo.frontier().expected_venues == before.expected_venues
+        assert repo.frontier().next_minute is None
+        assert repo.observation_scopes
+        assert all(venues == ("kraken", "walutomat") for _, venues in repo.observation_scopes)
+
+    @pytest.mark.asyncio
+    async def test_frozen_manifest_drift_rewinds_without_publishing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A changed execution manifest restarts replay before publishing more samples.
+
+        Given: A partially committed generation and a drifted frozen execution manifest.
+        When: The next chunk cannot recertify the earlier manifest.
+        Then: The current tick changes only the durable cursor, and the following
+              tick recomputes from the first minute using the fresh manifest.
+
+        Args:
+            monkeypatch: Force a two-minute bound and inject the evidence drift.
+        """
+        monkeypatch.setattr(pnl_snapshotter, "MAX_CORRECTION_CHUNK_MINUTES", 2)
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(6))
+        with _patched_series(seq=4):
+            await snap._tick_once()
+        before = repo.frontier()
+        samples = repo.persisted
+        assert before.next_minute == _minute(3)
+        changed_digest = "b" * 64
+        calls: list[tuple[datetime, datetime, str | None]] = []
+
+        async def fake(*args: object, **kwargs: object) -> PnlWalletSeriesResult:
+            """Reject the old frozen manifest, then certify the replacement."""
+            start, end = args[3], args[4]
+            assert isinstance(start, datetime) and isinstance(end, datetime)
+            options = kwargs["options"]
+            assert isinstance(options, PnlSeriesReplayOptions)
+            digest = options.frozen_execution_manifest_digest
+            calls.append((start, end, digest))
+            if digest == _EXECUTION_MANIFEST_DIGEST:
+                raise PnlFrozenReplayEvidenceChangedError("synthetic frozen manifest drift")
+            metadata = replace(_meta(seq=4), execution_manifest_digest=changed_digest)
+            return _series(start, end, metadata=metadata)
+
+        monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
+        await snap._tick_once()
+
+        assert calls == [
+            (_minute(3), _minute(4), _EXECUTION_MANIFEST_DIGEST),
+            (_minute(4), _minute(4), None),
+        ]
+        assert repo.persisted == samples
+        assert len(repo.committed_chunks) == len(repo.attempted_chunks) == 1
+        rewind = repo.frontier()
+        assert rewind.generation == before.generation + 1
+        assert rewind.next_minute == _minute(1)
+        assert rewind.execution_manifest_digest == changed_digest
+        assert rewind.baseline_watermarks == before.baseline_watermarks
+
+        await snap._tick_once()
+
+        assert calls[-1] == (_minute(1), _minute(2), changed_digest)
+        assert len(repo.committed_chunks) == 2
+        assert repo.frontier().next_minute == _minute(3)
 
     @pytest.mark.asyncio
     async def test_stale_version_recomputes_from_t0_through_supersede(self) -> None:
@@ -1193,21 +1723,20 @@ class TestCatchupAndCorrections:
         repo = _FakeRepo(
             credentials=[_cred("kraken")],
             anchor=_anchor(),
-            latest=stale_rows[-1],
             persisted=stale_rows,
         )
         snap = _snapshotter(repo, _minute(4))
         with _patched_series(seq=7):
             await snap._tick_once()
-        assert [row[0]["point_time"] for row in repo.superseded] == [
+        assert [edit.point_time for edit in repo.superseded] == [
             _minute(1),
             _minute(2),
         ]
-        assert all(row[0]["calc_version"] == PNL_SAMPLE_CALC_VERSION for row in repo.superseded)
+        assert all(row["calc_version"] == PNL_SAMPLE_CALC_VERSION for row in repo.persisted)
 
     @pytest.mark.asyncio
-    async def test_stale_transition_ignores_a_newer_foreign_epoch_tip(self) -> None:
-        """Version transition progress and supersedes stay inside the anchored epoch."""
+    async def test_stale_transition_retains_the_foreign_epoch_sample(self) -> None:
+        """A foreign row stays untouched and records a durable repair boundary."""
         stale = _persisted_sample(_minute(1), status="complete")
         stale["calc_version"] = "5B.1"
         foreign = _persisted_sample(_minute(3), status="complete")
@@ -1215,14 +1744,14 @@ class TestCatchupAndCorrections:
         repo = _FakeRepo(
             credentials=[_cred("kraken")],
             anchor=_anchor(),
-            latest=foreign,
             persisted=[stale, foreign],
         )
-        snap = _snapshotter(repo, _minute(4))
+        snap = _snapshotter(repo, _minute(5))
         with _patched_series(seq=7):
             await snap._tick_once()
-        assert [row[0]["point_time"] for row in repo.superseded] == [_minute(1)]
-        assert all(row[0]["epoch_public_id"] == _EPOCH for row in repo.superseded)
+        assert [edit.point_time for edit in repo.superseded] == [_minute(1)]
+        assert foreign in repo.persisted
+        assert repo.frontier().repair_from == _minute(3)
 
     @pytest.mark.asyncio
     async def test_5c3_recomputation_recovers_an_interior_missing_minute(self) -> None:
@@ -1230,7 +1759,7 @@ class TestCatchupAndCorrections:
 
         Given: Two old 5C.3 rows separated by a formerly withheld minute,
         When: The enabled writer actually recomputes the stale epoch,
-        Then: The hole is inserted and only recomputed replacements carry 5C.4.
+        Then: The hole is inserted and only recomputed replacements carry the current version.
         """
         stale_rows = [_persisted_sample(_minute(offset), status="complete") for offset in (1, 3)]
         for row in stale_rows:
@@ -1238,7 +1767,6 @@ class TestCatchupAndCorrections:
         repo = _FakeRepo(
             credentials=[_cred("kraken")],
             anchor=_anchor(),
-            latest=stale_rows[-1],
             persisted=stale_rows,
         )
         snap = _snapshotter(repo, _minute(5))
@@ -1246,11 +1774,11 @@ class TestCatchupAndCorrections:
         with _patched_series(seq=7):
             await snap._tick_once()
 
-        assert [row[0]["point_time"] for row in repo.superseded] == [_minute(1), _minute(3)]
+        assert [edit.point_time for edit in repo.superseded] == [_minute(1), _minute(3)]
         inserted = [row for batch in repo.recorded for row in batch]
         assert _minute(2) in {row["point_time"] for row in inserted}
-        assert all(row["calc_version"] == "5C.4" for row in inserted)
-        assert all(row[0]["calc_version"] == "5C.4" for row in repo.superseded)
+        assert all(row["calc_version"] == PNL_SAMPLE_CALC_VERSION for row in inserted)
+        assert all(row["calc_version"] == PNL_SAMPLE_CALC_VERSION for row in repo.persisted)
         assert all(row["calc_version"] == "5C.3" for row in stale_rows)
 
     @pytest.mark.asyncio
@@ -1263,9 +1791,7 @@ class TestCatchupAndCorrections:
         """
         stale = _persisted_sample(_minute(1), status="complete")
         stale["calc_version"] = "5C.3"
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=stale, persisted=[stale]
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=[stale])
         snap = PortfolioPnlSnapshotter(repo=cast(Repository, repo), disabled=True)
 
         await snap.start()
@@ -1283,16 +1809,17 @@ class TestCatchupAndCorrections:
         """A late fill recomputes forward and supersedes changed minutes under CAS."""
         latest = _persisted_sample(_minute(3))
         persisted = [_persisted_sample(_minute(2)), latest]
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=persisted)
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(6))
         _install_series(monkeypatch, first=_meta(seq=9, affected=_minute(2)))
         await snap._tick_once()
-        superseded = {(row["point_time"], derived, pid) for row, derived, pid in repo.superseded}
-        assert (_minute(2), True, "sample-" + _minute(2).isoformat()) in superseded
-        assert (_minute(3), True, "sample-" + _minute(3).isoformat()) in superseded
-        assert _minute(2) in repo.peak_before
+        assert [edit.point_time for edit in repo.superseded] == [_minute(2), _minute(3)]
+        for edit in repo.superseded:
+            assert edit.expected_row is not None
+            assert edit.expected_row.row["public_id"] == "sample-" + edit.point_time.isoformat()
+        assert repo.committed_chunks[0].evidence.start == _minute(2)
+        assert repo.frontier().baseline_watermarks == {"kraken": 9}
 
     @pytest.mark.asyncio
     async def test_self_heal_recomputes_forward_through_tip(
@@ -1301,15 +1828,46 @@ class TestCatchupAndCorrections:
         """A retryable incomplete minute recomputes forward through the tip (A1)."""
         latest = _persisted_sample(_minute(3))
         persisted = [_persisted_sample(_minute(2)), latest]
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=persisted)
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(5))
         _install_series(monkeypatch, first=_meta(seq=4))
         await snap._tick_once()
         assert repo.recorded == []
-        healed = {row["point_time"] for row, _derived, _pid in repo.superseded}
+        healed = {edit.point_time for edit in repo.superseded}
         assert _minute(2) in healed
+
+    @pytest.mark.asyncio
+    async def test_retried_self_heal_logs_the_same_window_once(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Report an unchanged self-heal window once across retries.
+
+        Given: A retryable incomplete minute and an admission conflict.
+        When: Two consecutive ticks try to reopen its window.
+        Then: Both select that minute and only the first logs the notice.
+
+        Args:
+            monkeypatch: Simulate a losing checkpoint admission.
+            caplog: Capture the self-heal window notices.
+        """
+        incomplete = _persisted_sample(_minute(2))
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=[incomplete])
+        repo.seed_completed_replay(_minute(3))
+        original = repo.frontier()
+        snap = _snapshotter(repo, original.as_of)
+        conflict = PortfolioPnlCorrectionConflictError("stale revision")
+        admission = mock.AsyncMock(side_effect=conflict)
+        monkeypatch.setattr(repo, "invalidate_portfolio_pnl_correction", admission)
+
+        with _patched_series(seq=4), caplog.at_level("INFO", logger=pnl_snapshotter.__name__):
+            await snap._tick_once()
+            await snap._tick_once()
+
+        starts = [call.args[1].start for call in admission.await_args_list]
+        assert starts == [incomplete["point_time"], incomplete["point_time"]]
+        assert sum("self-heal window starts" in record.message for record in caplog.records) == 1
+        assert repo.frontier() == original
 
     @pytest.mark.asyncio
     async def test_final_reason_minute_opens_no_self_heal(
@@ -1322,9 +1880,8 @@ class TestCatchupAndCorrections:
         """
         latest = _persisted_sample(_minute(3), reasons=("non_finite",))
         persisted = [_persisted_sample(_minute(2), reasons=("non_finite",)), latest]
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=persisted)
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(5))
         _install_series(monkeypatch, first=_meta(seq=4))
         await snap._tick_once()
@@ -1350,14 +1907,13 @@ class TestCatchupAndCorrections:
         """
         latest = _persisted_sample(_minute(3), reasons=("a_future_code",))
         persisted = [_persisted_sample(_minute(2), reasons=("a_future_code",)), latest]
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=persisted)
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(5))
         _install_series(monkeypatch, first=_meta(seq=4))
         await snap._tick_once()
         assert repo.recorded == []
-        healed = {row["point_time"] for row, _derived, _pid in repo.superseded}
+        healed = {edit.point_time for edit in repo.superseded}
         assert _minute(2) in healed
 
     @pytest.mark.asyncio
@@ -1370,7 +1926,8 @@ class TestCatchupAndCorrections:
         beside :data:`SELF_HEAL_LOOKBACK`, so the two could drift apart silently.
         """
         latest = _persisted_sample(_minute(3))
-        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), latest=latest)
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=[latest])
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(5))
         monkeypatch.setattr(pnl_snapshotter, "SELF_HEAL_LOOKBACK", timedelta(minutes=7))
         _install_series(monkeypatch, first=_meta(seq=4))
@@ -1382,30 +1939,30 @@ class TestCatchupAndCorrections:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A recompute matching the persisted rows is never superseded (skip-idempotent)."""
-        latest = _persisted_sample(_minute(3))
-        persisted = [_persisted_sample(_minute(2)), latest]
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
         snap = _snapshotter(repo, _minute(6))
-        monkeypatch.setattr(pnl_snapshotter, "_sample_values_equal", lambda existing, other: True)
+        with _patched_series(seq=9):
+            await snap._tick_once()
+        original = repo.persisted
         _install_series(monkeypatch, first=_meta(seq=9, affected=_minute(2)))
         await snap._tick_once()
+        assert len(repo.committed_chunks) == 2
+        assert repo.committed_chunks[-1].edits == ()
+        assert repo.persisted == original
         assert repo.superseded == []
 
     @pytest.mark.asyncio
     async def test_restored_minute_is_inserted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A formerly-untrusted minute the recompute restores is inserted, not discarded (P1)."""
         latest = _persisted_sample(_minute(3))
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=[latest]
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=[latest])
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(6))
         _install_series(monkeypatch, first=_meta(seq=9, affected=_minute(2)))
         await snap._tick_once()
         inserted = {row["point_time"] for chunk in repo.recorded for row in chunk}
         assert _minute(2) in inserted
-        superseded_minutes = {row["point_time"] for row, _l, _p in repo.superseded}
+        superseded_minutes = {edit.point_time for edit in repo.superseded}
         assert superseded_minutes == {_minute(3)}
 
     @pytest.mark.asyncio
@@ -1414,37 +1971,46 @@ class TestCatchupAndCorrections:
     ) -> None:
         """A conflicting recompute-insert logs and retries next tick (P1/B1)."""
         latest = _persisted_sample(_minute(3))
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=[latest]
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=[latest])
         repo.conflict_batch = True
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(6))
         _install_series(monkeypatch, first=_meta(seq=9, affected=_minute(2)))
         with caplog.at_level("WARNING", logger="snapper.application.portfolio.pnl_snapshotter"):
             await snap._tick_once()
-        assert any("recompute-insert conflicts" in r.message for r in caplog.records)
+        assert not repo.committed_chunks
+        assert repo.persisted == [latest]
+        assert repo.frontier().next_minute == _minute(2)
+        assert repo.frontier().baseline_watermarks == {"kraken": 4}
+        assert any("catch-up conflicts" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_catchup_without_metadata_clears_baseline(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("failure", ["probe", "replay", "fill_witness"])
+    async def test_missing_replay_metadata_holds_the_durable_baseline(
+        self, monkeypatch: pytest.MonkeyPatch, failure: str
     ) -> None:
-        """A catch-up run reporting no metadata advances the baseline to empty."""
+        """Missing anchor evidence defers publication and does not consume the baseline."""
         repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
-        snap = _snapshotter(repo, _minute(5))
+        repo.seed_completed_replay(_minute(2))
+        snap = _snapshotter(repo, _minute(6))
 
-        def fake(*args: Any, **kwargs: Any) -> Any:
+        async def fake(*args: object, **kwargs: object) -> PnlWalletSeriesResult:
+            """Disclose absent anchor evidence during either the probe or the replay."""
             del kwargs
             from_time, to_time = args[3], args[4]
-
-            async def _run() -> PnlWalletSeriesResult:
-                return _series(from_time, to_time, metadata=None)
-
-            return _run()
+            assert isinstance(from_time, datetime) and isinstance(to_time, datetime)
+            phase = "probe" if from_time == to_time == _minute(4) else "replay"
+            metadata = _meta(seq=7)
+            if failure == "fill_witness":
+                metadata = replace(metadata, fill_witness_cut=None)
+            return _series(from_time, to_time, metadata=None if phase == failure else metadata)
 
         monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
         await snap._tick_once()
-        assert snap._baselines[f"{_WALLET}|live|USD|{_EPOCH}"] == {}
-        assert repo.recorded[0][0]["watermarks_json"] == "{}"
+        assert repo.frontier().baseline_watermarks == {"kraken": 4}
+        assert repo.frontier().next_minute == (_minute(3) if failure == "replay" else None)
+        assert not repo.committed_chunks
+        assert not repo.persisted
 
     @pytest.mark.asyncio
     async def test_supersede_cas_conflict_aborts_catchup(
@@ -1457,18 +2023,20 @@ class TestCatchupAndCorrections:
         """
         latest = _persisted_sample(_minute(3))
         persisted = [_persisted_sample(_minute(2)), latest]
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
-        )
-        repo.conflict_minutes = {_minute(2)}
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=persisted)
+        repo.conflict_minutes = {_minute(3)}
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(6))
         _install_series(monkeypatch, first=_meta(seq=9, affected=_minute(2)))
         with caplog.at_level("WARNING", logger="snapper.application.portfolio.pnl_snapshotter"):
             await snap._tick_once()
         assert repo.superseded == []
         assert repo.recorded == []
-        assert snap._baselines == {}
-        assert any("supersede CAS lost" in r.message for r in caplog.records)
+        assert repo.persisted == persisted
+        assert repo.frontier().next_minute == _minute(2)
+        assert repo.frontier().baseline_watermarks == {"kraken": 4}
+        assert repo.frontier().pending_watermarks == {"kraken": 9}
+        assert any("catch-up conflicts" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_conflict_warning_is_logged_once_per_streak(
@@ -1477,10 +2045,9 @@ class TestCatchupAndCorrections:
         """A persistent supersede conflict logs once per streak, not every tick (C2)."""
         latest = _persisted_sample(_minute(3))
         persisted = [_persisted_sample(_minute(2)), latest]
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=persisted)
         repo.conflict_minutes = {_minute(2)}
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(6))
 
         def fake(*args: Any, **kwargs: Any) -> Any:
@@ -1496,7 +2063,7 @@ class TestCatchupAndCorrections:
         with caplog.at_level("WARNING", logger="snapper.application.portfolio.pnl_snapshotter"):
             await snap._tick_once()
             await snap._tick_once()
-        assert sum("supersede CAS lost" in r.message for r in caplog.records) == 1
+        assert sum("catch-up conflicts" in r.message for r in caplog.records) == 1
         assert sum("scope(s) failed this tick" in r.message for r in caplog.records) == 2
 
     @pytest.mark.asyncio
@@ -1506,9 +2073,8 @@ class TestCatchupAndCorrections:
         """A minute whose recompute falls to untrusted is retracted, not left stale (N1)."""
         latest = _persisted_sample(_minute(3), status="complete")
         persisted = [_persisted_sample(_minute(2), status="complete"), latest]
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=persisted)
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(6))
 
         def fake(*args: Any, **kwargs: Any) -> Any:
@@ -1517,15 +2083,17 @@ class TestCatchupAndCorrections:
 
             async def _run() -> PnlWalletSeriesResult:
                 if from_time == _minute(2):
-                    return _series(from_time, to_time, metadata=_meta(), untrusted=True)
+                    return _series(from_time, to_time, metadata=_meta(seq=9), untrusted=True)
                 return _series(from_time, to_time, metadata=_meta(seq=9, affected=_minute(2)))
 
             return _run()
 
         monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
         await snap._tick_once()
-        retracted = {point_time for point_time, _pid, _bt in repo.retracted}
-        assert _minute(2) in retracted
+        assert [edit.point_time for edit in repo.retracted] == [_minute(2), _minute(3)]
+        assert repo.persisted == []
+        assert repo.frontier().repair_from == _minute(2)
+        assert repo.frontier().baseline_watermarks == {"kraken": 4}
         assert repo.superseded == []
 
     @pytest.mark.asyncio
@@ -1534,17 +2102,13 @@ class TestCatchupAndCorrections:
     ) -> None:
         """A sum no float can express must not cost a published minute its row.
 
-        The arithmetic still reaches the same answer; only the rendering fails.
-        Retraction here is irreversible — the write is an SCD2 close with no
-        successor, catch-up never revisits a withheld minute, and self-heal only
-        finds persisted ``incomplete`` rows — so a representation limit must not
-        be allowed to delete history.
+        The amounts agree, but cannot be assigned to floating-point buckets.
+        Keep the published sample while the durable repair remains pending.
         """
         latest = _persisted_sample(_minute(3), status="complete")
         persisted = [_persisted_sample(_minute(2), status="complete"), latest]
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=persisted)
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(6))
 
         def fake(*args: Any, **kwargs: Any) -> Any:
@@ -1553,7 +2117,7 @@ class TestCatchupAndCorrections:
 
             async def _run() -> PnlWalletSeriesResult:
                 if from_time == _minute(2):
-                    return _series(from_time, to_time, metadata=_meta(), unrepresentable=True)
+                    return _series(from_time, to_time, metadata=_meta(seq=9), unrepresentable=True)
                 return _series(from_time, to_time, metadata=_meta(seq=9, affected=_minute(2)))
 
             return _run()
@@ -1561,6 +2125,9 @@ class TestCatchupAndCorrections:
         monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
         await snap._tick_once()
         assert repo.retracted == []
+        assert repo.persisted == persisted
+        assert repo.frontier().repair_from == _minute(2)
+        assert repo.frontier().baseline_watermarks == {"kraken": 4}
 
     @pytest.mark.asyncio
     async def test_retract_cas_conflict_is_logged_and_skipped(
@@ -1569,10 +2136,9 @@ class TestCatchupAndCorrections:
         """A lost retract CAS logs and leaves the minute for a clean retry (N1)."""
         latest = _persisted_sample(_minute(3), status="complete")
         persisted = [_persisted_sample(_minute(2), status="complete"), latest]
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=persisted)
         repo.conflict_minutes = {_minute(2)}
+        repo.seed_completed_replay(_minute(3))
         snap = _snapshotter(repo, _minute(6))
 
         def fake(*args: Any, **kwargs: Any) -> Any:
@@ -1581,7 +2147,7 @@ class TestCatchupAndCorrections:
 
             async def _run() -> PnlWalletSeriesResult:
                 if from_time == _minute(2):
-                    return _series(from_time, to_time, metadata=_meta(), untrusted=True)
+                    return _series(from_time, to_time, metadata=_meta(seq=9), untrusted=True)
                 return _series(from_time, to_time, metadata=_meta(seq=9, affected=_minute(2)))
 
             return _run()
@@ -1589,30 +2155,27 @@ class TestCatchupAndCorrections:
         monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
         with caplog.at_level("WARNING", logger="snapper.application.portfolio.pnl_snapshotter"):
             await snap._tick_once()
-        assert all(point_time != _minute(2) for point_time, _pid, _bt in repo.retracted)
-        assert any("retract CAS lost" in r.message for r in caplog.records)
+        assert not repo.retracted
+        assert repo.persisted == persisted
+        assert repo.frontier().next_minute == _minute(2)
+        assert repo.frontier().baseline_watermarks == {"kraken": 4}
+        assert any("catch-up conflicts" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_catchup_stops_at_the_first_chunk_conflict(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A conflicting catch-up chunk stops the write so no later chunk crosses a gap (C1)."""
+        """A failed chunk leaves its cursor at the earliest uncommitted minute."""
         repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
         repo.conflict_batch = True
         snap = _snapshotter(repo, _minute(5))
-        monkeypatch.setattr(
-            pnl_snapshotter,
-            "plan_catchup_chunks",
-            lambda *args, **kwargs: (
-                ChunkWindow(_minute(1), _minute(1)),
-                ChunkWindow(_minute(2), _minute(2)),
-            ),
-        )
+        monkeypatch.setattr(pnl_snapshotter, "MAX_CORRECTION_CHUNK_MINUTES", 1)
         with _patched_series(seq=7):
             await snap._tick_once()
-        assert len(repo.recorded) == 1
-        assert all(row["point_time"] != _minute(2) for chunk in repo.recorded for row in chunk)
-        assert snap._baselines == {}
+        assert [chunk.end for chunk in repo.attempted_chunks] == [_minute(1)]
+        assert not repo.committed_chunks
+        assert repo.frontier().next_minute == _minute(1)
+        assert not repo.frontier().baseline_watermarks
 
     @pytest.mark.asyncio
     async def test_batch_conflict_does_not_advance_baseline(
@@ -1627,8 +2190,10 @@ class TestCatchupAndCorrections:
             _patched_series(seq=7),
         ):
             await snap._tick_once()
-        assert snap._baselines == {}
-        assert any("not advancing baseline" in r.message for r in caplog.records)
+        assert repo.persisted == []
+        assert repo.frontier().next_minute == _minute(1)
+        assert not repo.frontier().baseline_watermarks
+        assert any("catch-up conflicts" in r.message for r in caplog.records)
 
 
 class TestBudgetSplitAndHelpers:
@@ -1673,29 +2238,32 @@ class TestBudgetSplitAndHelpers:
         await snap._tick_once()
         assert (_minute(1), _minute(3)) in calls
         persisted = [row["point_time"] for chunk in repo.recorded for row in chunk]
-        assert set(persisted) == {_minute(1), _minute(2), _minute(3)}
+        assert persisted == [_minute(1)]
+        assert repo.frontier().next_minute == _minute(2)
+        assert not repo.frontier().baseline_watermarks
+        await snap._tick_once()
+        assert [chunk.end for chunk in repo.committed_chunks] == [_minute(1), _minute(3)]
+        assert repo.frontier().next_minute is None
 
     @pytest.mark.asyncio
     async def test_recompute_forward_subdivides_on_budget(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A late-fill recompute window that trips the budget is subdivided."""
-        latest = _persisted_sample(_minute(5))
         persisted = [_persisted_sample(_minute(offset)) for offset in (1, 2, 3, 4, 5)]
-        repo = _FakeRepo(
-            credentials=[_cred("kraken")], anchor=_anchor(), latest=latest, persisted=persisted
-        )
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=persisted)
+        repo.seed_completed_replay(_minute(5))
         snap = _snapshotter(repo, _minute(8))
         state = {"first": True}
 
         def fake(*args: Any, **kwargs: Any) -> Any:
             del kwargs
             from_time, to_time = args[3], args[4]
-            attach = _meta(seq=9, affected=_minute(1)) if state["first"] else _meta()
+            attach = _meta(seq=9, affected=_minute(1) if state["first"] else None)
             state["first"] = False
 
             async def _run() -> PnlWalletSeriesResult:
-                if from_time == _minute(1) and to_time == _minute(5):
+                if from_time == _minute(1) and to_time == _minute(6):
                     raise PnlTimelineWorkBudgetError("recompute too big")
                 return _series(from_time, to_time, metadata=attach)
 
@@ -1703,33 +2271,31 @@ class TestBudgetSplitAndHelpers:
 
         monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
         await snap._tick_once()
-        assert any(row["point_time"] == _minute(1) for row, _l, _p in repo.superseded)
+        assert [edit.point_time for edit in repo.superseded] == [_minute(i) for i in (1, 2, 3)]
+        assert repo.frontier().next_minute == _minute(4)
+        assert repo.frontier().baseline_watermarks == {"kraken": 4}
+        await snap._tick_once()
+        assert [chunk.end for chunk in repo.committed_chunks] == [_minute(3), _minute(6)]
+        assert repo.frontier().baseline_watermarks == {"kraken": 9}
 
     def test_watermarks_json_serializes_canonically(self) -> None:
-        """The advanced watermark map serializes to canonical JSON."""
-        assert _watermarks_json(_meta(seq=3)) == '{"kraken":3}'
-        assert _watermarks_json(None) == "{}"
-
-    @pytest.mark.parametrize(
-        ("raw", "expected"),
-        [
-            ('{"kraken":5}', {"kraken": 5}),
-            ("{bad", {}),
-            ("[]", {}),
-            ('{"kraken":true}', {}),
-        ],
-    )
-    def test_parse_baseline(self, raw: str, expected: dict[str, int]) -> None:
-        """The durable baseline parser is fail-safe on any malformed payload."""
-        assert _parse_baseline(raw) == expected
+        """A sample records its own causal watermark rather than the chunk envelope."""
+        minute = _minute(1)
+        metadata = _meta(seq=3)
+        assert _watermarks_json(metadata, minute) == '{"kraken":3}'
+        pointwise = replace(metadata, sample_watermarks_by_minute={minute: {"kraken": 2}})
+        assert _watermarks_json(pointwise, minute) == '{"kraken":2}'
+        assert _watermarks_json(None, minute) == "{}"
 
     def test_sample_values_equal_ignores_provenance(self) -> None:
         """Value equality ignores the write provenance identity columns."""
         left = _persisted_sample(_minute(1))
         right = {**left, "public_id": "other", "timestamp": _minute(9)}
-        assert _sample_values_equal(left, cast(PortfolioPnlSampleRow, right)) is True
+        assert pnl_correction_planner._same_sample(left, cast(PortfolioPnlSampleRow, right)) is True
         changed = {**left, "realized_pnl": 1.0}
-        assert _sample_values_equal(left, cast(PortfolioPnlSampleRow, changed)) is False
+        assert (
+            pnl_correction_planner._same_sample(left, cast(PortfolioPnlSampleRow, changed)) is False
+        )
 
     def test_observed_currencies_collects_non_usd(self) -> None:
         """Observed non-USD currencies are collected for the crypto load."""
@@ -1819,7 +2385,7 @@ class TestEvidenceAndPartition:
     ) -> None:
         """A failed evidence read cannot publish catch-up or advance its detector.
 
-        Given either new catch-up or an older calculation-version suffix
+        Given either a fresh catch-up or a detected late fill over an older sample
         When the crypto evidence statement is cancelled, times out on a lock or otherwise fails
         Then durable rows and baselines stay unchanged and each tick reports failure,
             and only the two budget SQLSTATEs log the once-per-streak timeout diagnostic.
@@ -1844,23 +2410,30 @@ class TestEvidenceAndPartition:
         repo = _FakeRepo(
             credentials=[_cred("kraken")],
             anchor=_anchor(),
-            latest=old if recompute else None,
             persisted=[old] if recompute else [],
             balances_json='[{"currency":"BTC","total":2.0}]',
         )
-        before = list(repo.persisted)
+        if recompute:
+            repo.seed_completed_replay(_minute(3))
+        before = repo.persisted
         snap = _snapshotter(repo, _minute(7))
         monkeypatch.setattr(
             repo, "get_pnl_crypto_usd_plane_candles", mock.AsyncMock(side_effect=failure)
         )
-        with _patched_series(), caplog.at_level("WARNING", logger=pnl_snapshotter.__name__):
+        _install_series(monkeypatch, first=_meta(seq=7, affected=_minute(1) if recompute else None))
+        with caplog.at_level("WARNING", logger=pnl_snapshotter.__name__):
             await snap._tick_once()
+            first_attempt = repo.frontier()
             await snap._tick_once()
         assert repo.persisted == before
         assert repo.recorded == []
         assert repo.superseded == []
         assert repo.retracted == []
-        assert snap._baselines == {}
+        assert repo.committed_chunks == []
+        assert repo.frontier() == first_attempt
+        assert first_attempt.next_minute == _minute(1)
+        assert first_attempt.baseline_watermarks == ({"kraken": 4} if recompute else {})
+        assert first_attempt.pending_watermarks == {"kraken": 7}
         assert sum("scope(s) failed this tick" in record.message for record in caplog.records) == 2
         timeouts = [
             record.message
@@ -1871,7 +2444,7 @@ class TestEvidenceAndPartition:
         if timeouts:
             assert _WALLET in timeouts[0]
             assert str(_minute(1)) in timeouts[0]
-            assert str(_minute(3 if recompute else 5)) in timeouts[0]
+            assert str(_minute(5)) in timeouts[0]
 
     @pytest.mark.asyncio
     async def test_usd_only_basket_skips_crypto_load(self) -> None:
@@ -1973,28 +2546,25 @@ class TestVersionRestamping:
     def test_matching_values_on_an_older_version_are_not_settled(self) -> None:
         """Otherwise every read filtering on calc_version stops seeing the row.
 
-        That includes the scope's own progress read, which keeps stale_version
-        true, which re-schedules the same from-t0 recompute every tick — a loop
-        that is guaranteed, not hypothetical, whenever a version bump lands on a
-        series whose values do not change.
+        The current overlay filters by calculation version and would omit it
+        even when its values are equal to the new recomputation.
         """
         existing = _persisted_sample(_minute(1), status="complete")
         existing["calc_version"] = "5B.1"
         replacement = _persisted_sample(_minute(1), status="complete")
-        assert pnl_snapshotter._sample_values_equal(existing, replacement)
-        assert not pnl_snapshotter._sample_is_settled(existing, replacement)
+        assert not pnl_correction_planner._same_sample(existing, replacement)
 
     def test_matching_values_on_the_same_version_are_settled(self) -> None:
         """The ordinary case: an identical recompute writes nothing."""
         existing = _persisted_sample(_minute(1), status="complete")
         replacement = _persisted_sample(_minute(1), status="complete")
-        assert pnl_snapshotter._sample_is_settled(existing, replacement)
+        assert pnl_correction_planner._same_sample(existing, replacement)
 
     def test_changed_values_are_never_settled(self) -> None:
         """A real value change supersedes regardless of version agreement."""
         existing = _persisted_sample(_minute(1), status="complete", realized=1.0)
         replacement = _persisted_sample(_minute(1), status="complete", realized=2.0)
-        assert not pnl_snapshotter._sample_is_settled(existing, replacement)
+        assert not pnl_correction_planner._same_sample(existing, replacement)
 
 
 class TestRowPreservingWithholds:
@@ -2002,7 +2572,7 @@ class TestRowPreservingWithholds:
 
     def test_only_representation_limits_preserve_a_row(self) -> None:
         """A sum no float can express is the only cause that spares the row."""
-        preserved = pnl_snapshotter._preserves_persisted_row(
+        preserved = pnl_correction_planner.preserves_persisted_row(
             WithheldMinute(
                 point_time=_minute(1),
                 reasons=("instrument_sum_unrepresentable[global]",),
@@ -2013,7 +2583,7 @@ class TestRowPreservingWithholds:
 
     def test_a_disagreement_about_the_money_still_retracts(self) -> None:
         """A reconciliation failure means the two sides disagree; N1 must fire."""
-        preserved = pnl_snapshotter._preserves_persisted_row(
+        preserved = pnl_correction_planner.preserves_persisted_row(
             WithheldMinute(
                 point_time=_minute(1),
                 reasons=("instrument_reconciliation_failed[global]",),
@@ -2024,7 +2594,7 @@ class TestRowPreservingWithholds:
 
     def test_a_mixed_cause_set_still_retracts(self) -> None:
         """One representable-sum cause does not neutralise a co-occurring fault."""
-        preserved = pnl_snapshotter._preserves_persisted_row(
+        preserved = pnl_correction_planner.preserves_persisted_row(
             WithheldMinute(
                 point_time=_minute(1),
                 reasons=("fill_evidence_gap[global]", "instrument_sum_unrepresentable[global]"),
@@ -2035,7 +2605,7 @@ class TestRowPreservingWithholds:
 
     def test_an_unexplained_withhold_still_retracts(self) -> None:
         """No recorded cause is not evidence that the money is sound."""
-        preserved = pnl_snapshotter._preserves_persisted_row(
+        preserved = pnl_correction_planner.preserves_persisted_row(
             WithheldMinute(point_time=_minute(1), reasons=(), reason_codes=())
         )
         assert not preserved
@@ -2200,11 +2770,8 @@ class TestWithheldMinuteAlarm:
     ) -> None:
         """An unwritten minute must not let the late-fill detector move past it.
 
-        Advancing the baseline over the executions that produced an unwritten
-        minute destroys the only trigger that would ever revisit it: catch-up
-        resumes after the latest ACTIVE row, and self-heal can only see minutes
-        that persisted an ``incomplete`` row — which a withheld minute never
-        does. The hole would be both silent and permanent.
+        Advancing the baseline would consume executions whose correction
+        still needs repair. The scan may complete while retaining the first hole.
         """
         repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
         snap = _snapshotter(repo, _minute(5))
@@ -2214,14 +2781,17 @@ class TestWithheldMinuteAlarm:
             from_time, to_time = args[3], args[4]
 
             async def _run() -> PnlWalletSeriesResult:
-                return _series(from_time, to_time, metadata=_meta(), untrusted=True)
+                return _series(from_time, to_time, metadata=_meta(seq=7), untrusted=True)
 
             return _run()
 
         monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", fake)
         await snap._tick_once()
         assert repo.recorded == []
-        assert snap._baselines == {}
+        assert repo.frontier().next_minute is None
+        assert repo.frontier().repair_from == _minute(1)
+        assert not repo.frontier().baseline_watermarks
+        assert repo.frontier().pending_watermarks == {"kraken": 7}
 
     @pytest.mark.asyncio
     async def test_a_fully_written_tick_still_advances_the_baseline(self) -> None:
@@ -2231,4 +2801,4 @@ class TestWithheldMinuteAlarm:
         with _patched_series():
             await snap._tick_once()
         assert repo.recorded
-        assert snap._baselines != {}
+        assert repo.frontier().baseline_watermarks == {"kraken": 7}
