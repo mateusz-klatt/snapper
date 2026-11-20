@@ -39,6 +39,24 @@ interval. Evidence loading and asynchronous correction writes also retain
 their existing scope; this is not a hard wall-clock deadline for an entire
 tick or a fixed bound on all historical inputs.
 
+The crypto-to-USD candle read first selects a distinct set of candidate
+instrument identities from historical metadata known at the tick's `as_of`.
+PostgreSQL bounds candle keys with one typed UUID array; SQLite uses an `IN`
+subquery. This candidate set does not replace the candle-author-time ownership
+joins, denomination and spot-kind unanimity, or venue certification. Corrected
+or delisted metadata and ambiguous price planes retain their existing meaning.
+
+That PostgreSQL read owns an explicit transaction with JIT disabled and the
+shared P&L budget: the statement timeout is capped at 20 seconds and the lock
+timeout at 1 second, and a shorter limit already in effect is kept. The settings
+end with that transaction and do not change other repository reads. A timeout aborts the affected scope's remaining
+work for the tick, logs its wallet and chunk range once per failure streak,
+and contributes to the existing per-tick failed-scope count. Catch-up samples
+and the detector baseline cannot advance past the failed evidence load.
+Earlier committed correction chunks remain durable. The next tick can retry
+the failed work; this query limit does not provide a resumable correction
+cursor or a wall-clock bound for the complete tick.
+
 Release acceptance remains separate from local tests: the exact source needs
 the full quality gate and independent review, and the runtime owner controls
 deployment and the explicit snapshotter enablement.

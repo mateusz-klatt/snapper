@@ -24,9 +24,15 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import Result
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Executable
 
 from snapper.application.portfolio.basket_valuation import CryptoUsdCandle
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
@@ -45,6 +51,59 @@ _M = _NOW - timedelta(hours=1)
 _FUTURE = _NOW + timedelta(days=1)
 _CORRECTION_AT = _M + timedelta(minutes=30)
 _SESSION = "00000000-0000-7000-8000-000000000901"
+
+
+async def test_postgresql_crypto_plane_scan_is_typed_bounded_and_transactional(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bound the candle keys and query lifetime before reading temporal evidence.
+
+    Given a PostgreSQL expression path over an isolated repository
+    When crypto prices are loaded for duplicate requested bases
+    Then local limits precede one typed-array bounded read in one transaction.
+
+    Args:
+        repository: Isolated temporal evidence fixture.
+        monkeypatch: Driver-boundary capture without PostgreSQL access.
+    """
+    statements: list[str] = []
+    result = Mock(spec=Result)
+    result.all.return_value = []
+
+    def dialect(_repository: SQLAlchemyRepository) -> str:
+        """Choose PostgreSQL expressions without opening a PostgreSQL connection."""
+        return "postgresql"
+
+    async def capture(session: AsyncSession, statement: Executable) -> Result[tuple[object]]:
+        """Check transaction ownership and capture actual driver-boundary SQL."""
+        assert session.in_transaction()
+        statements.append(" ".join(str(statement.compile(dialect=postgresql.dialect())).split()))
+        return cast(Result[tuple[object]], result)
+
+    monkeypatch.setattr(SQLAlchemyRepository, "dialect_name", property(dialect))
+    monkeypatch.setattr(AsyncSession, "execute", capture)
+    assert await repository.get_pnl_crypto_usd_plane_candles(["BTC", "BTC"], _M, _M, _NOW) == []
+    assert len(statements) == 3
+    budget = statements[0]
+    assert "set_config('statement_timeout', CASE WHEN" in budget
+    assert "interval '20 seconds' THEN '20s' ELSE current_setting('statement_timeout')" in budget
+    assert "set_config('lock_timeout', CASE WHEN" in budget
+    assert "interval '1 second' THEN '1s' ELSE current_setting('lock_timeout')" in budget
+    assert ", true)" in budget
+    assert "SET LOCAL statement_timeout" not in budget
+    assert statements[1] == "SET LOCAL jit = off"
+    query = statements[2]
+    assert "WITH pnl_crypto_usd_candidate_instruments AS MATERIALIZED" in query
+    assert "candles.instrument_public_id = ANY (CAST((SELECT array_agg(" in query
+    assert "AS UUID[]" in query
+    candidates = query.split(") SELECT symbols.base", 1)[0]
+    assert "SELECT DISTINCT instruments.public_id AS public_id" in candidates
+    assert "symbols.base IN" in candidates
+    assert "symbols.quote =" in candidates
+    assert "symbols.timestamp <=" in candidates
+    assert "instruments.timestamp <=" in candidates
+    assert "known_to" not in candidates
+    assert "instrument_specs" not in candidates
 
 
 @dataclass(frozen=True)

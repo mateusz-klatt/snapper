@@ -67,6 +67,8 @@ from typing import Final
 from typing import cast
 from uuid import uuid7
 
+from sqlalchemy.exc import DBAPIError
+
 from snapper.application.portfolio.basket_valuation import CryptoUsdCandle
 from snapper.application.portfolio.basket_valuation import PositionInventoryEntry
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
@@ -131,6 +133,10 @@ _POOL_KEY_ESTIMATE: Final[int] = 1
 
 _FAILURE_MESSAGES: Final[dict[str, str]] = {
     "sample_failed": "PortfolioPnlSnapshotter: wallet %s sample failed; continuing",
+    "crypto_plane_timeout": (
+        "PortfolioPnlSnapshotter: wallet %s crypto-plane query timed out for chunk %s through %s; "
+        "not advancing baseline"
+    ),
     "supersede_cas": "PortfolioPnlSnapshotter: wallet %s supersede CAS lost at %s; retrying next tick",
     "retract_cas": "PortfolioPnlSnapshotter: wallet %s retract CAS lost at %s; retrying next tick",
     "recompute_insert": (
@@ -1142,9 +1148,16 @@ class PortfolioPnlSnapshotter:
         """Load and index the crypto→USD candle plane for the chunk's currencies."""
         if not currencies:
             return {}
-        rows = await repo.get_pnl_crypto_usd_plane_candles(
-            sorted(currencies), chunk.start - _MINUTE, chunk.end - _MINUTE, ctx.as_of
-        )
+        try:
+            rows = await repo.get_pnl_crypto_usd_plane_candles(
+                sorted(currencies), chunk.start - _MINUTE, chunk.end - _MINUTE, ctx.as_of
+            )
+        except DBAPIError as error:
+            if getattr(error.orig, "sqlstate", None) == "57014":
+                self._log_class(
+                    ctx.wallet_public_id, "crypto_plane_timeout", chunk.start, chunk.end
+                )
+            raise
         planes: dict[tuple[str, datetime], list[CryptoUsdCandle]] = {}
         for row in rows:
             minute = row["open_at"] + _MINUTE
