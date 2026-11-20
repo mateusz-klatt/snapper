@@ -22031,9 +22031,7 @@ class SQLAlchemyRepository(Repository):
         if any(not exchange or watermark < 0 for exchange, watermark in normalized.items()):
             raise ValueError("execution watermark map is invalid")
         async with self.session() as s, s.begin():
-            await self._begin_effective_execution_snapshot(
-                s, pin_sqlite=fill_witness_cut is not None
-            )
+            await self._begin_effective_execution_snapshot(s)
             return await self._load_pnl_timeline_execution_prefix_for_watermarks(
                 s,
                 wallet_public_id,
@@ -22081,7 +22079,7 @@ class SQLAlchemyRepository(Repository):
         from that same read when ``capture_fill_witness_cut`` is true.
         """
         async with self.session() as s, s.begin():
-            await self._begin_effective_execution_snapshot(s, pin_sqlite=capture_fill_witness_cut)
+            await self._begin_effective_execution_snapshot(s)
             return await self._load_pnl_timeline_execution_prefix_snapshot(
                 s,
                 wallet_public_id,
@@ -22090,9 +22088,7 @@ class SQLAlchemyRepository(Repository):
                 capture_fill_witness_cut=capture_fill_witness_cut,
             )
 
-    async def _begin_effective_execution_snapshot(
-        self, s: AsyncSession, *, pin_sqlite: bool = False
-    ) -> None:
+    async def _begin_effective_execution_snapshot(self, s: AsyncSession) -> None:
         """Pin one effective-execution read to a single consistent view.
 
         Every read that decides which bookings still count does it in several
@@ -22111,16 +22107,16 @@ class SQLAlchemyRepository(Repository):
         consumption are separate statements: recovery and the scope listing
         would otherwise validate under one snapshot and filter under another.
         Mirrors the spot reconciliation bundle, which pins its own multi-read
-        evidence the same way. Resumable replay also starts an explicit SQLite
-        transaction so the legacy driver cannot take a new view between SELECTs.
+        evidence the same way. SQLite starts an explicit deferred transaction
+        for every effective-execution read, including ordinary prefix bundles,
+        so the legacy driver cannot take a new view between SELECTs.
 
         Args:
             s: The session whose read transaction is being pinned.
-            pin_sqlite: Whether a replay witness requires an explicit SQLite read transaction.
         """
         if self.dialect_name == "postgresql":
             await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-        elif pin_sqlite:
+        else:
             await s.execute(text("BEGIN"))
 
     async def get_pnl_timeline_execution_prefix_bundle(
