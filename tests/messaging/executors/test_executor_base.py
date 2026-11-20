@@ -607,7 +607,7 @@ async def test_stop_disconnects_exchange_client_after_zmq_teardown() -> None:
 
     Given: A running executor with ZMQ sockets and an exchange client,
     When: stop() is called,
-    Then: Sockets close and the context terminates BEFORE the client
+    Then: Sockets close and the context is destroyed BEFORE the client
     disconnects — consumers unwind before their transport is torn —
     and the disconnect is awaited exactly once.
     """
@@ -616,14 +616,14 @@ async def test_stop_disconnects_exchange_client_after_zmq_teardown() -> None:
     ex.running = True
     ex.subscriber = zmq_socket_stub(close=lambda: order.append("sub"))
     ex.publisher = zmq_socket_stub(close=lambda: order.append("pub"))
-    ex.context = SimpleNamespace(term=lambda: order.append("term"))
+    ex.context = SimpleNamespace(destroy=lambda linger: order.append(f"destroy:{linger}"))
 
     async def _disconnect() -> None:
         order.append("disconnect")
 
     ex.exchange_client = SimpleNamespace(disconnect=_disconnect)
     await ex.stop()
-    assert order == ["sub", "pub", "term", "disconnect"]
+    assert order == ["sub", "pub", "destroy:0", "disconnect"]
     assert not ex.running
 
 
@@ -643,7 +643,7 @@ async def test_stop_skips_disconnect_while_client_context_active() -> None:
     ex.running = True
     ex.subscriber = zmq_socket_stub(close=lambda: None)
     ex.publisher = zmq_socket_stub(close=lambda: None)
-    ex.context = SimpleNamespace(term=lambda: None)
+    ex.context = SimpleNamespace(destroy=lambda linger: None)
     ex._client_context_active = True
     disconnects: list[bool] = []
 
@@ -694,7 +694,7 @@ async def test_stop_swallows_exchange_client_disconnect_failure() -> None:
     ex.running = True
     ex.subscriber = zmq_socket_stub(close=lambda: None)
     ex.publisher = zmq_socket_stub(close=lambda: None)
-    ex.context = SimpleNamespace(term=lambda: None)
+    ex.context = SimpleNamespace(destroy=lambda linger: None)
 
     async def _disconnect() -> None:
         raise RuntimeError("disconnect failed")
@@ -716,7 +716,7 @@ async def test_stop_with_none_subscriber(monkeypatch: pytest.MonkeyPatch) -> Non
     ex.running = True
     ex.subscriber = None
     ex.publisher = zmq_socket_stub(close=lambda: None)
-    ex.context = SimpleNamespace(term=lambda: None)
+    ex.context = SimpleNamespace(destroy=lambda linger: None)
     await ex.stop()
     assert not ex.running
 
@@ -733,7 +733,7 @@ async def test_stop_with_none_publisher(monkeypatch: pytest.MonkeyPatch) -> None
     ex.running = True
     ex.subscriber = zmq_socket_stub(close=lambda: None)
     ex.publisher = None
-    ex.context = SimpleNamespace(term=lambda: None)
+    ex.context = SimpleNamespace(destroy=lambda linger: None)
     await ex.stop()
     assert not ex.running
 
@@ -1676,8 +1676,8 @@ def test_stop_closes_resources() -> None:
     )
 
     class Ctx:
-        def term(self) -> None:
-            closed["ctx"] = True
+        def destroy(self, linger: int) -> None:
+            closed["ctx"] = linger == 0
 
     ex.context = Ctx()
     asyncio.run(ex.stop())
@@ -3069,9 +3069,13 @@ class ContextStub:
         """Initialize context stub."""
         self.terminated = False
 
-    def term(self) -> None:
-        """Terminate the context."""
-        self.terminated = True
+    def destroy(self, linger: int) -> None:
+        """Destroy the context, recording termination only for a zero linger.
+
+        Args:
+            linger: Linger applied to sockets still open on the context.
+        """
+        self.terminated = linger == 0
 
 
 class SubscriberStub:
@@ -3736,7 +3740,8 @@ class TestExecutorCoverage:
         assert service.running is False
         mock_subscriber.close.assert_called_once()
         mock_publisher.close.assert_called_once()
-        mock_context.term.assert_called_once()
+        mock_context.destroy.assert_called_once_with(linger=0)
+        mock_context.term.assert_not_called()
         assert service.context is None
         assert service.subscriber is None
         assert service.publisher is None
@@ -10794,6 +10799,25 @@ class TestZmqReleaseOnFailedStartAndStop:
         self._assert_released(executor, ctx, sub, pub)
 
         await executor.stop()
+        self._assert_released(executor, ctx, sub, pub)
+
+    @pytest.mark.asyncio
+    async def test_release_destroys_context_with_unclosed_extra_socket(self) -> None:
+        """Releasing never blocks on a socket the executor did not track.
+
+        Given: A non-running executor whose real ZMQ context also owns an extra
+            socket that no executor attribute references,
+        When: stop() releases the ZMQ resources,
+        Then: The context is destroyed with linger 0, the stray socket is closed
+            with it, and every executor reference is cleared without blocking.
+        """
+        executor = _TypedStartFailureExecutor(self._build_client())
+        ctx, sub, pub = self._attach_real_zmq(executor)
+        stray = ctx.socket(zmq.SUB)
+
+        await asyncio.wait_for(executor.stop(), timeout=5.0)
+
+        assert stray.closed is True
         self._assert_released(executor, ctx, sub, pub)
 
     @pytest.mark.asyncio

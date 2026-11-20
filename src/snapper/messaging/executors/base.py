@@ -1795,7 +1795,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         than only when ``running`` is True) prevents leaking the Context,
         its I/O thread, and the unbounded ``rcvhwm=0`` SUB socket across
         connect-failure restart loops. Clearing every reference to
-        ``None`` keeps repeated ``stop()`` calls idempotent.
+        ``None`` keeps repeated ``stop()`` calls idempotent. The context
+        is destroyed with ``linger=0`` rather than terminated: ``term()``
+        blocks the event loop until every socket of the context is
+        closed, so a socket that escaped the explicit closes above would
+        hang this release path forever, while ``destroy`` closes any
+        straggler first.
         """
         if self.subscriber is not None:
             self.subscriber.setsockopt(zmq.LINGER, 0)
@@ -1808,7 +1813,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         if self.msg_publisher is not None:
             self.msg_publisher = None
         if self.context is not None:
-            self.context.term()
+            self.context.destroy(linger=0)
             self.context = None
 
     async def start(self) -> None:
