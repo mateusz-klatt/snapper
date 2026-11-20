@@ -362,8 +362,8 @@ class TestStrategyFactory:
                 local_xpub=endpoints.xpub,
             )
             strategy.zmq_context = existing_ctx
-            await strategy.start()
             try:
+                await strategy.start()
                 assert strategy.zmq_context is existing_ctx
                 async with asyncio.timeout(3.0):
                     await broker.wait_for_subscription(b"market.")
