@@ -30,13 +30,21 @@ OAUTH_SURFACE_PREFIXES: Final[tuple[str, ...]] = (
 def _matches_prefix(path: str, prefixes: tuple[str, ...]) -> bool:
     """Return True when ``path`` matches any prefix on a segment boundary.
 
+    A path containing any ASCII control character always matches. Starlette
+    compiles route patterns ending in ``$``, which Python also matches before a
+    trailing newline, so ``/api/mcp/token%0A`` still reaches the real handler;
+    failing closed keeps such a request inside every protection.
+
     Args:
         path: Request URL path without query string.
         prefixes: Normalized path prefixes without trailing slashes.
 
     Returns:
-        True for an exact match or a segment-prefixed subpath.
+        True for an exact match, a segment-prefixed subpath, or a path that
+        carries a control character.
     """
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in path):
+        return True
     normalized = path.split("?", 1)[0].rstrip("/")
     return any(normalized == prefix or normalized.startswith(f"{prefix}/") for prefix in prefixes)
 

@@ -55,6 +55,25 @@ def _clean_path(scope: Scope) -> str:
     return str(scope.get("path", "")).split("?", 1)[0]
 
 
+def _exception_detail(exc: Exception, path: str) -> str:
+    """Describe a request exception for the control row without leaking credentials.
+
+    On a credential endpoint the exception message can carry submitted values,
+    for example a database error that echoes its bound parameters, so only the
+    exception class is recorded there.
+
+    Args:
+        exc: The exception raised while handling the request.
+        path: Request path without query string.
+
+    Returns:
+        ``ClassName`` on credential paths, otherwise ``ClassName: message``.
+    """
+    if is_oauth_credential_path(path):
+        return type(exc).__name__
+    return f"{type(exc).__name__}: {exc}"
+
+
 def _uuid_text_or_none(value: object) -> str | None:
     """Return canonical UUID text, otherwise ``None``."""
     if not isinstance(value, str) or not value:
@@ -219,7 +238,7 @@ class ClientProvenanceMiddleware:
             await self.app(scope, wrapping_receive, wrapping_send)
         except Exception as exc:
             outcome = "exception"
-            detail = f"{type(exc).__name__}: {exc}"
+            detail = _exception_detail(exc, _clean_path(scope))
             raise
         finally:
             full_body = b"".join(body_chunks)

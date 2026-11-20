@@ -160,6 +160,15 @@ async def real_app_case(
         ("/api/mcp-oauth/consent/approve", True),
         ("/api/mcp-oauth/consent/deny", True),
         ("/api/mcp-oauth/consent/deny/", True),
+        ("/api/mcp/token\n", True),
+        ("/api/mcp/revoke\r\n", True),
+        ("/api/mcp/register\n", True),
+        ("/api/mcp/authorize\n", True),
+        ("/api/mcp-oauth/consent/approve\n", True),
+        ("/api/mcp-oauth/consent/approve\r\n", True),
+        ("/api/mcp-oauth/consent/deny\n", True),
+        ("/api/orders\x00", True),
+        ("/api/orders\x7f", True),
         ("/api/mcp-oauth/consent", False),
         ("/api/mcp/tokenx", False),
         ("/api/mcp-oauth/consent/approvex", False),
@@ -174,7 +183,8 @@ def test_is_oauth_credential_path_segment_matching(path: str, expected: bool) ->
 
     Given: Candidate request paths including trailing slashes and sibling prefixes,
     When: ``is_oauth_credential_path`` evaluates each path,
-    Then: Only exact credential routes and their slash-delimited subpaths match.
+    Then: Exact credential routes, their slash-delimited subpaths, and any path
+        carrying a control character (which Starlette's ``$`` still routes) match.
 
     Args:
         path: Candidate request path.
@@ -207,6 +217,8 @@ def test_is_oauth_credential_path_segment_matching(path: str, expected: bool) ->
         ("/.well-known/openid-configurationx", False),
         ("/.well-known/security.txt", False),
         ("/api/health", False),
+        ("/api/mcp-oauth/consent\n", True),
+        ("/api/health\t", True),
         ("", False),
         ("/", False),
     ],
@@ -216,7 +228,8 @@ def test_is_oauth_surface_path_segment_matching(path: str, expected: bool) -> No
 
     Given: Candidate request paths covering OAuth routes, discovery paths, and siblings,
     When: ``is_oauth_surface_path`` evaluates each path,
-    Then: Only exact OAuth surface prefixes and their slash-delimited subpaths match.
+    Then: Exact OAuth surface prefixes, their slash-delimited subpaths, and any
+        path carrying a control character match.
 
     Args:
         path: Candidate request path.

@@ -3110,7 +3110,10 @@ error log replace the `state`, `code`, `code_challenge`, `code_verifier`,
 `X-MCP-OAuth-Request` header and response `Location`. Every HTTP response on an
 OAuth surface path — including dependency-layer 401/403/404/422/503 rejections
 and unhandled 500s — carries `Cache-Control: no-store`, `Pragma: no-cache`, and
-`Referrer-Policy: no-referrer` whenever absent.
+`Referrer-Policy: no-referrer` whenever absent. A header the handler already
+set is kept, so MCP streaming responses keep the SDK's own
+`Cache-Control: no-cache, no-transform`. A path carrying a control character,
+such as an encoded line break, is treated as a credential and surface path.
 
 ## AI Delegates
 
