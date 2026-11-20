@@ -458,6 +458,10 @@ def test_real_app_unhandled_500_on_oauth_path_carries_no_store_headers(
     Then: The OAuth 500 carries ``Cache-Control: no-store``, ``Pragma: no-cache``,
         and ``Referrer-Policy: no-referrer``, while the non-OAuth 500 carries none.
 
+    The non-OAuth route is moved to the front of the router: when
+    ``frontend/dist`` exists, ``create_app()`` mounts the SPA catch-all at
+    ``/``, which would otherwise answer the late-registered route with a 404.
+
     Args:
         real_app_case: Fixture providing the real app, client, flags, and owner.
     """
@@ -472,6 +476,7 @@ def test_real_app_unhandled_500_on_oauth_path_carries_no_store_headers(
         """Raise an unhandled exception on a non-OAuth route."""
         raise RuntimeError("boom-plain")
 
+    app.router.routes.insert(0, app.router.routes.pop())
     app.dependency_overrides[oauth_settings] = _boom_settings
     error_client = TestClient(app, raise_server_exceptions=False)
 
