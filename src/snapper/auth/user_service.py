@@ -9,6 +9,7 @@ queryable via where_active for point-in-time audit.
 
 from datetime import UTC
 from datetime import datetime
+from typing import cast
 from uuid import uuid7
 
 import bcrypt
@@ -35,6 +36,7 @@ from snapper.data.models import User
 from snapper.data.models import UserActiveToken
 from snapper.data.models import UserLoginEvent
 from snapper.data.oauth_grant_revocation import revoke_oauth_grants_in_tx
+from snapper.data.repository import TemporalVersionConflictError
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
@@ -734,10 +736,9 @@ class UserService:
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
             }
-            new_row = await close_and_insert(
+            new_row = await self._close_and_insert_user(
                 session=session,
-                model=User,
-                match_filters=[target],
+                target=target,
                 new_values=new_values,
                 bus_time=now,
             )
@@ -810,10 +811,9 @@ class UserService:
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
             }
-            new_row = await close_and_insert(
+            new_row = await self._close_and_insert_user(
                 session=session,
-                model=User,
-                match_filters=[target],
+                target=target,
                 new_values=new_values,
                 bus_time=now,
             )
@@ -909,10 +909,9 @@ class UserService:
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
             }
-            await close_and_insert(
+            await self._close_and_insert_user(
                 session=session,
-                model=User,
-                match_filters=[target],
+                target=target,
                 new_values=new_values,
                 bus_time=now,
             )
@@ -973,6 +972,44 @@ class UserService:
         if visible_id is not None:
             raise UserAuthorityConflictError("User version changed. Retry the request.")
         return None
+
+    @staticmethod
+    async def _close_and_insert_user(
+        session: AsyncSession,
+        target: ColumnElement[bool],
+        new_values: dict[str, object | None],
+        bus_time: datetime,
+    ) -> User:
+        """Close the current user version and insert its successor.
+
+        Maps :class:`TemporalVersionConflictError` from ``close_and_insert``
+        to :class:`UserAuthorityConflictError` so public writers retry once
+        and repeat conflicts surface as HTTP 409.
+
+        Args:
+            session: Active transaction holding the user row lock.
+            target: Predicate identifying the target user row.
+            new_values: Column values for the replacement ``User`` version.
+            bus_time: Processing timestamp used for close and insert.
+
+        Returns:
+            The newly inserted ``User`` version.
+
+        Raises:
+            UserAuthorityConflictError: If the matching user version was
+                already closed before ``close_and_insert`` ran.
+        """
+        try:
+            new_row = await close_and_insert(
+                session=session,
+                model=User,
+                match_filters=[target],
+                new_values=new_values,
+                bus_time=bus_time,
+            )
+        except TemporalVersionConflictError as error:
+            raise UserAuthorityConflictError("User version changed. Retry the request.") from error
+        return cast(User, new_row)
 
     async def _sqlite_revoke_legacy_sessions(self, user_public_id: str) -> bool:
         """Run the legacy credential barrier outside SQLite's user write transaction."""
@@ -1240,10 +1277,9 @@ class UserService:
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
             }
-            await close_and_insert(
+            await self._close_and_insert_user(
                 session=session,
-                model=User,
-                match_filters=[target],
+                target=target,
                 new_values=new_values,
                 bus_time=now,
             )
@@ -1296,10 +1332,9 @@ class UserService:
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
             }
-            await close_and_insert(
+            await self._close_and_insert_user(
                 session=session,
-                model=User,
-                match_filters=[target],
+                target=target,
                 new_values=new_values,
                 bus_time=now,
             )
@@ -1351,10 +1386,9 @@ class UserService:
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
             }
-            await close_and_insert(
+            await self._close_and_insert_user(
                 session=session,
-                model=User,
-                match_filters=[target],
+                target=target,
                 new_values=new_values,
                 bus_time=now,
             )

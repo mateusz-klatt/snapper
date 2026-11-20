@@ -326,6 +326,9 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
@@ -362,6 +365,9 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
@@ -381,6 +387,9 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
@@ -438,6 +447,9 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
@@ -478,6 +490,9 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
@@ -517,6 +532,9 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
@@ -558,6 +576,9 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
@@ -600,6 +621,9 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo

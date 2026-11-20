@@ -544,6 +544,7 @@ __all__ = [
     "WalletUserReadGrantNotFoundError",
     "CredentialConflictError",
     "CredentialNotFoundError",
+    "TemporalVersionConflictError",
     "close_and_insert",
     "close_and_insert_sync",
     "IMMUTABLE_LEDGER_TABLE_NAMES",
@@ -1112,6 +1113,37 @@ class ExecutionPhysicalMutationError(RuntimeError):
     ledger as new append-only signed events with a fresh ``scope_sequence``
     above every captured watermark.
     """
+
+
+class TemporalVersionConflictError(RuntimeError):
+    """Raised when an SCD2 close targets a version that is no longer current.
+
+    Args:
+        model_name: Physical table name of the temporal model.
+        row_id: Primary key of the selected version.
+        existing_known_to: Timestamp at which the selected version was closed.
+        bus_time: Processing timestamp requested for the close.
+    """
+
+    def __init__(
+        self, model_name: str, row_id: int, existing_known_to: datetime, bus_time: datetime
+    ) -> None:
+        """Record the conflicting version and the requested processing time.
+
+        Args:
+            model_name: Physical table name of the temporal model.
+            row_id: Primary key of the selected version.
+            existing_known_to: Timestamp at which the selected version was closed.
+            bus_time: Processing timestamp requested for the close.
+        """
+        self.model_name = model_name
+        self.row_id = row_id
+        self.existing_known_to = existing_known_to
+        self.bus_time = bus_time
+        super().__init__(
+            f"{model_name} version {row_id} is no longer current "
+            f"(known_to={existing_known_to}, bus_time={bus_time})."
+        )
 
 
 class PnlTimelineAnchorEvidenceMismatchError(RuntimeError):
@@ -3128,9 +3160,10 @@ async def close_and_insert(
 ) -> Any:
     """Close the active version and insert a new one (SCD Type 2).
 
-    Finds the active row matching the given filters at bus_time,
-    closes it by setting known_to=bus_time, then inserts a new row
-    carrying the same public_id. If no active row exists, inserts fresh.
+    Finds the row matching the filters at ``bus_time`` and refreshes it from
+    the database under the lock. If still current, sets its ``known_to`` to
+    ``bus_time`` and inserts a new row with the same ``public_id``. If no row
+    matches, inserts fresh.
 
     The model must have ``id``, ``public_id``, ``timestamp``, and
     ``known_to`` columns (all temporal ORM models in this project do).
@@ -3151,6 +3184,7 @@ async def close_and_insert(
             fresh counter. The refusal resolves the physical table name so
             it holds for the mapped class, ``aliased`` proxy, or ``Table``
             alike.
+        TemporalVersionConflictError: If the matching version is already closed.
 
     Returns:
         The newly inserted model instance.
@@ -3171,11 +3205,19 @@ async def close_and_insert(
                     *match_filters,
                 )
                 .with_for_update()
+                .execution_options(populate_existing=True)
             )
         )
         .scalars()
         .first()
     )
+    if existing is not None and not is_open_ended_version(existing.known_to):
+        raise TemporalVersionConflictError(
+            _resolve_physical_table_name(model) or repr(model),
+            existing.id,
+            existing.known_to,
+            bus_time,
+        )
     if existing:
         await session.execute(
             update(model).where(model.id == existing.id).values(known_to=bus_time)
@@ -3197,9 +3239,10 @@ def close_and_insert_sync(
 ) -> Any:
     """Synchronous variant of close_and_insert for SCD Type 2.
 
-    Finds the active row matching the given filters at bus_time,
-    closes it by setting known_to=bus_time, then inserts a new row
-    carrying the same public_id. If no active row exists, inserts fresh.
+    Finds the row matching the filters at ``bus_time`` and refreshes it from
+    the database under the lock. If still current, sets its ``known_to`` to
+    ``bus_time`` and inserts a new row with the same ``public_id``. If no row
+    matches, inserts fresh.
 
     The model must have ``id``, ``public_id``, ``timestamp``, and
     ``known_to`` columns (all temporal ORM models in this project do).
@@ -3219,6 +3262,7 @@ def close_and_insert_sync(
             same resolution-based refusal so no SCD2 close+supersede can
             revise a committed ``scope_sequence`` under any target
             spelling.
+        TemporalVersionConflictError: If the matching version is already closed.
 
     Returns:
         The newly inserted model instance.
@@ -3238,10 +3282,18 @@ def close_and_insert_sync(
                 *match_filters,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         .scalars()
         .first()
     )
+    if existing is not None and not is_open_ended_version(existing.known_to):
+        raise TemporalVersionConflictError(
+            _resolve_physical_table_name(model) or repr(model),
+            existing.id,
+            existing.known_to,
+            bus_time,
+        )
     if existing:
         session.execute(update(model).where(model.id == existing.id).values(known_to=bus_time))
         new_values["public_id"] = existing.public_id
