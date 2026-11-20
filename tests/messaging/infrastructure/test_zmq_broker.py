@@ -35,7 +35,7 @@ class TestZMQBroker:
         Then: Running state toggles appropriately.
         """
         broker = ZmqBrokerProcess(
-            xsub_endpoint="tcp://127.0.0.1:7800", xpub_endpoint="tcp://127.0.0.1:7801"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
         assert not broker.running
         try:
@@ -58,16 +58,20 @@ class TestZMQBroker:
         Then: Returns dict with running state and endpoints.
         """
         broker = ZmqBrokerProcess(
-            xsub_endpoint="tcp://127.0.0.1:7802", xpub_endpoint="tcp://127.0.0.1:7803"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
         status = broker.get_status()
         assert status["running"] is False
-        assert status["xsub_endpoint"] == "tcp://127.0.0.1:7802"
-        assert status["xpub_endpoint"] == "tcp://127.0.0.1:7803"
+        assert status["xsub_endpoint"] == "tcp://127.0.0.1:0"
+        assert status["xpub_endpoint"] == "tcp://127.0.0.1:0"
         try:
             await asyncio.wait_for(broker.start(), timeout=2.0)
             status = broker.get_status()
             assert status["running"] is True
+            assert not broker.xsub_endpoint.endswith(":0")
+            assert not broker.xpub_endpoint.endswith(":0")
+            assert status["xsub_endpoint"] == broker.xsub_endpoint
+            assert status["xpub_endpoint"] == broker.xpub_endpoint
         finally:
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 
@@ -76,38 +80,30 @@ class TestZMQBroker:
         """Test ZmqBrokerProcess forwards messages.
 
         Given: A running broker with publisher and subscriber,
-        When: Publisher sends message to XSUB,
-        Then: Subscriber receives message from XPUB.
+        When: Publisher resends a message to XSUB until the subscription has propagated,
+        Then: Subscriber receives the message from XPUB within the 5 s deadline.
         """
         broker = ZmqBrokerProcess(
-            xsub_endpoint="tcp://127.0.0.1:7804", xpub_endpoint="tcp://127.0.0.1:7805"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
-        context = None
-        pub_socket = None
-        sub_socket = None
         try:
             await asyncio.wait_for(broker.start(), timeout=2.0)
-            await asyncio.sleep(0.1)
             context = zmq.asyncio.Context()
-            pub_socket = context.socket(zmq.PUB)
-            pub_socket.connect("tcp://127.0.0.1:7804")
-            sub_socket = context.socket(zmq.SUB)
-            sub_socket.connect("tcp://127.0.0.1:7805")
-            sub_socket.setsockopt_string(zmq.SUBSCRIBE, "TEST")
-            await asyncio.sleep(0.1)
-            await asyncio.wait_for(
-                pub_socket.send_multipart([b"TEST", b"hello world"]), timeout=1.0
-            )
-            topic, payload = await asyncio.wait_for(sub_socket.recv_multipart(), timeout=2.0)
-            assert topic == b"TEST"
-            assert payload == b"hello world"
+            try:
+                pub_socket = context.socket(zmq.PUB)
+                pub_socket.connect(broker.xsub_endpoint)
+                sub_socket = context.socket(zmq.SUB)
+                sub_socket.connect(broker.xpub_endpoint)
+                sub_socket.setsockopt_string(zmq.SUBSCRIBE, "TEST")
+                async with asyncio.timeout(5.0):
+                    while not await sub_socket.poll(timeout=50):
+                        await pub_socket.send_multipart([b"TEST", b"hello world"])
+                    topic, payload = await sub_socket.recv_multipart()
+                assert topic == b"TEST"
+                assert payload == b"hello world"
+            finally:
+                context.destroy(linger=0)
         finally:
-            if pub_socket:
-                pub_socket.close()
-            if sub_socket:
-                sub_socket.close()
-            if context:
-                context.term()
             await asyncio.wait_for(broker.stop(), timeout=2.0)
 
     @pytest.mark.timeout(15)
@@ -119,7 +115,7 @@ class TestZMQBroker:
         Then: No proxy errors cause crash.
         """
         broker = ZmqBrokerProcess(
-            xsub_endpoint="tcp://127.0.0.1:7806", xpub_endpoint="tcp://127.0.0.1:7807"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
         try:
             await asyncio.wait_for(broker.start(), timeout=2.0)
@@ -139,7 +135,7 @@ class TestZMQBrokerSync:
         Then: Running state toggles appropriately.
         """
         broker = ZmqBrokerThread(
-            xsub_endpoint="tcp://127.0.0.1:7808", xpub_endpoint="tcp://127.0.0.1:7809"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
         assert not broker.running
         try:
@@ -161,12 +157,12 @@ class TestZMQBrokerSync:
         Then: Returns BrokerStatus with running state and endpoints.
         """
         broker = ZmqBrokerThread(
-            xsub_endpoint="tcp://127.0.0.1:7810", xpub_endpoint="tcp://127.0.0.1:7811"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
         status = broker.get_status()
         assert status.running is False
-        assert status.xsub_endpoint == "tcp://127.0.0.1:7810"
-        assert status.xpub_endpoint == "tcp://127.0.0.1:7811"
+        assert status.xsub_endpoint == "tcp://127.0.0.1:0"
+        assert status.xpub_endpoint == "tcp://127.0.0.1:0"
         try:
             broker.start()
             status = broker.get_status()
@@ -182,7 +178,7 @@ class TestZMQBrokerSync:
         Then: Thread exists and is alive.
         """
         broker = ZmqBrokerThread(
-            xsub_endpoint="tcp://127.0.0.1:7812", xpub_endpoint="tcp://127.0.0.1:7813"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
         try:
             broker.start()
@@ -242,7 +238,7 @@ class TestZMQBrokerAdditionalCoverage:
         Then: No error occurs.
         """
         broker = ZmqBrokerProcess(
-            xsub_endpoint="tcp://127.0.0.1:7820", xpub_endpoint="tcp://127.0.0.1:7821"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
         await broker.stop()
         assert not broker.running
@@ -275,7 +271,7 @@ class TestZMQBrokerAdditionalCoverage:
         Then: Broker remains running.
         """
         broker = ZmqBrokerProcess(
-            xsub_endpoint="tcp://127.0.0.1:7824", xpub_endpoint="tcp://127.0.0.1:7825"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
         try:
             await asyncio.wait_for(broker.start(), timeout=2.0)
@@ -293,7 +289,7 @@ class TestZMQBrokerAdditionalCoverage:
         Then: Broker continues running.
         """
         broker = ZmqBrokerProcess(
-            xsub_endpoint="tcp://127.0.0.1:7826", xpub_endpoint="tcp://127.0.0.1:7827"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
         try:
             await asyncio.wait_for(broker.start(), timeout=2.0)
@@ -311,16 +307,20 @@ class TestZMQBrokerAdditionalCoverage:
         Then: Running state reflects actual state.
         """
         broker = ZmqBrokerProcess(
-            xsub_endpoint="tcp://127.0.0.1:7828", xpub_endpoint="tcp://127.0.0.1:7829"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
         status = broker.get_status()
         assert status["running"] is False
-        assert status["xsub_endpoint"] == "tcp://127.0.0.1:7828"
-        assert status["xpub_endpoint"] == "tcp://127.0.0.1:7829"
+        assert status["xsub_endpoint"] == "tcp://127.0.0.1:0"
+        assert status["xpub_endpoint"] == "tcp://127.0.0.1:0"
         try:
             await asyncio.wait_for(broker.start(), timeout=2.0)
             status = broker.get_status()
             assert status["running"] is True
+            assert not broker.xsub_endpoint.endswith(":0")
+            assert not broker.xpub_endpoint.endswith(":0")
+            assert status["xsub_endpoint"] == broker.xsub_endpoint
+            assert status["xpub_endpoint"] == broker.xpub_endpoint
         finally:
             await broker.stop()
 
@@ -333,15 +333,14 @@ class TestZMQBrokerAdditionalCoverage:
         Then: No error occurs and broker is stopped.
         """
         broker = ZmqBrokerProcess(
-            xsub_endpoint="tcp://127.0.0.1:7830", xpub_endpoint="tcp://127.0.0.1:7831"
+            xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0"
         )
         try:
             await asyncio.wait_for(broker.start(), timeout=2.0)
             await broker.stop()
+        finally:
             await broker.stop()
-            assert not broker.running
-        except TimeoutError:
-            pass
+        assert not broker.running
 
 
 @pytest.mark.asyncio
@@ -359,11 +358,9 @@ class TestZMQPubSub:
         context = zmq.asyncio.Context()
         try:
             pub_socket = context.socket(zmq.PUB)
-            pub_socket.setsockopt(zmq.LINGER, 0)
             pub_port = pub_socket.bind_to_random_port("tcp://127.0.0.1")
             pub_endpoint = f"tcp://127.0.0.1:{pub_port}"
             sub_socket = context.socket(zmq.SUB)
-            sub_socket.setsockopt(zmq.LINGER, 0)
             sub_socket.connect(pub_endpoint)
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, "BTCUSD")
             await asyncio.sleep(0.1)
@@ -377,7 +374,10 @@ class TestZMQPubSub:
                 volume=0.1,
                 last=50000.0,
             )
-            await pub_socket.send_multipart([b"BTCUSD", test_msg.to_json().encode("utf-8")])
+            await asyncio.wait_for(
+                pub_socket.send_multipart([b"BTCUSD", test_msg.to_json().encode("utf-8")]),
+                timeout=1.0,
+            )
             topic_bytes, payload_bytes = await asyncio.wait_for(
                 sub_socket.recv_multipart(), timeout=1.0
             )
@@ -390,9 +390,7 @@ class TestZMQPubSub:
             assert received_msg.last == pytest.approx(50000.0)
             assert received_msg.volume == pytest.approx(0.1)
         finally:
-            pub_socket.close()
-            sub_socket.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.timeout(15)
     async def test_multi_topic_subscription(self) -> None:
@@ -405,11 +403,9 @@ class TestZMQPubSub:
         context = zmq.asyncio.Context()
         try:
             pub_socket = context.socket(zmq.PUB)
-            pub_socket.setsockopt(zmq.LINGER, 0)
             pub_port = pub_socket.bind_to_random_port("tcp://127.0.0.1")
             pub_endpoint = f"tcp://127.0.0.1:{pub_port}"
             sub_socket = context.socket(zmq.SUB)
-            sub_socket.setsockopt(zmq.LINGER, 0)
             sub_socket.connect(pub_endpoint)
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, "BTCUSD")
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, "ETHUSD")
@@ -444,9 +440,10 @@ class TestZMQPubSub:
                 volume=100.0,
                 last=0.5,
             )
-            await pub_socket.send_multipart([b"BTCUSD", btc_msg.to_json().encode("utf-8")])
-            await pub_socket.send_multipart([b"ETHUSD", eth_msg.to_json().encode("utf-8")])
-            await pub_socket.send_multipart([b"ADAUSD", other_msg.to_json().encode("utf-8")])
+            async with asyncio.timeout(1.0):
+                await pub_socket.send_multipart([b"BTCUSD", btc_msg.to_json().encode("utf-8")])
+                await pub_socket.send_multipart([b"ETHUSD", eth_msg.to_json().encode("utf-8")])
+                await pub_socket.send_multipart([b"ADAUSD", other_msg.to_json().encode("utf-8")])
             received_topics = []
             for _ in range(2):
                 topic_bytes, _payload_bytes = await asyncio.wait_for(
@@ -458,9 +455,7 @@ class TestZMQPubSub:
             assert "ETHUSD" in received_topics
             assert len(received_topics) == 2
         finally:
-            pub_socket.close()
-            sub_socket.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.timeout(10)
     async def test_no_subscription_no_messages(self) -> None:
@@ -473,11 +468,9 @@ class TestZMQPubSub:
         context = zmq.asyncio.Context()
         try:
             pub_socket = context.socket(zmq.PUB)
-            pub_socket.setsockopt(zmq.LINGER, 0)
             pub_port = pub_socket.bind_to_random_port("tcp://127.0.0.1")
             pub_endpoint = f"tcp://127.0.0.1:{pub_port}"
             sub_socket = context.socket(zmq.SUB)
-            sub_socket.setsockopt(zmq.LINGER, 0)
             sub_socket.connect(pub_endpoint)
             await asyncio.sleep(0.1)
             test_msg = TickData(
@@ -490,14 +483,15 @@ class TestZMQPubSub:
                 volume=0.1,
                 last=50000.0,
             )
-            await pub_socket.send_multipart([b"BTCUSD", test_msg.to_json().encode("utf-8")])
+            await asyncio.wait_for(
+                pub_socket.send_multipart([b"BTCUSD", test_msg.to_json().encode("utf-8")]),
+                timeout=1.0,
+            )
             unsubscribed_receive = sub_socket.recv_multipart()
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(unsubscribed_receive, timeout=0.5)
         finally:
-            pub_socket.close()
-            sub_socket.close()
-            context.term()
+            context.destroy(linger=0)
 
     @pytest.mark.timeout(15)
     async def test_late_subscriber(self) -> None:
@@ -510,10 +504,8 @@ class TestZMQPubSub:
         context = zmq.asyncio.Context()
         try:
             pub_socket = context.socket(zmq.PUB)
-            pub_socket.setsockopt(zmq.LINGER, 0)
             pub_port = pub_socket.bind_to_random_port("tcp://127.0.0.1")
             pub_endpoint = f"tcp://127.0.0.1:{pub_port}"
-            await asyncio.sleep(0.1)
             early_msg = TickData(
                 session_id="",
                 sequence_id=0,
@@ -524,9 +516,11 @@ class TestZMQPubSub:
                 volume=0.1,
                 last=49000.0,
             )
-            await pub_socket.send_multipart([b"BTCUSD", early_msg.to_json().encode("utf-8")])
+            await asyncio.wait_for(
+                pub_socket.send_multipart([b"BTCUSD", early_msg.to_json().encode("utf-8")]),
+                timeout=1.0,
+            )
             sub_socket = context.socket(zmq.SUB)
-            sub_socket.setsockopt(zmq.LINGER, 0)
             sub_socket.connect(pub_endpoint)
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, "BTCUSD")
             await asyncio.sleep(0.1)
@@ -540,7 +534,10 @@ class TestZMQPubSub:
                 volume=0.1,
                 last=50000.0,
             )
-            await pub_socket.send_multipart([b"BTCUSD", late_msg.to_json().encode("utf-8")])
+            await asyncio.wait_for(
+                pub_socket.send_multipart([b"BTCUSD", late_msg.to_json().encode("utf-8")]),
+                timeout=1.0,
+            )
             _topic_bytes, payload_bytes = await asyncio.wait_for(
                 sub_socket.recv_multipart(), timeout=1.0
             )
@@ -551,9 +548,7 @@ class TestZMQPubSub:
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(missed_early_receive, timeout=0.5)
         finally:
-            pub_socket.close()
-            sub_socket.close()
-            context.term()
+            context.destroy(linger=0)
 
 
 class DummyContext(SimpleNamespace):
@@ -1025,36 +1020,43 @@ def test_zmq_broker_thread_proxy_loop_forwards_real_sockets() -> None:
     """Test ``ZmqBrokerThread._proxy_loop`` forwards a real PUB->SUB round-trip.
 
     Given: A ``ZmqBrokerThread`` started on ephemeral tcp endpoints.
-    When: A PUB connects to XSUB and sends a frame, a SUB connects to
-        XPUB and reads it.
+    When: A PUB connects to XSUB and resends a frame until a SUB connected
+        to XPUB can read it, within a 5 s deadline.
     Then: The SUB receives the frame, exercising the CLI threaded
         broker's forwarding hot path.
 
     Exercises the CLI-side threaded broker (used by ``cli/app.py``)
     via real sockets so the legacy class keeps its production
     behaviour after the production class refactor.
+
+    ``ZmqBrokerThread`` does not resolve OS-assigned ports, so the test
+    reads ``LAST_ENDPOINT`` from the bound sockets. That option is written
+    only by ``bind()``, which this thread ran before the proxy thread
+    started, and the proxy loop never changes it.
     """
-    broker = ZmqBrokerThread(
-        xsub_endpoint="tcp://127.0.0.1:7820", xpub_endpoint="tcp://127.0.0.1:7821"
-    )
+    broker = ZmqBrokerThread(xsub_endpoint="tcp://127.0.0.1:0", xpub_endpoint="tcp://127.0.0.1:0")
     try:
         broker.start()
-        time.sleep(0.1)
+        assert broker.xsub_socket is not None
+        assert broker.xpub_socket is not None
         context = zmq.Context()
-        pub = context.socket(zmq.PUB)
-        pub.connect("tcp://127.0.0.1:7820")
-        sub = context.socket(zmq.SUB)
-        sub.connect("tcp://127.0.0.1:7821")
-        sub.setsockopt_string(zmq.SUBSCRIBE, "TOPIC")
-        time.sleep(0.2)
-        pub.send_multipart([b"TOPIC", b"payload"])
-        sub.setsockopt(zmq.RCVTIMEO, 2000)
-        topic, payload = sub.recv_multipart()
-        assert topic == b"TOPIC"
-        assert payload == b"payload"
-        pub.close()
-        sub.close()
-        context.term()
+        try:
+            pub = context.socket(zmq.PUB)
+            pub.connect(broker.xsub_socket.getsockopt_string(zmq.LAST_ENDPOINT))
+            sub = context.socket(zmq.SUB)
+            sub.connect(broker.xpub_socket.getsockopt_string(zmq.LAST_ENDPOINT))
+            sub.setsockopt_string(zmq.SUBSCRIBE, "TOPIC")
+            deadline = time.monotonic() + 5.0
+            ready = 0
+            while not ready and time.monotonic() < deadline:
+                pub.send_multipart([b"TOPIC", b"payload"], flags=zmq.DONTWAIT)
+                ready = sub.poll(timeout=50, flags=zmq.POLLIN)
+            assert ready & zmq.POLLIN
+            topic, payload = sub.recv_multipart(flags=zmq.DONTWAIT)
+            assert topic == b"TOPIC"
+            assert payload == b"payload"
+        finally:
+            context.destroy(linger=0)
     finally:
         broker.stop()
 
