@@ -1,36 +1,42 @@
-"""Access-log redaction for credential-bearing OAuth request lines.
+"""Access-log redaction for OAuth and MCP request lines.
 
-``GET /api/mcp/authorize`` carries the client's ``state`` and PKCE challenge in
-its query string, as OAuth requires. uvicorn's access log records the full
-request line, so the query of that one path is replaced with ``[REDACTED]``
-while method, path, protocol and status stay readable for operations.
+OAuth and MCP routes can carry ``state``, PKCE challenges, codes, or pending
+request identifiers in query strings or unexpected client requests. uvicorn's
+access log records the full request line, so the query of every OAuth surface
+path is replaced with ``[REDACTED]`` while method, path, protocol, and status
+stay readable for operations.
 """
 
 import logging
 from urllib.parse import urlsplit
 
+from snapper.server.oauth_paths import OAUTH_SURFACE_PREFIXES
+from snapper.server.oauth_paths import is_oauth_surface_path
+
 ACCESS_LOGGER = "uvicorn.access"
 """The logger uvicorn writes request lines to."""
 
-REDACTED_QUERY_PATHS = frozenset({"/api/mcp/authorize"})
-"""Paths whose query string never reaches the access log."""
+REDACTED_QUERY_PATHS = frozenset(OAUTH_SURFACE_PREFIXES)
+"""Segment-aware OAuth surface prefixes whose query strings never reach the access log."""
 
 _PATH_ARG = 2
 _REDACTED = "[REDACTED]"
 
 
 def redact_request_target(target: str) -> str:
-    """Replace the query of a credential-bearing path, with or without a trailing slash.
+    """Replace the query of any OAuth surface path, with or without a trailing slash.
 
     Args:
         target: The request target uvicorn logs, path plus optional query.
 
     Returns:
-        The target with its query replaced when the path is in
-        :data:`REDACTED_QUERY_PATHS`, otherwise the unchanged target.
+        The target with its query replaced when the path matches
+        :data:`REDACTED_QUERY_PATHS` via
+        :func:`snapper.server.oauth_paths.is_oauth_surface_path` and a query is
+        present, otherwise the unchanged target.
     """
     parts = urlsplit(target)
-    if parts.path.rstrip("/") not in REDACTED_QUERY_PATHS or not parts.query:
+    if not parts.query or not is_oauth_surface_path(parts.path):
         return target
     return f"{parts.path}?{_REDACTED}"
 

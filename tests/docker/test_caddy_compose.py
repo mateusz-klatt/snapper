@@ -57,6 +57,7 @@ _REDACTED_QUERY_KEYS: Final[tuple[str, ...]] = (
     "token",
     "refresh_token",
     "access_token",
+    "oauth_request",
 )
 
 

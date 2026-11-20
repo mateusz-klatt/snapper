@@ -1,6 +1,9 @@
 """Tests for ClientProvenanceMiddleware REST provenance validation."""
 
 import json
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 from loguru import logger
@@ -301,3 +304,307 @@ class TestClientProvenanceMiddleware:
             logger.remove(sink_id)
         assert resp.status_code == 200
         assert not any("Client provenance" in m for m in messages)
+
+    @pytest.mark.parametrize(
+        "credential_path",
+        [
+            "/api/mcp/token",
+            "/api/mcp/token/",
+            "/api/mcp/revoke",
+            "/api/mcp/register",
+            "/api/mcp/authorize",
+            "/api/mcp-oauth/consent/approve",
+            "/api/mcp-oauth/consent/deny",
+        ],
+    )
+    def test_credential_path_skips_provenance_and_suppresses_control_payload(
+        self, credential_path: str
+    ) -> None:
+        """Credential endpoints skip body inspection and store payload=None without query strings.
+
+        Given: A POST request to an OAuth credential path with a sentinel query
+            and a JSON body carrying code, code_verifier, client_secret, and provenance keys,
+        When: Processed by ClientProvenanceMiddleware with a repository,
+        Then: No provenance log is emitted, no gap detector is created, message_type
+            contains the path without any query string, and Control.payload is None
+            with no sentinel anywhere in the persisted Control row.
+
+        Args:
+            credential_path: OAuth credential endpoint path under test.
+        """
+        mock_session = AsyncMock(add=MagicMock())
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_ctx
+        detectors: dict[str, object] = {}
+
+        async def _ok_handler(request: Request) -> JSONResponse:
+            """Read request body and return 200."""
+            await request.body()
+            return JSONResponse({"ok": True})
+
+        app = Starlette(
+            routes=[
+                Route(credential_path, _ok_handler, methods=["POST"]),
+                Route("/api/mcp/tokenx", _ok_handler, methods=["POST"]),
+            ],
+        )
+        app.add_middleware(
+            ClientProvenanceMiddleware,
+            db_url="sqlite+aiosqlite:///:memory:",
+            gap_detectors=detectors,
+        )
+        client = TestClient(app)
+        body = json.dumps(
+            {
+                "session_id": "019e873c-cf6c-72a4-88d6-07199e9cbd96",
+                "sequence_id": 1,
+                "public_id": "019fc3ba-79f6-72dd-8f24-09084ae1d7c5",
+                "code": "SENTINEL_BODY_CODE",
+                "code_verifier": "SENTINEL_VERIFIER",
+                "client_secret": "SENTINEL_SECRET",
+            }
+        )
+        messages: list[str] = []
+        sink_id = logger.add(lambda msg: messages.append(str(msg)), level="INFO")
+        try:
+            with patch(
+                "snapper.server.provenance_middleware.get_repository",
+                return_value=mock_repo,
+            ):
+                resp = client.post(f"{credential_path}?code=SENTINEL", content=body)
+        finally:
+            logger.remove(sink_id)
+
+        assert resp.status_code == 200
+        assert not any("Client provenance" in m for m in messages)
+        assert detectors == {}
+        mock_session.add.assert_called_once()
+        row = mock_session.add.call_args[0][0]
+        assert row.message_type == f"POST {credential_path}"
+        assert "SENTINEL" not in row.message_type
+        assert "?" not in row.message_type
+        assert row.payload is None
+        assert row.outcome == "ok"
+        assert row.detail is None
+        assert row.client_session_id is None
+        assert row.client_public_id is None
+        for sentinel in (
+            "SENTINEL",
+            "SENTINEL_BODY_CODE",
+            "SENTINEL_VERIFIER",
+            "SENTINEL_SECRET",
+        ):
+            assert sentinel not in str(row.message_type)
+            assert sentinel not in str(row.payload)
+            assert sentinel not in str(row.detail)
+
+    @pytest.mark.parametrize("suffix", ["%0A", "%0D%0A", "%09"])
+    @pytest.mark.parametrize(
+        "credential_path",
+        [
+            "/api/mcp/token",
+            "/api/mcp/revoke",
+            "/api/mcp/register",
+            "/api/mcp/authorize",
+            "/api/mcp-oauth/consent/approve",
+            "/api/mcp-oauth/consent/deny",
+        ],
+    )
+    def test_encoded_line_break_cannot_bypass_credential_suppression(
+        self, credential_path: str, suffix: str
+    ) -> None:
+        """A percent-encoded line break never turns a credential body into a persisted payload.
+
+        Given: A credential route and a POST whose path ends in an encoded line break,
+            which Starlette's ``$``-anchored pattern can still route to the handler,
+        When: The JSON body carries credential sentinels,
+        Then: Whether or not the route matched, the stored control row has no
+            payload and no sentinel.
+
+        Args:
+            credential_path: OAuth credential endpoint path under test.
+            suffix: Percent-encoded line break or tab appended to the path.
+        """
+        mock_session = AsyncMock(add=MagicMock())
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_ctx
+
+        async def _ok_handler(request: Request) -> JSONResponse:
+            """Read request body and return 200."""
+            await request.body()
+            return JSONResponse({"ok": True})
+
+        app = Starlette(routes=[Route(credential_path, _ok_handler, methods=["POST"])])
+        app.add_middleware(ClientProvenanceMiddleware, db_url="sqlite+aiosqlite:///:memory:")
+        client = TestClient(app)
+        body = json.dumps({"code": "SENTINEL_CODE", "client_secret": "SENTINEL_SECRET"})
+        with patch(
+            "snapper.server.provenance_middleware.get_repository",
+            return_value=mock_repo,
+        ):
+            client.post(f"{credential_path}{suffix}", content=body)
+
+        mock_session.add.assert_called_once()
+        row = mock_session.add.call_args[0][0]
+        assert row.payload is None
+        for sentinel in ("SENTINEL_CODE", "SENTINEL_SECRET"):
+            assert sentinel not in str(row.payload)
+            assert sentinel not in str(row.detail)
+
+    @pytest.mark.parametrize(
+        ("path", "expected_detail"),
+        [
+            ("/api/mcp/token", "RuntimeError"),
+            ("/api/mcp-oauth/consent/approve", "RuntimeError"),
+            ("/api/orders", "RuntimeError: SENTINEL_EXCEPTION"),
+        ],
+    )
+    def test_exception_detail_omits_message_on_credential_paths(
+        self, path: str, expected_detail: str
+    ) -> None:
+        """A handler exception's message is not persisted on credential endpoints.
+
+        Given: A handler that raises an exception whose message carries a sentinel,
+        When: The request is a POST to a credential path or to an ordinary path,
+        Then: The control row records only the exception class on the credential
+            path and the full ``Class: message`` detail elsewhere.
+
+        Args:
+            path: Request path under test.
+            expected_detail: The detail the control row must carry.
+        """
+        mock_session = AsyncMock(add=MagicMock())
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_ctx
+
+        async def _failing_handler(_request: Request) -> JSONResponse:
+            """Raise an exception that echoes a submitted value."""
+            raise RuntimeError("SENTINEL_EXCEPTION")
+
+        app = Starlette(routes=[Route(path, _failing_handler, methods=["POST"])])
+        app.add_middleware(ClientProvenanceMiddleware, db_url="sqlite+aiosqlite:///:memory:")
+        client = TestClient(app, raise_server_exceptions=False)
+        with patch(
+            "snapper.server.provenance_middleware.get_repository",
+            return_value=mock_repo,
+        ):
+            response = client.post(path, content=b"{}")
+
+        assert response.status_code == 500
+        row = mock_session.add.call_args[0][0]
+        assert row.outcome == "exception"
+        assert row.detail == expected_detail
+
+    @pytest.mark.asyncio
+    async def test_scope_path_query_is_stripped_on_mutation_and_telemetry(self) -> None:
+        """Any accidental query suffix on ASGI scope path is stripped before recording.
+
+        Given: Direct ASGI scopes whose ``path`` carries a ``?query`` suffix,
+        When: Processed for a credential POST and a telemetry-enabled GET,
+        Then: Both Control and Telemetry message_type omit the query string, and
+            the credential Control row keeps the exception outcome and only the
+            exception class as its detail.
+        """
+        mock_session = AsyncMock(add=MagicMock())
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_ctx
+
+        async def _raising_app(scope: Scope, receive: Receive, send: Send) -> None:
+            """Consume body if POST, then raise for POST or reply 200 for GET."""
+            if scope["method"] == "POST":
+                await receive()
+                raise RuntimeError("boom")
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        middleware = ClientProvenanceMiddleware(
+            _raising_app,
+            db_url="sqlite+aiosqlite:///:memory:",
+            telemetry_enabled=True,
+        )
+
+        async def _post_receive() -> Message:
+            """Return one token request body."""
+            return {
+                "type": "http.request",
+                "body": b'{"code_verifier": "SENTINEL_VERIFIER"}',
+                "more_body": False,
+            }
+
+        async def _noop_send(_message: Message) -> None:
+            """Discard outgoing ASGI messages."""
+
+        with patch(
+            "snapper.server.provenance_middleware.get_repository",
+            return_value=mock_repo,
+        ):
+            with pytest.raises(RuntimeError, match="boom"):
+                await middleware(
+                    {
+                        "type": "http",
+                        "method": "POST",
+                        "path": "/api/mcp/token?code=SENTINEL",
+                    },
+                    _post_receive,
+                    _noop_send,
+                )
+            await middleware(
+                {
+                    "type": "http",
+                    "method": "GET",
+                    "path": "/api/mcp/authorize?state=SENTINEL",
+                },
+                _post_receive,
+                _noop_send,
+            )
+
+        assert mock_session.add.call_count == 2
+        control_row = mock_session.add.call_args_list[0].args[0]
+        telemetry_row = mock_session.add.call_args_list[1].args[0]
+        assert control_row.message_type == "POST /api/mcp/token"
+        assert control_row.payload is None
+        assert control_row.outcome == "exception"
+        assert control_row.detail == "RuntimeError"
+        assert telemetry_row.message_type == "GET /api/mcp/authorize"
+        assert telemetry_row.payload is None
+
+    def test_non_credential_boundary_sibling_keeps_control_payload(self) -> None:
+        """A path starting with an OAuth prefix without a slash boundary is not suppressed.
+
+        Given: A POST request to ``/api/mcp/tokenx`` with a JSON body,
+        When: Processed by ClientProvenanceMiddleware,
+        Then: The Control row records the JSON payload normally.
+        """
+        mock_session = AsyncMock(add=MagicMock())
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_repo = MagicMock()
+        mock_repo.session.return_value = mock_ctx
+
+        app = Starlette(routes=[Route("/api/mcp/tokenx", _echo_handler, methods=["POST"])])
+        app.add_middleware(ClientProvenanceMiddleware, db_url="sqlite+aiosqlite:///:memory:")
+        client = TestClient(app)
+
+        with patch(
+            "snapper.server.provenance_middleware.get_repository",
+            return_value=mock_repo,
+        ):
+            resp = client.post("/api/mcp/tokenx", content=json.dumps({"safe": "value"}))
+
+        assert resp.status_code == 200
+        row = mock_session.add.call_args[0][0]
+        assert row.message_type == "POST /api/mcp/tokenx"
+        assert row.payload == json.dumps({"safe": "value"})

@@ -246,6 +246,13 @@ def _tokens(case: HttpCase) -> JsonObject:
     return _exchange(case, _approve(case, _pending(case))["code"][0])
 
 
+def _assert_no_store_headers(response: Response) -> None:
+    """Assert every OAuth surface response carries no-store and no-referrer headers."""
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["referrer-policy"] == "no-referrer"
+
+
 def test_every_oauth_surface_is_404_by_default(disabled: HttpCase) -> None:
     """MCP_OAUTH_ENABLED=false publishes nothing.
 
@@ -256,6 +263,7 @@ def test_every_oauth_surface_is_404_by_default(disabled: HttpCase) -> None:
     for method, path in _ROUTES:
         response = disabled.client.request(method, path)
         assert response.status_code == 404, (method, path)
+        _assert_no_store_headers(response)
 
 
 def test_registration_and_openid_stay_absent(case: HttpCase) -> None:
@@ -760,6 +768,7 @@ def test_token_endpoint_requires_one_valued_form_bodies(
     response = case.client.post("/api/mcp/token", headers=headers, content=content)
     assert response.status_code == 400
     assert response.json() == {"error": "invalid_request"}
+    _assert_no_store_headers(response)
 
 
 def test_token_issuance_is_refused_while_live_integration_is_disabled(case: HttpCase) -> None:
@@ -899,6 +908,7 @@ def test_consent_api_is_disabled_with_the_live_flag(case: HttpCase) -> None:
     response = _describe(case, request_id)
     assert response.status_code == 503
     assert response.json()["error_code"] == "feature_disabled"
+    _assert_no_store_headers(response)
 
 
 def test_consent_requires_ai_integration_management(case: HttpCase) -> None:
@@ -914,6 +924,7 @@ def test_consent_requires_ai_integration_management(case: HttpCase) -> None:
     )
     response = _describe(case, request_id)
     assert response.status_code == 403
+    _assert_no_store_headers(response)
 
 
 def test_consent_mutations_enforce_csrf(case: HttpCase) -> None:
@@ -933,6 +944,7 @@ def test_consent_mutations_enforce_csrf(case: HttpCase) -> None:
         ),
     )
     assert response.status_code == 403
+    _assert_no_store_headers(response)
     case.app.dependency_overrides[validate_csrf_token] = lambda: None
     assert _describe(case, request_id).status_code == 200
 
@@ -957,8 +969,12 @@ async def test_consent_requires_browser_session_and_csrf(case: HttpCase, decisio
     )
     url = f"/api/mcp-oauth/consent/{decision}"
     case.client.headers["Authorization"] = f"Bearer {pair.access_token}"
-    assert _describe(case, request_id).status_code == 401
-    assert case.client.post(url, json=payload).status_code == 401
+    bearer_read = _describe(case, request_id)
+    assert bearer_read.status_code == 401
+    _assert_no_store_headers(bearer_read)
+    bearer_post = case.client.post(url, json=payload)
+    assert bearer_post.status_code == 401
+    _assert_no_store_headers(bearer_post)
     case.client.cookies.set("access_token", pair.access_token)
     assert case.client.post(url, json=payload).status_code == 401
     del case.client.headers["Authorization"]
