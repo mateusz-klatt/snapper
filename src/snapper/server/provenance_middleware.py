@@ -38,8 +38,21 @@ from snapper.data.models import Telemetry
 from snapper.data.repository import get_repository
 from snapper.messaging.infrastructure.gap_detector import GapDetector
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.server.oauth_paths import is_oauth_credential_path
 
 _MUTATION_METHODS = {b"POST", b"PUT", b"DELETE", b"PATCH"}
+
+
+def _clean_path(scope: Scope) -> str:
+    """Return the request path from ASGI ``scope`` without any query string.
+
+    Args:
+        scope: ASGI connection scope.
+
+    Returns:
+        Request path with any query suffix stripped.
+    """
+    return str(scope.get("path", "")).split("?", 1)[0]
 
 
 def _uuid_text_or_none(value: object) -> str | None:
@@ -159,8 +172,7 @@ class ClientProvenanceMiddleware:
         """
         if method_bytes == b"GET" and self.telemetry_enabled and self.db_url:
             await self.app(scope, receive, send)
-            path: str = scope.get("path", "")
-            await self._record_telemetry(path=path)
+            await self._record_telemetry(path=_clean_path(scope))
         else:
             await self.app(scope, receive, send)
 
@@ -211,9 +223,9 @@ class ClientProvenanceMiddleware:
             raise
         finally:
             full_body = b"".join(body_chunks)
-            path: str = scope.get("path", "")
+            path = _clean_path(scope)
             payload_dict: JsonObject | None = None
-            if full_body:
+            if full_body and not is_oauth_credential_path(path):
                 payload_dict = self._inspect_provenance(full_body, path)
             await self._record_control(
                 path=path,

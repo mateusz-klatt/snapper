@@ -3087,16 +3087,30 @@ cannot succeed by retrying.
 
 Both decisions return `mcp_oauth_consent_redirect` with `redirect_to`, the
 exact registered callback carrying `code` or `error=access_denied`, `state` and
-`iss`. The `oauth_request` body key is redacted before the provenance
-middleware stores the request.
+`iss`. Mutation bodies on OAuth credential endpoints (including consent
+approve/deny) are skipped by provenance inspection and stored with
+`payload=None` in the control table.
 
 ### Log redaction
 
-The uvicorn access log replaces the query of `/api/mcp/authorize` with
-`[REDACTED]`. The Caddy access log and its default error log replace the
-`state`, `code`, `code_challenge`, `code_verifier`, `request`,
-`client_secret`, `token`, `refresh_token` and `access_token` query values and
-drop the `X-MCP-OAuth-Request` header.
+Control-table persistence suppresses `payload` (`None`, without parsing or
+logging the body) on OAuth credential endpoints (`/api/mcp/token`,
+`/api/mcp/revoke`, `/api/mcp/register`, `/api/mcp/authorize`,
+`/api/mcp-oauth/consent/approve`, and `/api/mcp-oauth/consent/deny`), and
+`core/redact.py` additionally redacts OAuth secret keys (`client_secret`,
+`code_verifier`, `code_challenge`, `client_assertion`, `id_token`, and
+`oauth_request`) recursively if logged elsewhere. The uvicorn access log replaces
+the query string of every OAuth surface path (`/api/mcp`, `/api/mcp-oauth`,
+`/.well-known/oauth-authorization-server`,
+`/.well-known/oauth-protected-resource`, `/.well-known/openid-configuration`,
+and their subpaths) with `[REDACTED]`. The Caddy access log and its default
+error log replace the `state`, `code`, `code_challenge`, `code_verifier`,
+`request`, `client_secret`, `token`, `refresh_token`, `access_token` and
+`oauth_request` query values (effective on the next Caddy deploy) and drop the
+`X-MCP-OAuth-Request` header and response `Location`. Every HTTP response on an
+OAuth surface path — including dependency-layer 401/403/404/422/503 rejections
+and unhandled 500s — carries `Cache-Control: no-store`, `Pragma: no-cache`, and
+`Referrer-Policy: no-referrer` whenever absent.
 
 ## AI Delegates
 

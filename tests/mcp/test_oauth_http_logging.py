@@ -58,11 +58,10 @@ async def recorded(tmp_path: Path) -> AsyncGenerator[tuple[HttpCase, TestClient,
         await harness.repository.engine.dispose()
 
 
-async def _control_text(control_url: str) -> str:
-    """Concatenate every persisted control payload and detail."""
+async def _control_rows(control_url: str) -> list[Control]:
+    """Return every persisted control row."""
     async with get_repository(control_url).session() as session:
-        rows = (await session.execute(select(Control))).scalars().all()
-    return "\n".join(f"{row.message_type} {row.payload} {row.detail}" for row in rows)
+        return list((await session.execute(select(Control))).scalars().all())
 
 
 async def test_control_records_never_persist_oauth_credentials(
@@ -72,7 +71,8 @@ async def test_control_records_never_persist_oauth_credentials(
 
     Given the real provenance recorder around the OAuth-enabled app.
     When a full authorize, consent approval, code exchange and revocation run.
-    Then no credential value appears in any control row, while the operations are recorded.
+    Then no credential value appears in any control row, credential payloads are
+        suppressed as ``None``, and the operations remain recorded.
     """
     _case, client, control_url = recorded
     response = client.get("/api/mcp/authorize", params=_authorize_params(state=_SENTINEL_STATE))
@@ -108,14 +108,17 @@ async def test_control_records_never_persist_oauth_credentials(
     assert tokens.status_code == 200
     issued = tokens.json()
     client.post("/api/mcp/revoke", headers=headers, data={"token": "revoke-SENTINEL-9a2c"})
-    persisted = await _control_text(control_url)
+    rows = await _control_rows(control_url)
+    persisted = "\n".join(f"{row.message_type} {row.payload} {row.detail}" for row in rows)
     assert "POST /api/mcp-oauth/consent/approve" in persisted
     assert "POST /api/mcp/token" in persisted
-    assert "[REDACTED]" in persisted
+    assert "POST /api/mcp/revoke" in persisted
+    assert all(row.payload is None for row in rows)
     for secret in [
         request_id,
         callback["code"][0],
         _CLIENT_SECRET,
+        _VERIFIER,
         basic,
         "revoke-SENTINEL-9a2c",
         _SENTINEL_STATE,
@@ -189,20 +192,118 @@ def test_access_log_redacts_the_authorize_query(prior_state: str) -> None:
     ("target", "expected"),
     [
         ("/api/mcp/authorize", "/api/mcp/authorize"),
+        ("/api/mcp/token", "/api/mcp/token"),
+        ("/api/mcp-oauth/consent", "/api/mcp-oauth/consent"),
         ("/api/mcp/authorize?state=s", "/api/mcp/authorize?[REDACTED]"),
         ("/api/mcp/authorize/?state=s", "/api/mcp/authorize/?[REDACTED]"),
+        ("/api/mcp/token?code=SENTINEL", "/api/mcp/token?[REDACTED]"),
+        ("/api/mcp-oauth/consent?oauth_request=SENTINEL", "/api/mcp-oauth/consent?[REDACTED]"),
+        ("/api/mcp?foo=bar", "/api/mcp?[REDACTED]"),
+        ("/api/mcp/?foo=bar", "/api/mcp/?[REDACTED]"),
+        (
+            "/.well-known/oauth-authorization-server/api/mcp?foo=bar",
+            "/.well-known/oauth-authorization-server/api/mcp?[REDACTED]",
+        ),
+        (
+            "/.well-known/oauth-protected-resource/api/mcp?foo=bar",
+            "/.well-known/oauth-protected-resource/api/mcp?[REDACTED]",
+        ),
+        (
+            "/.well-known/openid-configuration?foo=bar",
+            "/.well-known/openid-configuration?[REDACTED]",
+        ),
         ("/api/orders?limit=5", "/api/orders?limit=5"),
-        ("/api/mcp/authorizex?state=s", "/api/mcp/authorizex?state=s"),
+        ("/api/mcp/authorizex?state=s", "/api/mcp/authorizex?[REDACTED]"),
+        ("/api/mcpx?state=s", "/api/mcpx?state=s"),
+        ("/api/mcp-oauthx?x=1", "/api/mcp-oauthx?x=1"),
     ],
 )
-def test_only_the_credential_bearing_query_is_redacted(target: str, expected: str) -> None:
-    """Other request lines keep their query for operations.
+def test_only_oauth_surface_queries_are_redacted(target: str, expected: str) -> None:
+    """Every OAuth surface path has its query replaced while sibling/non-OAuth queries stay intact.
 
     Given a request target.
     When it is prepared for the access log.
-    Then only the authorize query is replaced.
+    Then OAuth surface targets replace their query with ``[REDACTED]``, while
+        queryless paths, non-OAuth paths, and boundary-bypass siblings stay unchanged.
+
+    Args:
+        target: Raw request target passed to the redactor.
+        expected: Expected target string written to the log.
     """
     assert redact_request_target(target) == expected
+
+
+@pytest.mark.parametrize(
+    ("method", "target", "status_code", "expected_target", "sentinel"),
+    [
+        (
+            "GET",
+            "/api/mcp-oauth/consent?oauth_request=SENTINEL",
+            200,
+            "/api/mcp-oauth/consent?[REDACTED]",
+            "SENTINEL",
+        ),
+        (
+            "POST",
+            "/api/mcp/token?code=SENTINEL",
+            400,
+            "/api/mcp/token?[REDACTED]",
+            "SENTINEL",
+        ),
+        (
+            "GET",
+            "/api/mcp-oauthx?x=1",
+            404,
+            "/api/mcp-oauthx?x=1",
+            None,
+        ),
+        (
+            "GET",
+            "/api/orders?limit=5",
+            200,
+            "/api/orders?limit=5",
+            None,
+        ),
+    ],
+    ids=["consent-query", "token-query", "oauthx-boundary", "non-oauth"],
+)
+def test_access_filter_with_real_uvicorn_log_records(
+    method: str,
+    target: str,
+    status_code: int,
+    expected_target: str,
+    sentinel: str | None,
+) -> None:
+    """Filter rewrites real ``logging.LogRecord`` targets without altering method, protocol, or status.
+
+    Given a real uvicorn-shaped ``logging.LogRecord`` and ``OAuthQueryRedactionFilter``.
+    When the filter processes the record.
+    Then OAuth surface queries become ``[REDACTED]``, non-OAuth and boundary paths
+        stay untouched, and method, protocol, and status remain intact.
+
+    Args:
+        method: HTTP method in the access log tuple.
+        target: Request target path with query string.
+        status_code: HTTP status code in the access log tuple.
+        expected_target: Expected formatted target after filtering.
+        sentinel: Optional secret value that must not appear in the formatted message.
+    """
+    redaction = OAuthQueryRedactionFilter()
+    record = logging.LogRecord(
+        ACCESS_LOGGER,
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:5000", method, target, "1.1", status_code),
+        None,
+    )
+    assert redaction.filter(record) is True
+    assert record.args == ("127.0.0.1:5000", method, expected_target, "1.1", status_code)
+    formatted = record.getMessage()
+    assert formatted == f'127.0.0.1:5000 - "{method} {expected_target} HTTP/1.1" {status_code}'
+    if sentinel is not None:
+        assert sentinel not in formatted
 
 
 def test_access_filter_passes_unexpected_record_shapes_unchanged() -> None:
