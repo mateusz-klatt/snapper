@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
 from functools import partial
+from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -31,6 +32,7 @@ from snapper.auth.user_service import UserService
 from snapper.auth.user_service import get_user_service
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User
+from snapper.data.repository import TemporalVersionConflictError
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
@@ -1339,6 +1341,221 @@ class TestUserService:
             values = mutation["new_values"]
             assert values["email"] == mock_db_user.email
             assert values["is_active"] is mock_db_user.is_active
+
+    @staticmethod
+    def _make_session_attempt(
+        locked_user: User | None,
+        scalar_value: object = None,
+        scalars_value: list[str] | None = None,
+    ) -> tuple[AsyncMock, MagicMock]:
+        """Create a mocked AsyncSession and async context manager for one attempt.
+
+        Args:
+            locked_user: User returned by ``execute(...).scalar_one_or_none()``.
+            scalar_value: Value returned by ``session.scalar(...)``.
+            scalars_value: Sequence returned by ``session.scalars(...)``.
+
+        Returns:
+            Tuple of the mocked session and its async context manager.
+        """
+        session = AsyncMock(add=MagicMock())
+        session.execute.return_value = MagicMock(
+            scalar_one_or_none=MagicMock(return_value=locked_user)
+        )
+        session.scalar.return_value = scalar_value
+        session.scalars.return_value = scalars_value or []
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=session)
+        context.__aexit__ = AsyncMock(return_value=False)
+        return session, context
+
+    @classmethod
+    def _build_writer_contexts(
+        cls,
+        writer_func: object,
+        mock_db_user: User,
+    ) -> tuple[list[MagicMock], AsyncMock, AsyncMock]:
+        """Assemble mocked repository session contexts for a writer retry run.
+
+        Args:
+            writer_func: Unbound ``UserService`` writer method being exercised.
+            mock_db_user: Locked user row returned on each write attempt.
+
+        Returns:
+            Ordered session contexts, first write session, and second write session.
+        """
+        first, first_context = cls._make_session_attempt(mock_db_user)
+        second, second_context = cls._make_session_attempt(mock_db_user, scalars_value=["late-jti"])
+        if writer_func is UserService.deactivate_user:
+            _, preflight_context = cls._make_session_attempt(None, scalar_value=mock_db_user.id)
+            return [preflight_context, first_context, second_context], first, second
+        if writer_func is UserService.change_password:
+            _, read_one = cls._make_session_attempt(None, scalar_value=mock_db_user.password_hash)
+            _, read_two = cls._make_session_attempt(None, scalar_value=mock_db_user.password_hash)
+            return [read_one, first_context, read_two, second_context], first, second
+        return [first_context, second_context], first, second
+
+    @staticmethod
+    def _make_successor_user(mock_db_user: User, writer_func: object) -> User:
+        """Build a User-like successor row returned by ``close_and_insert``.
+
+        Args:
+            mock_db_user: Baseline user fixture whose unchanged columns are copied.
+            writer_func: Unbound ``UserService`` writer method being exercised.
+
+        Returns:
+            Mock ``User`` row representing the newly inserted version.
+        """
+        successor = MagicMock(spec=User)
+        successor.public_id = mock_db_user.public_id
+        successor.timestamp = mock_db_user.timestamp
+        successor.session_id = mock_db_user.session_id
+        successor.sequence_id = 2
+        successor.username = mock_db_user.username
+        successor.email = "updated@example.com"
+        successor.password_hash = "new_hash"
+        successor.role = mock_db_user.role
+        successor.is_active = writer_func is not UserService.deactivate_user
+        successor.default_language = "pl"
+        successor.created_at = mock_db_user.created_at
+        return cast(User, successor)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("second_conflict", [False, True])
+    @pytest.mark.parametrize(
+        "writer",
+        [
+            pytest.param(
+                partial(
+                    UserService.update_user,
+                    user_id="testuser",
+                    email="updated@example.com",
+                ),
+                id="update-user",
+            ),
+            pytest.param(
+                partial(
+                    UserService.update_self_preferences,
+                    user_id="testuser",
+                    default_language="pl",
+                ),
+                id="preferences",
+            ),
+            pytest.param(
+                partial(
+                    UserService.deactivate_user,
+                    user_public_id="fake-public-id",
+                    reason="policy",
+                ),
+                id="deactivate",
+            ),
+            pytest.param(
+                partial(
+                    UserService.change_password,
+                    user_id="testuser",
+                    old_password="old",
+                    new_password="new",
+                ),
+                id="change-password",
+            ),
+            pytest.param(
+                partial(
+                    UserService.admin_reset_password,
+                    user_id="testuser",
+                    new_password="new",
+                ),
+                id="admin-reset-password",
+            ),
+            pytest.param(
+                partial(
+                    UserService.reset_password_by_username,
+                    username="testuser",
+                    new_password="new",
+                ),
+                id="cli-reset-password",
+            ),
+        ],
+    )
+    async def test_all_user_writers_retry_and_map_temporal_version_conflict(
+        self,
+        user_service: UserService,
+        mock_db_user: User,
+        writer: Callable[[UserService], Awaitable[UserProfile | bool | None]],
+        second_conflict: bool,
+    ) -> None:
+        """All six User SCD2 writers retry once and map repeat conflicts.
+
+        Given close_and_insert raises TemporalVersionConflictError on the first attempt
+            and either succeeds or raises TemporalVersionConflictError on the retry.
+        When any of the six public UserService writers is invoked.
+        Then the writer succeeds after retry with single post-commit side effects,
+            or raises UserAuthorityConflictError chained from TemporalVersionConflictError.
+
+        Args:
+            user_service: Real service with a mocked repository.
+            mock_db_user: Locked user row returned on each write attempt.
+            writer: Public SCD2 writer with its arguments bound.
+            second_conflict: Whether the retry's close_and_insert also raises.
+        """
+        writer_func = getattr(writer, "func", None)
+        contexts, first_session, second_session = self._build_writer_contexts(
+            writer_func, mock_db_user
+        )
+        successor = self._make_successor_user(mock_db_user, writer_func)
+        closed_at = datetime(2026, 1, 1, tzinfo=UTC)
+        bus_time = datetime(2026, 1, 2, tzinfo=UTC)
+        first_conflict = TemporalVersionConflictError("users", 1, closed_at, bus_time)
+        second_error = TemporalVersionConflictError("users", 1, closed_at, bus_time)
+        mutate = AsyncMock(
+            side_effect=[first_conflict, second_error if second_conflict else successor]
+        )
+        token_manager = MagicMock(
+            revoke_user_sessions=AsyncMock(return_value=0),
+            blacklist_token_immediately=MagicMock(),
+        )
+        publisher = MagicMock(send=AsyncMock())
+        with (
+            patch.object(user_service.repository, "dialect_name", "sqlite"),
+            patch.object(user_service.repository, "session", side_effect=contexts),
+            patch.object(user_service, "_verify_password", return_value=True),
+            patch.object(user_service, "hash_password", return_value="new_hash"),
+            patch.object(user_service, "_msg_publisher", publisher),
+            patch("snapper.auth.user_service.get_token_manager", return_value=token_manager),
+            patch("snapper.auth.user_service.close_and_insert", new=mutate),
+        ):
+            if second_conflict:
+                with pytest.raises(
+                    UserAuthorityConflictError,
+                    match="User version changed. Retry the request.",
+                ) as raised:
+                    await writer(user_service)
+                assert isinstance(raised.value.__cause__, TemporalVersionConflictError)
+                assert raised.value.__cause__ is second_error
+                assert mutate.await_count == 2
+                first_session.commit.assert_not_awaited()
+                second_session.commit.assert_not_awaited()
+                token_manager.blacklist_token_immediately.assert_not_called()
+                publisher.send.assert_not_awaited()
+                return
+            result = await writer(user_service)
+        assert mutate.await_count == 2
+        first_session.commit.assert_not_awaited()
+        second_session.commit.assert_awaited_once()
+        if writer_func in {UserService.update_user, UserService.update_self_preferences}:
+            assert result == user_service._db_user_to_auth_user(successor)
+        elif writer_func in {UserService.deactivate_user, UserService.change_password}:
+            assert result is True
+        else:
+            assert result is None
+        if writer_func is UserService.deactivate_user:
+            token_manager.blacklist_token_immediately.assert_called_once_with("late-jti")
+            publisher.send.assert_awaited_once()
+            assert publisher.send.await_args is not None
+            assert publisher.send.await_args.args[0] == "admin.user_deactivated"
+            assert publisher.send.await_args.args[1].user_public_id == mock_db_user.public_id
+        else:
+            token_manager.blacklist_token_immediately.assert_not_called()
+            publisher.send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_list_login_events_returns_results(self, user_service: UserService) -> None:

@@ -10,6 +10,7 @@ from snapper.application.updaters.symbols.kraken_equities import _build_native_s
 from snapper.application.updaters.symbols.kraken_equities import _classify_asset_type
 from snapper.config.settings import AppSettings
 from snapper.core.types import AssetTypeEnum
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
@@ -205,6 +206,9 @@ class TestUpdateDatabase:
         updater = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
@@ -246,6 +250,9 @@ class TestUpdateDatabase:
         updater = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
@@ -265,6 +272,9 @@ class TestUpdateDatabase:
         updater = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+            KNOWN_TO_MAX
+        )
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo

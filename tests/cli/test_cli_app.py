@@ -52,6 +52,7 @@ from snapper.cli.app import settings_rotate_encryption
 from snapper.cli.app import validate_api_keys
 from snapper.cli.app import zmq_logger
 from snapper.core.types import ProcessAutostartProfileEnum
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonSplitEvent
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 
@@ -3368,6 +3369,7 @@ def mock_setting() -> MagicMock:
     setting.key = "test_key"
     setting.value = None
     setting.is_encrypted = True
+    setting.known_to = KNOWN_TO_MAX
     return setting
 
 
@@ -3418,7 +3420,10 @@ def test_rotate_encryption_dry_run(
     mock_setting.value = encrypted_value
     execute_result = MagicMock()
     execute_result.scalars = MagicMock(
-        return_value=MagicMock(all=MagicMock(return_value=[mock_setting]))
+        return_value=MagicMock(
+            all=MagicMock(return_value=[mock_setting]),
+            first=MagicMock(return_value=mock_setting),
+        )
     )
     mock_session.execute.return_value = execute_result
     with (
@@ -3460,7 +3465,10 @@ def test_rotate_encryption_success(
     mock_setting.value = encrypted_value
     result_mock = MagicMock()
     result_mock.scalars = MagicMock(
-        return_value=MagicMock(all=MagicMock(return_value=[mock_setting]))
+        return_value=MagicMock(
+            all=MagicMock(return_value=[mock_setting]),
+            first=MagicMock(return_value=mock_setting),
+        )
     )
     mock_session.execute.return_value = result_mock
     with (
@@ -3576,7 +3584,10 @@ def test_rotate_encryption_with_custom_old_password(
     mock_setting.value = encrypted_value
     result_mock = MagicMock()
     result_mock.scalars = MagicMock(
-        return_value=MagicMock(all=MagicMock(return_value=[mock_setting]))
+        return_value=MagicMock(
+            all=MagicMock(return_value=[mock_setting]),
+            first=MagicMock(return_value=mock_setting),
+        )
     )
     mock_session.execute.return_value = result_mock
     with (
@@ -3616,7 +3627,10 @@ def test_rotate_encryption_decryption_failure(
     mock_setting.value = "invalid-encrypted-data"
     result_mock = MagicMock()
     result_mock.scalars = MagicMock(
-        return_value=MagicMock(all=MagicMock(return_value=[mock_setting]))
+        return_value=MagicMock(
+            all=MagicMock(return_value=[mock_setting]),
+            first=MagicMock(return_value=mock_setting),
+        )
     )
     mock_session.execute.return_value = result_mock
     with (

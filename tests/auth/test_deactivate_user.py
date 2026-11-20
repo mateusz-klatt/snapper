@@ -48,6 +48,7 @@ from snapper.auth.user_service import UserService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import User
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import TemporalVersionConflictError
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import UserDeactivatedData
 
@@ -982,6 +983,56 @@ def test_account_write_routes_resolve_authority_conflicts(
         profile = UserResponse.model_validate_json(response.content).payload
         assert profile.username == target.username
         assert profile.default_language == expected["default_language"]
+
+
+def test_account_write_route_maps_repeated_temporal_version_conflict_to_409() -> None:
+    """Repeated TemporalVersionConflictError from close_and_insert maps to HTTP 409.
+
+    Given close_and_insert raises TemporalVersionConflictError on both write attempts.
+    When an authenticated caller posts an account preference update over HTTP.
+    Then the route returns HTTP 409 with the canonical version-conflict detail.
+    """
+    target = _make_db_user("target")
+    service, _, _, _, _ = _build_service(existing_db_user=target)
+    first, first_context = _lock_attempt(target, None)
+    second, second_context = _lock_attempt(target, None)
+    conflict = TemporalVersionConflictError(
+        "users",
+        target.id,
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    principal = _make_principal(target.username)
+    app = FastAPI()
+    app.state.rest_tracker = SequenceTracker()
+    app.include_router(router, prefix="/api")
+    app.dependency_overrides[require_authentication] = lambda: principal
+    app.dependency_overrides[validate_csrf_token] = lambda: None
+    with (
+        patch("snapper.auth.routes.get_user_service", return_value=service),
+        patch.object(service.repository, "session", side_effect=[first_context, second_context]),
+        patch(
+            "snapper.auth.user_service.close_and_insert",
+            new=AsyncMock(side_effect=[conflict, conflict]),
+        ) as mutate,
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/api/auth/me/update",
+            json={
+                "type": "update_auth_me_request",
+                "public_id": "env-public-id",
+                "session_id": "env-session",
+                "sequence_id": 1,
+                "timestamp": "2026-04-19T00:00:00Z",
+                "payload": {"default_language": "en"},
+            },
+        )
+    assert response.status_code == 409
+    assert response.json() == {"detail": "User version changed. Retry the request."}
+    assert mutate.await_count == 2
+    first.commit.assert_not_awaited()
+    second.commit.assert_not_awaited()
 
 
 class TestDeactivateUserRoute:
