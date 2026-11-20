@@ -1,6 +1,7 @@
 """Tests for ReconciliationLoop — periodic reconciliation + lifecycle fold."""
 
 import asyncio
+from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -10,7 +11,9 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from loguru import logger
 
+from snapper.application.trade import reconciler as reconciler_module
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.reconciler import fold_lifecycle_advance
 from snapper.application.trade.trade_service import TradeService
@@ -678,16 +681,39 @@ async def _run_loop_until_called(recon: ReconciliationLoop, expected: MagicMock)
         expected: Trade-service mock method the first completed cycle must call.
 
     Raises:
+        AssertionError: When the loop exits cleanly without calling ``expected``.
         TimeoutError: When no cycle made the expected call within five seconds.
     """
     task = asyncio.create_task(recon.run())
+    awaited = False
     try:
         async with asyncio.timeout(5.0):
-            while not expected.called:
+            while not expected.called and not task.done():
                 await asyncio.sleep(0.005)
+        if task.done() and not expected.called:
+            awaited = True
+            await task
+            raise AssertionError("ReconciliationLoop exited without calling expected mock")
     finally:
         recon.stop()
-        await asyncio.wait_for(task, timeout=5.0)
+        if not awaited:
+            await asyncio.wait_for(task, timeout=5.0)
+
+
+@pytest.fixture
+def loguru_warnings() -> Iterator[list[str]]:
+    """Capture WARNING-and-above loguru messages for reconciliation assertions."""
+    messages: list[str] = []
+
+    def _sink(message: object) -> None:
+        """Collect one rendered loguru record."""
+        messages.append(str(message))
+
+    handler_id = logger.add(_sink, format="{level.name}|{message}", level="WARNING")
+    try:
+        yield messages
+    finally:
+        logger.remove(handler_id)
 
 
 @pytest.mark.asyncio
@@ -767,11 +793,16 @@ async def test_reconcile_cancellation() -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_skips_terminal_commands() -> None:
-    """Reconciliation skips commands in terminal status.
+    """Reconciliation skips advancing commands in terminal status.
+
+    In production the repository query ``get_active_commands_for_exchange`` excludes
+    terminal rows before ``ReconciliationLoop`` receives them; the loop has no
+    separate terminal-status filter for stale reporting (only ``_command_advance``
+    skips statuses outside ``_FOLD_SOURCE_STATUSES``).
 
     Given: a ReconciliationLoop with a filled command,
     When: one reconciliation cycle runs,
-    Then: the terminal command is skipped (not flagged as stale).
+    Then: the terminal command is not advanced and the cycle records success.
     """
     terminal_cmd = _make_cmd(
         public_id="cmd-done",
@@ -788,12 +819,12 @@ async def test_reconcile_skips_terminal_commands() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reconcile_failure_triggers_halt() -> None:
+async def test_reconcile_failure_triggers_halt(loguru_warnings: list[str]) -> None:
     """Repeated reconciliation failures trigger shard halt.
 
     Given: a ReconciliationLoop where record_recon_failure returns True (halt),
     When: reconciliation cycle fails,
-    Then: the shard is halted via trade_service.
+    Then: the shard is halted via trade_service and a HALTED error log is emitted.
     """
     repo = AsyncMock()
     repo.get_active_commands_for_exchange = AsyncMock(side_effect=RuntimeError("DB down"))
@@ -805,6 +836,10 @@ async def test_reconcile_failure_triggers_halt() -> None:
     )
     await _run_loop_until_called(recon, trade_svc.record_recon_failure)
     trade_svc.record_recon_failure.assert_called_with("kraken.BTC-USD.live")
+    assert any(
+        msg.startswith("ERROR|") and "kraken.BTC-USD.live" in msg and "HALTED" in msg
+        for msg in loguru_warnings
+    )
 
 
 @pytest.mark.asyncio
@@ -877,20 +912,35 @@ async def test_reconcile_failure_uses_last_seen_real_shards() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reconcile_fresh_command_not_stale() -> None:
+async def test_reconcile_fresh_command_not_stale(
+    monkeypatch: pytest.MonkeyPatch, loguru_warnings: list[str]
+) -> None:
     """Fresh non-terminal command is not flagged as stale.
 
-    Given: a ReconciliationLoop with a recently created dispatched command,
+    Given: a ReconciliationLoop with a dispatched command created at the frozen cycle time,
     When: one reconciliation cycle runs,
-    Then: the command is not flagged as stale and cycle succeeds.
+    Then: the command is not flagged as stale, no stale warning is logged, and cycle succeeds.
     """
-    repo = _make_repo(cmds=[_make_cmd(public_id="cmd-fresh")])
+    frozen_now = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+
+    class _FrozenDatetime:
+        """Datetime stand-in pinning the reconciler cycle's now() read."""
+
+        @staticmethod
+        def now(tz: object = None) -> datetime:
+            """Return the frozen UTC instant regardless of tz argument."""
+            del tz
+            return frozen_now
+
+    monkeypatch.setattr(reconciler_module, "datetime", _FrozenDatetime)
+    repo = _make_repo(cmds=[_make_cmd(public_id="cmd-fresh", created_at=frozen_now)])
     trade_svc = MagicMock(spec=TradeService)
     recon = ReconciliationLoop(
         exchange_name="kraken", repository=repo, trade_service=trade_svc, interval_seconds=0.01
     )
     await _run_loop_until_called(recon, trade_svc.record_recon_success)
     trade_svc.record_recon_success.assert_called()
+    assert not any("stale" in msg.lower() for msg in loguru_warnings)
 
 
 class TestFalseRejectionResurrection:
