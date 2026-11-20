@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import ccxt
 import pytest
 import requests
+import urllib3.exceptions
 
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
@@ -20,8 +21,12 @@ from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchan
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
+from snapper.infrastructure.exchanges.kraken_rest_egress import (
+    _KRAKEN_REST_CONNECT_ERROR_QUARANTINE_S,
+)
 from snapper.infrastructure.exchanges.kraken_rest_egress import KrakenRestOperationKind
 from snapper.infrastructure.exchanges.kraken_rest_egress import RestProxyTarget
+from snapper.infrastructure.exchanges.kraken_rest_egress import _is_proxy_hop_error
 from snapper.infrastructure.exchanges.kraken_rest_egress import ccxt_proxy_target
 from snapper.infrastructure.exchanges.kraken_rest_egress import classify_kraken_rest_operation
 from snapper.infrastructure.exchanges.kraken_rest_egress import is_provable_presend_connect_error
@@ -33,6 +38,8 @@ from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
+from snapper.infrastructure.network.egress_reservation import EgressReservation
+from snapper.infrastructure.network.egress_reservation import QuarantineReason
 
 
 class _FakeCcxtClient:
@@ -154,6 +161,33 @@ def _proxy_snapshot(session: requests.Session) -> dict[str, str]:
     return {str(key): str(value) for key, value in session.proxies.items()}
 
 
+def _capture_quarantines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, float, QuarantineReason]]:
+    """Record ``EgressReservation.quarantine`` calls while still delegating.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture used to wrap ``quarantine``.
+
+    Returns:
+        List receiving ``(route_id, retry_after_s, reason)`` tuples.
+    """
+    recorded: list[tuple[str, float, QuarantineReason]] = []
+    original_quarantine = EgressReservation.quarantine
+
+    def record_quarantine(
+        self: EgressReservation,
+        retry_after_s: float,
+        *,
+        reason: QuarantineReason,
+    ) -> None:
+        recorded.append((self.route_id, retry_after_s, reason))
+        original_quarantine(self, retry_after_s, reason=reason)
+
+    monkeypatch.setattr(EgressReservation, "quarantine", record_quarantine)
+    return recorded
+
+
 @pytest.mark.parametrize(
     ("kind", "traffic_class", "idempotency", "fallback_allowed"),
     [
@@ -185,7 +219,8 @@ def test_classify_kraken_rest_operation_policy(
 def test_presend_detector_is_conservative() -> None:
     """Spec — only provable pre-send connect failures are fallback-eligible.
 
-    Given: wrapped connect timeout, OS connect errno, and generic connection errors,
+    Given: wrapped connect timeout, OS connect errno, generic connection error,
+        and proxy-hop error,
     When: the pre-send detector evaluates them,
     Then: only errors that prove a failed connection setup are accepted.
     """
@@ -199,6 +234,22 @@ def test_presend_detector_is_conservative() -> None:
         )
         is False
     )
+    assert is_provable_presend_connect_error(requests.exceptions.ProxyError("tunnel 407")) is False
+
+
+def test_proxy_hop_error_detector_handles_cyclic_exception_chain() -> None:
+    """Spec — proxy-hop detector terminates on cyclic exception chains.
+
+    Given: two non-proxy exceptions forming a ``__context__`` cycle,
+    When: ``_is_proxy_hop_error`` inspects the chain,
+    Then: it returns False without hanging.
+    """
+    err_a = RuntimeError("first")
+    err_b = RuntimeError("second")
+    err_a.__context__ = err_b
+    err_b.__context__ = err_a
+
+    assert _is_proxy_hop_error(err_a) is False
 
 
 def test_public_rest_routes_through_pool_vpn_and_restores_proxy_state() -> None:
@@ -517,6 +568,129 @@ def test_public_rest_ambiguous_error_releases_without_quarantine() -> None:
     assert snapshot.routes[1].active_reservations == []
 
 
+def test_public_rest_requests_proxy_error_quarantines_and_releases_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — public REST requests.ProxyError quarantines the selected route.
+
+    Given: a public read selected the IE route,
+    When: the blocking call raises a bare requests ProxyError,
+    Then: IE is quarantined with reason ``http-proxy-error`` and released.
+    """
+    pool = configure_egress_pool(_private_fallback_config())
+    assert pool is not None
+    recorded_quarantines = _capture_quarantines(monkeypatch)
+    client = _FakeCcxtClient()
+
+    def sync_call() -> str:
+        raise requests.exceptions.ProxyError("Unable to connect to proxy")
+
+    proxy_target = ccxt_proxy_target(client)
+    proxy_lock = threading.RLock()
+    with pytest.raises(requests.exceptions.ProxyError, match="Unable to connect to proxy"):
+        route_kraken_rest_sync_call(
+            exchange="kraken",
+            operation="fetch_ticker",
+            kind="public_read",
+            target=proxy_target,
+            proxy_lock=proxy_lock,
+            sync_call=sync_call,
+        )
+
+    assert recorded_quarantines == [
+        ("ie", _KRAKEN_REST_CONNECT_ERROR_QUARANTINE_S, "http-proxy-error")
+    ]
+    snapshot = pool.status_snapshot()
+    assert snapshot.routes[1].id == "ie"
+    assert snapshot.routes[1].quarantined is True
+    assert snapshot.routes[1].in_use_count == 0
+    assert snapshot.routes[1].active_reservations == []
+
+
+def test_public_rest_wrapped_urllib3_proxy_error_quarantines_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — wrapped urllib3.ProxyError quarantines public REST routes as proxy errors.
+
+    Given: a public read selected the IE route,
+    When: the blocking call raises a CCXT NetworkError caused by a urllib3 ProxyError,
+    Then: IE is quarantined with reason ``http-proxy-error`` and released.
+    """
+    pool = configure_egress_pool(_private_fallback_config())
+    assert pool is not None
+    recorded_quarantines = _capture_quarantines(monkeypatch)
+    client = _FakeCcxtClient()
+
+    def sync_call() -> str:
+        cause = urllib3.exceptions.ProxyError("Unable to connect to proxy", OSError("x"))
+        error = ccxt.NetworkError("wrapped proxy error")
+        error.__cause__ = cause
+        raise error
+
+    proxy_target = ccxt_proxy_target(client)
+    proxy_lock = threading.RLock()
+    with pytest.raises(ccxt.NetworkError, match="wrapped proxy error"):
+        route_kraken_rest_sync_call(
+            exchange="kraken",
+            operation="fetch_ticker",
+            kind="public_read",
+            target=proxy_target,
+            proxy_lock=proxy_lock,
+            sync_call=sync_call,
+        )
+
+    assert recorded_quarantines == [
+        ("ie", _KRAKEN_REST_CONNECT_ERROR_QUARANTINE_S, "http-proxy-error")
+    ]
+    snapshot = pool.status_snapshot()
+    assert snapshot.routes[1].id == "ie"
+    assert snapshot.routes[1].quarantined is True
+    assert snapshot.routes[1].in_use_count == 0
+    assert snapshot.routes[1].active_reservations == []
+
+
+def test_public_rest_presend_takes_precedence_over_proxy_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — pre-send connect cause wins over outer ProxyError on public reads.
+
+    Given: a public read selected the IE route,
+    When: the call raises a ProxyError caused by a ConnectTimeout,
+    Then: IE is quarantined exactly once with reason ``http-connect-error``
+        and released.
+    """
+    pool = configure_egress_pool(_private_fallback_config())
+    assert pool is not None
+    recorded_quarantines = _capture_quarantines(monkeypatch)
+    client = _FakeCcxtClient()
+
+    def sync_call() -> str:
+        error = requests.exceptions.ProxyError("Unable to connect to proxy")
+        error.__cause__ = requests.exceptions.ConnectTimeout("connect timeout")
+        raise error
+
+    proxy_target = ccxt_proxy_target(client)
+    proxy_lock = threading.RLock()
+    with pytest.raises(requests.exceptions.ProxyError, match="Unable to connect to proxy"):
+        route_kraken_rest_sync_call(
+            exchange="kraken",
+            operation="fetch_ticker",
+            kind="public_read",
+            target=proxy_target,
+            proxy_lock=proxy_lock,
+            sync_call=sync_call,
+        )
+
+    assert recorded_quarantines == [
+        ("ie", _KRAKEN_REST_CONNECT_ERROR_QUARANTINE_S, "http-connect-error")
+    ]
+    snapshot = pool.status_snapshot()
+    assert snapshot.routes[1].id == "ie"
+    assert snapshot.routes[1].quarantined is True
+    assert snapshot.routes[1].in_use_count == 0
+    assert snapshot.routes[1].active_reservations == []
+
+
 def test_private_idempotent_read_falls_back_once_after_presend_connect_error() -> None:
     """Spec — private reads use direct first and PL only after a proven pre-send error.
 
@@ -617,6 +791,43 @@ def test_private_idempotent_read_ambiguous_error_does_not_fallback() -> None:
         )
 
     assert seen_proxies == [{}]
+
+
+def test_private_idempotent_read_proxy_error_does_not_fallback_or_quarantine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Spec — private read proxy errors neither fall back nor quarantine routes.
+
+    Given: direct then PL fallback routes are configured,
+    When: the direct private read raises a requests ProxyError,
+    Then: the error is re-raised after one direct attempt with no fallback and
+        no route quarantine.
+    """
+    pool = configure_egress_pool(_private_fallback_config())
+    assert pool is not None
+    recorded_quarantines = _capture_quarantines(monkeypatch)
+    client = _FakeCcxtClient()
+    seen_proxies: list[dict[str, str]] = []
+
+    def sync_call() -> str:
+        seen_proxies.append(_proxy_snapshot(client.session))
+        raise requests.exceptions.ProxyError("tunnel 407")
+
+    proxy_target = ccxt_proxy_target(client)
+    proxy_lock = threading.RLock()
+    with pytest.raises(requests.exceptions.ProxyError, match="tunnel 407"):
+        route_kraken_rest_sync_call(
+            exchange="kraken",
+            operation="fetch_balance",
+            kind="private_idempotent_read",
+            target=proxy_target,
+            proxy_lock=proxy_lock,
+            sync_call=sync_call,
+        )
+
+    assert seen_proxies == [{}]
+    assert recorded_quarantines == []
+    assert all(not route.quarantined for route in pool.status_snapshot().routes)
 
 
 def test_private_idempotent_read_presend_error_without_pool_has_no_fallback() -> None:
