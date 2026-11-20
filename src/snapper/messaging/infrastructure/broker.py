@@ -82,6 +82,39 @@ class BrokerStatus:
     xpub_endpoint: str
 
 
+def _resolve_bound_endpoint(socket: object, configured: str) -> str:
+    """Return the actual bound endpoint, resolving OS-assigned ports.
+
+    When ``configured`` requests an OS-assigned port (``:0`` or ``:*``),
+    query ``LAST_ENDPOINT`` to get the concrete tcp address so callers
+    connecting later (e.g. ephemeral backtest replay endpoints or CLI
+    threaded brokers) know the real port. Returns the configured endpoint
+    unchanged for non-tcp transports or when the socket stub does not
+    support the query.
+
+    Args:
+        socket: Bound ZMQ socket or test stub.
+        configured: Endpoint string passed to ``bind()``.
+
+    Returns:
+        Resolved concrete endpoint when ``configured`` uses ``:0`` or
+        ``:*`` and ``LAST_ENDPOINT`` returns ``bytes`` or ``str``;
+        otherwise ``configured``.
+    """
+    needs_resolution = configured.endswith((":0", ":*"))
+    if not needs_resolution:
+        return configured
+    getsockopt = getattr(socket, "getsockopt", None)
+    if getsockopt is None:
+        return configured
+    actual = getsockopt(zmq.LAST_ENDPOINT)
+    if isinstance(actual, bytes):
+        return actual.decode()
+    if isinstance(actual, str):
+        return actual
+    return configured
+
+
 @register_process(
     "zmq_broker",
     description="ZeroMQ XPUB/XSUB message broker",
@@ -212,7 +245,7 @@ class ZmqBrokerProcess(RegisterableProcess):
         self.xsub_socket = self.context.socket(zmq.XSUB)
         apply_hwm(self.xsub_socket, rcvhwm=HWM_BROKER)
         self.xsub_socket.bind(self.xsub_endpoint)
-        self.xsub_endpoint = self._resolve_endpoint(self.xsub_socket, self.xsub_endpoint)
+        self.xsub_endpoint = _resolve_bound_endpoint(self.xsub_socket, self.xsub_endpoint)
         self.xpub_socket = self.context.socket(zmq.XPUB)
         apply_hwm(self.xpub_socket, sndhwm=HWM_BROKER)
         if self.xpub_verbose:
@@ -220,7 +253,7 @@ class ZmqBrokerProcess(RegisterableProcess):
             self._observed_subscriptions = {}
             self._observation_changed = threading.Condition()
         self.xpub_socket.bind(self.xpub_endpoint)
-        self.xpub_endpoint = self._resolve_endpoint(self.xpub_socket, self.xpub_endpoint)
+        self.xpub_endpoint = _resolve_bound_endpoint(self.xpub_socket, self.xpub_endpoint)
         self.proxy_thread = threading.Thread(
             target=self._proxy_loop, name="zmq-broker-proxy", daemon=True
         )
@@ -263,29 +296,6 @@ class ZmqBrokerProcess(RegisterableProcess):
             self.xpub_socket.close()
         if self.context is not None:
             self.context.term()
-
-    @staticmethod
-    def _resolve_endpoint(socket: Any, configured: str) -> str:
-        """Return the actual bound endpoint, resolving OS-assigned ports.
-
-        When ``configured`` requests an OS-assigned port (``:0`` or ``:*``),
-        query ``LAST_ENDPOINT`` to get the concrete tcp address so callers
-        connecting later (e.g. ephemeral backtest replay endpoints) know the
-        real port. Returns the configured endpoint unchanged for non-tcp
-        transports or when the socket stub does not support the query.
-        """
-        needs_resolution = configured.endswith((":0", ":*"))
-        if not needs_resolution:
-            return configured
-        getsockopt = getattr(socket, "getsockopt", None)
-        if getsockopt is None:
-            return configured
-        actual = getsockopt(zmq.LAST_ENDPOINT)
-        if isinstance(actual, bytes):
-            return actual.decode()
-        if isinstance(actual, str):
-            return actual
-        return configured
 
     def _handle_subscription_frame(self, message: list[bytes]) -> bool:
         r"""Forward a XPUB-side frame and update the observed-set if applicable.
@@ -506,9 +516,11 @@ class ZmqBrokerThread:
     def start(self) -> None:
         """Start the broker in a background daemon thread.
 
-        Creates ZMQ context, binds XSUB and XPUB sockets, and starts
-        the proxy loop in a daemon thread. Idempotent - does nothing
-        if already running.
+        Creates ZMQ context, binds XSUB and XPUB sockets, resolves any
+        OS-assigned ephemeral ports (``:0`` or ``:*``) onto
+        ``xsub_endpoint`` and ``xpub_endpoint`` before launching the
+        proxy thread, and starts the proxy loop in a daemon thread.
+        Idempotent - does nothing if already running.
 
         Raises:
             zmq.ZMQError: If socket binding fails.
@@ -520,9 +532,11 @@ class ZmqBrokerThread:
         self.xsub_socket = self.context.socket(zmq.XSUB)
         apply_hwm(self.xsub_socket, rcvhwm=HWM_BROKER)
         self.xsub_socket.bind(self.xsub_endpoint)
+        self.xsub_endpoint = _resolve_bound_endpoint(self.xsub_socket, self.xsub_endpoint)
         self.xpub_socket = self.context.socket(zmq.XPUB)
         apply_hwm(self.xpub_socket, sndhwm=HWM_BROKER)
         self.xpub_socket.bind(self.xpub_endpoint)
+        self.xpub_endpoint = _resolve_bound_endpoint(self.xpub_socket, self.xpub_endpoint)
         self.proxy_thread = threading.Thread(target=self._proxy_loop, daemon=True)
         self.proxy_thread.start()
         self.running = True
