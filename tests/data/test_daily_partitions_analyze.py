@@ -1,6 +1,5 @@
 """Unit and opt-in PostgreSQL contracts for daily-partition planner statistics ANALYZE."""
 
-import logging
 import os
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -379,19 +378,19 @@ def test_analyze_stale_relations_executes_empty_noop_and_validates_inputs() -> N
     assert connection.begin.call_count == 0
 
 
-def test_run_analyze_targets_skips_timeouts_warns_and_raises_other_db_errors(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+def test_run_analyze_targets_skips_timeouts_warns_and_raises_other_db_errors() -> None:
     """Timeout SQLSTATEs 55P03/57014 must skip and continue while other errors abort.
 
-    Args:
-        caplog: Pytest log capture fixture verifying warning output.
+    The module logger is replaced by a spy instead of using ``caplog`` because
+    other tests in the same xdist worker can reconfigure logging propagation,
+    which left ``caplog.text`` empty under ``make check-all``.
 
     Given: Three targets where target 1 hits ``55P03``, target 2 hits ``57014``,
         and target 3 succeeds; plus a separate case hitting ``42P01``.
     When: ``_run_analyze_targets`` executes with ``dry_run=False``.
-    Then: The timeout targets land in ``skipped`` with logged warnings, target 3
-        commits in ``executed``, and ``42P01`` raises ``DailyPartitionError``.
+    Then: The timeout targets land in ``skipped`` with one warning each naming
+        their SQLSTATE, target 3 commits in ``executed``, and ``42P01`` raises
+        ``DailyPartitionError``.
     """
     connection, _executed_sql = _postgresql_double()
     targets = (
@@ -410,7 +409,7 @@ def test_run_analyze_targets_skips_timeouts_warns_and_raises_other_db_errors(
         return MagicMock()
 
     connection.execute.side_effect = _timeout_on_first_two
-    with caplog.at_level(logging.WARNING, logger="snapper.data.daily_partitions"):
+    with patch.object(lifecycle, "logger") as logger_spy:
         outcome = lifecycle._run_analyze_targets(
             cast(Connection, connection),
             targets,
@@ -419,8 +418,11 @@ def test_run_analyze_targets_skips_timeouts_warns_and_raises_other_db_errors(
 
     assert outcome.executed == ("candles",)
     assert outcome.skipped == ("candles_d20260801", "venue_account_observations")
-    assert "55P03" in caplog.text
-    assert "57014" in caplog.text
+    warned = [call.args for call in logger_spy.warning.call_args_list]
+    assert [(args[1], args[2]) for args in warned] == [
+        ("candles_d20260801", "55P03"),
+        ("venue_account_observations", "57014"),
+    ]
 
     def _unexpected_error(statement: object, *_args: object, **_kwargs: object) -> MagicMock:
         """Raise an undefined-table error on the ANALYZE statement itself."""
@@ -504,7 +506,7 @@ def test_postgresql_live_stale_analyze_populates_stats_and_becomes_noop() -> Non
                 )
                 for relation in (parent_name, past_leaf_name, future_leaf_name, ordinary_name):
                     setup_conn.execute(
-                        text("SELECT pg_stat_reset_single_table_counters(:rel::regclass)"),
+                        text("SELECT pg_stat_reset_single_table_counters(CAST(:rel AS regclass))"),
                         {"rel": f"public.{relation}"},
                     )
 
