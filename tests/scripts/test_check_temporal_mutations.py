@@ -892,3 +892,14 @@ class TestSuccessMessage:
         captured = capsys.readouterr()
         assert "No forbidden temporal mutations found." in captured.out
         assert "Bitemporal integrity enforced" not in captured.out
+
+
+def test_allowed_non_temporal_mutable_tables_lists_observation_spans() -> None:
+    """Explicitly allow in-place updates on non-temporal observation spans.
+
+    Given: The temporal mutation checker module.
+    When: ``ALLOWED_NON_TEMPORAL_MUTABLE_TABLES`` is inspected.
+    Then: Both non-temporal operational tables are declared explicitly.
+    """
+    assert "instrument_spec_observation_spans" in checker.ALLOWED_NON_TEMPORAL_MUTABLE_TABLES
+    assert "portfolio_pnl_correction_frontiers" in checker.ALLOWED_NON_TEMPORAL_MUTABLE_TABLES

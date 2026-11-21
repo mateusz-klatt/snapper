@@ -1763,6 +1763,8 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             with self.repository.get_session() as session:
                 processed_symbol_public_ids: set[str] = set()
                 now = datetime.now(UTC)
+                if not self._enter_locked_update(session, now):
+                    return
                 for raw_symbol_data in records:
                     symbol_data = self._preserve_tokenized_alias_owner(
                         session, raw_symbol_data, now
@@ -1808,6 +1810,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                     next_sequence_fn=lambda: self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
                 )
                 closed_aliases = self._reconcile_aliases(session, ExchangeEnum.KRAKEN, now)
+                self._finalize_locked_update(session, now)
                 session.commit()
                 logger.info(
                     f"Kraken update complete: {created_count} created, "

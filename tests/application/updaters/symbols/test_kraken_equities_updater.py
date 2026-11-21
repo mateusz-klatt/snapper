@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy.orm import Session
 
 from snapper.application.updaters.symbols.kraken_equities import KrakenEquitiesSymbolUpdaterService
 from snapper.application.updaters.symbols.kraken_equities import _build_native_symbol
@@ -11,6 +12,7 @@ from snapper.application.updaters.symbols.kraken_equities import _classify_asset
 from snapper.config.settings import AppSettings
 from snapper.core.types import AssetTypeEnum
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
@@ -205,7 +207,8 @@ class TestUpdateDatabase:
         """
         updater = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
-        mock_session = MagicMock()
+        mock_session = MagicMock(spec=Session)
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -214,6 +217,7 @@ class TestUpdateDatabase:
         updater.repository = mock_repo
 
         with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
             patch.object(updater, "_upsert_symbol", return_value="pub-id-1"),
             patch.object(updater, "_upsert_alias", return_value="created"),
             patch.object(updater, "_upsert_capability", return_value="created"),
@@ -249,7 +253,8 @@ class TestUpdateDatabase:
         """
         updater = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
-        mock_session = MagicMock()
+        mock_session = MagicMock(spec=Session)
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -257,7 +262,10 @@ class TestUpdateDatabase:
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
 
-        with patch.object(updater, "_reconcile_capabilities", return_value=0):
+        with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
+            patch.object(updater, "_reconcile_capabilities", return_value=0),
+        ):
             await updater._update_database([{"invalid": "data"}])
             mock_session.commit.assert_called_once()
 
@@ -271,7 +279,8 @@ class TestUpdateDatabase:
         """
         updater = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
-        mock_session = MagicMock()
+        mock_session = MagicMock(spec=Session)
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -279,7 +288,10 @@ class TestUpdateDatabase:
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
 
-        with patch.object(updater, "_reconcile_capabilities", return_value=0):
+        with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
+            patch.object(updater, "_reconcile_capabilities", return_value=0),
+        ):
             symbols = [
                 {
                     "symbol": "NODOT",

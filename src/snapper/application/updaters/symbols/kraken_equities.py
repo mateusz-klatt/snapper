@@ -115,6 +115,8 @@ class KrakenEquitiesSymbolUpdaterService(SymbolUpdaterService[KrakenEquitiesExch
             with self.repository.get_session() as session:
                 processed_symbol_public_ids: set[str] = set()
                 now = datetime.now(UTC)
+                if not self._enter_locked_update(session, now):
+                    return
                 for raw_contract in symbols:
                     try:
                         schema = KrakenEquitiesInstrumentSchema.model_validate(raw_contract)
@@ -206,6 +208,7 @@ class KrakenEquitiesSymbolUpdaterService(SymbolUpdaterService[KrakenEquitiesExch
                     next_sequence_fn=lambda: self._tracker.next_sequence(_SEQ_KEY_CAPABILITIES),
                 )
                 closed_aliases = self._reconcile_aliases(session, ExchangeEnum.KRAKEN_EQUITIES, now)
+                self._finalize_locked_update(session, now)
                 session.commit()
                 logger.info(
                     f"Kraken Equities update complete: {created_count} processed, "

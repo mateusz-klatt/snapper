@@ -16,10 +16,12 @@ from snapper.core.execution_unit_snapshot import SnapshotCommandMaterial
 from snapper.core.execution_unit_snapshot import SnapshotDimensions
 from snapper.core.execution_unit_snapshot import SnapshotRebaseContext
 from snapper.data.execution_unit_snapshot_store import SnapshotBindingError
+from snapper.data.instrument_spec_observation_spans import load_instrument_spec_observation_spans
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import Symbol
 from snapper.data.models import is_open_ended_version
+from snapper.data.repository_types import InstrumentSpecObservationSpanRow
 from snapper.data.temporal_selection import one_or_none
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 
@@ -49,6 +51,7 @@ class UnitCatalogObservation:
     instrument: Instrument
     symbol: Symbol
     spec: InstrumentSpec
+    observation_spans: tuple[InstrumentSpecObservationSpanRow, ...] = ()
 
 
 def catalog_decimal_mirror(value: float | None) -> Decimal | None:
@@ -122,7 +125,16 @@ async def load_unit_catalog(
     if row is None:
         raise SnapshotBindingError("unit_catalog_lineage_missing")
     instrument, symbol, spec = row
-    return UnitCatalogObservation(instrument, symbol, spec)
+    spans_by_key = await load_instrument_spec_observation_spans(
+        session,
+        [(spec.instrument_public_id, spec.public_id, spec.timestamp)],
+    )
+    return UnitCatalogObservation(
+        instrument,
+        symbol,
+        spec,
+        spans_by_key.get((spec.instrument_public_id, spec.public_id, spec.timestamp), ()),
+    )
 
 
 async def load_unit_source_catalog(

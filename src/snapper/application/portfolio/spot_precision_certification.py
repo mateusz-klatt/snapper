@@ -17,6 +17,7 @@ from decimal import InvalidOperation
 from typing import Literal
 
 import snapper.application.portfolio.walutomat_precision_artifact as walutomat_artifact
+from snapper.data.instrument_spec_observation_spans import is_spec_observation_fresh
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
 
@@ -721,8 +722,10 @@ def is_spot_instrument_precision_certified(
         return False
     if not check_artifact_observation_binding(source_kind, spec["spec_observed_at"]):
         return False
-    if not check_source_freshness(source_kind, spec["spec_observed_at"], evaluated_at):
-        return False
     if source_kind == "documentary_instrument_spec":
         return check_documentary_instrument_precision_value(spec)
-    return source_kind == "kraken_instrument_spec"
+    return source_kind == "kraken_instrument_spec" and is_spec_observation_fresh(
+        spec,
+        evaluated_at,
+        freshness=SPOT_PRECISION_MAX_AGE,
+    )

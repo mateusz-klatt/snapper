@@ -14,6 +14,7 @@ from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.permissions import has_effective_permission
 from snapper.auth.schemas.tokens import TokenClaims
 from snapper.core.json_types import JsonObject
+from snapper.data.instrument_spec_observation_spans import latest_spec_observation_at
 from snapper.data.repository import Repository
 from snapper.data.repository import is_effective_unit_certified
 from snapper.data.repository_types import InstrumentSpecRow
@@ -35,6 +36,7 @@ def _sizing_spec(spec: InstrumentSpecRow | None, as_of: datetime) -> JsonObject 
         return None
     contract_size = spec["contract_size"]
     observed_at = spec["spec_observed_at"]
+    last_observed_at = latest_spec_observation_at(spec)
     expiry_at = spec["expiry_at"]
     return {
         "instrument_kind": spec["instrument_kind"],
@@ -55,6 +57,7 @@ def _sizing_spec(spec: InstrumentSpecRow | None, as_of: datetime) -> JsonObject 
         "spec_source": spec["spec_source"],
         "spec_version": spec["spec_version"],
         "spec_observed_at": observed_at.isoformat() if observed_at is not None else None,
+        "last_observed_at": last_observed_at.isoformat() if last_observed_at is not None else None,
     }
 
 

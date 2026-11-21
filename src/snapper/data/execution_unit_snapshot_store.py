@@ -500,7 +500,15 @@ def _verify_fill_identity(event: VenueEvent, execution: Execution, order: Order)
 async def _verify_catalog(
     session: AsyncSession, payload: ExecutionUnitSnapshotPayload, effective_at: datetime
 ) -> None:
-    """Bind the copied interpretation to its exact temporal catalog and instrument observation."""
+    """Bind the copied interpretation to its exact temporal catalog version identity.
+
+    Catalog binding is keyed on ``(spec.public_id, spec.timestamp,
+    spec.instrument_public_id, spec.spec_source, spec.spec_version,
+    spec.spec_observed_at)`` and ``spec.timestamp <= effective_at < spec.known_to``.
+    ``catalog.observed_at`` binds to the version row's first-observed instant,
+    which remains immutable for the lifetime of that version row while
+    observation spans extend ``last_observed_at``.
+    """
     catalog = payload.catalog
     spec = await _one(
         session,

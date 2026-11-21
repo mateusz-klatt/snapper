@@ -284,6 +284,8 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         processed_symbol_public_ids: set[str] = set()
         try:
             with self.repository.get_session() as session:
+                if not self._enter_locked_update(session, now):
+                    return
                 for symbol_data in records:
                     ticker = symbol_data.get("ticker")
                     if not ticker:
@@ -300,8 +302,8 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
                         processed_symbol_public_ids.add(spid)
                     total_processed = stats["updated"] + stats["inserted"]
                     if total_processed % self.BATCH_COMMIT_SIZE == 0 and total_processed > 0:
-                        session.commit()
-                        logger.info(f"Committed batch: {stats}")
+                        session.flush()
+                        logger.info(f"Flushed batch: {stats}")
                 deactivated = self._reconcile_capabilities(
                     session,
                     ExchangeEnum.POLYGON,
@@ -312,6 +314,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
                     next_sequence_fn=lambda: self._tracker.next_sequence("capabilities"),
                 )
                 closed_aliases = self._reconcile_aliases(session, ExchangeEnum.POLYGON, now)
+                self._finalize_locked_update(session, now)
                 session.commit()
                 stats["deactivated"] = deactivated
                 stats["closed_aliases"] = closed_aliases

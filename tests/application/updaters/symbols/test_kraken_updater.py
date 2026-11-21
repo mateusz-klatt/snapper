@@ -35,6 +35,7 @@ from snapper.data.models import InstrumentSpec
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 
 
@@ -310,7 +311,7 @@ class TestKrakenSymbolUpdater:
                 "quote_currency": "USD",
             },
         ]
-        mock_session = MagicMock()
+        mock_session = MagicMock(spec=Session)
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -320,7 +321,10 @@ class TestKrakenSymbolUpdater:
         mock_session.execute.return_value.first.return_value = None
         mock_repo = MagicMock()
         mock_repo.get_session.return_value = mock_session
-        with patch.object(updater, "repository", mock_repo):
+        with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
+            patch.object(updater, "repository", mock_repo),
+        ):
             await updater._update_database(symbols)
         assert mock_session.add.call_count == 7
         mock_session.commit.assert_called_once()
@@ -625,8 +629,11 @@ async def test_update_database_handles_error(monkeypatch: pytest.MonkeyPatch) ->
     """
     svc = KrakenSymbolUpdaterService()
 
-    class FaultySession:
+    class FaultySession(Session):
         """Session stub that fails on commit."""
+
+        def __init__(self) -> None:
+            """Skip base SQLAlchemy Session initialization for the stub."""
 
         def __enter__(self) -> FaultySession:
             return self
@@ -668,7 +675,10 @@ async def test_update_database_handles_error(monkeypatch: pytest.MonkeyPatch) ->
             "quote_currency": "USD",
         }
     ]
-    with pytest.raises(RuntimeError):
+    with (
+        patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
+        pytest.raises(RuntimeError),
+    ):
         await svc._update_database(symbols)
 
 
