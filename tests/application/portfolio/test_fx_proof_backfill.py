@@ -218,6 +218,26 @@ class _DiscoveryRepository:
             planes.append(("PLN", "USD", "kraken"))
         return planes
 
+    async def get_pnl_fx_rate_exchanges_at(
+        self,
+        pairs: list[tuple[str, str]],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[tuple[str, str, str]]:
+        """Expose the same candidate planes to an exact-minute discovery."""
+        return await self.get_pnl_fx_rate_exchanges(pairs, min(open_ats), max(open_ats), as_of)
+
+    async def get_pnl_fx_rate_candles_at(
+        self,
+        planes: list[tuple[str, str, str]],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Return the canned candidate rows opening at exactly the requested minutes."""
+        wanted = set(open_ats)
+        rows = await self.get_pnl_fx_rate_candles(planes, min(open_ats), max(open_ats), as_of)
+        return [row for row in rows if row["open_at"] in wanted]
+
     async def get_pnl_fx_rate_candles(
         self,
         planes: list[tuple[str, str, str]],

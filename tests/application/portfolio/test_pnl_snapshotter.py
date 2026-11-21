@@ -621,6 +621,41 @@ class _FakeRepo:
             }
         )
 
+    async def get_pnl_fx_rate_exchanges_at(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[tuple[str, str, str]]:
+        """Discover venue-qualified forex planes from canned rows at exact opens."""
+        del as_of
+        requested = set(pairs)
+        wanted = set(open_ats)
+        return sorted(
+            {
+                (row["base"], row["quote"], row["exchange"])
+                for row in self.fx_rows
+                if (row["base"], row["quote"]) in requested and row["open_at"] in wanted
+            }
+        )
+
+    async def get_pnl_fx_rate_candles_at(
+        self,
+        planes: Sequence[tuple[str, str, str]],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[dict[str, object]]:
+        """Return the canned fiat candle rows for the requested planes at exact opens."""
+        del as_of
+        requested = set(planes)
+        wanted = set(open_ats)
+        return [
+            row
+            for row in self.fx_rows
+            if (row["base"], row["quote"], row["exchange"]) in requested
+            and row["open_at"] in wanted
+        ]
+
     async def get_pnl_fx_rate_candles(
         self,
         planes: Sequence[tuple[str, str, str]],

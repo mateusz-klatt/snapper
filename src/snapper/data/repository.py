@@ -5642,6 +5642,31 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_pnl_fx_rate_exchanges_at(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[PnlFxRatePlane]:
+        """Discover spot-FX venue planes with evidence at exact candle opens.
+
+        Same evidence, ownership and denomination proof as the range-bounded
+        sibling; only the candle-open selection differs. A plane qualifies when
+        at least one finalized one-minute candle opens at one of ``open_ats``,
+        so it pairs with ``get_pnl_fx_rate_candles_at`` for consumers that read
+        only exact minutes. An empty minute selection is not a range request: it
+        returns no plane without a query and never widens to a dense read.
+
+        Args:
+            pairs: Distinct ``(base, quote)`` currency legs to discover.
+            open_ats: Exact candle-open minutes to match.
+            as_of: Snapshot time selecting candle versions known at the horizon.
+
+        Returns:
+            Distinct ``(base, quote, exchange)`` planes in lexical order.
+        """
+
+    @abstractmethod
     async def get_pnl_fx_rate_candles_at(
         self,
         planes: Sequence[PnlFxRatePlane],
@@ -22955,6 +22980,61 @@ class SQLAlchemyRepository(Repository):
                 minute_filter,
                 or_(*(Candle.open_at.between(lower, upper) for lower, upper in open_intervals)),
             )
+        return await self._pnl_fx_rate_exchanges(pairs, as_of, minute_filter)
+
+    async def get_pnl_fx_rate_exchanges_at(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[PnlFxRatePlane]:
+        """Discover spot-FX venue planes with evidence at exactly these opens.
+
+        See the abstract declaration. The minutes are batched exactly as
+        ``get_pnl_fx_rate_candles_at`` batches them, because a bound-parameter
+        list is capped by the driver. Every batch runs the shared discovery
+        statement of ``get_pnl_fx_rate_exchanges`` under the caller's knowledge
+        horizon, and the distinct planes are merged into one lexical order.
+
+        Args:
+            pairs: Distinct ``(base, quote)`` currency legs to discover.
+            open_ats: Exact candle-open minutes to match.
+            as_of: Snapshot time threading the temporal predicates.
+
+        Returns:
+            Distinct planes in ``(base, quote, exchange)`` order.
+        """
+        if not pairs or not open_ats:
+            return []
+        wanted = sorted(set(open_ats))
+        planes: set[PnlFxRatePlane] = set()
+        for index in range(0, len(wanted), _PNL_FX_MINUTE_BATCH):
+            batch = wanted[index : index + _PNL_FX_MINUTE_BATCH]
+            planes.update(
+                await self._pnl_fx_rate_exchanges(pairs, as_of, Candle.open_at.in_(batch))
+            )
+        return sorted(planes)
+
+    async def _pnl_fx_rate_exchanges(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        as_of: datetime,
+        minute_filter: ColumnElement[bool],
+    ) -> list[PnlFxRatePlane]:
+        """Run the shared FX-plane discovery statement under one minute predicate.
+
+        Both discovery entry points share every metadata, ownership, symbol
+        proof, finalization and knowledge-horizon predicate here; they differ
+        only in which candle opens ``minute_filter`` selects.
+
+        Args:
+            pairs: Distinct ``(base, quote)`` currency legs to discover.
+            as_of: Snapshot time threading the temporal predicates.
+            minute_filter: Predicate selecting the candle opens that count as evidence.
+
+        Returns:
+            Distinct planes in ``(base, quote, exchange)`` order.
+        """
         candidate_instruments = (
             select(Instrument.public_id)
             .select_from(Instrument)

@@ -3854,6 +3854,133 @@ def _event_fx_open_intervals(
     return _sparse_event_fx_intervals(requirements)
 
 
+@dataclass(frozen=True, slots=True)
+class _FxEventSelection:
+    """Candle opens the event discovery and load share for one request.
+
+    ``opens`` is ``None`` for the original interval policy, where an empty
+    ``intervals`` tuple keeps the complete bounded range. Otherwise it is the
+    exact candle-open selection, and an empty tuple selects nothing: it must
+    never be mistaken for the dense range. The two selectors are exclusive.
+
+    Attributes:
+        intervals: Inclusive candle-open intervals inside the event outer bounds.
+        opens: Exact candle opens, or ``None`` when the interval policy applies.
+    """
+
+    intervals: tuple[tuple[datetime, datetime], ...] = ()
+    opens: tuple[datetime, ...] | None = None
+
+    def __post_init__(self) -> None:
+        """Reject an ambiguous selection naming both intervals and exact opens.
+
+        Raises:
+            ValueError: If intervals and exact opens are both supplied.
+        """
+        if self.opens is not None and self.intervals:
+            raise ValueError("an FX event read selects intervals or exact opens, not both")
+
+
+def _event_fx_selection(
+    event_requirements: Mapping[FxPairKey, set[datetime]],
+    requirements: Mapping[FxPairKey, set[datetime]],
+    *,
+    exact_minutes: bool,
+) -> _FxEventSelection:
+    """Plan the event phase's candle opens under the caller's read policy.
+
+    The exact policy keeps the original event outer bounds, the first event
+    open less the carry window through the last event minute, and selects only
+    the mark and event requirement minutes inside them after the close-to-open
+    shift. A mark minute outside those bounds is never fetched by the event
+    phase, while a mark-only minute inside them still is, so a cross-read
+    conflict stays visible. Without event minutes the event phase stays empty.
+
+    Args:
+        event_requirements: Exact event minutes grouped by pair.
+        requirements: Merged mark and event minutes grouped by pair.
+        exact_minutes: Whether the consumer reads only its required minutes.
+
+    Returns:
+        The shared selection for event discovery and loading.
+    """
+    if not exact_minutes:
+        return _FxEventSelection(
+            intervals=_event_fx_open_intervals(event_requirements, requirements)
+        )
+    bounds = _fx_requirement_range(event_requirements)
+    if bounds is None:
+        pnl_read_fx_window("no_requirements")
+        return _FxEventSelection(opens=())
+    lower = bounds[0] - _FX_CARRY_WINDOW
+    opens = {
+        minute - timedelta(minutes=1)
+        for pair_minutes in requirements.values()
+        for minute in pair_minutes
+    }
+    return _FxEventSelection(
+        opens=tuple(sorted(open_at for open_at in opens if lower <= open_at <= bounds[1]))
+    )
+
+
+async def _discover_event_fx_candidates(
+    repo: Repository,
+    requirements: Mapping[FxPairKey, set[datetime]],
+    as_of: datetime,
+    selection: _FxEventSelection,
+) -> list[PnlFxRatePlane]:
+    """Discover event-phase planes through the selection's interval or exact read.
+
+    Args:
+        repo: Repository providing bounded and exact forex-plane discovery.
+        requirements: Exact event minutes grouped by pair.
+        as_of: Knowledge horizon threading the repository read.
+        selection: Candle opens shared with the event load.
+
+    Returns:
+        Concrete oriented venue planes with evidence in the selection.
+    """
+    if selection.opens is None:
+        return await _discover_fx_candidates(
+            repo, requirements, as_of, open_intervals=selection.intervals
+        )
+    pairs = sorted(requirements)
+    if not pairs or not selection.opens:
+        return []
+    return await repo.get_pnl_fx_rate_exchanges_at(
+        _oriented_fx_pairs(pairs), selection.opens, as_of
+    )
+
+
+async def _load_event_fx_rows(
+    repo: Repository,
+    requirements: Mapping[FxPairKey, set[datetime]],
+    candidate_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
+    as_of: datetime,
+    selection: _FxEventSelection,
+) -> list[PnlFxRateRow]:
+    """Load event-phase rows through the selection's interval or exact read.
+
+    Args:
+        repo: Repository providing bounded and exact forex candles.
+        requirements: Exact event minutes grouped by pair.
+        candidate_planes: Eligible discovered and identity planes by pair.
+        as_of: Knowledge horizon threading the repository read.
+        selection: Candle opens shared with event discovery.
+
+    Returns:
+        Candidate rows in the repository's stable per-minute order.
+    """
+    if selection.opens is None:
+        return await _load_fx_candidate_rows(
+            repo, requirements, candidate_planes, as_of, open_intervals=selection.intervals
+        )
+    planes = {plane for pair in requirements for plane in candidate_planes.get(pair, set())}
+    if not planes or not selection.opens:
+        return []
+    return await repo.get_pnl_fx_rate_candles_at(sorted(planes), selection.opens, as_of)
+
+
 def _sparse_event_fx_intervals(
     requirements: Mapping[FxPairKey, set[datetime]],
 ) -> tuple[tuple[datetime, datetime], ...]:
@@ -4501,8 +4628,26 @@ async def _read_fx_candidate_evidence(
     minute_sets: _FxMinuteSets,
     *,
     has_general_consumers: bool,
+    exact_event_minutes: bool,
 ) -> tuple[list[PnlFxRateRow], dict[FxPairKey, set[PnlFxRatePlane]]]:
-    """Load the same bounded mark and event evidence for either election policy."""
+    """Load the same bounded mark and event evidence for either election policy.
+
+    Both phases always run. ``exact_event_minutes`` is set only by the pointwise
+    series consumer, which reads rows at its required minutes alone; its event
+    phase then selects those exact minutes inside the unchanged event bounds
+    instead of every minute the bounds span. Every other caller keeps the
+    original interval or dense event read.
+
+    Args:
+        repo: Repository providing bounded FX plane and candle reads.
+        request: Consumers and knowledge horizon of this read.
+        minute_sets: The request's mark and event minute views.
+        has_general_consumers: Whether shared planes must be discovered.
+        exact_event_minutes: Whether the event phase reads exact minutes only.
+
+    Returns:
+        Mark rows followed by event rows, and candidate planes by pair.
+    """
     identity_planes = request.identity_planes
     as_of = request.as_of
     mark_pair_requirements = minute_sets.mark_reads
@@ -4510,7 +4655,9 @@ async def _read_fx_candidate_evidence(
     requirements = _merge_fx_minutes(mark_pair_requirements, event_pair_requirements)
     if not requirements:
         return [], {}
-    event_open_intervals = _event_fx_open_intervals(event_pair_requirements, requirements)
+    event_selection = _event_fx_selection(
+        event_pair_requirements, requirements, exact_minutes=exact_event_minutes
+    )
     mark_candidates: list[PnlFxRatePlane] = []
     event_candidates: list[PnlFxRatePlane] = []
     if has_general_consumers:
@@ -4522,11 +4669,11 @@ async def _read_fx_candidate_evidence(
             )
         pnl_read_count("fx_mark_candidate_planes", mark_candidates)
         with pnl_read_phase("fx_discovery_event"):
-            event_candidates = await _discover_fx_candidates(
+            event_candidates = await _discover_event_fx_candidates(
                 repo,
                 event_pair_requirements,
                 as_of,
-                open_intervals=event_open_intervals,
+                event_selection,
             )
         pnl_read_count("fx_event_candidate_planes", event_candidates)
     candidate_planes = _candidate_planes(
@@ -4542,12 +4689,12 @@ async def _read_fx_candidate_evidence(
         )
     pnl_read_count("fx_mark_rows", mark_rows)
     with pnl_read_phase("fx_load_event"):
-        event_rows = await _load_fx_candidate_rows(
+        event_rows = await _load_event_fx_rows(
             repo,
             event_pair_requirements,
             candidate_planes,
             as_of,
-            open_intervals=event_open_intervals,
+            event_selection,
         )
     pnl_read_count("fx_event_rows", event_rows)
     rows = [*mark_rows, *event_rows]
@@ -4576,7 +4723,11 @@ async def _elect_fx_planes(repo: Repository, request: _FxRequest) -> _FxElection
     general_requirements = _general_fx_minutes(minute_sets.voters, identity_planes)
     general_event_requirements = _general_fx_minutes(event_requirements, identity_planes)
     rows, candidate_planes = await _read_fx_candidate_evidence(
-        repo, request, minute_sets, has_general_consumers=bool(general_requirements)
+        repo,
+        request,
+        minute_sets,
+        has_general_consumers=bool(general_requirements),
+        exact_event_minutes=False,
     )
     with pnl_read_phase("fx_election"):
         shared_planes = _resolve_fx_planes(
@@ -5002,11 +5153,30 @@ def _series_pointwise_shadow_requirements(
 
 @pnl_read_stage("fx")
 async def _load_pointwise_series_fx(repo: Repository, request: _FxRequest) -> _SeriesFxEvidence:
-    """Read FX in batches and choose causal minute pins for exact replay only."""
+    """Read FX in batches and choose causal minute pins for exact replay only.
+
+    Every consumer here reads rows only at its required pair minutes: venue
+    election skips other minutes, the exact book never carries, and shadow
+    evidence groups rows by requirement minute. The event phase therefore reads
+    exactly those minutes inside its unchanged bounds, which returns the same
+    rows at every consumed minute as the dense read without growing with the
+    distance between an old event and the current chunk.
+
+    Args:
+        repo: Repository providing bounded and exact FX plane and candle reads.
+        request: Consumers and knowledge horizon of this read.
+
+    Returns:
+        The exact rate book, minute pins and every plane actually used.
+    """
     minute_sets = _fx_minute_sets(request)
     general = _general_fx_minutes(minute_sets.exact, request.identity_planes)
     rows, _ = await _read_fx_candidate_evidence(
-        repo, request, minute_sets, has_general_consumers=bool(general)
+        repo,
+        request,
+        minute_sets,
+        has_general_consumers=bool(general),
+        exact_event_minutes=True,
     )
     rates = build_fx_rates(rows)
     shared = _pointwise_fx_venues(general, rates, request.valuation_ccy)
