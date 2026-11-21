@@ -652,6 +652,7 @@ WALLET_SCOPED_SCHEMA_TABLES = frozenset(
         "paired_execution_legs",
         "portfolio_drift_episodes",
         "portfolio_pnl_correction_frontiers",
+        "portfolio_pnl_opening_checkpoints",
         "portfolio_pnl_points",
         "portfolio_reconciliation_method_configs",
         "portfolio_reconciliation_observations",
@@ -749,6 +750,11 @@ certified wallet identity.
 populated subset. Only an actual correction creates its continuation, repair
 obligation and execution-detection baseline; screenshot data must not invent
 completed or pending financial work.
+
+``portfolio_pnl_opening_checkpoints`` is deliberately EXCLUDED from the
+populated subset for the same reason: a durable opening checkpoint is certified
+only during an actual settled correction generation, so screenshot data must
+not manufacture cached replay state or certificates.
 """
 
 

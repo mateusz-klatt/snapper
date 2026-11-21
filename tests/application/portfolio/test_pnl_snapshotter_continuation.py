@@ -35,6 +35,7 @@ from snapper.data.models import VenueAccountObservation
 from snapper.data.models import WalletCredential
 from snapper.data.pnl_correction_state import PnlCorrectionChunk
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
+from snapper.data.pnl_correction_state import PnlOpeningCheckpointWrite
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PortfolioPnlSampleRow
@@ -138,6 +139,7 @@ def _create_schema(path: Path) -> None:
     engine = create_engine(f"sqlite:///{path.as_posix()}")
     frontier = import_module("snapper.data.migrations.versions.0069_pnl_correction_frontiers")
     raw_cut = import_module("snapper.data.migrations.versions.0070_pnl_correction_raw_watermarks")
+    checkpoints = import_module("snapper.data.migrations.versions.0071_pnl_opening_checkpoints")
     try:
         with engine.begin() as connection:
             for table in (
@@ -153,6 +155,7 @@ def _create_schema(path: Path) -> None:
             with Operations.context(MigrationContext.configure(connection)):
                 frontier.upgrade()
                 raw_cut.upgrade()
+                checkpoints.upgrade()
     finally:
         engine.dispose()
 
@@ -256,9 +259,10 @@ async def _interrupt_tick(
         scope: PortfolioPnlSampleScope,
         expected: PnlCorrectionFrontier,
         chunk: PnlCorrectionChunk,
+        checkpoint: PnlOpeningCheckpointWrite | None = None,
     ) -> PnlCorrectionFrontier:
         """Raise after both the financial writes and checkpoint have committed."""
-        advanced = await commit(scope, expected, chunk)
+        advanced = await commit(scope, expected, chunk, checkpoint=checkpoint)
         assert advanced.next_minute == _TIP
         failures.append("after_commit")
         raise RuntimeError("injected loss of durable P&L chunk acknowledgement")

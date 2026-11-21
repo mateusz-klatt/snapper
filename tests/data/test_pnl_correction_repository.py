@@ -21,6 +21,7 @@ from snapper.application.portfolio.pnl_snapshot_planner import plan_chunk_sample
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import PortfolioPnlCorrectionFrontier
+from snapper.data.models import PortfolioPnlOpeningCheckpoint
 from snapper.data.models import PortfolioPnlPoint
 from snapper.data.pnl_correction_state import PnlCorrectionChunk
 from snapper.data.pnl_correction_state import PnlCorrectionEdit
@@ -50,6 +51,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     engine = create_engine(f"sqlite:///{db_path}")
     PortfolioPnlPoint.__table__.create(engine)
     PortfolioPnlCorrectionFrontier.__table__.create(engine)
+    PortfolioPnlOpeningCheckpoint.__table__.create(engine)
     engine.dispose()
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     async with repo.session() as session:

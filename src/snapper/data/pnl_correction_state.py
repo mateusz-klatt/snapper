@@ -14,11 +14,13 @@ from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from typing import Final
 
 from snapper.data.repository_types import PortfolioPnlSampleRow
 
 MAX_CORRECTION_CHUNK_MINUTES = 1440
 _MINUTE = timedelta(minutes=1)
+_HEX_DIGITS: Final[frozenset[str]] = frozenset("0123456789abcdef")
 
 
 class PortfolioPnlCorrectionConflictError(RuntimeError):
@@ -552,3 +554,423 @@ def _remaining_correction_repair(
     )
     candidates = (*repairable_withheld, *((pending,) if pending is not None else ()))
     return min(candidates) if candidates else None
+
+
+def _require_non_bool_int(value: object, label: str) -> int:
+    """Require a plain integer while rejecting booleans."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} must be an integer")
+    return value
+
+
+def _require_non_negative_int(value: object, label: str) -> int:
+    """Require a non-negative plain integer while rejecting booleans."""
+    parsed = _require_non_bool_int(value, label)
+    if parsed < 0:
+        raise ValueError(f"{label} must be non-negative")
+    return parsed
+
+
+def _require_non_blank_str(value: object, label: str) -> str:
+    """Require a non-empty string without leading or trailing whitespace."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{label} must be a non-empty stripped string")
+    return value
+
+
+def _require_sha256_digest(value: object, label: str) -> str:
+    """Require a 64-character lowercase hexadecimal SHA-256 digest string."""
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in _HEX_DIGITS for character in value)
+    ):
+        raise ValueError(f"{label} must be a 64-character lowercase hex digest")
+    return value
+
+
+@dataclass(frozen=True)
+class IdAggregate:
+    """Order-independent row-identity aggregate fingerprint over active rows.
+
+    Stores ``(count, id_sum, max_id, max_timestamp)`` with arbitrary-precision
+    Python integer arithmetic on ``id_sum`` so callers never suffer 64-bit
+    overflow when comparing accrual or event-FX candle prefixes.
+    """
+
+    count: int
+    id_sum: int
+    max_id: int
+    max_timestamp: datetime | None
+
+    def __post_init__(self) -> None:
+        """Validate integer types, non-negativity, aware timestamp, and zero coherence."""
+        _require_non_negative_int(self.count, "IdAggregate.count")
+        _require_non_negative_int(self.id_sum, "IdAggregate.id_sum")
+        _require_non_negative_int(self.max_id, "IdAggregate.max_id")
+        if self.max_timestamp is not None:
+            if not isinstance(self.max_timestamp, datetime):
+                raise ValueError("IdAggregate.max_timestamp must be a datetime")
+            if self.max_timestamp.utcoffset() is None:
+                raise ValueError("IdAggregate.max_timestamp must be timezone-aware")
+        zero_flags = (
+            self.count == 0,
+            self.id_sum == 0,
+            self.max_id == 0,
+            self.max_timestamp is None,
+        )
+        if len(set(zero_flags)) != 1:
+            raise ValueError(
+                "IdAggregate fields must be coherent: count == 0 iff id_sum == 0 "
+                "iff max_id == 0 iff max_timestamp is None"
+            )
+        if self.count > 0:
+            if self.id_sum < self.count:
+                raise ValueError("IdAggregate.id_sum must be at least IdAggregate.count")
+            if self.id_sum < self.max_id or self.id_sum > self.count * self.max_id:
+                raise ValueError(
+                    "IdAggregate.id_sum must satisfy max_id <= id_sum <= count * max_id"
+                )
+
+
+def _validate_certificate_key(cert: PnlOpeningCheckpointCertificate) -> None:
+    """Validate certificate key components, version labels, and anchor id."""
+    if cert.key.mode not in ("live", "paper"):
+        raise ValueError("certificate key.mode must be 'live' or 'paper'")
+    _require_non_blank_str(cert.key.wallet_public_id, "certificate key.wallet_public_id")
+    _require_non_blank_str(cert.key.valuation_ccy, "certificate key.valuation_ccy")
+    _require_non_blank_str(cert.key.epoch_public_id, "certificate key.epoch_public_id")
+    _require_non_blank_str(cert.key.calc_version, "certificate key.calc_version")
+    _require_non_blank_str(cert.timeline_calc_version, "certificate timeline_calc_version")
+    _require_non_blank_str(cert.fx_policy_version, "certificate fx_policy_version")
+    _require_non_blank_str(cert.anchor_public_id, "certificate anchor_public_id")
+
+
+def _validate_certificate_digests(cert: PnlOpeningCheckpointCertificate) -> None:
+    """Validate every fixed 64-character lowercase hex digest field on a certificate."""
+    digest_fields = (
+        ("anchor_digest", cert.anchor_digest),
+        ("execution_manifest_digest", cert.execution_manifest_digest),
+        ("prefix_annulment_digest", cert.prefix_annulment_digest),
+        ("prefix_lineage_digest", cert.prefix_lineage_digest),
+        ("prefix_fill_witness_digest", cert.prefix_fill_witness_digest),
+        ("source_fill_witness_digest", cert.source_fill_witness_digest),
+        ("symbol_ref_digest", cert.symbol_ref_digest),
+        ("event_fx_exchanges_digest", cert.event_fx_exchanges_digest),
+    )
+    for label, value in digest_fields:
+        _require_sha256_digest(value, label)
+
+
+def _validate_certificate_aggregates(cert: PnlOpeningCheckpointCertificate) -> None:
+    """Validate both fingerprint aggregate types and horizon timestamp bounds."""
+    aggregates = (
+        ("accrual_prefix_fingerprint", cert.accrual_prefix_fingerprint),
+        ("event_fx_candles_fingerprint", cert.event_fx_candles_fingerprint),
+    )
+    for field_name, aggregate in aggregates:
+        if not isinstance(aggregate, IdAggregate):
+            raise ValueError(f"certificate {field_name} must be IdAggregate")
+        if aggregate.max_timestamp is not None and aggregate.max_timestamp > cert.as_of:
+            raise ValueError(f"certificate {field_name}.max_timestamp cannot exceed as_of")
+
+
+def _validate_certificate_header(cert: PnlOpeningCheckpointCertificate) -> None:
+    """Validate scalar header fields, timestamps, aggregates, key, and digests."""
+    schema_version = _require_non_bool_int(cert.schema_version, "certificate schema_version")
+    if schema_version != 1:
+        raise ValueError("certificate schema_version must equal 1")
+    source_generation = _require_non_bool_int(
+        cert.source_generation,
+        "certificate source_generation",
+    )
+    if source_generation < 1:
+        raise ValueError("certificate source_generation must be at least 1")
+    if not isinstance(cert.prefix_has_idless_executions, bool):
+        raise ValueError("certificate prefix_has_idless_executions must be a bool")
+    validate_correction_minute(cert.checkpoint_minute)
+    if not isinstance(cert.as_of, datetime):
+        raise ValueError("certificate as_of must be a datetime")
+    if cert.as_of.utcoffset() is None:
+        raise ValueError("certificate as_of must be timezone-aware")
+    if cert.checkpoint_minute > cert.as_of:
+        raise ValueError("certificate checkpoint_minute cannot exceed as_of")
+    _validate_certificate_aggregates(cert)
+    _validate_certificate_key(cert)
+    _validate_certificate_digests(cert)
+
+
+def _normalize_chain_digests(
+    digests: Mapping[str, str],
+    cutoff_watermarks: Mapping[str, int],
+) -> dict[str, str]:
+    """Validate and canonically sort per-exchange execution chain tip digests."""
+    if set(digests) != set(cutoff_watermarks):
+        raise ValueError(
+            "certificate execution_chain_digests exchanges must match cutoff_execution_watermarks"
+        )
+    return {
+        exchange: _require_sha256_digest(digest, f"execution_chain_digests[{exchange!r}]")
+        for exchange, digest in sorted(digests.items())
+    }
+
+
+def _normalize_cutoff_counts(
+    counts: Mapping[str, int],
+    cutoff_watermarks: Mapping[str, int],
+) -> dict[str, int]:
+    """Validate ``0 <= count <= W_C[ex]`` and sort per-exchange execution counts."""
+    if set(counts) != set(cutoff_watermarks):
+        raise ValueError(
+            "certificate cutoff_execution_counts exchanges must match cutoff_execution_watermarks"
+        )
+    normalized: dict[str, int] = {}
+    for exchange, count in sorted(counts.items()):
+        validated = _require_non_negative_int(count, "cutoff_execution_counts")
+        if validated > cutoff_watermarks[exchange]:
+            raise ValueError(
+                f"cutoff_execution_counts[{exchange!r}] cannot exceed cutoff watermark"
+            )
+        normalized[exchange] = validated
+    return normalized
+
+
+def _normalize_applied_watermarks(
+    applied: Mapping[str, int],
+    cutoff_watermarks: Mapping[str, int],
+) -> dict[str, int]:
+    """Validate ``0 <= applied <= W_C[ex]`` and return a sorted copy."""
+    normalized = correction_watermarks(applied)
+    for exchange, seq in normalized.items():
+        if exchange not in cutoff_watermarks or seq > cutoff_watermarks[exchange]:
+            raise ValueError(
+                f"applied_watermarks_by_exchange[{exchange!r}] cannot exceed cutoff watermark"
+            )
+    return normalized
+
+
+def _normalize_deferred_sequences(
+    deferred: Mapping[str, Sequence[int]],
+    cutoff_watermarks: Mapping[str, int],
+) -> dict[str, tuple[int, ...]]:
+    """Validate strictly increasing ``1..W_C[ex]`` sequences and normalize to sorted tuples."""
+    normalized: dict[str, tuple[int, ...]] = {}
+    for exchange, sequences in sorted(deferred.items()):
+        if exchange not in cutoff_watermarks:
+            raise ValueError(
+                f"deferred_execution_sequences exchange {exchange!r} is not in "
+                "cutoff_execution_watermarks"
+            )
+        limit = cutoff_watermarks[exchange]
+        prev: int | None = None
+        validated: list[int] = []
+        for seq in sequences:
+            item = _require_non_bool_int(seq, "deferred_execution_sequences")
+            if item < 1 or item > limit:
+                raise ValueError(
+                    f"deferred_execution_sequences[{exchange!r}] sequence must lie in 1..{limit}"
+                )
+            if prev is not None and item <= prev:
+                raise ValueError(
+                    f"deferred_execution_sequences[{exchange!r}] must be strictly "
+                    "increasing without duplicates"
+                )
+            prev = item
+            validated.append(item)
+        normalized[exchange] = tuple(validated)
+    return normalized
+
+
+def _normalize_consumed_fx_pairs(
+    pairs: Sequence[tuple[str, str]],
+) -> tuple[tuple[str, str], ...]:
+    """Validate sorted distinct unordered currency pairs and convert to tuple."""
+    normalized: list[tuple[str, str]] = []
+    prev: tuple[str, str] | None = None
+    for first, second in pairs:
+        _require_non_blank_str(first, "consumed_fx_pairs")
+        _require_non_blank_str(second, "consumed_fx_pairs")
+        if first >= second:
+            raise ValueError("consumed_fx_pairs entries must be lexically ordered distinct legs")
+        pair = (first, second)
+        if prev is not None and pair <= prev:
+            raise ValueError("consumed_fx_pairs must be strictly increasing without duplicates")
+        prev = pair
+        normalized.append(pair)
+    return tuple(normalized)
+
+
+def _normalize_consumed_fx_open_ats(
+    open_ats: Sequence[datetime],
+    checkpoint_minute: datetime,
+) -> tuple[datetime, ...]:
+    """Validate strictly increasing minute-aligned open times ``<= checkpoint_minute``."""
+    normalized: list[datetime] = []
+    prev: datetime | None = None
+    for open_at in open_ats:
+        validate_correction_minute(open_at)
+        if open_at > checkpoint_minute:
+            raise ValueError("consumed_fx_open_ats cannot exceed checkpoint_minute")
+        if prev is not None and open_at <= prev:
+            raise ValueError("consumed_fx_open_ats must be strictly increasing without duplicates")
+        prev = open_at
+        normalized.append(open_at)
+    return tuple(normalized)
+
+
+def _validate_source_expected_venues(value: frozenset[str] | None) -> frozenset[str]:
+    """Require a non-empty canonical spot venue set for the replayed frontier cut."""
+    validated = correction_expected_venues(value)
+    if validated is None:
+        raise ValueError(
+            "certificate source_expected_venues requires a nonempty canonical spot venue set"
+        )
+    return validated
+
+
+def _validate_certificate_fx_fingerprint(
+    fx_pairs: tuple[tuple[str, str], ...],
+    fx_open_ats: tuple[datetime, ...],
+    fingerprint: IdAggregate,
+) -> None:
+    """Require zero event-FX candle aggregate when either FX input sequence is empty."""
+    if (not fx_pairs or not fx_open_ats) and fingerprint != IdAggregate(0, 0, 0, None):
+        raise ValueError(
+            "certificate event_fx_candles_fingerprint must be empty when "
+            "consumed_fx_pairs or consumed_fx_open_ats is empty"
+        )
+
+
+@dataclass(frozen=True)
+class PnlOpeningCheckpointCertificate:
+    """Cryptographic and structural evidence certificate for an opening checkpoint.
+
+    Binds scope identity, calculation and policy versions, schema version,
+    activation anchor, source generation, boundary clock, execution cut
+    watermarks/digests/counts/deferred sequences, prefix annulment and lineage
+    digests, prefix and source fill-witness cuts, symbol reference digest,
+    accrual fingerprint, and consumed event-FX exchange and candle fingerprints.
+
+    Prefix vs. source witness cuts: ``prefix_*`` witness fields
+    (``prefix_fill_witness_digest`` and ``prefix_venue_event_watermarks``) are
+    restricted to sequences up to the checkpoint boundary and define the
+    reader's recomputation target verified at the resuming generation's
+    ``as_of``. By contrast, ``source_*`` fields (``source_expected_venues``,
+    ``source_venue_event_watermarks``, and ``source_fill_witness_digest``) bind
+    the certificate at write time to the active frontier cut under which the
+    checkpoint state was replayed, matching the write gate's execution-cut check.
+
+    Evidence-read ordering contract: reads at a fixed ``as_of`` do not share a
+    database snapshot across queries, so every certificate fingerprint and
+    digest must be read BEFORE the final replay chunk reads its prefix
+    evidence. A concurrent commit with bus ``timestamp <= as_of`` that lands
+    between the two reads enters the carried state without entering the stored
+    certificate, so later verification mismatches and falls back safely; reading
+    the replay evidence before the certificate would be unsafe.
+
+    Resumption verification contract: on resume, the reader always recomputes
+    every certificate fingerprint and digest at the RESUMING generation's
+    ``as_of`` (never at the certificate's stored ``as_of``), so any prefix
+    correction, accrual change, candle revision, lineage relabel, or late
+    witness arriving after certification triggers a fail-closed fallback to full
+    anchor replay.
+    """
+
+    key: PnlCorrectionKey
+    timeline_calc_version: str
+    fx_policy_version: str
+    schema_version: int
+    anchor_public_id: str
+    anchor_digest: str
+    source_generation: int
+    checkpoint_minute: datetime
+    as_of: datetime
+    cutoff_execution_watermarks: Mapping[str, int]
+    execution_chain_digests: Mapping[str, str]
+    cutoff_execution_counts: Mapping[str, int]
+    applied_watermarks_by_exchange: Mapping[str, int]
+    deferred_execution_sequences: Mapping[str, Sequence[int]]
+    prefix_has_idless_executions: bool
+    execution_manifest_digest: str
+    prefix_annulment_digest: str
+    accrual_prefix_fingerprint: IdAggregate
+    prefix_lineage_digest: str
+    prefix_fill_witness_digest: str
+    prefix_venue_event_watermarks: Mapping[str, int]
+    source_expected_venues: frozenset[str]
+    source_venue_event_watermarks: Mapping[str, int]
+    source_fill_witness_digest: str
+    symbol_ref_digest: str
+    consumed_fx_pairs: Sequence[tuple[str, str]]
+    consumed_fx_open_ats: Sequence[datetime]
+    event_fx_exchanges_digest: str
+    event_fx_candles_fingerprint: IdAggregate
+
+    def __post_init__(self) -> None:
+        """Validate every shape invariant and normalize mappings and sequences."""
+        _validate_certificate_header(self)
+        cutoff = correction_watermarks(self.cutoff_execution_watermarks)
+        chain_digests = _normalize_chain_digests(self.execution_chain_digests, cutoff)
+        counts = _normalize_cutoff_counts(self.cutoff_execution_counts, cutoff)
+        applied = _normalize_applied_watermarks(self.applied_watermarks_by_exchange, cutoff)
+        deferred = _normalize_deferred_sequences(self.deferred_execution_sequences, cutoff)
+        witness_watermarks = correction_watermarks(self.prefix_venue_event_watermarks)
+        expected_venues = _validate_source_expected_venues(self.source_expected_venues)
+        if not isinstance(self.source_venue_event_watermarks, Mapping):
+            raise ValueError("certificate source_venue_event_watermarks must be a mapping")
+        source_witness_watermarks = correction_watermarks(self.source_venue_event_watermarks)
+        fx_pairs = _normalize_consumed_fx_pairs(self.consumed_fx_pairs)
+        fx_open_ats = _normalize_consumed_fx_open_ats(
+            self.consumed_fx_open_ats,
+            self.checkpoint_minute,
+        )
+        _validate_certificate_fx_fingerprint(
+            fx_pairs,
+            fx_open_ats,
+            self.event_fx_candles_fingerprint,
+        )
+        object.__setattr__(self, "cutoff_execution_watermarks", cutoff)
+        object.__setattr__(self, "execution_chain_digests", chain_digests)
+        object.__setattr__(self, "cutoff_execution_counts", counts)
+        object.__setattr__(self, "applied_watermarks_by_exchange", applied)
+        object.__setattr__(self, "deferred_execution_sequences", deferred)
+        object.__setattr__(self, "prefix_venue_event_watermarks", witness_watermarks)
+        object.__setattr__(self, "source_expected_venues", expected_venues)
+        object.__setattr__(self, "source_venue_event_watermarks", source_witness_watermarks)
+        object.__setattr__(self, "consumed_fx_pairs", fx_pairs)
+        object.__setattr__(self, "consumed_fx_open_ats", fx_open_ats)
+
+
+@dataclass(frozen=True)
+class PnlOpeningCheckpointWrite:
+    """Certified opening checkpoint payload staged for a fenced chunk commit."""
+
+    certificate: PnlOpeningCheckpointCertificate
+    state_json: str
+
+    def __post_init__(self) -> None:
+        """Validate certificate type and non-blank serialized state payload."""
+        if not isinstance(self.certificate, PnlOpeningCheckpointCertificate):
+            raise ValueError("checkpoint write certificate must be PnlOpeningCheckpointCertificate")
+        _require_non_blank_str(self.state_json, "checkpoint write state_json")
+
+
+@dataclass(frozen=True)
+class PnlOpeningCheckpointRecord:
+    """Persisted opening checkpoint certificate, raw serialized state, and write time."""
+
+    certificate: PnlOpeningCheckpointCertificate
+    state_json: str
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        """Validate certificate, serialized state payload, and aware write timestamp."""
+        if not isinstance(self.certificate, PnlOpeningCheckpointCertificate):
+            raise ValueError(
+                "checkpoint record certificate must be PnlOpeningCheckpointCertificate"
+            )
+        _require_non_blank_str(self.state_json, "checkpoint record state_json")
+        if not isinstance(self.updated_at, datetime):
+            raise ValueError("checkpoint record updated_at must be a datetime")
+        if self.updated_at.utcoffset() is None:
+            raise ValueError("checkpoint record updated_at must be timezone-aware")

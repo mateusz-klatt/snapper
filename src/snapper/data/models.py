@@ -1732,6 +1732,78 @@ class PortfolioPnlCorrectionFrontier(Base):
     repair_from: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
 
 
+class PortfolioPnlOpeningCheckpoint(Base):
+    """Durable certified opening-checkpoint snapshot for settled P&L scopes.
+
+    Stores the carried engine boundary state at ``checkpoint_minute`` alongside
+    every version, watermark, canonical digest, and aggregate fingerprint needed
+    to verify prefix immutability at resume time before reading only suffix data.
+    """
+
+    __tablename__ = "portfolio_pnl_opening_checkpoints"
+    __table_args__ = (
+        CheckConstraint(_CK_MODE_LIVE_PAPER, name="ck_pnl_opening_checkpoints_mode"),
+        CheckConstraint(
+            "schema_version >= 1",
+            name="ck_pnl_opening_checkpoints_schema_version",
+        ),
+        CheckConstraint(
+            "source_generation >= 1",
+            name="ck_pnl_opening_checkpoints_source_generation",
+        ),
+        CheckConstraint(
+            "checkpoint_minute <= as_of",
+            name="ck_pnl_opening_checkpoints_as_of",
+        ),
+        CheckConstraint(
+            "event_fx_candle_count >= 0",
+            name="ck_pnl_opening_checkpoints_fx_candle_count",
+        ),
+        CheckConstraint(
+            "event_fx_candle_max_id >= 0",
+            name="ck_pnl_opening_checkpoints_fx_candle_max_id",
+        ),
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(8), primary_key=True)
+    valuation_ccy: Mapped[str] = mapped_column(String(16), primary_key=True)
+    epoch_public_id: Mapped[str] = mapped_column(UUIDColumn(), primary_key=True)
+    calc_version: Mapped[str] = mapped_column(String(16), primary_key=True)
+    timeline_calc_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    fx_policy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    checkpoint_minute: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    as_of: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    anchor_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    anchor_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    cutoff_execution_watermarks_json: Mapped[str] = mapped_column(Text, nullable=False)
+    execution_chain_digests_json: Mapped[str] = mapped_column(Text, nullable=False)
+    cutoff_execution_counts_json: Mapped[str] = mapped_column(Text, nullable=False)
+    applied_watermarks_json: Mapped[str] = mapped_column(Text, nullable=False)
+    deferred_execution_sequences_json: Mapped[str] = mapped_column(Text, nullable=False)
+    prefix_has_idless_executions: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    execution_manifest_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    prefix_annulment_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    accrual_prefix_fingerprint_json: Mapped[str] = mapped_column(Text, nullable=False)
+    prefix_lineage_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    prefix_fill_witness_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    prefix_venue_event_watermarks_json: Mapped[str] = mapped_column(Text, nullable=False)
+    source_expected_venues_json: Mapped[str] = mapped_column(Text, nullable=False)
+    source_venue_event_watermarks_json: Mapped[str] = mapped_column(Text, nullable=False)
+    source_fill_witness_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol_ref_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    consumed_fx_pairs_json: Mapped[str] = mapped_column(Text, nullable=False)
+    consumed_fx_open_ats_json: Mapped[str] = mapped_column(Text, nullable=False)
+    event_fx_exchanges_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_fx_candle_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_fx_candle_id_sum: Mapped[str] = mapped_column(Text, nullable=False)
+    event_fx_candle_max_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    event_fx_candle_max_ts: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    state_json: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+
+
 class FxConversionElection(TemporalMixin, Base):
     """Bitemporal decision selecting one exact-coverage conversion plane.
 

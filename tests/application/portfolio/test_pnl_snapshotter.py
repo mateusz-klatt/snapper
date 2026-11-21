@@ -17,6 +17,9 @@ from sqlalchemy.exc import DBAPIError
 
 from snapper.application.portfolio import pnl_correction_planner
 from snapper.application.portfolio import pnl_snapshotter
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    checkpoint_write_refusal,
+)
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
 from snapper.application.portfolio.pnl_snapshot_planner import WithheldMinute
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
@@ -36,6 +39,7 @@ from snapper.application.process_manager.executor_topology import MINT_WALLET_PI
 from snapper.application.process_manager.executor_topology import ExecutorTopology
 from snapper.application.services.settings import SettingsService
 from snapper.core.json_types import JsonValue
+from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlCorrectionChunk
 from snapper.data.pnl_correction_state import PnlCorrectionEdit
 from snapper.data.pnl_correction_state import PnlCorrectionEvidence
@@ -43,6 +47,8 @@ from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlCorrectionKey
 from snapper.data.pnl_correction_state import PnlCorrectionRequest
 from snapper.data.pnl_correction_state import PnlCorrectionSampleVersion
+from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
+from snapper.data.pnl_correction_state import PnlOpeningCheckpointWrite
 from snapper.data.pnl_correction_state import PortfolioPnlCorrectionConflictError
 from snapper.data.pnl_correction_state import advance_correction_frontier
 from snapper.data.pnl_correction_state import start_correction_frontier
@@ -50,6 +56,7 @@ from snapper.data.repository import PortfolioPnlSampleQuery
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
+from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PortfolioPnlAnchorRow
 from snapper.data.repository_types import PortfolioPnlSampleRow
 from snapper.data.repository_types import ScopeGrantRow
@@ -315,6 +322,7 @@ class _FakeRepo:
         self._credentials = list(credentials or [])
         self._anchor = anchor
         self._frontiers: dict[PnlCorrectionKey, PnlCorrectionFrontier] = {}
+        self._opening_checkpoints: dict[PnlCorrectionKey, PnlOpeningCheckpointRecord] = {}
         self._samples = {
             self._sample_key(row): PnlCorrectionSampleVersion(index, row.copy())
             for index, row in enumerate(persisted or (), start=1)
@@ -679,23 +687,35 @@ class _FakeRepo:
             )
         ]
 
-    async def commit_portfolio_pnl_correction_chunk(
+    def _record_synthetic_checkpoint(
+        self,
+        key: PnlCorrectionKey,
+        frontier: PnlCorrectionFrontier,
+        chunk: PnlCorrectionChunk,
+        checkpoint: PnlOpeningCheckpointWrite | None,
+    ) -> None:
+        """Validate and persist a staged synthetic opening checkpoint when provided."""
+        if checkpoint is None:
+            return
+        refusal = checkpoint_write_refusal(frontier, chunk, checkpoint.certificate)
+        if refusal is not None:
+            raise ValueError(f"Refusing opening checkpoint write: {refusal}")
+        self._opening_checkpoints[key] = PnlOpeningCheckpointRecord(
+            checkpoint.certificate,
+            checkpoint.state_json,
+            datetime.now(UTC),
+        )
+
+    def _stage_chunk_edits(
         self,
         scope: PortfolioPnlSampleScope,
-        expected: PnlCorrectionFrontier,
         chunk: PnlCorrectionChunk,
-    ) -> PnlCorrectionFrontier:
-        """Publish exact-version sample edits and their cursor together."""
-        self.attempted_chunks.append(chunk)
-        key = self._correction_key(scope)
-        evidence = self._evidence(scope, chunk.evidence.start, chunk.end)
-        if (
-            self._frontiers.get(key) != expected
-            or evidence != chunk.evidence
-            or evidence.prior_peak != expected.prior_peak
-        ):
-            raise PortfolioPnlCorrectionConflictError("synthetic stale chunk evidence")
-        frontier = advance_correction_frontier(expected, chunk)
+    ) -> tuple[
+        dict[tuple[str, str, str, datetime], PnlCorrectionSampleVersion],
+        int,
+        list[PortfolioPnlSampleRow],
+    ]:
+        """Validate and apply chunk edits onto a copy of synthetic samples."""
         staged = self._samples.copy()
         row_id = self._next_row_id
         inserted: list[PortfolioPnlSampleRow] = []
@@ -720,9 +740,31 @@ class _FakeRepo:
                 row["timestamp"] = max(row["timestamp"], previous.row["timestamp"])
             staged[sample_key] = PnlCorrectionSampleVersion(row_id, row)
             row_id += 1
+        return staged, row_id, inserted
+
+    async def commit_portfolio_pnl_correction_chunk(
+        self,
+        scope: PortfolioPnlSampleScope,
+        expected: PnlCorrectionFrontier,
+        chunk: PnlCorrectionChunk,
+        checkpoint: PnlOpeningCheckpointWrite | None = None,
+    ) -> PnlCorrectionFrontier:
+        """Publish exact-version sample edits and their cursor together."""
+        self.attempted_chunks.append(chunk)
+        key = self._correction_key(scope)
+        evidence = self._evidence(scope, chunk.evidence.start, chunk.end)
+        if (
+            self._frontiers.get(key) != expected
+            or evidence != chunk.evidence
+            or evidence.prior_peak != expected.prior_peak
+        ):
+            raise PortfolioPnlCorrectionConflictError("synthetic stale chunk evidence")
+        frontier = advance_correction_frontier(expected, chunk)
+        staged, row_id, inserted = self._stage_chunk_edits(scope, chunk)
         peak = self._peak_before(scope, list(staged.values()), chunk.end + timedelta(minutes=1))
         if peak != frontier.prior_peak:
             raise PortfolioPnlCorrectionConflictError("synthetic resulting peak disagreement")
+        self._record_synthetic_checkpoint(key, frontier, chunk, checkpoint)
         self._samples = staged
         self._next_row_id = row_id
         self._frontiers[key] = frontier
@@ -730,6 +772,55 @@ class _FakeRepo:
         if inserted:
             self.recorded.append(inserted)
         return frontier
+
+    async def get_portfolio_pnl_opening_checkpoint(
+        self, scope: PortfolioPnlSampleScope
+    ) -> PnlOpeningCheckpointRecord | None:
+        """Return any stored synthetic opening checkpoint for ``scope``."""
+        return self._opening_checkpoints.get(self._correction_key(scope))
+
+    async def delete_portfolio_pnl_opening_checkpoint(
+        self, scope: PortfolioPnlSampleScope, expected_generation: int
+    ) -> bool:
+        """Delete stored synthetic opening checkpoint when generation matches."""
+        key = self._correction_key(scope)
+        record = self._opening_checkpoints.get(key)
+        if record is None or record.certificate.source_generation != expected_generation:
+            return False
+        del self._opening_checkpoints[key]
+        return True
+
+    async def get_pnl_accrual_prefix_fingerprint(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        after_exclusive: datetime,
+        through: datetime,
+        as_of: datetime,
+    ) -> IdAggregate:
+        """Return empty accrual aggregate for synthetic snapshotter tests."""
+        del wallet_public_id, mode, after_exclusive, through, as_of
+        return IdAggregate(0, 0, 0, None)
+
+    async def get_pnl_event_fx_candle_fingerprint(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> IdAggregate:
+        """Return empty event-FX candle aggregate for synthetic snapshotter tests."""
+        del planes, open_ats, as_of
+        return IdAggregate(0, 0, 0, None)
+
+    async def get_pnl_execution_prefix_counts(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        watermarks: dict[str, int],
+    ) -> dict[str, tuple[int, int]]:
+        """Return zeroed per-exchange counts for synthetic snapshotter tests."""
+        del wallet_public_id, mode
+        return dict.fromkeys(sorted(watermarks), (0, 0))
 
 
 class _FakeSettingsService:
@@ -956,6 +1047,69 @@ class TestConstructorAndProperties:
         monkeypatch.setenv("PNL_FX_SHADOW_PINNING_ENABLED", "true")
         enabled = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()), disabled=False)
         assert enabled._fx_shadow_pinning_enabled is True
+
+    def test_checkpoint_mode_defaults_off_and_is_read_only(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unset checkpoint mode resolves to ``off`` and exposes a read-only property.
+
+        Given: ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` is unset in the environment.
+        When: ``PortfolioPnlSnapshotter`` is constructed.
+        Then: ``checkpoint_mode`` is ``"off"`` and cannot be reassigned.
+        """
+        monkeypatch.delenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", raising=False)
+        snap = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()))
+        assert snap.checkpoint_mode == "off"
+        attr = "checkpoint_mode"
+        with pytest.raises(AttributeError):
+            setattr(snap, attr, "active")
+
+    def test_checkpoint_mode_resolves_configured_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Configured valid checkpoint modes strip whitespace and normalize case.
+
+        Given: ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` set to ``" Shadow "``.
+        When: ``PortfolioPnlSnapshotter`` is constructed.
+        Then: ``checkpoint_mode`` resolves to ``"shadow"``.
+        """
+        monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", " Shadow ")
+        snap = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()))
+        assert snap.checkpoint_mode == "shadow"
+
+    def test_checkpoint_mode_rejects_invalid_value_at_startup(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unrecognised checkpoint mode fails fast at constructor startup.
+
+        Given: ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` set to ``"bogus"``.
+        When: ``PortfolioPnlSnapshotter`` is constructed.
+        Then: ``ValueError`` is raised naming ``PNL_SNAPSHOTTER_CHECKPOINT_MODE``.
+        """
+        monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "bogus")
+        with pytest.raises(ValueError, match="PNL_SNAPSHOTTER_CHECKPOINT_MODE"):
+            PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()))
+
+    @pytest.mark.asyncio
+    async def test_fake_repo_matches_checkpoint_read_signatures(self) -> None:
+        """Keep hand-rolled fake aligned with plane-based FX and horizon-free execution counts.
+
+        Given: A fresh ``_FakeRepo`` double satisfying ``Repository``.
+        When: Keyword arguments match the updated abstract repository signatures.
+        Then: ``get_pnl_event_fx_candle_fingerprint`` accepts ``planes`` and
+            ``get_pnl_execution_prefix_counts`` omits ``as_of``.
+        """
+        repo = _FakeRepo()
+        assert await repo.get_pnl_event_fx_candle_fingerprint(
+            planes=[("EUR", "USD", "kraken")],
+            open_ats=[],
+            as_of=_T0,
+        ) == IdAggregate(0, 0, 0, None)
+        assert await repo.get_pnl_execution_prefix_counts(
+            wallet_public_id="wallet-1",
+            mode="live",
+            watermarks={"kraken": 2},
+        ) == {"kraken": (0, 0)}
 
 
 class TestLifecycle:
