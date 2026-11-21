@@ -503,11 +503,11 @@ async def _verify_catalog(
     """Bind the copied interpretation to its exact temporal catalog version identity.
 
     Catalog binding is keyed on ``(spec.public_id, spec.timestamp,
-    spec.instrument_public_id, spec.spec_source, spec.spec_version)`` and
-    ``spec.timestamp <= effective_at < spec.known_to``. ``catalog.observed_at``
-    remains copied payload evidence rather than a binding equality field so
-    heartbeat span extensions on a value-identical spec version never
-    invalidate an existing snapshot.
+    spec.instrument_public_id, spec.spec_source, spec.spec_version,
+    spec.spec_observed_at)`` and ``spec.timestamp <= effective_at < spec.known_to``.
+    ``catalog.observed_at`` binds to the version row's first-observed instant,
+    which remains immutable for the lifetime of that version row while
+    observation spans extend ``last_observed_at``.
     """
     catalog = payload.catalog
     spec = await _one(
@@ -524,11 +524,13 @@ async def _verify_catalog(
             spec.instrument_public_id,
             spec.spec_source,
             spec.spec_version,
+            spec.spec_observed_at,
         )
         == (
             payload.scope.instrument_public_id,
             catalog.source,
             catalog.version,
+            catalog.observed_at,
         ),
         "catalog_observation_mismatch",
     )

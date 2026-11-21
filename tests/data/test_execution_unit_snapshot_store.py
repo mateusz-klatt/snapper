@@ -1292,14 +1292,16 @@ async def test_malformed_durable_receipt_contract_is_a_binding_refusal(
 async def test_value_identical_reobservation_span_does_not_invalidate_snapshot(
     snapshot_repo: SQLAlchemyRepository,
 ) -> None:
-    """A heartbeat span extension on an unchanged spec version never breaks binding.
+    """A heartbeat span extension keeps binding valid while altered observed_at fails closed.
 
     Given: A committed execution-unit snapshot bound to an InstrumentSpec version row.
     When: A later value-identical spec revision extends the version's observation span
-        without writing a new SCD2 row, and a submission snapshot binds the same spec
-        version while carrying a distinct causal ``catalog.observed_at`` evidence instant.
-    Then: The original spec row remains active, exact retry returns the committed
-        snapshot, and catalog binding succeeds on version identity alone.
+        without writing a new SCD2 row, a matching retry and submission snapshot bind
+        the version's unchanged first-observed instant, and another submission payload
+        supplies an altered ``catalog.observed_at``.
+    Then: The original spec row stays active with its span extended, exact retry and
+        matching submission binding succeed, and the altered ``catalog.observed_at``
+        payload is rejected with ``catalog_observation_mismatch``.
     """
     fill_payload = await _payload(snapshot_repo, "fill")
     committed = await insert_execution_unit_snapshot(snapshot_repo, fill_payload, _provenance(29))
@@ -1341,17 +1343,26 @@ async def test_value_identical_reobservation_span_does_not_invalidate_snapshot(
     assert retried.created is False
 
     sub_payload = await _payload(snapshot_repo, "submission")
-    evidence_only_changed = sub_payload.model_copy(
+    altered_observed = sub_payload.model_copy(
         update={
             "catalog": sub_payload.catalog.model_copy(
                 update={"observed_at": _SPEC_TIME + timedelta(minutes=1)}
             )
         }
     )
-    stored = await insert_execution_unit_snapshot(
-        snapshot_repo, evidence_only_changed, _provenance(31)
-    )
+    with pytest.raises(SnapshotBindingError, match="catalog_observation_mismatch"):
+        await insert_execution_unit_snapshot(snapshot_repo, altered_observed, _provenance(31))
+
+    stored = await insert_execution_unit_snapshot(snapshot_repo, sub_payload, _provenance(32))
     assert stored.created is True
+    loaded_spec = await snapshot_repo.get_instrument_spec(
+        fill_payload.scope.instrument_public_id, later_obs
+    )
+    assert loaded_spec is not None
+    assert loaded_spec["spec_observed_at"] == _SPEC_TIME
+    spans = loaded_spec.get("observation_spans", ())
+    assert len(spans) == 1
+    assert spans[0]["last_observed_at"] == later_obs
     async with snapshot_repo.session() as session:
         specs = (await session.scalars(select(InstrumentSpec))).all()
     assert len(specs) == 1
