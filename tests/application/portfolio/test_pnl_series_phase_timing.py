@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from itertools import count
 from typing import cast
 from unittest.mock import AsyncMock
@@ -9,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from snapper.application.portfolio import pnl_read_timing
+from snapper.application.portfolio import pnl_timeline_service
 from snapper.application.portfolio.pnl_read_timing import observe_pnl_read
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
@@ -360,3 +363,64 @@ async def test_real_series_failure_preserves_exception_and_partial_phases(
     assert all(fields[phase] == "unobserved" for phase in _PHASES[2:])
     assert "private-replay-token-sentinel" not in messages[0]
     assert pnl_read_timing._current_timing.get() is None
+
+
+async def test_default_series_phase_sequence_exits_requirements_before_fx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep FX loading outside series_requirements in base phase order.
+
+    Given: A default series build needing mark, fee, and accrual FX conversions.
+    When: Every ``pnl_read_phase`` entry and exit is recorded in order.
+    Then: ``series_requirements`` exits before ``fx_discovery_mark`` enters and
+        the complete phase sequence matches master.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    events: list[tuple[str, str]] = []
+    original = pnl_timeline_service.pnl_read_phase
+
+    @contextmanager
+    def record_phase(name: str) -> Iterator[None]:
+        """Record phase entry and exit around the real timing context manager.
+
+        Args:
+            name: Phase label passed to ``pnl_read_phase``.
+
+        Yields:
+            Control inside the original phase context.
+        """
+        events.append(("enter", name))
+        with original(name):
+            yield
+        events.append(("exit", name))
+
+    monkeypatch.setattr(pnl_timeline_service, "pnl_read_phase", record_phase)
+    await _build(_series_repo())
+    assert events == [
+        ("enter", "series_anchor"),
+        ("exit", "series_anchor"),
+        ("enter", "series_replay"),
+        ("exit", "series_replay"),
+        ("enter", "series_market_data"),
+        ("exit", "series_market_data"),
+        ("enter", "series_requirements"),
+        ("exit", "series_requirements"),
+        ("enter", "fx_discovery_mark"),
+        ("exit", "fx_discovery_mark"),
+        ("enter", "fx_discovery_event"),
+        ("exit", "fx_discovery_event"),
+        ("enter", "fx_load_mark"),
+        ("exit", "fx_load_mark"),
+        ("enter", "fx_load_event"),
+        ("exit", "fx_load_event"),
+        ("enter", "fx_election"),
+        ("exit", "fx_election"),
+        ("enter", "fx_fold_final"),
+        ("exit", "fx_fold_final"),
+        ("enter", "series_valuation"),
+        ("exit", "series_valuation"),
+        ("enter", "series_overlay"),
+        ("exit", "series_overlay"),
+    ]

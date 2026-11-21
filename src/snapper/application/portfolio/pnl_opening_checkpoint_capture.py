@@ -35,6 +35,7 @@ from snapper.data.pnl_correction_state import PnlCorrectionKey
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointCertificate
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointWrite
 from snapper.data.repository import Repository
+from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
@@ -108,7 +109,8 @@ class _CaptureEvidence:
     accrual_prefix_fingerprint: IdAggregate | None = None
     lineage_digest: str | None = None
     lineage_order_ids: tuple[str, ...] = ()
-    symbol_ref_digest: str | None = None
+    symbol_ref_seen: frozenset[str] | None = None
+    symbol_refs: tuple[InstrumentSymbolRefRow, ...] | None = None
     consumed_fx_pairs: tuple[tuple[str, str], ...] = ()
     consumed_fx_open_ats: tuple[datetime, ...] = ()
     event_fx_exchanges_digest: str | None = None
@@ -157,6 +159,15 @@ class PnlCheckpointCaptureRequest:
     anchor_digest: str
     calc_version: str
     _evidence: _CaptureEvidence = field(init=False, default_factory=_CaptureEvidence, repr=False)
+
+    def __post_init__(self) -> None:
+        """Require the request calc_version to agree with the correction key.
+
+        Raises:
+            ValueError: When ``calc_version`` disagrees with ``key.calc_version``.
+        """
+        if self.calc_version != self.key.calc_version:
+            raise ValueError("PnlCheckpointCaptureRequest calc_version must match key.calc_version")
 
     @property
     def active(self) -> bool:
@@ -325,8 +336,10 @@ class PnlCheckpointCaptureRequest:
         if not self.active:
             return
         try:
-            refs = await repo.get_instrument_symbol_refs(tuple(sorted(set(seen))), as_of)
-            self._evidence.symbol_ref_digest = symbol_ref_digest(refs)
+            ordered_seen = tuple(sorted(set(seen)))
+            refs = await repo.get_instrument_symbol_refs(ordered_seen, as_of)
+            self._evidence.symbol_ref_seen = frozenset(ordered_seen)
+            self._evidence.symbol_refs = tuple(refs)
         except ValueError:
             self._refuse("capture_value_error")
 
@@ -472,7 +485,9 @@ class PnlCheckpointCaptureRequest:
             applied_watermarks_by_exchange=applied,
             deferred_execution_sequences=deferred,
             prefix_has_idless_executions=any(
-                row["exec_id"] is None and row["trade_id"] is None for row in prefix["executions"]
+                not (row["exec_id"] or "").strip(" \t\r\n\x0b\x0c")
+                and not (row["trade_id"] or "").strip(" \t\r\n\x0b\x0c")
+                for row in prefix["executions"]
             ),
             execution_manifest_digest=self.execution_manifest_digest,
             prefix_annulment_digest=self._require_evidence(
@@ -492,10 +507,7 @@ class PnlCheckpointCaptureRequest:
             source_expected_venues=self.expected_venues,
             source_venue_event_watermarks=self.venue_event_watermarks,
             source_fill_witness_digest=self.fill_witness_digest,
-            symbol_ref_digest=self._require_evidence(
-                self._evidence.symbol_ref_digest,
-                "symbol_ref_digest",
-            ),
+            symbol_ref_digest=self._symbol_ref_digest(assembly.engine_state.seen),
             consumed_fx_pairs=self._evidence.consumed_fx_pairs,
             consumed_fx_open_ats=self._evidence.consumed_fx_open_ats,
             event_fx_exchanges_digest=self._require_evidence(
@@ -506,6 +518,17 @@ class PnlCheckpointCaptureRequest:
                 self._evidence.event_fx_candles_fingerprint,
                 "event_fx_candles_fingerprint",
             ),
+        )
+
+    def _symbol_ref_digest(self, seen: Sequence[str]) -> str:
+        """Compute ``symbol_ref_digest`` over exactly the engine-seen instruments."""
+        captured_seen = self._require_evidence(self._evidence.symbol_ref_seen, "symbol_ref_seen")
+        captured_refs = self._require_evidence(self._evidence.symbol_refs, "symbol_refs")
+        engine_seen = frozenset(seen)
+        if not engine_seen.issubset(captured_seen):
+            raise ValueError("capture symbol references omitted an engine-seen instrument")
+        return symbol_ref_digest(
+            [ref for ref in captured_refs if ref["instrument_public_id"] in engine_seen]
         )
 
     @staticmethod

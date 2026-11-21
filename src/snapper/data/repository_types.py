@@ -932,6 +932,15 @@ class PnlTimelineExecutionSuffixRequest:
     generation_watermarks: Mapping[str, int]
     deferred_execution_sequences: Mapping[str, Sequence[int]]
     as_of: datetime
+    prefix_has_idless_executions: bool = False
+    fill_witness_cut: PnlTimelineFillWitnessCut | None = None
+
+
+class PnlTimelineExecutionSuffix(TypedDict):
+    """Certified effective suffix executions and suffix-applied annulments."""
+
+    executions: list[PnlTimelineOpeningExecutionRow]
+    annulments: list[PnlTimelineAppliedAnnulment]
 
 
 class PnlTimelineExecutionPrefix(TypedDict):

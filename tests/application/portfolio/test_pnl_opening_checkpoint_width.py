@@ -2,6 +2,7 @@
 
 import ast
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import replace
@@ -24,8 +25,11 @@ from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
 from snapper.core.numeric import is_positive_finite
 from snapper.data.pnl_correction_state import IdAggregate
+from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import Repository
+from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
+from snapper.data.repository_types import PnlTimelineCandleRow
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 from tests.application.portfolio import test_pnl_opening_checkpoint as checkpoint_fixtures
 from tests.application.portfolio import test_pnl_opening_checkpoint_capture as capture
@@ -352,3 +356,249 @@ def test_new_checkpoint_tests_have_no_assert_in_broad_try() -> None:
                 if any(isinstance(child, ast.Assert) for child in ast.walk(node)):
                     violations.append(f"{name}:{node.lineno}")
     assert violations == []
+
+
+class _BoundedCandleResumeRepo(resume_fixtures._ResumeRepo):
+    """Resume fake whose candle read honors the repository open_at range."""
+
+    async def get_pnl_timeline_candles(
+        self,
+        refs: Sequence[InstrumentSymbolRefRow],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+    ) -> list[PnlTimelineCandleRow]:
+        """Return only candles whose open_at lies inside ``[start, end]``.
+
+        Args:
+            refs: Trusted symbol references to load candles for.
+            start: Inclusive lower candle-open bound.
+            end: Inclusive upper candle-open bound.
+            as_of: Knowledge horizon.
+
+        Returns:
+            Range-bounded candle rows matching the real repository contract.
+        """
+        rows = await super().get_pnl_timeline_candles(refs, start, end, as_of)
+        return [row for row in rows if start <= row["open_at"] <= end]
+
+
+def _prefix_mark_edge_repo(prefix_event: str) -> _BoundedCandleResumeRepo:
+    """Build a non-USD instrument with an event after its last pre-C candle.
+
+    Args:
+        prefix_event: One of ``"open"``, ``"close"``, ``"invalid_after_candle"``,
+            or ``"invalid_no_candles"``.
+
+    Returns:
+        Configured range-bounded resume fake for capture and replay comparison.
+    """
+    repo = _BoundedCandleResumeRepo()
+    if prefix_event == "open":
+        executions = [
+            fixtures._exec_row(fixtures._I1, 1, 3, "buy", 1.0, 100.0, 0.0, "USD"),
+        ]
+        prefix_candles = [fixtures._candle(fixtures._m(1), 100.0, fixtures._I1)]
+    elif prefix_event == "close":
+        executions = [
+            fixtures._exec_row(fixtures._I1, 1, 1, "buy", 1.0, 100.0, 0.0, "USD"),
+            fixtures._exec_row(fixtures._I1, 2, 3, "sell", 1.0, 102.0, 0.0, "USD"),
+        ]
+        prefix_candles = [fixtures._candle(fixtures._m(1), 100.0, fixtures._I1)]
+    elif prefix_event == "invalid_after_candle":
+        executions = [
+            fixtures._exec_row(fixtures._I1, 1, 1, "buy", 1.0, 100.0, 0.0, "USD"),
+            fixtures._exec_row(fixtures._I1, 2, 3, "buy", 1.0, 0.0, 0.0, "USD"),
+        ]
+        prefix_candles = [fixtures._candle(fixtures._m(1), 100.0, fixtures._I1)]
+    else:
+        executions = [
+            fixtures._exec_row(fixtures._I1, 1, 3, "buy", 1.0, 0.0, 0.0, "USD"),
+        ]
+        prefix_candles = []
+    suffix_candles = [
+        fixtures._candle(fixtures._m(minute), 105.0 + minute, fixtures._I1)
+        for minute in range(4, 8)
+    ]
+    repo._executions = executions
+    repo._accruals = []
+    repo._refs = [fixtures._ref(fixtures._I1, "BTC-EUR", "EUR")]
+    repo._candles = [*prefix_candles, *suffix_candles]
+    repo._lineage = [fixtures._lineage_row(row["order_public_id"], "rest") for row in executions]
+    repo._fx_rows = [fixtures._fx_row("EUR", "USD", minute, 1.5) for minute in range(1, 10)]
+    repo._execution_watermarks = {"kraken": len(executions)}
+    return repo
+
+
+@pytest.mark.parametrize(
+    "prefix_event",
+    ["open", "close", "invalid_after_candle", "invalid_no_candles"],
+)
+async def test_resume_mark_walk_matches_anchor_after_last_prefix_candle(
+    monkeypatch: pytest.MonkeyPatch,
+    prefix_event: str,
+) -> None:
+    """Advance mark walk state to C across all instruments even without candles.
+
+    Given: A non-USD instrument with an open, close, or invalid fill after its
+        last candle before C (or with zero candles before C).
+    When: The checkpoint is captured at C and resumed through T alongside an
+        anchor replay of the same window.
+    Then: Resumed points and mark FX requirement sets match anchor replay.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        prefix_event: Prefix mark-walk edge constellation under test.
+    """
+    repo = _prefix_mark_edge_repo(prefix_event)
+    watermark = len(repo._executions)
+    capture._permit_capture(monkeypatch)
+    request = replace(capture._request(), raw_execution_watermarks={"kraken": watermark})
+    capture_options = replace(capture._options(request), replay_generation_tip=resume_fixtures._C)
+    captured = await service.build_wallet_pnl_series(
+        repo,
+        fixtures._W1,
+        "live",
+        fixtures._m(0),
+        resume_fixtures._C,
+        "1m",
+        capture._AS_OF,
+        "USD",
+        policy=service.PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=capture_options,
+    )
+    assert captured.checkpoint_write is not None
+    write = captured.checkpoint_write
+    record = PnlOpeningCheckpointRecord(write.certificate, write.state_json, fixtures._m(10))
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        verifier._scope(request),
+        fixtures._m(10),
+        replace(
+            verifier._eligibility(request),
+            from_time=fixtures._m(5),
+            frontier_tip=resume_fixtures._T,
+            replay_generation_tip=resume_fixtures._T,
+        ),
+    )
+    assert isinstance(outcome, PnlCheckpointResume)
+    log = _RequirementLog()
+    _install_requirement_spies(monkeypatch, log)
+    options = replace(
+        resume_fixtures._resume_options(outcome),
+        frozen_execution_watermarks={"kraken": watermark},
+    )
+    anchor_repo = _prefix_mark_edge_repo(prefix_event)
+    anchor = await service.build_wallet_pnl_series(
+        anchor_repo,
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        resume_fixtures._T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=service.PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    resumed = await service.build_wallet_pnl_series(
+        repo,
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        resume_fixtures._T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=service.PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
+    assert log.marks[1] == _restricted(log.marks[0], resume_fixtures._T)
+
+
+async def test_resume_mark_requirements_seeds_last_effective_from_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seed _effective_mark_events from engine_state.last_effective_by_pool.
+
+    Given: A captured checkpoint with an untrusted instrument fill before C whose
+        pool cursor exists in engine_state.last_effective_by_pool but not in
+        event_walk_state.last_effective.
+    When: _resume_mark_requirements computes suffix mark FX requirements.
+    Then: _effective_mark_events receives the checkpoint's last_effective_by_pool.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    repo = _BoundedCandleResumeRepo()
+    repo._executions = [
+        fixtures._exec_row(fixtures._I1, 1, 1, "buy", 1.0, 100.0, 0.0, "USD"),
+        fixtures._exec_row(fixtures._I2, 2, 2, "buy", 1.0, 50.0, 0.0, "USD"),
+    ]
+    repo._accruals = []
+    repo._refs = [
+        fixtures._ref(fixtures._I1, "BTC-EUR", "EUR"),
+        fixtures._ref(fixtures._I2, "UNTRUSTED", None),
+    ]
+    repo._candles = [
+        fixtures._candle(fixtures._m(minute), 101.0, fixtures._I1) for minute in range(9)
+    ]
+    repo._lineage = [
+        fixtures._lineage_row(row["order_public_id"], "rest") for row in repo._executions
+    ]
+    repo._fx_rows = [fixtures._fx_row("EUR", "USD", minute, 1.5) for minute in range(1, 10)]
+    repo._execution_watermarks = {"kraken": 2}
+    resume = await resume_fixtures._capture_and_verify_custom(monkeypatch, repo, {"kraken": 2})
+    seen_initial: list[dict[tuple[str, str], datetime]] = []
+    original = service._effective_mark_events
+
+    def spy_effective(
+        execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+        base_by_instrument: dict[str, str],
+        quote_by_instrument: dict[str, str],
+        initial_last_effective: dict[tuple[str, str], datetime] | None = None,
+    ) -> tuple[
+        dict[str, list[service._EffectiveMarkEvent]],
+        list[tuple[datetime, datetime]],
+    ]:
+        """Record the seeded initial_last_effective map before delegating.
+
+        Args:
+            execution_rows: Suffix execution rows.
+            base_by_instrument: Proven base assets.
+            quote_by_instrument: Proven quote assets.
+            initial_last_effective: Seeded per-pool cursors.
+
+        Returns:
+            Unchanged mark events and regression shadows.
+        """
+        seen_initial.append(dict(initial_last_effective or {}))
+        return original(
+            execution_rows,
+            base_by_instrument,
+            quote_by_instrument,
+            initial_last_effective,
+        )
+
+    monkeypatch.setattr(service, "_effective_mark_events", spy_effective)
+    options = replace(
+        resume_fixtures._resume_options(resume),
+        frozen_execution_watermarks={"kraken": 2},
+    )
+    await service.build_wallet_pnl_series(
+        repo,
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        resume_fixtures._T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=service.PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    expected_cursor = dict(service.resume_engine_opening(resume).last_effective_by_pool)
+    assert (fixtures._I2, repo._executions[1]["shard_key"]) in expected_cursor
+    assert seen_initial == [expected_cursor]

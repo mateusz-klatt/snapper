@@ -1019,3 +1019,60 @@ def test_event_rate_sources_exclude_absent_and_unused_planes() -> None:
         "USD",
     )
     assert sources == ()
+
+
+async def test_symbol_ref_digest_rejects_uncaptured_engine_seen_instrument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed when engine_state.seen includes an instrument not captured before replay.
+
+    Given: An active capture request that fetched symbol refs only for I1.
+    When: ``_symbol_ref_digest`` is asked to hash refs for both I1 and uncaptured I2.
+    Then: It raises ValueError so capture refuses instead of hashing a partial set.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    _permit_capture(monkeypatch)
+    request = _request()
+    request.activate(_C, _C)
+    repo = _CaptureRepo()
+    await request.capture_symbol_refs(cast(Repository, repo), [fixtures._I1], _AS_OF)
+    with pytest.raises(ValueError, match="omitted an engine-seen instrument"):
+        request._symbol_ref_digest((fixtures._I1, fixtures._I2))
+
+
+async def test_global_withhold_sets_refusal_only_when_capture_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Leave closing_checkpoint_refusal as None on default globally withheld reads.
+
+    Given: A scope with a global fill gap read once without capture and once
+        with a permitted checkpoint capture request.
+    When: ``build_wallet_pnl_series`` builds both globally withheld results.
+    Then: The default read keeps ``closing_checkpoint_refusal=None`` while the
+        capture read reports ``"global_withhold"``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    _permit_capture(monkeypatch)
+    default_result = await _build(_CaptureRepo(), None, has_fill_gap=True)
+    assert default_result.closing_checkpoint is None
+    assert default_result.closing_checkpoint_refusal is None
+    assert default_result.checkpoint_capture_refusal is None
+    capture_result = await _build(_CaptureRepo(), _request(), has_fill_gap=True)
+    assert capture_result.closing_checkpoint is None
+    assert capture_result.closing_checkpoint_refusal == "global_withhold"
+    assert capture_result.checkpoint_capture_refusal == "global_withhold"
+
+
+def test_capture_request_rejects_mismatched_calc_version() -> None:
+    """Reject a capture request whose calc_version disagrees with key.calc_version.
+
+    Given: A capture request whose correction key specifies ``"5C.5"``.
+    When: ``calc_version`` is set to a different version string.
+    Then: Construction raises ``ValueError``.
+    """
+    with pytest.raises(ValueError, match="calc_version"):
+        replace(_request("5C.5"), calc_version=_CAPTURE_VERSION)

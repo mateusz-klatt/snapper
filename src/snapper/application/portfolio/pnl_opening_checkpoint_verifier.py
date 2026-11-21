@@ -21,6 +21,7 @@ from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PnlFxRatePlane
+from snapper.data.repository_types import PnlTimelineAppliedAnnulment
 
 PnlCheckpointFallbackReason = Literal[
     "checkpoint_absent",
@@ -61,10 +62,11 @@ _DELETE_REASONS: frozenset[str] = frozenset(
 
 @dataclass(frozen=True)
 class PnlCheckpointResume:
-    """Verified persisted record and decoded service state eligible for resume."""
+    """Verified persisted record, decoded service state, and prefix annulments."""
 
     record: PnlOpeningCheckpointRecord
     bundle: PnlCheckpointStateBundle
+    prefix_annulments: tuple[PnlTimelineAppliedAnnulment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -158,7 +160,7 @@ async def _verify_execution_prefix(
     scope: PortfolioPnlSampleScope,
     record: PnlOpeningCheckpointRecord,
     frontier_as_of: datetime,
-) -> PnlCheckpointFallback | None:
+) -> tuple[PnlCheckpointFallback | None, tuple[PnlTimelineAppliedAnnulment, ...]]:
     """Verify counts, prefix annulments, and fill-witness membership in order."""
     certificate = record.certificate
     counts = await repo.get_pnl_execution_prefix_counts(
@@ -167,7 +169,7 @@ async def _verify_execution_prefix(
         certificate.cutoff_execution_watermarks,
     )
     if not _execution_counts_match(certificate, counts):
-        return _fallback("checkpoint_execution_counts_changed")
+        return _fallback("checkpoint_execution_counts_changed"), ()
     prefix = await repo.get_pnl_timeline_execution_prefix_at_watermarks(
         scope.wallet_public_id,
         scope.mode,
@@ -182,15 +184,15 @@ async def _verify_execution_prefix(
         )
         != certificate.prefix_annulment_digest
     ):
-        return _fallback("checkpoint_prefix_annulment_changed")
+        return _fallback("checkpoint_prefix_annulment_changed"), ()
     witness = prefix.get("fill_witness_cut")
     if (
         witness is None
         or witness["watermarks"] != certificate.prefix_venue_event_watermarks
         or witness["digest"] != certificate.prefix_fill_witness_digest
     ):
-        return _fallback("checkpoint_prefix_witness_changed")
-    return None
+        return _fallback("checkpoint_prefix_witness_changed"), ()
+    return None, tuple(prefix["annulments"])
 
 
 async def _verify_accounting_and_refs(
@@ -313,7 +315,12 @@ async def verify_checkpoint_for_resume(
         or certificate.anchor_digest != eligibility.expected_anchor_digest
     ):
         return _fallback("checkpoint_anchor_mismatch")
-    execution = await _verify_execution_prefix(repo, scope, record, frontier_as_of)
+    execution, prefix_annulments = await _verify_execution_prefix(
+        repo,
+        scope,
+        record,
+        frontier_as_of,
+    )
     if execution is not None:
         return execution
     accounting = await _verify_accounting_and_refs(
@@ -330,4 +337,8 @@ async def verify_checkpoint_for_resume(
         return event_fx
     if eligibility.has_late_execution:
         return _fallback("checkpoint_late_execution")
-    return PnlCheckpointResume(record=record, bundle=bundle)
+    return PnlCheckpointResume(
+        record=record,
+        bundle=bundle,
+        prefix_annulments=prefix_annulments,
+    )

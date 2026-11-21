@@ -472,6 +472,7 @@ from snapper.data.repository_types import PnlTimelineExecutionLineageRow
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineExecutionPrefixBundle
 from snapper.data.repository_types import PnlTimelineExecutionRow
+from snapper.data.repository_types import PnlTimelineExecutionSuffix
 from snapper.data.repository_types import PnlTimelineExecutionSuffixRequest
 from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
@@ -5471,7 +5472,7 @@ class Repository(ABC):
     async def get_pnl_timeline_execution_suffix_at_watermarks(
         self,
         request: PnlTimelineExecutionSuffixRequest,
-    ) -> list[PnlTimelineOpeningExecutionRow]:
+    ) -> PnlTimelineExecutionSuffix:
         """Read only suffix and deferred coordinates under the certified fold."""
         ...
 
@@ -20671,7 +20672,7 @@ class SQLAlchemyRepository(Repository):
         exchanges.update(request.deferred_execution_sequences)
         for exchange in sorted(exchanges):
             lower = request.cutoff_watermarks.get(exchange, 0)
-            upper = request.generation_watermarks.get(exchange, lower)
+            upper = request.generation_watermarks.get(exchange, 0)
             deferred = tuple(request.deferred_execution_sequences.get(exchange, ()))
             if lower >= upper and not deferred:
                 continue
@@ -22492,22 +22493,101 @@ class SQLAlchemyRepository(Repository):
         )
 
     @staticmethod
+    def _expected_pnl_timeline_suffix_coordinates(
+        request: PnlTimelineExecutionSuffixRequest,
+    ) -> set[tuple[str, int]]:
+        """Validate suffix bounds and return every required ``(exchange, seq)`` coordinate.
+
+        Args:
+            request: Cutoff, generation, deferred coordinates, scope, and horizon.
+
+        Returns:
+            Exact set of ``(exchange, scope_sequence)`` coordinates required for the suffix.
+
+        Raises:
+            ExecutionChainError: When any generation watermark regresses below its cutoff.
+        """
+        expected: set[tuple[str, int]] = set()
+        exchanges = sorted(
+            set(request.cutoff_watermarks)
+            | set(request.generation_watermarks)
+            | set(request.deferred_execution_sequences)
+        )
+        for exchange in exchanges:
+            cutoff = request.cutoff_watermarks.get(exchange, 0)
+            generation = request.generation_watermarks.get(exchange, 0)
+            if generation < cutoff:
+                raise ExecutionChainError(
+                    "regressed_execution_suffix_watermarks: "
+                    f"scope=({request.wallet_public_id}, {exchange}, {request.mode}) "
+                    f"cutoff={cutoff} generation={generation}"
+                )
+            for sequence in range(cutoff + 1, generation + 1):
+                expected.add((exchange, sequence))
+            for deferred in request.deferred_execution_sequences.get(exchange, ()):
+                expected.add((exchange, deferred))
+        return expected
+
+    @staticmethod
+    def _proven_pnl_timeline_execution_suffix_rows(
+        source: _PnlTimelineExecutionPrefixSource,
+        request: PnlTimelineExecutionSuffixRequest,
+    ) -> dict[tuple[str, int], tuple[Execution, Order | None, Instrument | None]]:
+        """Prove physical suffix and deferred rows before folding annulments.
+
+        Args:
+            source: Raw suffix executions and associated lineage inputs.
+            request: Suffix cutoff, generation, and deferred coordinates.
+
+        Returns:
+            Proven rows keyed by immutable ``(exchange, scope_sequence)`` coordinate.
+
+        Raises:
+            ExecutionChainError: If generation regresses below cutoff or any requested
+                coordinate is duplicated, superseded, or missing.
+        """
+        expected = SQLAlchemyRepository._expected_pnl_timeline_suffix_coordinates(request)
+        wallet_public_id = source.wallet_public_id
+        mode = source.mode
+        rows_by_coordinate: dict[tuple[str, int], tuple[Execution, Order | None, Instrument | None]]
+        rows_by_coordinate = {}
+        for execution, order, instrument in source.source_rows:
+            sequence = int(execution.scope_sequence)
+            key = (execution.exchange, sequence)
+            if key in rows_by_coordinate:
+                raise ExecutionChainError(
+                    "duplicate_execution_suffix_row: "
+                    f"scope=({wallet_public_id}, {execution.exchange}, {mode}) "
+                    f"scope_sequence={sequence}"
+                )
+            if execution.known_to != KNOWN_TO_MAX:
+                raise ExecutionChainError(
+                    "superseded_execution_row: "
+                    f"scope=({wallet_public_id}, {execution.exchange}, {mode}) "
+                    f"scope_sequence={sequence}"
+                )
+            rows_by_coordinate[key] = (execution, order, instrument)
+        missing = sorted(expected - set(rows_by_coordinate))
+        if missing:
+            raise ExecutionChainError(
+                "missing_execution_suffix_row: "
+                f"scope=({wallet_public_id}, {mode}) missing={missing}"
+            )
+        return rows_by_coordinate
+
+    @staticmethod
     def _validate_pnl_timeline_execution_suffix(
         source: _PnlTimelineExecutionPrefixSource,
-    ) -> list[PnlTimelineOpeningExecutionRow]:
-        """Fold only requested coordinates through the certified witness pipeline."""
-        rows_by_coordinate = {
-            (execution.exchange, int(execution.scope_sequence)): (execution, order, instrument)
-            for execution, order, instrument in source.source_rows
-        }
-        annulment_rows = [
-            row
-            for row in source.annulment_rows
-            if (row.exchange, row.scope_sequence) in rows_by_coordinate
-        ]
+        request: PnlTimelineExecutionSuffixRequest,
+    ) -> PnlTimelineExecutionSuffix:
+        """Prove requested suffix coordinates and fold through the certified witness pipeline."""
+        rows_by_coordinate = SQLAlchemyRepository._proven_pnl_timeline_execution_suffix_rows(
+            source,
+            request,
+        )
         fold = SQLAlchemyRepository._validated_execution_annulment_fold(
             _ExecutionAnnulmentFoldRequest(
-                annulment_rows=annulment_rows,
+                annulment_rows=source.annulment_rows,
                 executions_by_coordinate={
                     coordinate: execution
                     for coordinate, (execution, _, _) in rows_by_coordinate.items()
@@ -22525,13 +22605,16 @@ class SQLAlchemyRepository(Repository):
             source.fill_rows,
             source.order_instrument_ids_by_scope,
         )
-        return [
-            SQLAlchemyRepository._project_pnl_timeline_execution_candidate(
-                candidate,
-                shard_by_execution_public_id[candidate.execution.public_id],
-            )
-            for candidate in candidates
-        ]
+        return PnlTimelineExecutionSuffix(
+            executions=[
+                SQLAlchemyRepository._project_pnl_timeline_execution_candidate(
+                    candidate,
+                    shard_by_execution_public_id[candidate.execution.public_id],
+                )
+                for candidate in candidates
+            ],
+            annulments=fold.applied,
+        )
 
     @staticmethod
     async def _read_pnl_timeline_annulment_manifest(
@@ -23027,96 +23110,137 @@ class SQLAlchemyRepository(Repository):
                 _resolved_knowledge_horizon(as_of),
             )
 
+    async def _load_pnl_timeline_execution_suffix_from_full_prefix(
+        self,
+        s: AsyncSession,
+        request: PnlTimelineExecutionSuffixRequest,
+        expected_coordinates: set[tuple[str, int]],
+        horizon: _ExecutionKnowledgeHorizon,
+    ) -> PnlTimelineExecutionSuffix:
+        """Fall back to certifying the full prefix when ID-less fills are involved."""
+        full = await self._load_pnl_timeline_execution_prefix_for_watermarks(
+            s,
+            request.wallet_public_id,
+            request.mode,
+            _PnlTimelineExecutionCut(
+                request.generation_watermarks,
+                fill_witness_cut=request.fill_witness_cut,
+            ),
+            horizon,
+        )
+        return PnlTimelineExecutionSuffix(
+            executions=[
+                row
+                for row in full["executions"]
+                if (row["exchange"], row["scope_sequence"]) in expected_coordinates
+            ],
+            annulments=list(full["annulments"]),
+        )
+
+    async def _certify_pnl_timeline_execution_suffix(
+        self,
+        s: AsyncSession,
+        request: PnlTimelineExecutionSuffixRequest,
+        source_rows: list[tuple[Execution, Order | None, Instrument | None]],
+        horizon: _ExecutionKnowledgeHorizon,
+    ) -> PnlTimelineExecutionSuffix:
+        """Load lineage, fills, and manifest rows for bounded suffix validation."""
+        client_order_ids = list(
+            dict.fromkeys(
+                order.client_order_id
+                for _, order, _ in source_rows
+                if order is not None and order.client_order_id is not None
+            )
+        )
+        fill_rows = await self._read_pnl_timeline_fill_lineage(
+            s,
+            client_order_ids,
+            horizon.as_of,
+            request.fill_witness_cut,
+        )
+        order_instrument_ids_by_scope = await self._read_pnl_timeline_order_instrument_lineage(
+            s,
+            request.wallet_public_id,
+            request.mode,
+            client_order_ids,
+        )
+        symbol_public_ids = list(
+            dict.fromkeys(
+                instrument.symbol_public_id
+                for _, _, instrument in source_rows
+                if instrument is not None
+            )
+        )
+        native_symbols = await self._read_pnl_timeline_native_symbol_lineage(
+            s,
+            symbol_public_ids,
+        )
+        annulment_rows = await self._read_pnl_timeline_annulment_manifest(
+            s,
+            request.wallet_public_id,
+            request.mode,
+            horizon,
+        )
+        witnesses = await self._read_execution_annulment_contradiction_witnesses(
+            s,
+            [row.target_execution_public_id for row in annulment_rows],
+        )
+        return self._validate_pnl_timeline_execution_suffix(
+            _PnlTimelineExecutionPrefixSource(
+                wallet_public_id=request.wallet_public_id,
+                mode=request.mode,
+                watermarks=dict(request.generation_watermarks),
+                source_rows=source_rows,
+                fill_rows=fill_rows,
+                native_symbols_by_symbol_public_id=native_symbols,
+                order_instrument_ids_by_scope=order_instrument_ids_by_scope,
+                annulment_rows=annulment_rows,
+                annulment_witnesses=witnesses,
+            ),
+            request,
+        )
+
     async def get_pnl_timeline_execution_suffix_at_watermarks(
         self,
         request: PnlTimelineExecutionSuffixRequest,
-    ) -> list[PnlTimelineOpeningExecutionRow]:
+    ) -> PnlTimelineExecutionSuffix:
         """Certify only suffix and deferred rows inside one effective snapshot.
 
         Args:
             request: Cutoff, generation, deferred coordinates, scope, and horizon.
 
         Returns:
-            Effective opening rows ordered by exchange and scope sequence.
+            Effective opening rows and suffix-applied annulments in coordinate order.
         """
+        expected_coordinates = self._expected_pnl_timeline_suffix_coordinates(request)
         horizon = _resolved_knowledge_horizon(request.as_of)
         async with self.session() as s, s.begin():
             await self._begin_effective_execution_snapshot(s)
-            source_rows = await self._read_pnl_timeline_execution_suffix(s, request)
-            requested_keys = {
-                (execution.exchange, int(execution.scope_sequence))
-                for execution, _, _ in source_rows
-            }
-            if any(
-                execution.exec_id is None and execution.trade_id is None
-                for execution, _, _ in source_rows
-            ):
-                full = await self._load_pnl_timeline_execution_prefix_for_watermarks(
+            if request.prefix_has_idless_executions:
+                return await self._load_pnl_timeline_execution_suffix_from_full_prefix(
                     s,
-                    request.wallet_public_id,
-                    request.mode,
-                    _PnlTimelineExecutionCut(request.generation_watermarks),
+                    request,
+                    expected_coordinates,
                     horizon,
                 )
-                return [
-                    row
-                    for row in full["executions"]
-                    if (row["exchange"], row["scope_sequence"]) in requested_keys
-                ]
-            if not source_rows:
-                return []
-            client_order_ids = list(
-                dict.fromkeys(
-                    order.client_order_id
-                    for _, order, _ in source_rows
-                    if order is not None and order.client_order_id is not None
+            if not expected_coordinates:
+                return PnlTimelineExecutionSuffix(executions=[], annulments=[])
+            source_rows = await self._read_pnl_timeline_execution_suffix(s, request)
+            if any(
+                not any(self._pnl_timeline_execution_fill_ids(execution))
+                for execution, _, _ in source_rows
+            ):
+                return await self._load_pnl_timeline_execution_suffix_from_full_prefix(
+                    s,
+                    request,
+                    expected_coordinates,
+                    horizon,
                 )
-            )
-            fill_rows = await self._read_pnl_timeline_fill_lineage(
+            return await self._certify_pnl_timeline_execution_suffix(
                 s,
-                client_order_ids,
-                horizon.as_of,
-                None,
-            )
-            order_instrument_ids_by_scope = await self._read_pnl_timeline_order_instrument_lineage(
-                s,
-                request.wallet_public_id,
-                request.mode,
-                client_order_ids,
-            )
-            symbol_public_ids = list(
-                dict.fromkeys(
-                    instrument.symbol_public_id
-                    for _, _, instrument in source_rows
-                    if instrument is not None
-                )
-            )
-            native_symbols = await self._read_pnl_timeline_native_symbol_lineage(
-                s,
-                symbol_public_ids,
-            )
-            annulment_rows = await self._read_pnl_timeline_annulment_manifest(
-                s,
-                request.wallet_public_id,
-                request.mode,
+                request,
+                source_rows,
                 horizon,
-            )
-            witnesses = await self._read_execution_annulment_contradiction_witnesses(
-                s,
-                [row.target_execution_public_id for row in annulment_rows],
-            )
-            return self._validate_pnl_timeline_execution_suffix(
-                _PnlTimelineExecutionPrefixSource(
-                    wallet_public_id=request.wallet_public_id,
-                    mode=request.mode,
-                    watermarks=dict(request.generation_watermarks),
-                    source_rows=source_rows,
-                    fill_rows=fill_rows,
-                    native_symbols_by_symbol_public_id=native_symbols,
-                    order_instrument_ids_by_scope=order_instrument_ids_by_scope,
-                    annulment_rows=annulment_rows,
-                    annulment_witnesses=witnesses,
-                )
             )
 
     async def get_pnl_timeline_execution_prefix(

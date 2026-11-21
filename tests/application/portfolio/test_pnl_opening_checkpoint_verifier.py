@@ -335,3 +335,83 @@ async def test_valid_resume_uses_resuming_as_of_for_every_temporal_read(
     assert repo.symbol_ref_as_of_calls == [_RESUMING_AS_OF]
     assert [as_of for _, as_of in repo.lineage_calls] == [_RESUMING_AS_OF]
     assert repo.fx_exact_candidate_calls == [list(record.certificate.consumed_fx_open_ats)]
+
+
+async def test_capture_and_verify_with_accrual_only_instrument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a checkpoint when an instrument appears only via prefix accruals.
+
+    Given: An executed instrument and a second instrument touched only by a
+        prefix accrual before C, both with symbol references.
+    When: The checkpoint is captured at C and verified at the resuming horizon.
+    Then: Verification succeeds without falling back on symbol_ref_digest.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    capture._permit_capture(monkeypatch)
+    request = capture._request()
+    repo = capture._CaptureRepo()
+    repo._accruals = [fixtures._accrual_row(fixtures._I2, 4, 1.5, "USD")]
+    repo._refs = [
+        fixtures._ref(fixtures._I1, "BTC-EUR", "EUR"),
+        fixtures._ref(fixtures._I2, "ETH-USD", "USD"),
+    ]
+    result = await capture._build(repo, request)
+    assert result.checkpoint_write is not None
+    write = result.checkpoint_write
+    record = PnlOpeningCheckpointRecord(write.certificate, write.state_json, _RESUMING_AS_OF)
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert isinstance(outcome, PnlCheckpointResume)
+    assert set(outcome.bundle.engine_state.seen) == {fixtures._I1, fixtures._I2}
+
+
+async def test_capture_and_verify_with_deferred_execution_on_new_instrument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify a checkpoint when a deferred execution introduces a new instrument.
+
+    Given: An applied execution on I1 before C and a deferred execution on a new
+        instrument I2 after C within the same captured watermark cut.
+    When: The checkpoint is captured at C and verified at the resuming horizon.
+    Then: Verification succeeds without falling back on symbol_ref_digest.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    capture._permit_capture(monkeypatch)
+    request = replace(capture._request(), raw_execution_watermarks={"kraken": 2})
+    repo = capture._CaptureRepo()
+    repo._executions = [
+        fixtures._exec_row(fixtures._I1, 1, 3, "buy", 1.0, 100.0, 2.0, "EUR"),
+        fixtures._exec_row(fixtures._I2, 2, 6, "buy", 1.0, 50.0, 0.0, "USD"),
+    ]
+    repo._lineage = [
+        fixtures._lineage_row(row["order_public_id"], "rest") for row in repo._executions
+    ]
+    repo._refs = [
+        fixtures._ref(fixtures._I1, "BTC-EUR", "EUR"),
+        fixtures._ref(fixtures._I2, "ETH-USD", "USD"),
+    ]
+    repo._execution_watermarks = {"kraken": 2}
+    result = await capture._build(repo, request)
+    assert result.checkpoint_write is not None
+    write = result.checkpoint_write
+    record = PnlOpeningCheckpointRecord(write.certificate, write.state_json, _RESUMING_AS_OF)
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert isinstance(outcome, PnlCheckpointResume)
+    assert outcome.bundle.engine_state.seen == (fixtures._I1,)
+    assert outcome.record.certificate.deferred_execution_sequences == {"kraken": (2,)}
