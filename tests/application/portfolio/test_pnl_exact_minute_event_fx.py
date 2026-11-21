@@ -8,6 +8,7 @@ series points, replay metadata, rate sources, FX shadow evaluations and built
 shadow artifacts must agree, while event rows stop growing with chunk position.
 """
 
+import os
 import random
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable
@@ -22,11 +23,13 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import event
 from sqlalchemy import update
+from sqlalchemy.engine import make_url
 
 from snapper.application.portfolio import pnl_timeline_service
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
@@ -148,6 +151,27 @@ def _standard_candles(minutes: Iterable[int]) -> list[Candle]:
     ]
 
 
+async def _seed(
+    repository: SQLAlchemyRepository,
+    candles: Sequence[Candle],
+    symbols: Sequence[Symbol],
+    instruments: Sequence[Instrument],
+) -> None:
+    """Insert the standard planes, any extra listings and the given candles.
+
+    Args:
+        repository: Store whose FX tables already exist.
+        candles: Candles to store, inserted in the given order.
+        symbols: Additional symbols beyond the standard FX set.
+        instruments: Additional instruments beyond the standard FX set.
+    """
+    async with repository.session() as session:
+        session.add_all([*_symbols(), *symbols, *_instruments(), *instruments])
+        await session.flush()
+        session.add_all(candles)
+        await session.commit()
+
+
 class _Databases:
     """Create isolated real SQLite FX stores and dispose every engine at teardown."""
 
@@ -180,11 +204,7 @@ class _Databases:
         schema.dispose()
         repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{path}")
         self._created.append(repository)
-        async with repository.session() as session:
-            session.add_all([*_symbols(), *symbols, *_instruments(), *instruments])
-            await session.flush()
-            session.add_all(candles)
-            await session.commit()
+        await _seed(repository, candles, symbols, instruments)
         return repository
 
     async def dispose(self) -> None:
@@ -197,6 +217,72 @@ class _Databases:
 async def databases(tmp_path: Path) -> AsyncIterator[_Databases]:
     """Provide the SQLite store factory and release its engines afterwards."""
     factory = _Databases(tmp_path)
+    try:
+        yield factory
+    finally:
+        await factory.dispose()
+
+
+class _PostgresDatabases:
+    """Create isolated PostgreSQL FX databases and drop every one at teardown."""
+
+    def __init__(self, configured: str) -> None:
+        """Remember the maintenance URL used to create and drop databases."""
+        self._configured = configured
+        self._names: list[str] = []
+        self._created: list[SQLAlchemyRepository] = []
+
+    async def _admin(self, statement: str) -> None:
+        """Run one database-level statement outside a transaction.
+
+        Args:
+            statement: ``CREATE DATABASE`` or ``DROP DATABASE`` text.
+        """
+        maintenance = SQLAlchemyRepository(self._configured)
+        try:
+            async with maintenance.engine.connect() as connection:
+                admin = await connection.execution_options(isolation_level="AUTOCOMMIT")
+                await admin.exec_driver_sql(statement)
+        finally:
+            await maintenance.engine.dispose()
+
+    async def create(self, candles: Sequence[Candle]) -> SQLAlchemyRepository:
+        """Create one database holding the standard planes and these candles.
+
+        Args:
+            candles: Candles to store, inserted in the given order.
+
+        Returns:
+            A repository over the populated PostgreSQL database.
+        """
+        name = f"pnl_exact_fx_{uuid4().hex}"
+        await self._admin(f'CREATE DATABASE "{name}"')
+        self._names.append(name)
+        target = make_url(self._configured).set(database=name)
+        repository = SQLAlchemyRepository(target.render_as_string(hide_password=False))
+        self._created.append(repository)
+        async with repository.engine.begin() as connection:
+            for table in (Symbol.__table__, Instrument.__table__, Candle.__table__):
+                await connection.run_sync(table.create)
+        await _seed(repository, candles, (), ())
+        return repository
+
+    async def dispose(self) -> None:
+        """Dispose every engine and drop every database this helper created."""
+        for repository in self._created:
+            await repository.engine.dispose()
+        for name in self._names:
+            await self._admin(f'DROP DATABASE IF EXISTS "{name}"')
+
+
+@pytest.fixture
+async def postgres_databases() -> AsyncIterator[_PostgresDatabases]:
+    """Provide isolated PostgreSQL stores when an opt-in server URL is configured."""
+    configured = os.environ.get("PNL_TEST_POSTGRES_URL")
+    if configured is None:
+        pytest.skip("requires isolated PNL_TEST_POSTGRES_URL")
+    assert make_url(configured).get_backend_name() == "postgresql"
+    factory = _PostgresDatabases(configured)
     try:
         yield factory
     finally:
@@ -414,33 +500,58 @@ def _without_candle_uuid(row: PnlFxRateRow) -> PnlFxRateRow:
     return {**row, "candle_public_id": ""}
 
 
+def _row_identity(row: PnlFxRateRow) -> tuple[datetime, str, str, str, int]:
+    """Order rows by the repository sort key, then by durable candle identity."""
+    return (row["open_at"], row["base"], row["quote"], row["exchange"], row["candle_id"])
+
+
 def _comparable(
-    evaluations: Sequence[FxShadowEvaluation], *, fresh_stores: bool
+    evaluations: Sequence[FxShadowEvaluation], *, fresh_stores: bool, tie_insensitive: bool
 ) -> list[FxShadowEvaluation]:
-    """Normalise store-generated candle UUIDs only when replays used separate stores."""
-    if not fresh_stores:
-        return list(evaluations)
-    return [
-        replace(evaluation, rows=tuple(_without_candle_uuid(row) for row in evaluation.rows))
-        for evaluation in evaluations
-    ]
+    """Normalise what may legitimately differ between two reads of one store.
+
+    Args:
+        evaluations: Shadow evaluations collected by one replay.
+        fresh_stores: Whether replays seeded separate stores, so candle UUIDs differ.
+        tie_insensitive: Whether rows tying on the repository sort key may arrive
+            in a different order, as PostgreSQL leaves them unordered.
+
+    Returns:
+        Evaluations with only those differences removed.
+    """
+    comparable: list[FxShadowEvaluation] = []
+    for evaluation in evaluations:
+        rows = evaluation.rows
+        if fresh_stores:
+            rows = tuple(_without_candle_uuid(row) for row in rows)
+        if tie_insensitive:
+            rows = tuple(sorted(rows, key=_row_identity))
+        comparable.append(replace(evaluation, rows=rows))
+    return comparable
 
 
-def _assert_parity(exact: _Run, dense: _Run, *, fresh_stores: bool = False) -> None:
+def _assert_parity(
+    exact: _Run, dense: _Run, *, fresh_stores: bool = False, tie_insensitive: bool = False
+) -> None:
     """Assert identical series output, shadow evaluations and built artifacts.
 
     Args:
         exact: Replay using the exact event read.
         dense: Replay using the original interval or dense event read.
         fresh_stores: Whether each replay seeded its own store, so candle UUIDs differ.
+        tie_insensitive: Whether evidence rows tying on the sort key may be reordered.
     """
     assert exact.result.points == dense.result.points
     assert exact.result.replay_metadata == dense.result.replay_metadata
     assert exact.result.replay_metadata is not None
     assert exact.result.rate_sources == dense.result.rate_sources
     assert exact.result == dense.result
-    exact_evaluations = _comparable(exact.evaluations, fresh_stores=fresh_stores)
-    dense_evaluations = _comparable(dense.evaluations, fresh_stores=fresh_stores)
+    exact_evaluations = _comparable(
+        exact.evaluations, fresh_stores=fresh_stores, tie_insensitive=tie_insensitive
+    )
+    dense_evaluations = _comparable(
+        dense.evaluations, fresh_stores=fresh_stores, tie_insensitive=tie_insensitive
+    )
     assert exact_evaluations == dense_evaluations
     assert _artifacts(exact_evaluations) == _artifacts(dense_evaluations)
     assert exact.repo.fx_exact_minute_calls
@@ -843,3 +954,79 @@ async def test_basket_keeps_its_lookback_pin_and_missing_rate_reason(
         assert fake.fx_exact_candidate_calls == []
         assert fake.fx_exact_minute_calls == []
         assert fake.fx_range_calls
+
+
+async def test_postgres_exact_reads_match_dense_rows_and_planes(
+    postgres_databases: _PostgresDatabases,
+) -> None:
+    """PostgreSQL exact reads return the dense rows and planes at their minutes.
+
+    Given: Shuffled PostgreSQL inserts of every plane with gaps and duplicates.
+    When: Exact discovery and loading run beside the range and per-minute reads.
+    Then: Exact rows keep the sort key and equal the dense rows at those minutes
+    as a multiset, and the discovered planes equal the per-minute union.
+    """
+    candles = _standard_candles(range(-30, 11))
+    random.Random(11).shuffle(candles)
+    database = await postgres_databases.create(candles)
+    horizon = _m(12)
+    planes = sorted(
+        {
+            (base, quote, exchange)
+            for _, symbol, exchange in _INSTRUMENTS
+            for public_id, _, base, quote in _SYMBOLS
+            if public_id == symbol
+        }
+    )
+    pairs = [("EUR", "USD"), ("USD", "EUR"), ("PLN", "USD"), ("USD", "PLN")]
+    opens = [_m(minute - 1) for minute in (-20, -7, 1, 2, 5, 6, 9)]
+    dense = await database.get_pnl_fx_rate_candles(planes, _m(-31), _m(10), horizon)
+    exact = await database.get_pnl_fx_rate_candles_at(planes, list(reversed(opens)), horizon)
+    wanted = set(opens)
+    restricted = [row for row in dense if row["open_at"] in wanted]
+    assert [_row_identity(row)[:4] for row in exact] == [
+        _row_identity(row)[:4] for row in restricted
+    ]
+    assert sorted(exact, key=_row_identity) == sorted(restricted, key=_row_identity)
+    duplicates = [row for row in exact if row["exchange"] == "kraken" and row["base"] == "EUR"]
+    assert len(duplicates) > len({row["open_at"] for row in duplicates})
+    per_minute: set[PnlFxRatePlane] = set()
+    for open_at in opens:
+        per_minute.update(
+            await database.get_pnl_fx_rate_exchanges(pairs, open_at, open_at, horizon)
+        )
+    discovered = await database.get_pnl_fx_rate_exchanges_at(pairs, opens, horizon)
+    assert discovered == sorted(per_minute)
+
+
+@pytest.mark.parametrize("event_layout", ["sparse", "fragmented"])
+async def test_postgres_exact_event_read_matches_dense_series(
+    postgres_databases: _PostgresDatabases,
+    monkeypatch: pytest.MonkeyPatch,
+    event_layout: str,
+) -> None:
+    """PostgreSQL pointwise series and shadow artifacts match the dense oracle.
+
+    Given: Every FX minute stored in PostgreSQL with equal and conflicting duplicates.
+    When: One shadow-pinned chunk replays with the exact read and the dense oracle.
+    Then: The series and the built artifacts are identical as returned, and the
+    evaluations are identical once rows tying on the sort key are ordered.
+    """
+    eur_fills, pln_fills = _EVENT_LAYOUTS[event_layout]
+    window = range(0, 10)
+    required = [*eur_fills, *pln_fills, *window]
+    database = await postgres_databases.create(
+        _standard_candles(range(min(required) - 25, window[-1] + 2))
+    )
+    scenario = _scenario(eur_fills, pln_fills, window)
+
+    async def make_repo() -> _RealFxRepo:
+        """Serve the shared read-only store through a fresh recorder."""
+        return _RealFxRepo(database, scenario)
+
+    exact, dense = await _exact_and_dense(make_repo, window, monkeypatch, shadow=True)
+
+    _assert_parity(exact, dense, tie_insensitive=True)
+    assert exact.evaluations
+    assert _artifacts(exact.evaluations) == _artifacts(dense.evaluations)
+    assert sum(exact.repo.exact_rows) < dense.repo.range_rows[1]
