@@ -23,6 +23,7 @@ import snapper.cli.daily_partitions as daily_partitions_cli
 from snapper.cli.app import app
 from snapper.cli.daily_partitions import _require_safe_adoption_load
 from snapper.cli.daily_partitions import daily_partitions_app
+from snapper.data.daily_partitions import AnalyzeResult
 from snapper.data.daily_partitions import DailyPartitionError
 from snapper.data.daily_partitions import LifecycleAction
 from snapper.data.daily_partitions import LifecycleResult
@@ -650,6 +651,16 @@ def test_ensure_cli_apply_uses_the_current_anchor_and_disposes() -> None:
             "snapper.cli.daily_partitions.ensure_future_leaves",
             return_value=result_value,
         ) as ensure,
+        patch(
+            "snapper.cli.daily_partitions.analyze_rollover_targets",
+            return_value=AnalyzeResult(
+                targets=(),
+                statements=(),
+                executed=(),
+                skipped=(),
+                skipped_dialect="sqlite",
+            ),
+        ) as post_analyze,
     ):
         result = runner.invoke(
             daily_partitions_app,
@@ -659,6 +670,12 @@ def test_ensure_cli_apply_uses_the_current_anchor_and_disposes() -> None:
     assert result.exit_code == 0, result.stderr
     assert "action: ensured" in result.stdout
     ensure.assert_called_once_with(
+        connection,
+        "ticks",
+        _ANCHOR_VALUE,
+        dry_run=False,
+    )
+    post_analyze.assert_called_once_with(
         connection,
         "ticks",
         _ANCHOR_VALUE,

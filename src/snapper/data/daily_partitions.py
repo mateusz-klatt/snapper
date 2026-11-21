@@ -11,6 +11,7 @@ existing sequence ownership to the parent.
 Mutation defaults are dry-run. Callers must pass ``dry_run=False`` explicitly.
 """
 
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -39,6 +40,13 @@ CUTOVER_STATEMENT_TIMEOUT: Final[str] = "30s"
 VALIDATION_STATEMENT_TIMEOUT: Final[str] = "12h"
 INDEX_BUILD_STATEMENT_TIMEOUT: Final[str] = "12h"
 INDEX_BUILD_MAINTENANCE_WORK_MEM: Final[str] = "64MB"
+ANALYZE_LOCK_TIMEOUT: Final[str] = "2s"
+ANALYZE_LEAF_STATEMENT_TIMEOUT: Final[str] = "60s"
+ANALYZE_PARENT_STATEMENT_TIMEOUT: Final[str] = "300s"
+DEFAULT_STALE_ANALYZE_LIMIT: Final[int] = 200
+_ANALYZE_SKIPPABLE_SQLSTATES: Final[frozenset[str]] = frozenset({"55P03", "57014"})
+_DAILY_SUFFIX_PATTERN: Final[re.Pattern[str]] = re.compile(r"_d(\d{8})$")
+logger = logging.getLogger(__name__)
 _ACTIVE_KNOWN_TO: Final[datetime] = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
 _ANCHOR_PATTERN: Final[re.Pattern[str]] = re.compile(r"\d{4}-\d{2}-\d{2}T00:00:00\+00:00")
 _SET_LOCAL_TIME_ZONE_UTC: Final[str] = "SET LOCAL TIME ZONE 'UTC'"
@@ -182,6 +190,33 @@ class LifecycleResult:
     statements: tuple[str, ...]
     future_leaf_count: int
     future_leaf_alarm: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _AnalyzeTarget:
+    """Internal PostgreSQL relation descriptor for bounded ANALYZE execution."""
+
+    relation: str
+    is_parent: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyzeResult:
+    """Planned or executed planner-statistics ANALYZE outcome.
+
+    Attributes:
+        targets: Ordered relation names targeted in ``public``.
+        statements: Ordered SQL statements planned or executed.
+        executed: Relation names whose ``ANALYZE`` transaction committed.
+        skipped: Relation names skipped after bounded lock or statement timeout.
+        skipped_dialect: Non-PostgreSQL dialect name when execution was bypassed.
+    """
+
+    targets: tuple[str, ...]
+    statements: tuple[str, ...]
+    executed: tuple[str, ...]
+    skipped: tuple[str, ...]
+    skipped_dialect: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3097,3 +3132,276 @@ def _range_bound_matches(
     if lower is None:
         return "MINVALUE" in bound.upper() and parsed == [upper]
     return parsed == [lower, upper]
+
+
+def _parse_daily_suffix_day(relation: str) -> date | None:
+    """Parse a trailing ``_dYYYYMMDD`` date suffix when present and valid.
+
+    Args:
+        relation: Catalog relation name.
+
+    Returns:
+        Calendar date extracted from the suffix, or ``None`` if absent or invalid.
+    """
+    match = _DAILY_SUFFIX_PATTERN.search(relation)
+    if match is None:
+        return None
+    raw = match.group(1)
+    try:
+        return date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
+    except ValueError:
+        return None
+
+
+def _analyze_sql(target: _AnalyzeTarget) -> str:
+    """Render safe single-relation ``ANALYZE (SKIP_LOCKED)`` SQL.
+
+    Partitioned parents MUST use ``ANALYZE (SKIP_LOCKED) ONLY ...`` so PG18
+    updates parent-level statistics explicitly without recursing over children.
+
+    Args:
+        target: Validated catalog-sourced or allowlisted target descriptor.
+
+    Returns:
+        Quoted ``ANALYZE (SKIP_LOCKED)`` statement scoped to ``public``.
+    """
+    qualified = f"{_quote_identifier('public')}.{_quote_identifier(target.relation)}"
+    if target.is_parent:
+        return f"ANALYZE (SKIP_LOCKED) ONLY {qualified}"
+    return f"ANALYZE (SKIP_LOCKED) {qualified}"
+
+
+def _run_analyze_targets(
+    connection: Connection,
+    targets: tuple[_AnalyzeTarget, ...],
+    *,
+    dry_run: bool,
+) -> AnalyzeResult:
+    """Plan or execute per-relation ``ANALYZE`` outside long transactions.
+
+    Partitioned parents run with ``ANALYZE_PARENT_STATEMENT_TIMEOUT`` (300s)
+    whereas individual leaves and ordinary tables use
+    ``ANALYZE_LEAF_STATEMENT_TIMEOUT`` (60s), because PostgreSQL samples across
+    every attached child partition when building ``ONLY`` parent histograms
+    even without scanning individual heaps deeply. Every relation runs in its
+    own short committed transaction under ``lock_timeout = '2s'`` and
+    ``SKIP_LOCKED`` so writers are never blocked.
+
+    Args:
+        connection: Clean PostgreSQL connection in ``public``.
+        targets: Ordered targets to plan or analyze.
+        dry_run: When true, return DDL without running transactions.
+
+    Returns:
+        Exact planned, committed, and timeout-skipped relation summary.
+
+    Raises:
+        DailyPartitionError: If PostgreSQL fails with a non-timeout error.
+    """
+    target_names = tuple(target.relation for target in targets)
+    statements = tuple(_analyze_sql(target) for target in targets)
+    if dry_run or not targets:
+        return AnalyzeResult(
+            targets=target_names,
+            statements=statements,
+            executed=(),
+            skipped=(),
+        )
+    executed: list[str] = []
+    skipped: list[str] = []
+    for target, statement in zip(targets, statements, strict=True):
+        statement_timeout = (
+            ANALYZE_PARENT_STATEMENT_TIMEOUT if target.is_parent else ANALYZE_LEAF_STATEMENT_TIMEOUT
+        )
+        try:
+            with connection.begin():
+                connection.execute(text(_SET_LOCAL_TIME_ZONE_UTC))
+                connection.execute(text(f"SET LOCAL lock_timeout = '{ANALYZE_LOCK_TIMEOUT}'"))
+                connection.execute(text(f"SET LOCAL statement_timeout = '{statement_timeout}'"))
+                connection.execute(text(statement))
+        except DBAPIError as error:
+            sqlstate = _sqlstate(error)
+            if sqlstate not in _ANALYZE_SKIPPABLE_SQLSTATES:
+                raise DailyPartitionError(
+                    f"ANALYZE failed for {target.relation}: {error}"
+                ) from error
+            logger.warning(
+                "Skipping PostgreSQL ANALYZE for %s after SQLSTATE %s",
+                target.relation,
+                sqlstate,
+            )
+            skipped.append(target.relation)
+            continue
+        executed.append(target.relation)
+    return AnalyzeResult(
+        targets=target_names,
+        statements=statements,
+        executed=tuple(executed),
+        skipped=tuple(skipped),
+    )
+
+
+def analyze_rollover_targets(
+    connection: Connection,
+    table: MarketDataTable,
+    anchor: datetime | None = None,
+    *,
+    dry_run: bool = True,
+) -> AnalyzeResult:
+    """Analyze the just-closed daily leaf and parent after partition rollover.
+
+    Intended to run after DDL transactions commit so ``ACCESS EXCLUSIVE`` has
+    already been released. Returns a typed no-op on non-PostgreSQL dialects.
+
+    Args:
+        connection: Clean SQLAlchemy connection.
+        table: Statically allowlisted market-data table.
+        anchor: Rollover UTC midnight; defaults to ``current_utc_anchor()``.
+        dry_run: When true, return ordered statements without executing them.
+
+    Returns:
+        Rollover ``ANALYZE`` outcome or SQLite dialect no-op.
+
+    Raises:
+        DailyPartitionError: If the relation is missing/unsupported or fails.
+        ValueError: If ``table`` or ``anchor`` is invalid.
+    """
+    spec = _spec(table)
+    effective_anchor = current_utc_anchor() if anchor is None else _validate_anchor(anchor)
+    if connection.dialect.name != "postgresql":
+        return AnalyzeResult(
+            targets=(),
+            statements=(),
+            executed=(),
+            skipped=(),
+            skipped_dialect=connection.dialect.name,
+        )
+    _require_clean_connection(connection)
+    _require_public_schema(connection)
+    relation_kind = cast(
+        str | None,
+        connection.scalar(
+            text("""
+                SELECT c.relkind::text
+                FROM pg_class AS c
+                JOIN pg_namespace AS n ON n.oid = c.relnamespace
+                WHERE n.nspname = current_schema()
+                  AND c.relname = :table
+                """),
+            {"table": spec.table},
+        ),
+    )
+    if relation_kind == "p":
+        partitions = _direct_partitions(connection, spec)
+        connection.rollback()
+        yesterday_leaf = _daily_name(spec, effective_anchor - timedelta(days=1))
+        attached_names = {item.name for item in partitions}
+        targets_list: list[_AnalyzeTarget] = []
+        if yesterday_leaf in attached_names:
+            targets_list.append(_AnalyzeTarget(yesterday_leaf, is_parent=False))
+        targets_list.append(_AnalyzeTarget(spec.table, is_parent=True))
+        targets = tuple(targets_list)
+    elif relation_kind == "r":
+        connection.rollback()
+        targets = (_AnalyzeTarget(spec.table, is_parent=False),)
+    else:
+        connection.rollback()
+        state = _relation_state(relation_kind)
+        raise DailyPartitionError(
+            f"refused: {spec.table} cannot be analyzed in state {state.value}"
+        )
+    return _run_analyze_targets(connection, targets, dry_run=dry_run)
+
+
+def _stale_sort_key(row: tuple[str, str, bool]) -> tuple[int, int, str]:
+    """Order parents first, then ordinary tables, then newest daily leaves."""
+    relation, relation_kind, is_partition = row
+    if relation_kind == "p":
+        return (0, 0, relation)
+    if not is_partition:
+        return (1, 0, relation)
+    leaf_day = _parse_daily_suffix_day(relation)
+    if leaf_day is not None:
+        return (2, -leaf_day.toordinal(), relation)
+    return (3, 0, relation)
+
+
+def _select_stale_targets(
+    rows: list[tuple[str, str, bool]],
+    *,
+    today: date,
+    limit: int,
+) -> tuple[_AnalyzeTarget, ...]:
+    """Exclude future daily leaves without relation locks and apply priority cap."""
+    eligible: list[tuple[str, str, bool]] = []
+    for relation, relation_kind, is_partition in rows:
+        if is_partition:
+            leaf_day = _parse_daily_suffix_day(relation)
+            if leaf_day is not None and leaf_day > today:
+                continue
+        eligible.append((relation, relation_kind, is_partition))
+    ordered = sorted(eligible, key=_stale_sort_key)[:limit]
+    return tuple(
+        _AnalyzeTarget(relation=relation, is_parent=(relation_kind == "p"))
+        for relation, relation_kind, _is_partition in ordered
+    )
+
+
+def analyze_stale_relations(
+    connection: Connection,
+    *,
+    limit: int = DEFAULT_STALE_ANALYZE_LIMIT,
+    today: date | None = None,
+    dry_run: bool = True,
+) -> AnalyzeResult:
+    """Analyze PostgreSQL relations whose cumulative analyze timestamps are NULL.
+
+    Queries ``pg_class`` left-joined to ``pg_stat_user_tables`` in
+    ``current_schema()`` for ``last_analyze IS NULL AND last_autoanalyze IS NULL``,
+    filters out future daily leaves (``day > today UTC``) in Python so discovery
+    acquires no relation locks, and rolls back the snapshot before running per-table
+    ``ANALYZE`` transactions. Returns a clean no-op on SQLite and other non-PG
+    dialects.
+
+    Args:
+        connection: Clean SQLAlchemy connection.
+        limit: Maximum relations to target in one invocation (must be ``>= 1``).
+        today: UTC calendar date separating past/today leaves from future ones.
+        dry_run: When true, return ordered statements without executing them.
+
+    Returns:
+        Stale-stats ``ANALYZE`` outcome or non-PostgreSQL dialect no-op.
+
+    Raises:
+        DailyPartitionError: If connection/schema invariants fail or SQL errors.
+        ValueError: If ``limit < 1``.
+    """
+    if limit < 1:
+        raise ValueError("stale analyze limit must be >= 1")
+    if connection.dialect.name != "postgresql":
+        return AnalyzeResult(
+            targets=(),
+            statements=(),
+            executed=(),
+            skipped=(),
+            skipped_dialect=connection.dialect.name,
+        )
+    _require_clean_connection(connection)
+    _require_public_schema(connection)
+    rows = connection.execute(text("""
+            SELECT c.relname::text,
+                   c.relkind::text,
+                   c.relispartition
+            FROM pg_class AS c
+            JOIN pg_namespace AS n ON n.oid = c.relnamespace
+            LEFT JOIN pg_stat_user_tables AS s ON s.relid = c.oid
+            WHERE n.nspname = current_schema()
+              AND c.relkind IN ('r', 'p')
+              AND s.last_analyze IS NULL
+              AND s.last_autoanalyze IS NULL
+            """)).all()
+    connection.rollback()
+    effective_today = current_utc_anchor().date() if today is None else today
+    catalog_rows = [(cast(str, row[0]), cast(str, row[1]), cast(bool, row[2])) for row in rows]
+    targets = _select_stale_targets(catalog_rows, today=effective_today, limit=limit)
+    return _run_analyze_targets(connection, targets, dry_run=dry_run)
