@@ -53,9 +53,11 @@ chunk-shared ``_ReplayRecoveryWork`` reserve raises ``PnlTimelineWorkBudgetError
 PR-1 changes only repair obligation (``unrepairable_withheld_minutes`` and
 ``repair_from``), never valuation (calc version stays ``5C.5``). Under guard R1,
 a minute is marked unrepairable only if no active sample row survives the chunk's
-edit; a ``*_sum_unrepresentable`` minute that retains an existing row through
-:func:`preserves_persisted_row` stays repairable because determinism of the new
-refusal proves nothing about an older retained row.
+edit; a ``*_sum_unrepresentable`` minute retains an existing row through
+:func:`preserves_persisted_row` only when its ``calc_version`` matches the
+correction key (staying repairable because determinism of the new refusal proves
+nothing about that retained row), whereas a foreign-version row is retracted and
+the minute can therefore be exempt.
 """
 
 
@@ -131,11 +133,11 @@ def _is_unrepairable_withhold(
 ) -> bool:
     """Classify a withheld minute as unrepairable only when deterministic and rowless (R1).
 
-    PR-1 alters only repair obligation, never valuation or ``_withhold``'s
-    row-retention rules. Empty-code and mixed-reason withholds (such as
-    ``missing_series_minute`` and ``foreign_epoch_sample``) stay repairable, and
-    any ``*_sum_unrepresentable`` withhold that retains an existing row via
-    :func:`preserves_persisted_row` stays repairable under R1.
+    Empty-code and mixed-reason withholds (such as ``missing_series_minute`` and
+    ``foreign_epoch_sample``) stay repairable. A ``*_sum_unrepresentable``
+    withhold that retains a same-``calc_version`` row via
+    :func:`preserves_persisted_row` stays repairable under R1, whereas one whose
+    foreign-version row is retracted leaves no active row and is therefore exempt.
 
     Args:
         withheld: The withheld minute and its causal ``PnlIncompletenessReason`` codes.
@@ -159,10 +161,15 @@ def _withhold(
     existing: PnlCorrectionSampleVersion | None,
     prior_peak: float | None,
 ) -> _MinuteCorrection:
-    """Keep an allowed same-epoch witness or retract the exact unsupported version."""
+    """Keep an allowed same-calc-version witness or retract the observed version.
+
+    Row-preserving reasons retain an active row only when its ``calc_version``
+    matches ``key.calc_version``; foreign-version rows are retracted so they
+    cannot pin ``repair_from`` under guard R1.
+    """
     if existing is None:
         return _MinuteCorrection(None, withheld, prior_peak)
-    if preserves_persisted_row(withheld):
+    if preserves_persisted_row(withheld) and existing.row["calc_version"] == key.calc_version:
         return _MinuteCorrection(None, withheld, _retained_peak(key, existing.row, prior_peak))
     return _MinuteCorrection(
         PnlCorrectionEdit(withheld.point_time, existing, None), withheld, prior_peak
@@ -223,8 +230,9 @@ def plan_correction_chunk(inputs: PnlCorrectionPlanInputs) -> PlannedPnlCorrecti
     Classifies deterministic reconciliation and ``*_sum_unrepresentable`` withholds
     as unrepairable only when all ``reason_codes`` are non-empty and in
     :data:`REPAIR_EXEMPT_WITHHOLD_REASONS` and no active row survives the planned
-    edit (guard R1: a retained row under :func:`preserves_persisted_row` keeps its
-    repair obligation, and PR-1 changes only repair obligation, never valuation).
+    edit (guard R1: a same-``calc_version`` row retained under
+    :func:`preserves_persisted_row` keeps its repair obligation, while a
+    foreign-version row is retracted).
     On frozen snapshotter inputs, ``*_sum_unrepresentable`` is deterministic across
     chunk widths because ``recovery_budget_per_point`` gives each point a fresh
     count-based ``FaithfulRecoveryBudget``, ``MAX_RECOVERY_KEYS`` depends solely on

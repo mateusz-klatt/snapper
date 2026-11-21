@@ -40,6 +40,8 @@ from snapper.data.models import Execution
 from snapper.data.models import PortfolioPnlPoint
 from snapper.data.models import VenueEvent
 from snapper.data.models import WalletCredential
+from snapper.data.pnl_correction_state import PnlCorrectionChunk
+from snapper.data.pnl_correction_state import PnlCorrectionEdit
 from snapper.data.pnl_correction_state import PnlCorrectionEvidence
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlCorrectionKey
@@ -47,6 +49,7 @@ from snapper.data.repository import PortfolioPnlSampleQuery
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
+from snapper.data.repository_types import PortfolioPnlSampleRow
 from tests.application.portfolio import test_pnl_snapshot_planner as planner_fixtures
 from tests.application.portfolio import test_pnl_snapshotter as series_fixtures
 from tests.application.portfolio import test_pnl_timeline as timeline_fixtures
@@ -400,6 +403,107 @@ async def test_r1_retained_sum_unrepresentable_pins_repair_from_and_gates_curren
         assert overlay_settled.equity_overlay_at(_M1).equity == 1000.0
         assert overlay_settled.equity_overlay_at(_M2).equity == 2500.0
         assert overlay_settled.equity_overlay_at(_M3).equity == 1000.0
+
+
+async def _seed_foreign_sample(
+    repo: SQLAlchemyRepository,
+    scope: PortfolioPnlSampleScope,
+    minute: datetime,
+    calc_version: str,
+) -> None:
+    """Persist an active complete sample of a foreign calculation version."""
+    foreign_row: PortfolioPnlSampleRow = samples._mutate(
+        samples._complete_sample(minute),
+        epoch_public_id=scope.epoch_public_id,
+        calc_version=calc_version,
+        cash_usd=2500.0,
+        position_value_usd=0.0,
+        drawdown=0.0,
+    )
+    async with repo.session() as session:
+        session.add(
+            PortfolioPnlPoint(
+                **repo._portfolio_pnl_sample_orm_kwargs(foreign_row),
+                known_to=KNOWN_TO_MAX,
+            )
+        )
+        await session.commit()
+
+
+async def test_foreign_calc_version_sum_unrepresentable_retracts_and_settles_repair_from(
+    db_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retract a foreign calc_version row on sum_unrepresentable and settle repair_from.
+
+    Given: An active complete 5C.4 sample seeded at M2 in SQLite or opt-in PostgreSQL.
+    When: A correction generation replays M1..M3 with M2 withheld purely as
+        instrument_sum_unrepresentable and commits through the repository fence.
+    Then: The fence accepts the retraction of that exact 5C.4 version, the foreign row is
+        no longer active, M2 is in unrepairable_withheld_minutes, and repair_from settles
+        to None without borrowing the foreign equity peak or re-replaying M2 at M4.
+    """
+    scope = await _seed_scope(db_url)
+    reads: list[tuple[datetime, datetime, bool]] = []
+    state: dict[str, object] = {
+        "seq": 1,
+        "affected": None,
+        "m2_reason": "instrument_sum_unrepresentable",
+    }
+    _install_scripted_series(monkeypatch, state, reads)
+
+    async with _repository(db_url) as repo:
+        await _seed_foreign_sample(repo, scope, _M2, "5C.4")
+        observed_before = await repo.get_portfolio_pnl_correction_evidence(scope, _M2, _M2)
+        (foreign_version,) = observed_before.versions
+        assert foreign_version.row["calc_version"] == "5C.4"
+
+        committed_chunks: list[PnlCorrectionChunk] = []
+        original_commit = repo.commit_portfolio_pnl_correction_chunk
+
+        async def record_commit(
+            commit_scope: PortfolioPnlSampleScope,
+            current: PnlCorrectionFrontier,
+            chunk: PnlCorrectionChunk,
+        ) -> PnlCorrectionFrontier:
+            """Forward chunk commit to the repository fence while recording the plan."""
+            committed_chunks.append(chunk)
+            return await original_commit(commit_scope, current, chunk)
+
+        monkeypatch.setattr(repo, "commit_portfolio_pnl_correction_chunk", record_commit)
+        await PortfolioPnlSnapshotter(
+            repo=repo, disabled=False, clock=lambda: _M3 + timedelta(minutes=2)
+        )._tick_once()
+
+        (chunk,) = committed_chunks
+        assert chunk.withheld_minutes == (_M2,)
+        assert chunk.unrepairable_withheld_minutes == (_M2,)
+        assert PnlCorrectionEdit(_M2, foreign_version, None) in chunk.edits
+        after_commit = await repo.get_portfolio_pnl_correction_evidence(scope, _M2, _M2)
+        assert after_commit.versions == ()
+        foreign_query = replace(_query(scope, require_reconciled=False), calc_version="5C.4")
+        assert await repo.get_portfolio_pnl_samples(foreign_query, _M1, _M3) == []
+
+        settled = await _frontier(repo, scope)
+        assert settled.next_minute is None
+        assert settled.repair_from is None
+        assert settled.baseline_watermarks == {"kraken": 1}
+        assert settled.prior_peak == 1000.0
+        reconciled = await repo.get_portfolio_pnl_samples(
+            _query(scope, require_reconciled=True), _M1, _M3
+        )
+        assert [row["point_time"] for row in reconciled] == [_M1, _M3]
+        assert [row["drawdown"] for row in reconciled] == [0.0, 0.0]
+
+        reads.clear()
+        state.update(seq=1, affected=None, m2_reason=None)
+        await PortfolioPnlSnapshotter(
+            repo=repo, disabled=False, clock=lambda: _M4 + timedelta(minutes=2)
+        )._tick_once()
+        advanced = await _frontier(repo, scope)
+        assert advanced.repair_from is None
+        assert advanced.tip == _M4
+        assert [entry for entry in reads if not entry[2]] == [(_M4, _M4, False)]
 
 
 def _unrepresentable_fee_constellation(

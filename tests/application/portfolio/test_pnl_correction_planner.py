@@ -193,7 +193,6 @@ def test_foreign_epoch_is_retained_and_its_equity_never_affects_the_running_peak
         (PNL_SAMPLE_CALC_VERSION, "complete", None, 2500.0, 0.6),
         (PNL_SAMPLE_CALC_VERSION, "complete", 5000.0, 5000.0, 0.8),
         (PNL_SAMPLE_CALC_VERSION, "incomplete", None, 1000.0, 0.0),
-        ("5C.3", "complete", None, 1000.0, 0.0),
     ],
 )
 def test_only_retained_current_complete_rows_raise_the_peak(
@@ -224,6 +223,49 @@ def test_only_retained_current_complete_rows_raise_the_peak(
     assert result.chunk.prior_peak == expected_peak
     assert result.chunk.withheld_minutes == (_M1,)
     assert result.withheld[0].reason_codes == ("instrument_sum_unrepresentable",)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["instrument_sum_unrepresentable", "attribution_sum_unrepresentable"],
+)
+def test_row_preserving_withhold_retracts_a_foreign_calc_version_row(
+    reason: PnlIncompletenessReason,
+) -> None:
+    """Retract a foreign-version row on a sum-unrepresentable withhold while keeping same-version.
+
+    Given: Active complete M1 samples on 5C.3 and current calc_version with cash 2500.0.
+    When: Replay withholds M1 for a pure sum-unrepresentable reason and values M2 as complete.
+    Then: The foreign M1 row is retracted and marked unrepairable without raising the peak,
+        whereas the same-version control retains M1 with no M1 edit and stays repairable.
+    """
+    valuations = (_minute(_M1, reason), _minute(_M2))
+    foreign_row = _complete_row(_M1)
+    foreign_row["calc_version"], foreign_row["cash_usd"] = "5C.3", 2500.0
+    foreign_version = PnlCorrectionSampleVersion(61, foreign_row)
+    result = plan_correction_chunk(_inputs(valuations, (foreign_version,), end=_M2))
+
+    retract, insert = result.chunk.edits
+    assert retract == PnlCorrectionEdit(_M1, foreign_version, None)
+    assert insert.point_time == _M2 and insert.expected_row is None
+    assert insert.replacement is not None
+    assert insert.replacement["drawdown"] == 0.0
+    assert result.chunk.prior_peak == 1000.0
+    assert result.chunk.withheld_minutes == (_M1,)
+    assert result.chunk.unrepairable_withheld_minutes == (_M1,)
+
+    same_row = _complete_row(_M1)
+    same_row["cash_usd"] = 2500.0
+    same_version = PnlCorrectionSampleVersion(62, same_row)
+    control = plan_correction_chunk(_inputs(valuations, (same_version,), end=_M2))
+
+    (control_edit,) = control.chunk.edits
+    assert control_edit.point_time == _M2 and control_edit.expected_row is None
+    assert control_edit.replacement is not None
+    assert control_edit.replacement["drawdown"] == pytest.approx(0.6)
+    assert control.chunk.prior_peak == 2500.0
+    assert control.chunk.withheld_minutes == (_M1,)
+    assert control.chunk.unrepairable_withheld_minutes == ()
 
 
 @pytest.mark.parametrize("field", ["cash_usd", "position_value_usd"])
