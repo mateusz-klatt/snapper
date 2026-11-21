@@ -541,6 +541,8 @@ class PnlSeriesReplayOptions:
     analysis so observations cannot be bound to a superseded prefix.
     ``pointwise_exact_fx`` values each required minute independently of the
     physical replay chunk. It is an exact-only snapshotter calculation policy.
+    ``metadata_only`` skips lineage, accruals, market data, FX, shadow collection,
+    and timeline valuation once ``replay_metadata`` is certified for a probe.
     """
 
     preloaded_evidence: _SeriesReadEvidence | None = None
@@ -554,6 +556,7 @@ class PnlSeriesReplayOptions:
     replay_generation_tip: datetime | None = None
     verify_replay_probe: bool = False
     pointwise_exact_fx: bool = False
+    metadata_only: bool = False
 
 
 _NO_SERIES_REPLAY_OPTIONS: Final[PnlSeriesReplayOptions] = PnlSeriesReplayOptions()
@@ -660,6 +663,29 @@ class _SeriesReplayInputs:
     applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...]
     raw_watermarks: Mapping[str, int]
     fill_witness_cut: PnlTimelineFillWitnessCut | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SeriesReplayAccountingTail:
+    """Windowed executions, accruals, and lineage skipped by metadata-only probes."""
+
+    replayed_execution_rows: list[PnlTimelineOpeningExecutionRow]
+    accrual_rows: list[PnlTimelineAccrualRow]
+    reference_tip: datetime
+    reference_execution_rows: list[PnlTimelineOpeningExecutionRow]
+    reference_accrual_rows: list[PnlTimelineAccrualRow]
+    lineage: dict[str, TimelineExecutionLineage]
+    late_pre_activation_reason: PnlIncompletenessReasonEntry | None
+
+
+@dataclass(frozen=True, slots=True)
+class _SeriesMarketRefs:
+    """Partitioned symbol references and initial untrusted price reasons for a series."""
+
+    trusted_refs: list[InstrumentSymbolRefRow]
+    quote_by_instrument: dict[str, str]
+    base_by_instrument: dict[str, str]
+    untrusted_price_reasons_by_instrument: dict[str, set[PnlIncompletenessReason]]
 
 
 class PnlAnchorEvidenceError(ValueError):
@@ -1321,6 +1347,20 @@ def _empty_pnl_series(granularity: str, valuation_ccy: str) -> PnlWalletSeriesRe
         granularity=granularity,
         valuation_ccy=valuation_ccy,
         rate_sources=(),
+    )
+
+
+def _metadata_only_pnl_series(
+    granularity: str,
+    valuation_ccy: str,
+    replay_metadata: PnlSeriesReplayMetadata | None,
+    applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...],
+) -> PnlWalletSeriesResult:
+    """Return certified replay metadata and annulments without valuing market data or points."""
+    return replace(
+        _empty_pnl_series(granularity, valuation_ccy),
+        replay_metadata=replay_metadata,
+        applied_annulments=applied_annulments,
     )
 
 
@@ -5761,7 +5801,109 @@ async def _load_series_replay_inputs(
         for row in loaded_prefix["executions"]
         if row["scope_sequence"] > anchor.watermarks.get(row["exchange"], 0)
     ]
-    reference_tip = options.replay_generation_tip or to_time
+    if options.metadata_only:
+        return _metadata_only_series_replay_inputs(
+            loaded_execution_rows,
+            loaded_prefix,
+            fill_gap_reason,
+            to_time,
+        )
+    tail = await _load_series_accounting_tail(
+        repo,
+        anchor_load,
+        loaded_execution_rows,
+        to_time,
+        options.replay_generation_tip or to_time,
+    )
+    return _SeriesReplayInputs(
+        loaded_execution_rows=loaded_execution_rows,
+        replayed_execution_rows=tail.replayed_execution_rows,
+        accrual_rows=tail.accrual_rows,
+        reference_tip=tail.reference_tip,
+        reference_execution_rows=tail.reference_execution_rows,
+        reference_accrual_rows=tail.reference_accrual_rows,
+        lineage=tail.lineage,
+        fill_gap_reason=fill_gap_reason,
+        late_pre_activation_reason=tail.late_pre_activation_reason,
+        applied_annulments=tuple(loaded_prefix["annulments"]),
+        raw_watermarks=loaded_prefix["watermarks"],
+        fill_witness_cut=loaded_prefix.get("fill_witness_cut"),
+    )
+
+
+def _metadata_only_series_replay_inputs(
+    loaded_execution_rows: list[PnlTimelineOpeningExecutionRow],
+    loaded_prefix: PnlTimelineExecutionPrefix,
+    fill_gap_reason: PnlIncompletenessReasonEntry | None,
+    to_time: datetime,
+) -> _SeriesReplayInputs:
+    """Package certified prefix evidence without loading lineage or accruals for a probe."""
+    return _SeriesReplayInputs(
+        loaded_execution_rows=loaded_execution_rows,
+        replayed_execution_rows=[],
+        accrual_rows=[],
+        reference_tip=to_time,
+        reference_execution_rows=[],
+        reference_accrual_rows=[],
+        lineage={},
+        fill_gap_reason=fill_gap_reason,
+        late_pre_activation_reason=None,
+        applied_annulments=tuple(loaded_prefix["annulments"]),
+        raw_watermarks=loaded_prefix["watermarks"],
+        fill_witness_cut=loaded_prefix.get("fill_witness_cut"),
+    )
+
+
+def _partition_series_market_refs(
+    refs: Sequence[InstrumentSymbolRefRow],
+    opening_instrument_ids: list[str],
+    instrument_ids: list[str],
+    replay: _SeriesReplayInputs,
+    opening_t0: datetime,
+) -> _SeriesMarketRefs:
+    """Partition opening and suffix symbol references into trusted quotes and failure reasons."""
+    suffix_refs, untrusted_reasons = _partition_series_execution_price_refs(
+        replay.reference_execution_rows,
+        refs,
+    )
+    opening_spans = {
+        instrument_public_id: (opening_t0, max(opening_t0, replay.reference_tip))
+        for instrument_public_id in opening_instrument_ids
+    }
+    opening_refs, _ = _partition_series_price_refs(opening_spans, refs)
+    trusted_by_instrument = {
+        ref["instrument_public_id"]: ref for ref in [*opening_refs, *suffix_refs]
+    }
+    trusted_refs = [
+        trusted_by_instrument[instrument_public_id]
+        for instrument_public_id in instrument_ids
+        if instrument_public_id in trusted_by_instrument
+    ]
+    return _SeriesMarketRefs(
+        trusted_refs=trusted_refs,
+        quote_by_instrument={
+            ref["instrument_public_id"]: cast(str, ref["quote_currency"]) for ref in trusted_refs
+        },
+        base_by_instrument={
+            ref["instrument_public_id"]: ref["base_currency"] for ref in trusted_refs
+        },
+        untrusted_price_reasons_by_instrument={
+            instrument_public_id: set(reasons)
+            for instrument_public_id, reasons in untrusted_reasons.items()
+        },
+    )
+
+
+async def _load_series_accounting_tail(
+    repo: Repository,
+    anchor_load: _AnchorLoadResult,
+    loaded_execution_rows: list[PnlTimelineOpeningExecutionRow],
+    to_time: datetime,
+    reference_tip: datetime,
+) -> _SeriesReplayAccountingTail:
+    """Load windowed executions, lineage, and accruals required for full series valuation."""
+    scope = anchor_load.scope
+    anchor = cast(_ResolvedPnlAnchor, anchor_load.anchor)
     replayed_execution_rows, reference_execution_rows = _series_replay_execution_windows(
         loaded_execution_rows, to_time, reference_tip
     )
@@ -5778,25 +5920,24 @@ async def _load_series_replay_inputs(
     order_public_ids = list(
         dict.fromkeys(row["order_public_id"] for row in replayed_execution_rows)
     )
-    lineage_rows = await repo.get_pnl_timeline_execution_lineage(order_public_ids, as_of)
+    lineage_rows = await repo.get_pnl_timeline_execution_lineage(
+        order_public_ids, scope.knowledge_horizon
+    )
     reference_accrual_rows = [
         row
-        for row in await repo.get_accruals_for_pnl(wallet_public_id, mode, as_of)
+        for row in await repo.get_accruals_for_pnl(
+            scope.wallet_public_id, scope.mode, scope.knowledge_horizon
+        )
         if anchor.opening.t0 < row["accrued_at"] <= reference_tip
     ]
-    return _SeriesReplayInputs(
-        loaded_execution_rows=loaded_execution_rows,
+    return _SeriesReplayAccountingTail(
         replayed_execution_rows=replayed_execution_rows,
         accrual_rows=[row for row in reference_accrual_rows if row["accrued_at"] <= to_time],
         reference_tip=reference_tip,
         reference_execution_rows=reference_execution_rows,
         reference_accrual_rows=reference_accrual_rows,
         lineage=_build_execution_lineage(lineage_rows),
-        fill_gap_reason=fill_gap_reason,
         late_pre_activation_reason=late_pre_activation_reason,
-        applied_annulments=tuple(loaded_prefix["annulments"]),
-        raw_watermarks=loaded_prefix["watermarks"],
-        fill_witness_cut=loaded_prefix.get("fill_witness_cut"),
     )
 
 
@@ -5812,12 +5953,18 @@ def _validate_frozen_replay_policy(
     if frozen is None and options.frozen_fill_witness_cut is not None:
         raise ValueError("A frozen P&L fill-witness certificate requires its captured raw cut")
     reference_tip = options.replay_generation_tip
+    if options.metadata_only and (
+        frozen is not None or reference_tip is not None or options.baseline_watermarks is None
+    ):
+        raise ValueError(
+            "A metadata-only P&L replay probe requires baseline watermarks without a frozen cut"
+        )
     if reference_tip is not None:
         if frozen is None:
             raise ValueError("P&L generation references require a captured raw execution cut")
         if not to_time <= reference_tip <= as_of:
             raise ValueError("P&L generation tip must cover the chunk within its knowledge horizon")
-    if (frozen is not None or options.verify_replay_probe) and (
+    if (frozen is not None or options.verify_replay_probe or options.metadata_only) and (
         policy.allow_anchor_creation or policy.current_truth or policy.current_truth_horizon
     ):
         raise ValueError("A P&L replay probe or frozen cut requires a read-only historical policy")
@@ -6551,6 +6698,13 @@ async def build_wallet_pnl_series(
         replay_metadata = await _series_replay_metadata(
             repo, anchor_load, replay, options, (from_time, to_time)
         )
+        if options.metadata_only:
+            return _metadata_only_pnl_series(
+                granularity,
+                valuation_ccy,
+                replay_metadata,
+                replay.applied_annulments,
+            )
         opening_instrument_ids, instrument_ids = _series_instrument_ids(
             anchor, replay, from_time, to_time
         )
@@ -6558,39 +6712,17 @@ async def build_wallet_pnl_series(
         refs = (
             await repo.get_instrument_symbol_refs(instrument_ids, as_of) if instrument_ids else []
         )
-        suffix_refs, untrusted_price_reasons_by_instrument = _partition_series_execution_price_refs(
-            replay.reference_execution_rows,
+        market_refs = _partition_series_market_refs(
             refs,
+            opening_instrument_ids,
+            instrument_ids,
+            replay,
+            anchor.opening.t0,
         )
-        opening_spans = {
-            instrument_public_id: (
-                anchor.opening.t0,
-                max(anchor.opening.t0, replay.reference_tip),
-            )
-            for instrument_public_id in opening_instrument_ids
-        }
-        opening_refs, _ = _partition_series_price_refs(
-            opening_spans,
-            refs,
-        )
-        untrusted_price_reasons_by_instrument = {
-            instrument_public_id: set(reasons)
-            for instrument_public_id, reasons in untrusted_price_reasons_by_instrument.items()
-        }
-        trusted_ref_by_instrument = {
-            ref["instrument_public_id"]: ref for ref in [*opening_refs, *suffix_refs]
-        }
-        trusted_refs = [
-            trusted_ref_by_instrument[instrument_public_id]
-            for instrument_public_id in instrument_ids
-            if instrument_public_id in trusted_ref_by_instrument
-        ]
-        quote_by_instrument = {
-            ref["instrument_public_id"]: cast(str, ref["quote_currency"]) for ref in trusted_refs
-        }
-        base_by_instrument = {
-            ref["instrument_public_id"]: ref["base_currency"] for ref in trusted_refs
-        }
+        trusted_refs = market_refs.trusted_refs
+        quote_by_instrument = market_refs.quote_by_instrument
+        base_by_instrument = market_refs.base_by_instrument
+        untrusted_price_reasons_by_instrument = market_refs.untrusted_price_reasons_by_instrument
         mark_candles = await _load_mark_candles(
             repo,
             trusted_refs,
