@@ -34,6 +34,7 @@ from snapper.application.notify.sidecar import _build_apns_payload
 from snapper.application.notify.sidecar import _priority_to_apns
 from snapper.core.json_types import JsonObject
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import AlertDelivery
 from snapper.data.models import NotificationDevice
 from snapper.data.models import User
 from snapper.data.repository import Repository
@@ -1099,6 +1100,107 @@ class TestScopePreSendSkip:
         assert await repo.list_active_notification_devices_for_user(user) == []
         counts = await repo.count_deliveries_by_status()
         assert counts == {"unregistered": 1}
+
+    @pytest.mark.asyncio
+    async def test_400_device_token_not_for_topic_logs_error_and_keeps_device_active(
+        self,
+        repo: SQLAlchemyRepository,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """APNs 400 DeviceTokenNotForTopic logs ERROR, fails delivery, and keeps device active."""
+        from aioapns.common import NotificationResult
+
+        from snapper.application.notify.apns_client import _map_result
+
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        mapped = _map_result(NotificationResult("", "400", "DeviceTokenNotForTopic", None))
+        sidecar, _ = _make_sidecar(repo, send_result=mapped)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        handler_id = logger.add(caplog.handler, format="{message}", level="ERROR")
+        try:
+            await sidecar._attempt_once(delivery_pid, device, event, _ts())
+        finally:
+            logger.remove(handler_id)
+
+        active = await repo.list_active_notification_devices_for_user(user)
+        assert [d["public_id"] for d in active] == [device_pid]
+        assert await repo.list_queued_deliveries_all() == []
+        assert await repo.count_deliveries_by_status() == {"failed": 1}
+        async with repo.session() as s:
+            delivery_row = (
+                await s.execute(
+                    select(AlertDelivery).where(
+                        AlertDelivery.public_id == delivery_pid,
+                        AlertDelivery.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            ).scalar_one()
+        assert delivery_row.status == "failed"
+        assert delivery_row.error_reason == "config_error:DeviceTokenNotForTopic"
+        errors = [
+            r
+            for r in caplog.records
+            if r.levelname == "ERROR" and "APNs configuration error" in r.getMessage()
+        ]
+        assert len(errors) == 1
+        assert "DeviceTokenNotForTopic" in errors[0].getMessage()
+        assert device_pid in errors[0].getMessage()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "raw_description",
+        [
+            "BadTopic",
+            "MissingDeviceToken",
+            "",
+            None,
+            "<html>not-json</html>",
+        ],
+    )
+    async def test_400_other_reasons_leave_device_active_and_schedule_retry(
+        self,
+        repo: SQLAlchemyRepository,
+        raw_description: str | None,
+    ) -> None:
+        """Non-unregistered APNs 400 reasons stay 'other', keep device active, and retry."""
+        from aioapns.common import NotificationResult
+
+        from snapper.application.notify.apns_client import _map_result
+
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        mapped = _map_result(NotificationResult("", "400", raw_description, None))
+        assert mapped.status == "other"
+        sidecar, _ = _make_sidecar(repo, send_result=mapped)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        await sidecar._attempt_once(delivery_pid, device, event, _ts())
+
+        active = await repo.list_active_notification_devices_for_user(user)
+        assert [d["public_id"] for d in active] == [device_pid]
+        queued = await repo.list_queued_deliveries_all()
+        assert len(queued) == 1
+        assert queued[0]["status"] == "queued"
+        assert queued[0]["attempt_count"] == 1
+        assert await repo.count_deliveries_by_status() == {"queued": 1}
 
     @pytest.mark.asyncio
     async def test_410_path_writes_inactive_successor_row(self, repo: SQLAlchemyRepository) -> None:

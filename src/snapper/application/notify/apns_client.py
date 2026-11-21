@@ -35,7 +35,8 @@ class ApnsSendResult:
         status_code: Numeric HTTP/2 status from APNs
             (200, 410, 429, 500, 503, etc.).
         status: Coarse status string (``success``, ``unregistered``,
-            ``throttled``, ``server_error``, ``other``).
+            ``config_error``, ``throttled``, ``server_error``, ``other``,
+            ``unknown``).
         apns_id: The server-minted ``apns-id`` echoed back on success,
             used to correlate with Apple's delivery diagnostics.
             Empty string when absent.
@@ -211,20 +212,31 @@ def _status_code_from(status: str) -> int:
 _UNREGISTERED_400_DESCRIPTIONS: Final[frozenset[str]] = frozenset(
     {
         "BadDeviceToken",
+    }
+)
+"""APNs HTTP 400 reasons proving a single device token is permanently invalid."""
+
+_CONFIG_ERROR_400_DESCRIPTIONS: Final[frozenset[str]] = frozenset(
+    {
         "DeviceTokenNotForTopic",
     }
 )
-"""APNs HTTP 400 reasons proving a device token can never succeed on this topic/env."""
+"""APNs HTTP 400 reasons indicating a server-side topic/bundle mismatch.
+
+Never auto-deactivate devices on these reasons: a misconfigured ``apns-topic``
+returns them for every valid device in the fleet.
+"""
 
 
 def _coarse_status(status_code: int, description: str) -> str:
     """Derive the coarse outbox status from the numeric HTTP/2 code and reason.
 
-    Apple APNs returns HTTP 410 for ``Unregistered`` and HTTP 400 for
-    permanently invalid device tokens (``BadDeviceToken`` and
-    ``DeviceTokenNotForTopic``). Both map to ``unregistered`` so the sidecar
-    deactivates the unusable device immediately instead of exhausting its retry
-    budget into ``failed`` on every subsequent alert.
+    Apple APNs returns HTTP 410 for ``Unregistered`` and HTTP 400
+    ``BadDeviceToken`` for a permanently invalid device token; both map to
+    ``unregistered`` so the sidecar deactivates that single unusable device
+    immediately instead of exhausting its retry budget into ``failed``.
+    HTTP 400 ``DeviceTokenNotForTopic`` maps to ``config_error`` so a
+    misconfigured ``apns-topic`` never deactivates healthy devices.
 
     Args:
         status_code: Numeric HTTP/2 status code from APNs.
@@ -232,17 +244,20 @@ def _coarse_status(status_code: int, description: str) -> str:
 
     Returns:
         Coarse outbox status string (``success``, ``unregistered``,
-        ``throttled``, ``server_error``, ``other``, or ``unknown``).
+        ``config_error``, ``throttled``, ``server_error``, ``other``, or
+        ``unknown``).
     """
     if status_code == 200:
         return "success"
     if status_code == 410 or (status_code == 400 and description in _UNREGISTERED_400_DESCRIPTIONS):
         return "unregistered"
+    if status_code == 400 and description in _CONFIG_ERROR_400_DESCRIPTIONS:
+        return "config_error"
     if status_code == 429:
         return "throttled"
     if 500 <= status_code < 600:
         return "server_error"
-    if description:
+    if status_code > 0 or description:
         return "other"
     return "unknown"
 

@@ -61,10 +61,13 @@ class TestCoarseStatus:
         assert _coarse_status(410, "Unregistered") == "unregistered"
         assert _coarse_status(410, "BadDeviceToken") == "unregistered"
 
-    def test_400_terminal_invalid_token_maps_to_unregistered(self) -> None:
-        """400 BadDeviceToken and DeviceTokenNotForTopic map to ``unregistered``."""
+    def test_400_bad_device_token_maps_to_unregistered(self) -> None:
+        """400 BadDeviceToken maps to ``unregistered``."""
         assert _coarse_status(400, "BadDeviceToken") == "unregistered"
-        assert _coarse_status(400, "DeviceTokenNotForTopic") == "unregistered"
+
+    def test_400_device_token_not_for_topic_maps_to_config_error(self) -> None:
+        """400 DeviceTokenNotForTopic maps to non-deactivating ``config_error``."""
+        assert _coarse_status(400, "DeviceTokenNotForTopic") == "config_error"
 
     def test_throttled(self) -> None:
         """429 maps to ``throttled``."""
@@ -75,9 +78,23 @@ class TestCoarseStatus:
         assert _coarse_status(500, "") == "server_error"
         assert _coarse_status(503, "") == "server_error"
 
-    def test_other_with_description(self) -> None:
-        """Non-standard code with a description maps to ``other``."""
-        assert _coarse_status(400, "BadRequest") == "other"
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "BadRequest",
+            "BadTopic",
+            "MissingDeviceToken",
+            "",
+            "<html>not-json</html>",
+        ],
+    )
+    def test_400_other_reasons_map_to_other(self, description: str) -> None:
+        """Non-unregistered 400 reasons (including empty/unparseable) stay ``other``."""
+        assert _coarse_status(400, description) == "other"
+
+    def test_zero_status_with_description_maps_to_other(self) -> None:
+        """0 status with a non-empty description still maps to ``other``."""
+        assert _coarse_status(0, "TransportFailure") == "other"
 
     def test_unknown_without_description(self) -> None:
         """0 status + empty description maps to ``unknown``."""
@@ -118,15 +135,37 @@ class TestMapResult:
         assert mapped.status == "unregistered"
         assert mapped.description == "BadDeviceToken"
 
-    def test_400_device_token_not_for_topic_maps_to_unregistered(self) -> None:
-        """400 DeviceTokenNotForTopic maps to ``unregistered`` while keeping status_code 400."""
+    def test_400_device_token_not_for_topic_maps_to_config_error(self) -> None:
+        """400 DeviceTokenNotForTopic maps to ``config_error`` while keeping status_code 400."""
         raw = NotificationResult("", "400", "DeviceTokenNotForTopic", None)
 
         mapped = _map_result(raw)
 
         assert mapped.status_code == 400
-        assert mapped.status == "unregistered"
+        assert mapped.status == "config_error"
         assert mapped.description == "DeviceTokenNotForTopic"
+
+    @pytest.mark.parametrize(
+        ("raw_description", "expected_description"),
+        [
+            ("BadTopic", "BadTopic"),
+            ("MissingDeviceToken", "MissingDeviceToken"),
+            ("", ""),
+            (None, ""),
+            ("<html>not-json</html>", "<html>not-json</html>"),
+        ],
+    )
+    def test_400_non_unregistered_reasons_map_to_other(
+        self, raw_description: str | None, expected_description: str
+    ) -> None:
+        """400 BadTopic, MissingDeviceToken, empty reason, and unparseable body stay ``other``."""
+        raw = NotificationResult("", "400", raw_description, None)
+
+        mapped = _map_result(raw)
+
+        assert mapped.status_code == 400
+        assert mapped.status == "other"
+        assert mapped.description == expected_description
 
     def test_missing_notification_id_becomes_empty_string(self) -> None:
         """None ``notification_id`` is normalised to empty string."""

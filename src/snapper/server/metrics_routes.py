@@ -108,10 +108,10 @@ class NotificationMetricsData(StrictDataSchema[Literal["notification_metrics"]])
     Attributes:
         delivery_success_total: Deliveries in the ``sent`` terminal state.
         delivery_failed_total: Deliveries in the ``failed`` terminal state
-            (exhausted retry budget).
+            (exhausted retry budget or APNs configuration errors such as
+            ``DeviceTokenNotForTopic``).
         delivery_410_unregistered_total: Deliveries terminated via an APNs
-            ``Unregistered`` (410) or terminal invalid-token (400
-            ``BadDeviceToken`` / ``DeviceTokenNotForTopic``) response.
+            ``Unregistered`` (410) or ``BadDeviceToken`` (400) response.
         delivery_cancelled_scope_total: Deliveries transitioned to
             ``cancelled_scope`` after an ``admin.scope_revoked`` or
             ``admin.user_deactivated`` event.
