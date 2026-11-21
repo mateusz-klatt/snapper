@@ -78,6 +78,12 @@ checkpoint and samples intact until the new prefix can be certified.
 A backdated execution with valid witnesses is considered on the next
 evidence probe.
 
+All effective-execution proof reads use one database snapshot. PostgreSQL
+uses a repeatable-read, read-only transaction. SQLite explicitly begins a
+deferred transaction before its first query. This also applies to ordinary
+request and activation prefix bundles, so a concurrent append cannot give
+their two cuts different views of the ledger.
+
 The witness digest covers venue events eligible to certify the captured
 execution lineage. An unrelated unmatched fill can appear after the
 independent scope-level gap read without changing that digest. Current

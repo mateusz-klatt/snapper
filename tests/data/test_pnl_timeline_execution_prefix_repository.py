@@ -22,6 +22,7 @@ from unittest.mock import patch
 from uuid import uuid7
 
 import pytest
+from aiosqlite import Connection as SQLiteConnection
 from sqlalchemy import create_engine
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
@@ -40,6 +41,7 @@ from snapper.data.models import Order
 from snapper.data.models import Symbol
 from snapper.data.models import VenueEvent
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import _ExecutionKnowledgeHorizon
 from snapper.data.repository import _PnlTimelineExecutionCandidate
 from snapper.data.repository import _PnlTimelineExecutionPrefixSource
 from snapper.data.repository import _PnlTimelineFillAssignmentState
@@ -659,6 +661,131 @@ async def test_bundle_reuses_the_proven_snapshot_for_equal_cuts(
 
     assert bundle["activation"] is bundle["request"]
     assert bundle["request"]["watermarks"] == {"kraken": 1}
+
+
+async def test_sqlite_bundle_keeps_both_cuts_in_one_snapshot(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep request and activation certification on one SQLite snapshot.
+
+    Given a certified execution and matching fill in a WAL-backed database.
+    When another connection commits a backdated execution and its fill after
+        the request cut has loaded but before the activation cut loads.
+    Then both cuts retain the original prefix, while a later request sees
+        the newly committed execution.
+    """
+    async with repository.session() as session:
+        assert await session.scalar(text("PRAGMA journal_mode")) == "wal"
+        session.add_all(
+            [
+                _instrument(),
+                _order(),
+                _execution("kraken", 1),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD),
+            ]
+        )
+        await session.commit()
+    load_prefix = repository._load_pnl_timeline_execution_prefix_snapshot
+    observed_cuts: list[PnlTimelineExecutionPrefix] = []
+
+    async def append_between_cuts(
+        session: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        horizon: _ExecutionKnowledgeHorizon,
+        *,
+        capture_fill_witness_cut: bool = False,
+    ) -> PnlTimelineExecutionPrefix:
+        """Commit a valid backdated suffix after the first real certification."""
+        prefix = await load_prefix(
+            session,
+            wallet_public_id,
+            mode,
+            horizon,
+            capture_fill_witness_cut=capture_fill_witness_cut,
+        )
+        observed_cuts.append(prefix)
+        if len(observed_cuts) == 1:
+            async with repository.session() as writer:
+                writer.add_all(
+                    [
+                        _execution("kraken", 2),
+                        _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=2),
+                    ]
+                )
+                await writer.commit()
+        return prefix
+
+    monkeypatch.setattr(
+        repository, "_load_pnl_timeline_execution_prefix_snapshot", append_between_cuts
+    )
+    bundle = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET, "live", _LATER, _AS_OF
+    )
+    fresh = await repository.get_pnl_timeline_execution_prefix(_WALLET, "live", _LATER)
+
+    assert [cut["watermarks"] for cut in observed_cuts] == [
+        {"kraken": 1},
+        {"kraken": 1},
+        {"kraken": 2},
+    ]
+    assert bundle["request"]["executions"] == bundle["activation"]["executions"]
+    assert [row["scope_sequence"] for row in fresh["executions"]] == [1, 2]
+
+
+async def test_effective_execution_reads_start_one_fresh_sqlite_transaction(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Start a native SQLite transaction at every effective-execution entry point.
+
+    Given one valid execution and its matching fill.
+    When each of the six effective-execution readers starts its proof.
+    Then its connection starts outside a native transaction, enters exactly
+        one read transaction, and completes the real evidence queries.
+    """
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _instrument(),
+                _order(),
+                _execution("kraken", 1),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD),
+            ]
+        )
+        await session.commit()
+    begin_snapshot = repository._begin_effective_execution_snapshot
+    started_connections: list[SQLiteConnection] = []
+
+    async def assert_fresh_then_begin(session: AsyncSession) -> None:
+        """Check native transaction state around the real snapshot admission."""
+        connection = await session.connection()
+        raw_connection = await connection.get_raw_connection()
+        driver = cast(SQLiteConnection, raw_connection.driver_connection)
+        assert not driver.in_transaction
+        await begin_snapshot(session)
+        assert driver.in_transaction
+        started_connections.append(driver)
+
+    monkeypatch.setattr(repository, "_begin_effective_execution_snapshot", assert_fresh_then_begin)
+
+    recovery = await repository.get_executions_for_recovery(_AS_OF, wallet_public_id=_WALLET)
+    prefix = await repository.get_pnl_timeline_execution_prefix(_WALLET, "live", _AS_OF)
+    frozen = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+        _WALLET, "live", {"kraken": 1}, _AS_OF
+    )
+    bundle = await repository.get_pnl_timeline_execution_prefix_bundle(
+        _WALLET, "live", _LATER, _AS_OF
+    )
+    executions = await repository.get_pnl_timeline_executions(_WALLET, "live", _AS_OF)
+    has_gap = await repository.pnl_timeline_scope_has_fill_gap(_WALLET, "live", _AS_OF)
+
+    assert len(started_connections) == 6
+    assert len(recovery) == len(executions) == 1
+    assert prefix["watermarks"] == frozen["watermarks"] == {"kraken": 1}
+    assert bundle["request"]["executions"] == bundle["activation"]["executions"]
+    assert not has_gap
 
 
 async def test_bundle_sets_repeatable_read_only_as_the_first_postgresql_statement(
