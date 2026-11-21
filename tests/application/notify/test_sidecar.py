@@ -21,10 +21,12 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from aioapns.common import NotificationResult
 from loguru import logger
 from sqlalchemy import select
 
 from snapper.application.notify.apns_client import ApnsSendResult
+from snapper.application.notify.apns_client import _map_result
 from snapper.application.notify.portfolio_drift_recovery import PortfolioDriftRecoveryScanner
 from snapper.application.notify.rules.base import AlertRule
 from snapper.application.notify.rules.base import RuleRegistry
@@ -1077,10 +1079,6 @@ class TestScopePreSendSkip:
         self, repo: SQLAlchemyRepository
     ) -> None:
         """APNs 400 BadDeviceToken deactivates the device immediately without retrying."""
-        from aioapns.common import NotificationResult
-
-        from snapper.application.notify.apns_client import _map_result
-
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
         device_pid = await _seed_device(repo, user)
@@ -1108,10 +1106,6 @@ class TestScopePreSendSkip:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """APNs 400 DeviceTokenNotForTopic logs ERROR, fails delivery, and keeps device active."""
-        from aioapns.common import NotificationResult
-
-        from snapper.application.notify.apns_client import _map_result
-
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
         device_pid = await _seed_device(repo, user)
@@ -1173,10 +1167,6 @@ class TestScopePreSendSkip:
         raw_description: str | None,
     ) -> None:
         """Non-unregistered APNs 400 reasons stay 'other', keep device active, and retry."""
-        from aioapns.common import NotificationResult
-
-        from snapper.application.notify.apns_client import _map_result
-
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
         device_pid = await _seed_device(repo, user)

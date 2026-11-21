@@ -50,7 +50,7 @@ class TestStatusCodeMapping:
 
 
 class TestCoarseStatus:
-    """``_coarse_status`` assigns one of 5 outbox-friendly status strings."""
+    """``_coarse_status`` assigns one of 7 outbox-friendly status strings."""
 
     def test_success(self) -> None:
         """200 maps to ``success``."""
