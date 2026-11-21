@@ -140,6 +140,30 @@ An old epoch/version left unchanged must be explicitly
 retained for repair, rather than acknowledged as reconciled. No missing point
 is converted to a zero or used as an implicit progress marker.
 
+A chunk may also classify a subset of its `withheld_minutes` as
+`unrepairable_withheld_minutes`, which drops their future `repair_from` obligation
+without changing how any minute is valued. The planner sets this only when a
+withheld minute's `reason_codes` are non-empty and all belong to
+`REPAIR_EXEMPT_WITHHOLD_REASONS` (`instrument_reconciliation_failed`,
+`attribution_reconciliation_failed`, `instrument_sum_unrepresentable`, and
+`attribution_sum_unrepresentable`) AND no active row survives the chunk's edit
+(either no row existed or the chunk explicitly retracts that exact version).
+If `*_sum_unrepresentable` preserves an existing row (`preserves_persisted_row`),
+the minute keeps its `repair_from` obligation (guard R1), because determinism of
+the new failed calculation proves nothing about an older retained row. Both the
+pure state transition and the repository fence enforce R1 against
+`chunk.evidence.versions` and `chunk.edits`, refusing any list entry that is not
+in `withheld_minutes`, lies outside the chunk, repeats, or leaves a current,
+legacy, or foreign active row unretracted. Mixed-reason and empty-reason-code
+withholds (`missing_series_minute`, `foreign_epoch_sample`) and market-data
+withholds (`mark_unavailable`, `fx_conversion_unproven`) likewise retain their
+repair obligation. On frozen snapshotter inputs, `*_sum_unrepresentable` is
+deterministic across chunk widths because `recovery_budget_per_point` gives each
+point a fresh count-based `FaithfulRecoveryBudget`, `MAX_RECOVERY_KEYS` depends
+solely on the point's own inputs, and exhausting the chunk-shared
+`_ReplayRecoveryWork` reserve raises `PnlTimelineWorkBudgetError` (splitting the
+chunk) rather than producing a withheld minute.
+
 A foreign-epoch row is kept as an explicit unresolved minute. A cursor can
 continue scanning, while the older evidence stays intact and the detector
 baseline remains pinned. This requires investigation before that scope can
@@ -227,6 +251,24 @@ event per scope (`scope_skip_reason="persistent_fill_gap_skip"`) carrying
 when replay actually resumes for that scope, and the frontier resumes a full
 replay from the anchor's first post-anchor minute through the current finalized
 tip as soon as evidence changes or the fill gap clears.
+
+Repair-lag monitoring note: whenever a frontier read or chunk update in
+`_sample_scope` or `_advance_replay` observes `repair_from` more than 24 hours
+behind `frontier.tip`, the snapshotter emits one rate-limited structured warning
+per scope and distinct `repair_from` value carrying `repair_from_lag`,
+`wallet_public_id`, `mode`, `valuation_ccy`, `epoch_public_id`, `repair_from`,
+`frontier_tip`, and `as_of`. Rate-limit state clears when `repair_from`
+resolves or drops within 24 hours and when absent scopes are pruned.
+
+Disclosed residual difference for repair-exempt withholds: value-neutrality
+holds on frozen evidence. If a later market-data correction (such as a revised
+candle version) lands on the exact minute of an exempt unrepairable withhold and
+changes its arithmetic outcome, the snapshotter leaves that minute withheld
+until another generation covers it via a late-fill rewind, an evidence change at
+or before it, or an explicit rewind — matching the policy already applied to
+`complete` minutes, which are likewise not revisited on candle corrections
+alone. The 24-hour `repair_from_lag` warning does not fire for an exempt
+unrepairable minute because no `repair_from` obligation remains.
 
 ## Replay acceptance
 

@@ -113,6 +113,8 @@ _SCOPE_SKIP_NO_ANCHOR: Final[str] = "no_active_usd_anchor"
 _SCOPE_SKIP_NO_SPOT_VENUES: Final[str] = "no_spot_venues"
 _SCOPE_SKIP_PERSISTENT_FILL_GAP: Final[str] = "persistent_fill_gap_skip"
 _MINUTE: Final[timedelta] = timedelta(minutes=1)
+_REPAIR_FROM_LAG_THRESHOLD: Final[timedelta] = timedelta(hours=24)
+"""Age beyond which a pinned ``repair_from`` emits a rate-limited lag warning."""
 _CRYPTO_PLANE_LIMIT_SQLSTATES: Final[frozenset[str]] = frozenset({"57014", "55P03"})
 """PostgreSQL SQLSTATEs raised when the crypto-plane read exceeds its shared P&L budget.
 
@@ -271,6 +273,7 @@ class PortfolioPnlSnapshotter:
         self._self_heal_logged: dict[str, tuple[datetime, tuple[str, ...]]] = {}
         self._withheld_logged: dict[str, tuple[datetime, tuple[str, ...]]] = {}
         self._persistent_fill_gap_skip_logged: set[tuple[str, str, str, str]] = set()
+        self._repair_from_lag_logged: dict[tuple[str, str, str, str], datetime] = {}
         self._fx_shadow_pinning_enabled = resolve_enabled(os.environ.get(FX_SHADOW_PINNING_ENV_VAR))
         self._fx_shadow_context: FxShadowPinContext | None = None
 
@@ -479,6 +482,11 @@ class PortfolioPnlSnapshotter:
             for scope_key in self._persistent_fill_gap_skip_logged
             if scope_key[0] in current_wallets
         }
+        self._repair_from_lag_logged = {
+            scope_key: repair_from
+            for scope_key, repair_from in self._repair_from_lag_logged.items()
+            if scope_key[0] in current_wallets
+        }
 
     async def _process_wallet(
         self,
@@ -571,6 +579,7 @@ class PortfolioPnlSnapshotter:
         """Commit at most one replay chunk, resuming durable work before probing new evidence."""
         try:
             frontier = await repo.get_portfolio_pnl_correction_frontier(ctx.scope)
+            self._log_repair_from_lag(ctx, frontier)
             if frontier is not None and ctx.as_of < frontier.as_of:
                 return False
             if (
@@ -745,6 +754,50 @@ class PortfolioPnlSnapshotter:
             },
         )
 
+    def _log_repair_from_lag(
+        self, ctx: _ScopeContext, frontier: PnlCorrectionFrontier | None
+    ) -> None:
+        """Emit one structured liveness log per scope and distinct ``repair_from`` past 24 h.
+
+        Args:
+            ctx: Active scope binding and tick clock.
+            frontier: Persisted or newly started correction frontier, if any.
+        """
+        scope_key = self._scope_streak_key(ctx.scope)
+        if frontier is None or frontier.repair_from is None:
+            self._repair_from_lag_logged.pop(scope_key, None)
+            return
+        repair_from = frontier.repair_from
+        lag = frontier.tip - repair_from
+        if lag <= _REPAIR_FROM_LAG_THRESHOLD:
+            self._repair_from_lag_logged.pop(scope_key, None)
+            return
+        if self._repair_from_lag_logged.get(scope_key) == repair_from:
+            return
+        self._repair_from_lag_logged[scope_key] = repair_from
+        logger.warning(
+            "PortfolioPnlSnapshotter: wallet %s repair_from lags frontier tip by %s "
+            "(mode=%s ccy=%s epoch=%s repair_from=%s frontier_tip=%s as_of=%s)",
+            ctx.scope.wallet_public_id,
+            lag,
+            ctx.scope.mode,
+            ctx.scope.valuation_ccy,
+            ctx.scope.epoch_public_id,
+            repair_from.isoformat(),
+            frontier.tip.isoformat(),
+            ctx.as_of.isoformat(),
+            extra={
+                "wallet_public_id": ctx.scope.wallet_public_id,
+                "mode": ctx.scope.mode,
+                "valuation_ccy": ctx.scope.valuation_ccy,
+                "epoch_public_id": ctx.scope.epoch_public_id,
+                "repair_from": repair_from,
+                "frontier_tip": frontier.tip,
+                "as_of": ctx.as_of,
+                "repair_from_lag": lag,
+            },
+        )
+
     @staticmethod
     async def _can_skip_persistent_fill_gap(
         repo: Repository,
@@ -842,6 +895,7 @@ class PortfolioPnlSnapshotter:
         self, repo: Repository, ctx: _ScopeContext, frontier: PnlCorrectionFrontier
     ) -> None:
         """Resume one bounded chunk at the generation's fixed evidence horizon."""
+        self._log_repair_from_lag(ctx, frontier)
         start = frontier.next_minute
         venues = frontier.expected_venues
         if start is None or venues is None:
@@ -864,7 +918,10 @@ class PortfolioPnlSnapshotter:
             await self._rewind_replay(repo, frozen, frontier)
             return
         plan = await self._plan_chunk(repo, frozen, result, evidence)
-        await repo.commit_portfolio_pnl_correction_chunk(ctx.scope, frontier, plan.chunk)
+        committed = await repo.commit_portfolio_pnl_correction_chunk(
+            ctx.scope, frontier, plan.chunk
+        )
+        self._log_repair_from_lag(ctx, committed)
         self._report_withheld(ctx.wallet_public_id, plan.withheld, bool(plan.chunk.edits))
 
     async def _replay_series(

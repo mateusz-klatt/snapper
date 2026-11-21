@@ -3,6 +3,7 @@
 from collections.abc import Callable
 from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -31,6 +32,31 @@ _WRITE_PROVENANCE: Final = frozenset({"public_id", "session_id", "sequence_id", 
 _ROW_PRESERVING_WITHHOLD_REASONS: Final[frozenset[PnlIncompletenessReason]] = frozenset(
     {"attribution_sum_unrepresentable", "instrument_sum_unrepresentable"}
 )
+REPAIR_EXEMPT_WITHHOLD_REASONS: Final[frozenset[PnlIncompletenessReason]] = frozenset(
+    {
+        "attribution_reconciliation_failed",
+        "attribution_sum_unrepresentable",
+        "instrument_reconciliation_failed",
+        "instrument_sum_unrepresentable",
+    }
+)
+"""Closed set of reconciliation and faithful-sum withhold reasons exempt from perpetual repair.
+
+Every member arises only after all accounting and pricing inputs are present and
+finite. In the snapshotter, ``*_sum_unrepresentable`` is deterministic on frozen
+point inputs alone because the caller sets ``recovery_budget_per_point``: each
+point gets a fresh count-based ``FaithfulRecoveryBudget``, key eligibility depends
+solely on the point's own ``MAX_RECOVERY_KEYS`` input count, and exhausting the
+chunk-shared ``_ReplayRecoveryWork`` reserve raises ``PnlTimelineWorkBudgetError``
+(triggering chunk subdivision) rather than withholding a minute.
+
+PR-1 changes only repair obligation (``unrepairable_withheld_minutes`` and
+``repair_from``), never valuation (calc version stays ``5C.5``). Under guard R1,
+a minute is marked unrepairable only if no active sample row survives the chunk's
+edit; a ``*_sum_unrepresentable`` minute that retains an existing row through
+:func:`preserves_persisted_row` stays repairable because determinism of the new
+refusal proves nothing about an older retained row.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +85,7 @@ class _MinuteCorrection:
     edit: PnlCorrectionEdit | None
     withheld: WithheldMinute | None
     peak: float | None
+    unrepairable: bool = False
 
 
 def preserves_persisted_row(withheld: WithheldMinute) -> bool:
@@ -95,6 +122,35 @@ def _retained_peak(
     equity = cash + position
     validate_correction_peak(equity)
     return equity if prior_peak is None else max(prior_peak, equity)
+
+
+def _is_unrepairable_withhold(
+    withheld: WithheldMinute,
+    existing: PnlCorrectionSampleVersion | None,
+    edit: PnlCorrectionEdit | None,
+) -> bool:
+    """Classify a withheld minute as unrepairable only when deterministic and rowless (R1).
+
+    PR-1 alters only repair obligation, never valuation or ``_withhold``'s
+    row-retention rules. Empty-code and mixed-reason withholds (such as
+    ``missing_series_minute`` and ``foreign_epoch_sample``) stay repairable, and
+    any ``*_sum_unrepresentable`` withhold that retains an existing row via
+    :func:`preserves_persisted_row` stays repairable under R1.
+
+    Args:
+        withheld: The withheld minute and its causal ``PnlIncompletenessReason`` codes.
+        existing: The active sample version observed at this minute, if any.
+        edit: The planned edit for this minute, if any.
+
+    Returns:
+        ``True`` iff ``reason_codes`` is non-empty and a subset of
+        :data:`REPAIR_EXEMPT_WITHHOLD_REASONS` and no active row survives ``edit``.
+    """
+    if not withheld.reason_codes or not all(
+        code in REPAIR_EXEMPT_WITHHOLD_REASONS for code in withheld.reason_codes
+    ):
+        return False
+    return existing is None or edit == PnlCorrectionEdit(withheld.point_time, existing, None)
 
 
 def _withhold(
@@ -136,7 +192,11 @@ def _plan_minute(
     if plan.sample is None:
         point = valuation.point
         withheld = WithheldMinute(minute, _withheld_reasons(point), _withheld_reason_codes(point))
-        return _withhold(key, withheld, existing, prior_peak)
+        decision = _withhold(key, withheld, existing, prior_peak)
+        return replace(
+            decision,
+            unrepairable=_is_unrepairable_withhold(withheld, existing, decision.edit),
+        )
     replacement = inputs.make_row(plan.sample)
     if existing is not None and _same_sample(existing.row, replacement):
         return _MinuteCorrection(None, None, plan.peak)
@@ -160,6 +220,18 @@ def _inputs_by_minute(
 def plan_correction_chunk(inputs: PnlCorrectionPlanInputs) -> PlannedPnlCorrection:
     """Reconcile every admitted minute, carrying peak through rows that remain active.
 
+    Classifies deterministic reconciliation and ``*_sum_unrepresentable`` withholds
+    as unrepairable only when all ``reason_codes`` are non-empty and in
+    :data:`REPAIR_EXEMPT_WITHHOLD_REASONS` and no active row survives the planned
+    edit (guard R1: a retained row under :func:`preserves_persisted_row` keeps its
+    repair obligation, and PR-1 changes only repair obligation, never valuation).
+    On frozen snapshotter inputs, ``*_sum_unrepresentable`` is deterministic across
+    chunk widths because ``recovery_budget_per_point`` gives each point a fresh
+    count-based ``FaithfulRecoveryBudget``, ``MAX_RECOVERY_KEYS`` depends solely on
+    the point's own input key count, and exhausting the chunk-shared
+    ``_ReplayRecoveryWork`` reserve raises ``PnlTimelineWorkBudgetError`` rather
+    than withholding.
+
     Args:
         inputs: Exact active sample evidence and series inputs confined to the
             same bounded window. The caller has verified the series' anchor.
@@ -181,6 +253,7 @@ def plan_correction_chunk(inputs: PnlCorrectionPlanInputs) -> PlannedPnlCorrecti
     observed = {version.row["point_time"]: version for version in evidence.versions}
     edits: list[PnlCorrectionEdit] = []
     withheld: list[WithheldMinute] = []
+    unrepairable: list[datetime] = []
     peak = evidence.prior_peak
     for offset in range(minutes):
         minute = start + _MINUTE * offset
@@ -190,6 +263,8 @@ def plan_correction_chunk(inputs: PnlCorrectionPlanInputs) -> PlannedPnlCorrecti
             edits.append(decision.edit)
         if decision.withheld is not None:
             withheld.append(decision.withheld)
+            if decision.unrepairable:
+                unrepairable.append(minute)
     chunk = PnlCorrectionChunk(
         end=end,
         edits=tuple(edits),
@@ -197,5 +272,6 @@ def plan_correction_chunk(inputs: PnlCorrectionPlanInputs) -> PlannedPnlCorrecti
         evidence=evidence,
         withheld_minutes=tuple(minute.point_time for minute in withheld),
         reconciles_repair=True,
+        unrepairable_withheld_minutes=tuple(unrepairable),
     )
     return PlannedPnlCorrection(chunk, tuple(withheld))
