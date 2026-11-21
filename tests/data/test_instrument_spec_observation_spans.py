@@ -1351,7 +1351,8 @@ def _run_pg_lock_race(
             with sync_repo.get_session() as session:
                 DatabaseRepository.acquire_symbol_updater_lock_sync(session, exchange_key)
                 locked_event.set()
-                assert release_event.wait(timeout=5.0)
+                if not release_event.wait(timeout=5.0):
+                    raise TimeoutError("Timed out waiting for release_event in _holder")
                 results["holder"] = DatabaseRepository.revise_instrument_spec_sync(
                     session, race_inst, str(uuid4()), 1, t1, _spec_input(t1)
                 )
