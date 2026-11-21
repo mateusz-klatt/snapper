@@ -6,6 +6,8 @@ with compile-time type checking — no Pydantic overhead for trusted internal
 data transfer.
 """
 
+from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -918,6 +920,18 @@ class PnlTimelineFillWitnessCut(TypedDict):
 
     watermarks: dict[str, int]
     digest: str
+
+
+@dataclass(frozen=True)
+class PnlTimelineExecutionSuffixRequest:
+    """Exact suffix bounds and deferred coordinates for checkpoint resume."""
+
+    wallet_public_id: str
+    mode: str
+    cutoff_watermarks: Mapping[str, int]
+    generation_watermarks: Mapping[str, int]
+    deferred_execution_sequences: Mapping[str, Sequence[int]]
+    as_of: datetime
 
 
 class PnlTimelineExecutionPrefix(TypedDict):

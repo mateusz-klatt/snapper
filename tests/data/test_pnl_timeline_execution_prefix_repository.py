@@ -54,6 +54,7 @@ from snapper.data.repository import _PnlTimelineNativeExactFillKey
 from snapper.data.repository import _PnlTimelineScopeExactFillKey
 from snapper.data.repository import _PnlTimelineScopeExecTradeFillKey
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
+from snapper.data.repository_types import PnlTimelineExecutionSuffixRequest
 from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 
@@ -3488,3 +3489,63 @@ async def test_prefix_at_watermarks_capture_fill_witness_cut(
         _WALLET, "live", {"kraken": 1}, _AS_OF, fill_witness_cut=expected_cut
     )
     assert replayed == captured
+
+
+@pytest.mark.parametrize("idless", [False, True])
+async def test_execution_suffix_matches_full_prefix_filtered_to_requested_keys(
+    repository: SQLAlchemyRepository,
+    idless: bool,
+) -> None:
+    """Return exactly suffix and deferred rows under the certified fold.
+
+    Given: Two witnessed fills and a cutoff below the generation watermark.
+    When: The suffix read requests the upper fill and deferred lower fill.
+    Then: It equals the full-prefix rows filtered to those keys for both ordinary
+        and ID-less evidence.
+
+    Args:
+        repository: Isolated SQLite repository.
+        idless: Whether execution and witness rows omit external identifiers.
+    """
+    executions = [_execution("kraken", sequence) for sequence in (1, 2)]
+    fills = [_fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=sequence) for sequence in (1, 2)]
+    if idless:
+        for row in [*executions, *fills]:
+            row.exec_id = None
+            row.trade_id = None
+    async with repository.session() as session:
+        session.add_all([_instrument(), _order(), *executions, *fills])
+        await session.commit()
+    full = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+        _WALLET,
+        "live",
+        {"kraken": 2},
+        _AS_OF,
+    )
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"kraken": 1},
+        generation_watermarks={"kraken": 2},
+        deferred_execution_sequences={"kraken": (1,)},
+        as_of=_AS_OF,
+    )
+    suffix = await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+    requested_keys = {("kraken", 1), ("kraken", 2)}
+    expected = [
+        row
+        for row in full["executions"]
+        if (row["exchange"], row["scope_sequence"]) in requested_keys
+    ]
+    assert suffix == expected
+    empty = await repository.get_pnl_timeline_execution_suffix_at_watermarks(
+        PnlTimelineExecutionSuffixRequest(
+            wallet_public_id=_WALLET,
+            mode="live",
+            cutoff_watermarks={"kraken": 1},
+            generation_watermarks={"kraken": 1},
+            deferred_execution_sequences={},
+            as_of=_AS_OF,
+        )
+    )
+    assert empty == []
