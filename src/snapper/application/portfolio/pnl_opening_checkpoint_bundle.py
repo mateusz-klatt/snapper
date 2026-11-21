@@ -14,6 +14,8 @@ from pydantic import StrictInt
 from pydantic import field_validator
 from pydantic import model_validator
 
+from snapper.application.portfolio.pnl_fx_replay_state import _EventFxReplayState
+from snapper.application.portfolio.pnl_fx_replay_state import _MarkReplayState
 from snapper.application.portfolio.pnl_opening_checkpoint import _STRICT_CHECKPOINT_CONFIG
 from snapper.application.portfolio.pnl_opening_checkpoint import HexFloatStr
 from snapper.application.portfolio.pnl_opening_checkpoint import NonEmptyStr
@@ -26,8 +28,6 @@ from snapper.application.portfolio.pnl_opening_checkpoint import _pool_key_to_pa
 from snapper.application.portfolio.pnl_opening_checkpoint import _reject_json_constant
 from snapper.application.portfolio.pnl_opening_checkpoint import _require_strictly_sorted
 from snapper.application.portfolio.pnl_opening_checkpoint import _unique_json_pairs
-from snapper.application.portfolio.pnl_timeline_service import _EventFxReplayState
-from snapper.application.portfolio.pnl_timeline_service import _MarkReplayState
 from snapper.data.pnl_correction_state import IdAggregate
 
 
