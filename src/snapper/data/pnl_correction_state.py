@@ -654,6 +654,7 @@ def _validate_certificate_digests(cert: PnlOpeningCheckpointCertificate) -> None
         ("prefix_annulment_digest", cert.prefix_annulment_digest),
         ("prefix_lineage_digest", cert.prefix_lineage_digest),
         ("prefix_fill_witness_digest", cert.prefix_fill_witness_digest),
+        ("source_fill_witness_digest", cert.source_fill_witness_digest),
         ("symbol_ref_digest", cert.symbol_ref_digest),
         ("event_fx_exchanges_digest", cert.event_fx_exchanges_digest),
     )
@@ -817,6 +818,29 @@ def _normalize_consumed_fx_open_ats(
     return tuple(normalized)
 
 
+def _validate_source_expected_venues(value: frozenset[str] | None) -> frozenset[str]:
+    """Require a non-empty canonical spot venue set for the replayed frontier cut."""
+    validated = correction_expected_venues(value)
+    if validated is None:
+        raise ValueError(
+            "certificate source_expected_venues requires a nonempty canonical spot venue set"
+        )
+    return validated
+
+
+def _validate_certificate_fx_fingerprint(
+    fx_pairs: tuple[tuple[str, str], ...],
+    fx_open_ats: tuple[datetime, ...],
+    fingerprint: IdAggregate,
+) -> None:
+    """Require zero event-FX candle aggregate when either FX input sequence is empty."""
+    if (not fx_pairs or not fx_open_ats) and fingerprint != IdAggregate(0, 0, 0, None):
+        raise ValueError(
+            "certificate event_fx_candles_fingerprint must be empty when "
+            "consumed_fx_pairs or consumed_fx_open_ats is empty"
+        )
+
+
 @dataclass(frozen=True)
 class PnlOpeningCheckpointCertificate:
     """Cryptographic and structural evidence certificate for an opening checkpoint.
@@ -824,8 +848,17 @@ class PnlOpeningCheckpointCertificate:
     Binds scope identity, calculation and policy versions, schema version,
     activation anchor, source generation, boundary clock, execution cut
     watermarks/digests/counts/deferred sequences, prefix annulment and lineage
-    digests, fill-witness cut, symbol reference digest, accrual fingerprint, and
-    consumed event-FX exchange and candle fingerprints.
+    digests, prefix and source fill-witness cuts, symbol reference digest,
+    accrual fingerprint, and consumed event-FX exchange and candle fingerprints.
+
+    Prefix vs. source witness cuts: ``prefix_*`` witness fields
+    (``prefix_fill_witness_digest`` and ``prefix_venue_event_watermarks``) are
+    restricted to sequences up to the checkpoint boundary and define the
+    reader's recomputation target verified at the resuming generation's
+    ``as_of``. By contrast, ``source_*`` fields (``source_expected_venues``,
+    ``source_venue_event_watermarks``, and ``source_fill_witness_digest``) bind
+    the certificate at write time to the active frontier cut under which the
+    checkpoint state was replayed, matching the write gate's execution-cut check.
 
     Evidence-read ordering contract: reads at a fixed ``as_of`` do not share a
     database snapshot across queries, so every certificate fingerprint and
@@ -864,6 +897,9 @@ class PnlOpeningCheckpointCertificate:
     prefix_lineage_digest: str
     prefix_fill_witness_digest: str
     prefix_venue_event_watermarks: Mapping[str, int]
+    source_expected_venues: frozenset[str]
+    source_venue_event_watermarks: Mapping[str, int]
+    source_fill_witness_digest: str
     symbol_ref_digest: str
     consumed_fx_pairs: Sequence[tuple[str, str]]
     consumed_fx_open_ats: Sequence[datetime]
@@ -879,10 +915,19 @@ class PnlOpeningCheckpointCertificate:
         applied = _normalize_applied_watermarks(self.applied_watermarks_by_exchange, cutoff)
         deferred = _normalize_deferred_sequences(self.deferred_execution_sequences, cutoff)
         witness_watermarks = correction_watermarks(self.prefix_venue_event_watermarks)
+        expected_venues = _validate_source_expected_venues(self.source_expected_venues)
+        if not isinstance(self.source_venue_event_watermarks, Mapping):
+            raise ValueError("certificate source_venue_event_watermarks must be a mapping")
+        source_witness_watermarks = correction_watermarks(self.source_venue_event_watermarks)
         fx_pairs = _normalize_consumed_fx_pairs(self.consumed_fx_pairs)
         fx_open_ats = _normalize_consumed_fx_open_ats(
             self.consumed_fx_open_ats,
             self.checkpoint_minute,
+        )
+        _validate_certificate_fx_fingerprint(
+            fx_pairs,
+            fx_open_ats,
+            self.event_fx_candles_fingerprint,
         )
         object.__setattr__(self, "cutoff_execution_watermarks", cutoff)
         object.__setattr__(self, "execution_chain_digests", chain_digests)
@@ -890,6 +935,8 @@ class PnlOpeningCheckpointCertificate:
         object.__setattr__(self, "applied_watermarks_by_exchange", applied)
         object.__setattr__(self, "deferred_execution_sequences", deferred)
         object.__setattr__(self, "prefix_venue_event_watermarks", witness_watermarks)
+        object.__setattr__(self, "source_expected_venues", expected_venues)
+        object.__setattr__(self, "source_venue_event_watermarks", source_witness_watermarks)
         object.__setattr__(self, "consumed_fx_pairs", fx_pairs)
         object.__setattr__(self, "consumed_fx_open_ats", fx_open_ats)
 

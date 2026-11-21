@@ -39,6 +39,8 @@ _INSERT_SQL = (
     "execution_manifest_digest, prefix_annulment_digest, "
     "accrual_prefix_fingerprint_json, prefix_lineage_digest, "
     "prefix_fill_witness_digest, prefix_venue_event_watermarks_json, "
+    "source_expected_venues_json, source_venue_event_watermarks_json, "
+    "source_fill_witness_digest, "
     "symbol_ref_digest, consumed_fx_pairs_json, consumed_fx_open_ats_json, "
     "event_fx_exchanges_digest, event_fx_candle_count, event_fx_candle_id_sum, "
     "event_fx_candle_max_id, event_fx_candle_max_ts, state_json, updated_at"
@@ -52,6 +54,8 @@ _INSERT_SQL = (
     ":execution_manifest_digest, :prefix_annulment_digest, "
     ":accrual_prefix_fingerprint_json, :prefix_lineage_digest, "
     ":prefix_fill_witness_digest, :prefix_venue_event_watermarks_json, "
+    ":source_expected_venues_json, :source_venue_event_watermarks_json, "
+    ":source_fill_witness_digest, "
     ":symbol_ref_digest, :consumed_fx_pairs_json, :consumed_fx_open_ats_json, "
     ":event_fx_exchanges_digest, :event_fx_candle_count, :event_fx_candle_id_sum, "
     ":event_fx_candle_max_id, :event_fx_candle_max_ts, :state_json, :updated_at)"
@@ -93,6 +97,9 @@ def _row(**overrides: object) -> dict[str, object]:
         "prefix_lineage_digest": _DIGEST,
         "prefix_fill_witness_digest": _DIGEST,
         "prefix_venue_event_watermarks_json": "{}",
+        "source_expected_venues_json": '["kraken"]',
+        "source_venue_event_watermarks_json": '{"kraken:spot":1}',
+        "source_fill_witness_digest": _DIGEST,
         "symbol_ref_digest": _DIGEST,
         "consumed_fx_pairs_json": "[]",
         "consumed_fx_open_ats_json": "[]",
@@ -217,6 +224,9 @@ def test_0071_postgresql_ddl_round_trip_uses_native_types() -> None:
     assert f"CREATE TABLE {_TABLE}" in ddl
     assert "wallet_public_id UUID NOT NULL" in ddl
     assert "source_generation BIGINT NOT NULL" in ddl
+    assert "source_expected_venues_json TEXT NOT NULL" in ddl
+    assert "source_venue_event_watermarks_json TEXT NOT NULL" in ddl
+    assert "source_fill_witness_digest VARCHAR(64) NOT NULL" in ddl
     assert "event_fx_candle_count BIGINT NOT NULL" in ddl
     assert "event_fx_candle_max_id BIGINT NOT NULL" in ddl
     assert "checkpoint_minute TIMESTAMP WITH TIME ZONE NOT NULL" in ddl

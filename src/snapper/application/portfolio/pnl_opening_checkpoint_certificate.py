@@ -206,6 +206,35 @@ def prefix_fill_witness_digest(witnesses: Sequence[PnlFillWitnessIdentity]) -> s
     return _canonical_digest("prefix_fill_witnesses", records)
 
 
+def _extract_frontier_cut(
+    frontier_after: PnlCorrectionFrontier,
+) -> tuple[Mapping[str, int], str, bool, frozenset[str], Mapping[str, int], str] | None:
+    """Return all six frontier cut fields when completely captured, else ``None``."""
+    raw_watermarks = frontier_after.raw_execution_watermarks
+    manifest_digest = frontier_after.execution_manifest_digest
+    has_fill_gap = frontier_after.has_fill_gap
+    expected_venues = frontier_after.expected_venues
+    venue_watermarks = frontier_after.venue_event_watermarks
+    fill_witness_digest = frontier_after.fill_witness_digest
+    if (
+        raw_watermarks is None
+        or manifest_digest is None
+        or has_fill_gap is None
+        or expected_venues is None
+        or venue_watermarks is None
+        or fill_witness_digest is None
+    ):
+        return None
+    return (
+        raw_watermarks,
+        manifest_digest,
+        has_fill_gap,
+        expected_venues,
+        venue_watermarks,
+        fill_witness_digest,
+    )
+
+
 def checkpoint_write_refusal(
     frontier_after: PnlCorrectionFrontier,
     chunk: PnlCorrectionChunk,
@@ -231,17 +260,34 @@ def checkpoint_write_refusal(
         or certificate.as_of != frontier_after.as_of
     ):
         return "generation_mismatch"
-    raw_watermarks = frontier_after.raw_execution_watermarks
-    manifest_digest = frontier_after.execution_manifest_digest
-    has_fill_gap = frontier_after.has_fill_gap
-    if raw_watermarks is None or manifest_digest is None or has_fill_gap is None:
+    frontier_cut = _extract_frontier_cut(frontier_after)
+    if frontier_cut is None:
         return "frontier_evidence_incomplete"
+    (
+        raw_watermarks,
+        manifest_digest,
+        has_fill_gap,
+        expected_venues,
+        venue_watermarks,
+        fill_witness_digest,
+    ) = frontier_cut
     if has_fill_gap:
         return "fill_gap"
-    if (
-        dict(certificate.cutoff_execution_watermarks) != dict(raw_watermarks)
-        or certificate.execution_manifest_digest != manifest_digest
-    ):
+    certificate_cut = (
+        dict(certificate.cutoff_execution_watermarks),
+        certificate.execution_manifest_digest,
+        certificate.source_expected_venues,
+        dict(certificate.source_venue_event_watermarks),
+        certificate.source_fill_witness_digest,
+    )
+    expected_cut = (
+        dict(raw_watermarks),
+        manifest_digest,
+        expected_venues,
+        dict(venue_watermarks),
+        fill_witness_digest,
+    )
+    if certificate_cut != expected_cut:
         return "cut_mismatch"
     if certificate.key != frontier_after.key:
         return "key_mismatch"

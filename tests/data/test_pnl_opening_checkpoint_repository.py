@@ -198,6 +198,9 @@ def _certificate_for(
         "prefix_lineage_digest": _DIGEST_A,
         "prefix_fill_witness_digest": _DIGEST_B,
         "prefix_venue_event_watermarks": {"walutomat:spot": 2, "kraken:spot": 9},
+        "source_expected_venues": frozenset({"kraken", "walutomat"}),
+        "source_venue_event_watermarks": {"walutomat:spot": 2, "kraken:spot": 9},
+        "source_fill_witness_digest": _DIGEST_B,
         "symbol_ref_digest": _DIGEST_A,
         "consumed_fx_pairs": [("BTC", "USD"), ("EUR", "USD")],
         "consumed_fx_open_ats": [samples._M1, samples._M2],
@@ -589,6 +592,9 @@ async def test_opening_checkpoint_canonical_serialization_and_round_trip(
     )
     assert raw.cutoff_execution_watermarks_json == '{"kraken":5,"walutomat":4}'
     assert raw.deferred_execution_sequences_json == '{"kraken":[4,5]}'
+    assert raw.source_expected_venues_json == '["kraken","walutomat"]'
+    assert raw.source_venue_event_watermarks_json == '{"kraken:spot":9,"walutomat:spot":2}'
+    assert raw.source_fill_witness_digest == _DIGEST_B
     assert raw.event_fx_candle_id_sum == str((3 << 62) + 6)
 
     record = await repository.get_portfolio_pnl_opening_checkpoint(samples._scope())
@@ -660,6 +666,13 @@ async def test_opening_checkpoint_canonical_serialization_and_round_trip(
         ("event_fx_candle_id_sum", "-1"),
         ("state_json", ""),
         ("anchor_digest", "short"),
+        ("source_expected_venues_json", "[]"),
+        ("source_expected_venues_json", '["Kraken"]'),
+        ("source_expected_venues_json", '["kraken","kraken"]'),
+        ("source_expected_venues_json", "{}"),
+        ("source_venue_event_watermarks_json", "[]"),
+        ("source_venue_event_watermarks_json", '{"kraken:spot":-1}'),
+        ("source_fill_witness_digest", "short"),
     ],
 )
 async def test_corrupt_persisted_opening_checkpoint_raises_value_error(
@@ -1205,6 +1218,48 @@ async def test_fenced_commit_raises_on_every_write_refusal_without_persisting(
     assert kept is not None and kept.certificate.checkpoint_minute == settled_g1.tip
 
 
+@pytest.mark.parametrize(
+    "source_override",
+    [
+        {"source_expected_venues": frozenset({"kraken"})},
+        {"source_venue_event_watermarks": {"kraken:spot": 9, "walutomat:spot": 3}},
+        {"source_fill_witness_digest": _DIGEST_A},
+    ],
+)
+async def test_fenced_commit_raises_on_source_cut_mismatch_and_rolls_back(
+    repository: SQLAlchemyRepository,
+    source_override: dict[str, object],
+) -> None:
+    """Reject source-cut mismatches inside the transaction and roll back frontier and checkpoint.
+
+    Given: A settled prior checkpoint at ``M2`` and a started generation at ``M3..M5``
+        whose candidate write mutates one source cut field against the frontier.
+    When: ``commit_portfolio_pnl_correction_chunk`` attempts to commit the mismatched write.
+    Then: It raises ``ValueError`` naming ``cut_mismatch``, leaves the frontier revision
+        unchanged, and leaves the prior checkpoint intact.
+    """
+    settled_g1, write_g1 = await _seed_settled_checkpoint(repository, tip=samples._M2)
+    g2 = await repository.invalidate_portfolio_pnl_correction(
+        samples._scope(),
+        _request(start=samples._M3, tip=samples._M5, as_of=samples._M5),
+        settled_g1,
+    )
+    tip_chunk = _empty_chunk(g2, samples._M5)
+    tip_after = advance_correction_frontier(g2, tip_chunk)
+    bad_cert = _certificate_for(tip_after, **source_override)
+    with pytest.raises(ValueError, match="cut_mismatch"):
+        await repository.commit_portfolio_pnl_correction_chunk(
+            samples._scope(),
+            g2,
+            tip_chunk,
+            checkpoint=PnlOpeningCheckpointWrite(bad_cert, '{"bad":1}'),
+        )
+    assert await repository.get_portfolio_pnl_correction_frontier(samples._scope()) == g2
+    kept = await repository.get_portfolio_pnl_opening_checkpoint(samples._scope())
+    assert kept is not None and kept.certificate == write_g1.certificate
+    assert kept.state_json == write_g1.state_json
+
+
 async def test_257_deferred_tail_refusal_drops_checkpoint_and_still_commits_frontier(
     repository: SQLAlchemyRepository,
 ) -> None:
@@ -1245,6 +1300,8 @@ async def test_257_deferred_tail_refusal_drops_checkpoint_and_still_commits_fron
         applied_watermarks_by_exchange={"kraken": 5},
         deferred_execution_sequences={"kraken": deferred},
         prefix_venue_event_watermarks={"kraken:spot": 9},
+        source_expected_venues=frozenset({"kraken"}),
+        source_venue_event_watermarks={"kraken:spot": 9},
     )
     assert checkpoint_write_refusal(planned_after, chunk, cert) == "deferred_tail_too_long"
     settled = await repository.commit_portfolio_pnl_correction_chunk(

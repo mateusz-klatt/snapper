@@ -19589,6 +19589,13 @@ class SQLAlchemyRepository(Repository):
             "prefix_venue_event_watermarks_json": cls._encode_pnl_checkpoint_json(
                 dict(cert.prefix_venue_event_watermarks)
             ),
+            "source_expected_venues_json": cls._encode_pnl_checkpoint_json(
+                sorted(cert.source_expected_venues)
+            ),
+            "source_venue_event_watermarks_json": cls._encode_pnl_checkpoint_json(
+                dict(cert.source_venue_event_watermarks)
+            ),
+            "source_fill_witness_digest": cert.source_fill_witness_digest,
             "symbol_ref_digest": cert.symbol_ref_digest,
             "consumed_fx_pairs_json": cls._encode_pnl_checkpoint_json(
                 [[base, quote] for base, quote in cert.consumed_fx_pairs]
@@ -19672,6 +19679,14 @@ class SQLAlchemyRepository(Repository):
             prefix_venue_event_watermarks=cls._pnl_correction_watermarks(
                 model.prefix_venue_event_watermarks_json
             ),
+            source_expected_venues=cast(
+                frozenset[str],
+                cls._pnl_correction_expected_venues(model.source_expected_venues_json),
+            ),
+            source_venue_event_watermarks=cls._pnl_correction_watermarks(
+                model.source_venue_event_watermarks_json
+            ),
+            source_fill_witness_digest=model.source_fill_witness_digest,
             symbol_ref_digest=model.symbol_ref_digest,
             consumed_fx_pairs=cls._decode_pnl_checkpoint_fx_pairs(model.consumed_fx_pairs_json),
             consumed_fx_open_ats=[

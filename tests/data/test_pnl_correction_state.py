@@ -588,6 +588,9 @@ def _valid_certificate(**overrides: object) -> PnlOpeningCheckpointCertificate:
         "prefix_lineage_digest": _DIGEST_64,
         "prefix_fill_witness_digest": _DIGEST_64,
         "prefix_venue_event_watermarks": {"walutomat:spot": 2, "kraken:spot": 9},
+        "source_expected_venues": frozenset({"walutomat", "kraken"}),
+        "source_venue_event_watermarks": {"walutomat:spot": 12, "kraken:spot": 19},
+        "source_fill_witness_digest": _DIGEST_64_ALT,
         "symbol_ref_digest": _DIGEST_64,
         "consumed_fx_pairs": [("BTC", "USD"), ("EUR", "USD")],
         "consumed_fx_open_ats": [samples._M1, samples._M3],
@@ -665,17 +668,23 @@ def test_certificate_normalizes_mappings_and_sequences_and_isolates_caller_state
     cutoff = {"walutomat": 4, "kraken": 5}
     deferred_list = [4, 5]
     deferred = {"kraken": deferred_list}
+    source_witness_wm = {"walutomat:spot": 12, "kraken:spot": 19}
     cert = _valid_certificate(
         cutoff_execution_watermarks=cutoff,
         deferred_execution_sequences=deferred,
+        source_venue_event_watermarks=source_witness_wm,
     )
     cutoff["kraken"] = 99
     deferred_list.append(1)
+    source_witness_wm["kraken:spot"] = 999
     assert list(cert.cutoff_execution_watermarks) == ["kraken", "walutomat"]
     assert list(cert.execution_chain_digests) == ["kraken", "walutomat"]
     assert list(cert.cutoff_execution_counts) == ["kraken", "walutomat"]
     assert list(cert.applied_watermarks_by_exchange) == ["kraken", "walutomat"]
     assert list(cert.prefix_venue_event_watermarks) == ["kraken:spot", "walutomat:spot"]
+    assert list(cert.source_venue_event_watermarks) == ["kraken:spot", "walutomat:spot"]
+    assert cert.source_venue_event_watermarks["kraken:spot"] == 19
+    assert cert.source_expected_venues == frozenset({"kraken", "walutomat"})
     assert cert.deferred_execution_sequences == {"kraken": (4, 5)}
     assert isinstance(cert.deferred_execution_sequences["kraken"], tuple)
     assert cert.consumed_fx_pairs == (("BTC", "USD"), ("EUR", "USD"))
@@ -689,6 +698,7 @@ def test_certificate_normalizes_mappings_and_sequences_and_isolates_caller_state
         deferred_execution_sequences={},
         consumed_fx_pairs=(),
         consumed_fx_open_ats=(),
+        event_fx_candles_fingerprint=IdAggregate(0, 0, 0, None),
     )
     assert empty_cert.cutoff_execution_watermarks == {}
 
@@ -702,6 +712,8 @@ def test_certificate_normalizes_mappings_and_sequences_and_isolates_caller_state
     assert "before" in doc
     assert "resum" in doc
     assert "as_of" in doc
+    assert "prefix_*" in doc or "prefix_" in doc
+    assert "source_*" in doc or "source_" in doc
 
 
 @pytest.mark.parametrize(
@@ -729,8 +741,19 @@ def test_certificate_normalizes_mappings_and_sequences_and_isolates_caller_state
         ({"prefix_annulment_digest": "bad"}, "prefix_annulment_digest"),
         ({"prefix_lineage_digest": "bad"}, "prefix_lineage_digest"),
         ({"prefix_fill_witness_digest": "bad"}, "prefix_fill_witness_digest"),
+        ({"source_fill_witness_digest": "bad"}, "source_fill_witness_digest"),
+        ({"source_expected_venues": frozenset()}, "spot venue"),
+        ({"source_expected_venues": frozenset({"Kraken"})}, "spot venue"),
+        ({"source_expected_venues": frozenset({"kraken "})}, "spot venue"),
+        ({"source_expected_venues": {"kraken"}}, "spot venue"),
+        ({"source_expected_venues": None}, "spot venue"),
+        ({"source_venue_event_watermarks": {"kraken:spot": -1}}, "watermarks"),
+        ({"source_venue_event_watermarks": {"": 1}}, "watermarks"),
+        ({"source_venue_event_watermarks": ["bad"]}, "watermarks"),
         ({"symbol_ref_digest": "bad"}, "symbol_ref_digest"),
         ({"event_fx_exchanges_digest": "bad"}, "event_fx_exchanges_digest"),
+        ({"consumed_fx_pairs": ()}, "event_fx_candles_fingerprint"),
+        ({"consumed_fx_open_ats": ()}, "event_fx_candles_fingerprint"),
         (
             {"execution_chain_digests": {"kraken": "BAD", "walutomat": _DIGEST_64}},
             "execution_chain_digests",
