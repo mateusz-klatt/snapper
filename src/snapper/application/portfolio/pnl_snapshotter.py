@@ -127,11 +127,13 @@ _CHUNK_RECOVERY_STREAK: Final[int] = 3
 """Consecutive fast committed chunks required before a reduced chunk limit doubles."""
 
 _CHUNK_RECOVERY_BUDGET_FRACTION: Final[float] = 0.25
-"""Share of the tick budget below which a committed chunk counts toward recovery.
+"""Share of the tick budget below which a full-width committed chunk counts toward recovery.
 
-Doubling a chunk that finished within a quarter of the tick keeps the doubled
-chunk within about half of it, so recovery cannot oscillate against the timeout
-that originally halved the limit.
+Doubling a chunk that spanned the whole current limit and finished within a
+quarter of the tick keeps the doubled chunk within about half of it, so recovery
+cannot oscillate against the timeout that originally halved the limit. A chunk
+narrower than the limit, clipped at the frontier tip or split after a work-budget
+overflow, proves nothing about a full-width chunk and never counts.
 """
 
 _FAILURE_MESSAGES: Final[dict[str, str]] = {
@@ -427,17 +429,21 @@ class PortfolioPnlSnapshotter:
         self._replay_chunk_limits[wallet] = max(1, self._replay_chunk_limit(wallet) // 2)
         self._replay_chunk_streaks.pop(wallet, None)
 
-    def _record_chunk_outcome(self, wallet: str, elapsed: float) -> None:
-        """Grow a reduced chunk limit back after consecutive fast committed chunks.
+    def _record_chunk_outcome(self, wallet: str, elapsed: float, replayed: ChunkWindow) -> None:
+        """Grow a reduced chunk limit back after consecutive fast full-width commits.
 
         A halved limit otherwise persists for the life of the process, so one
         transient deadline would multiply every later chunk's fixed prefix cost.
         Only committed chunks reach this method; rows stay width-independent
         because valuation is per point, so recovery changes only throughput.
+        A slow chunk resets the streak whatever its width, which is conservative.
+        A fast chunk counts only when it spanned the whole current limit, because
+        a tip-clipped or budget-split chunk says nothing about a full-width one.
 
         Args:
             wallet: Wallet whose replay chunk has just committed.
             elapsed: Monotonic wall time of that chunk, in seconds.
+            replayed: The window actually replayed and committed.
         """
         limit = self._replay_chunk_limit(wallet)
         if limit >= MAX_CORRECTION_CHUNK_MINUTES:
@@ -445,6 +451,8 @@ class PortfolioPnlSnapshotter:
             return
         if elapsed >= self._interval_seconds * _CHUNK_RECOVERY_BUDGET_FRACTION:
             self._replay_chunk_streaks[wallet] = 0
+            return
+        if (replayed.end - replayed.start) // _MINUTE + 1 < limit:
             return
         streak = self._replay_chunk_streaks.get(wallet, 0) + 1
         if streak < _CHUNK_RECOVERY_STREAK:
@@ -972,7 +980,7 @@ class PortfolioPnlSnapshotter:
         committed = await repo.commit_portfolio_pnl_correction_chunk(
             ctx.scope, frontier, plan.chunk
         )
-        self._record_chunk_outcome(ctx.wallet_public_id, self._monotonic() - started)
+        self._record_chunk_outcome(ctx.wallet_public_id, self._monotonic() - started, chunk)
         self._log_repair_from_lag(ctx, committed)
         self._report_withheld(ctx.wallet_public_id, plan.withheld, bool(plan.chunk.edits))
 

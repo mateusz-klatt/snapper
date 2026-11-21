@@ -2,18 +2,24 @@
 
 A transient deadline halves a wallet's chunk limit. Without recovery the halved
 limit would persist for the life of the process and multiply every later chunk's
-fixed prefix cost, so consecutive fast committed chunks double it back, capped
-at ``MAX_CORRECTION_CHUNK_MINUTES``, while persisted rows stay width-independent.
+fixed prefix cost, so consecutive fast full-width committed chunks double it
+back, capped at ``MAX_CORRECTION_CHUNK_MINUTES``, while persisted rows stay
+width-independent. Narrower chunks, clipped at the tip or split after a
+work-budget overflow, never count as evidence that a wider chunk fits.
 """
 
 from collections.abc import Callable
 from collections.abc import Iterator
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
 from itertools import count
 from pathlib import Path
 
 import pytest
 
 from snapper.application.portfolio import pnl_snapshotter
+from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
 from snapper.data.repository import SQLAlchemyRepository
 from tests.application.portfolio import test_pnl_snapshotter_continuation as restart
@@ -22,6 +28,32 @@ from tests.data import test_pnl_timeline_sample_repository as sample_fixtures
 _WALLET = "wallet-recovery"
 _FAST = 0.5
 _SLOW = 30.0
+_START = datetime(2026, 7, 20, tzinfo=UTC)
+
+
+def _window(minutes: int) -> ChunkWindow:
+    """Return a replayed window spanning exactly this many minutes.
+
+    Args:
+        minutes: Inclusive minute count of the window.
+
+    Returns:
+        A minute-aligned window starting at a fixed instant.
+    """
+    return ChunkWindow(_START, _START + timedelta(minutes=minutes - 1))
+
+
+def _full(snap: PortfolioPnlSnapshotter, wallet: str = _WALLET) -> ChunkWindow:
+    """Return a window as wide as the wallet's current chunk limit.
+
+    Args:
+        snap: Snapshotter whose limit sets the width.
+        wallet: Wallet whose limit is read.
+
+    Returns:
+        A full-width replayed window.
+    """
+    return _window(snap._replay_chunk_limit(wallet))
 
 
 def _disabled_snapshotter() -> PortfolioPnlSnapshotter:
@@ -65,7 +97,7 @@ def test_three_fast_chunks_restore_the_full_limit() -> None:
     snap._reduce_replay_chunk(_WALLET)
     assert snap._replay_chunk_limit(_WALLET) == 720
     for _ in range(3):
-        snap._record_chunk_outcome(_WALLET, _FAST)
+        snap._record_chunk_outcome(_WALLET, _FAST, _full(snap))
     assert snap._replay_chunk_limit(_WALLET) == 1440
     assert _WALLET not in snap._replay_chunk_limits
     assert _WALLET not in snap._replay_chunk_streaks
@@ -85,7 +117,7 @@ def test_recovery_doubles_in_steps_and_never_exceeds_the_cap() -> None:
     assert snap._replay_chunk_limit(_WALLET) == 360
     observed: list[int] = []
     for _ in range(9):
-        snap._record_chunk_outcome(_WALLET, _FAST)
+        snap._record_chunk_outcome(_WALLET, _FAST, _full(snap))
         observed.append(snap._replay_chunk_limit(_WALLET))
     assert observed == [360, 360, 720, 720, 720, 1440, 1440, 1440, 1440]
     assert _WALLET not in snap._replay_chunk_streaks
@@ -102,7 +134,7 @@ def test_slow_chunk_resets_the_streak() -> None:
     snap = _disabled_snapshotter()
     snap._reduce_replay_chunk(_WALLET)
     for elapsed in (_FAST, _FAST, 15.0, _FAST, _FAST):
-        snap._record_chunk_outcome(_WALLET, elapsed)
+        snap._record_chunk_outcome(_WALLET, elapsed, _full(snap))
     assert snap._replay_chunk_limit(_WALLET) == 720
     assert snap._replay_chunk_streaks[_WALLET] == 2
 
@@ -117,12 +149,12 @@ def test_reduction_during_a_streak_halves_and_resets() -> None:
     """
     snap = _disabled_snapshotter()
     snap._reduce_replay_chunk(_WALLET)
-    snap._record_chunk_outcome(_WALLET, _FAST)
-    snap._record_chunk_outcome(_WALLET, _FAST)
+    snap._record_chunk_outcome(_WALLET, _FAST, _full(snap))
+    snap._record_chunk_outcome(_WALLET, _FAST, _full(snap))
     snap._reduce_replay_chunk(_WALLET)
     assert _WALLET not in snap._replay_chunk_streaks
-    snap._record_chunk_outcome(_WALLET, _FAST)
-    snap._record_chunk_outcome(_WALLET, _FAST)
+    snap._record_chunk_outcome(_WALLET, _FAST, _full(snap))
+    snap._record_chunk_outcome(_WALLET, _FAST, _full(snap))
     assert snap._replay_chunk_limit(_WALLET) == 360
 
 
@@ -136,8 +168,8 @@ def test_full_limit_keeps_no_recovery_state() -> None:
     """
     snap = _disabled_snapshotter()
     snap._replay_chunk_streaks[_WALLET] = 2
-    snap._record_chunk_outcome(_WALLET, _FAST)
-    snap._record_chunk_outcome(_WALLET, _SLOW)
+    snap._record_chunk_outcome(_WALLET, _FAST, _full(snap))
+    snap._record_chunk_outcome(_WALLET, _SLOW, _full(snap))
     assert snap._replay_chunk_limit(_WALLET) == 1440
     assert snap._replay_chunk_streaks == {}
 
@@ -153,10 +185,54 @@ def test_pruning_an_absent_wallet_drops_its_streak() -> None:
     snap = _disabled_snapshotter()
     for wallet in (_WALLET, "wallet-gone"):
         snap._reduce_replay_chunk(wallet)
-        snap._record_chunk_outcome(wallet, _FAST)
+        snap._record_chunk_outcome(wallet, _FAST, _full(snap, wallet))
     snap._prune_absent_scopes({_WALLET})
     assert set(snap._replay_chunk_limits) == {_WALLET}
     assert snap._replay_chunk_streaks == {_WALLET: 1}
+
+
+@pytest.mark.usefixtures("capped")
+@pytest.mark.parametrize(
+    "narrow",
+    [
+        pytest.param(_window(5), id="tip_clipped"),
+        pytest.param(PortfolioPnlSnapshotter._split_chunk(_window(720))[0], id="budget_split"),
+    ],
+)
+def test_fast_narrow_chunks_neither_grow_nor_reset_the_limit(narrow: ChunkWindow) -> None:
+    """Keep a reduced limit while only narrower-than-limit chunks commit fast.
+
+    Given: A wallet halved to 720 minutes with one fast full-width commit counted.
+    When: Many fast chunks commit that are clipped at the tip or split in half.
+    Then: The limit stays 720 and the counted streak is left exactly as it was.
+    """
+    snap = _disabled_snapshotter()
+    snap._reduce_replay_chunk(_WALLET)
+    snap._record_chunk_outcome(_WALLET, _FAST, _full(snap))
+    for _ in range(9):
+        snap._record_chunk_outcome(_WALLET, _FAST, narrow)
+    assert snap._replay_chunk_limit(_WALLET) == 720
+    assert snap._replay_chunk_streaks[_WALLET] == 1
+
+
+@pytest.mark.usefixtures("capped")
+def test_slow_narrow_chunk_still_resets_the_streak() -> None:
+    """Treat any slow commit as a reason to restart the count, whatever its width.
+
+    Given: A wallet halved to 720 minutes with two fast full-width commits counted.
+    When: A five-minute chunk commits at the recovery threshold, then one fast
+    full-width chunk commits.
+    Then: The streak restarted, so the limit is still 720 with one commit counted.
+    """
+    snap = _disabled_snapshotter()
+    snap._reduce_replay_chunk(_WALLET)
+    snap._record_chunk_outcome(_WALLET, _FAST, _full(snap))
+    snap._record_chunk_outcome(_WALLET, _FAST, _full(snap))
+    snap._record_chunk_outcome(_WALLET, 15.0, _window(5))
+    assert snap._replay_chunk_streaks[_WALLET] == 0
+    snap._record_chunk_outcome(_WALLET, _FAST, _full(snap))
+    assert snap._replay_chunk_limit(_WALLET) == 720
+    assert snap._replay_chunk_streaks[_WALLET] == 1
 
 
 async def _settle(repo: SQLAlchemyRepository, snap: PortfolioPnlSnapshotter) -> list[int]:
