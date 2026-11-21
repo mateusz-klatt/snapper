@@ -43,6 +43,7 @@ INDEX_BUILD_MAINTENANCE_WORK_MEM: Final[str] = "64MB"
 ANALYZE_LOCK_TIMEOUT: Final[str] = "2s"
 ANALYZE_LEAF_STATEMENT_TIMEOUT: Final[str] = "60s"
 ANALYZE_PARENT_STATEMENT_TIMEOUT: Final[str] = "300s"
+ANALYZE_PARENT_ONLY_MIN_SERVER_VERSION_NUM: Final[int] = 180000
 DEFAULT_STALE_ANALYZE_LIMIT: Final[int] = 200
 _ANALYZE_SKIPPABLE_SQLSTATES: Final[frozenset[str]] = frozenset({"55P03", "57014"})
 _DAILY_SUFFIX_PATTERN: Final[re.Pattern[str]] = re.compile(r"_d(\d{8})$")
@@ -210,6 +211,7 @@ class AnalyzeResult:
         executed: Relation names whose ``ANALYZE`` transaction committed.
         skipped: Relation names skipped after bounded lock or statement timeout.
         skipped_dialect: Non-PostgreSQL dialect name when execution was bypassed.
+        unsupported: Partitioned parent names skipped when server precedes PG18.
     """
 
     targets: tuple[str, ...]
@@ -217,6 +219,7 @@ class AnalyzeResult:
     executed: tuple[str, ...]
     skipped: tuple[str, ...]
     skipped_dialect: str | None = None
+    unsupported: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -3153,6 +3156,61 @@ def _parse_daily_suffix_day(relation: str) -> date | None:
         return None
 
 
+def _server_version_num(connection: Connection) -> int:
+    """Read PostgreSQL ``server_version_num`` from the active connection.
+
+    Args:
+        connection: Clean PostgreSQL SQLAlchemy connection.
+
+    Returns:
+        Numeric PostgreSQL server version (for example ``180006``).
+
+    Raises:
+        DailyPartitionError: If ``SHOW server_version_num`` returns missing or
+            non-numeric output.
+    """
+    raw = cast(str | int | None, connection.scalar(text("SHOW server_version_num")))
+    if raw is None:
+        raise DailyPartitionError("refused: PostgreSQL server_version_num is unavailable")
+    normalized = str(raw).strip()
+    if re.fullmatch(r"[0-9]+", normalized) is None:
+        raise DailyPartitionError(
+            f"refused: PostgreSQL server_version_num is non-numeric ({raw!r})"
+        )
+    return int(normalized)
+
+
+def _split_unsupported_targets(
+    targets: tuple[_AnalyzeTarget, ...],
+    *,
+    parent_only_supported: bool,
+    server_version: int | None,
+) -> tuple[tuple[_AnalyzeTarget, ...], tuple[str, ...]]:
+    """Split partitioned parents out when the server lacks ``ANALYZE ... ONLY``.
+
+    Args:
+        targets: Ordered candidate relation descriptors.
+        parent_only_supported: Whether PostgreSQL is version 18 or newer.
+        server_version: Numeric PostgreSQL ``server_version_num`` for warning context.
+
+    Returns:
+        Supported targets to plan/execute and unsupported parent names.
+    """
+    if parent_only_supported:
+        return targets, ()
+    unsupported = tuple(target.relation for target in targets if target.is_parent)
+    supported = tuple(target for target in targets if not target.is_parent)
+    if unsupported:
+        logger.warning(
+            "Skipping PostgreSQL ANALYZE for partitioned parent(s) %s on server_version_num %s "
+            "(ANALYZE ... ONLY requires PostgreSQL >= %s)",
+            ", ".join(unsupported),
+            server_version,
+            ANALYZE_PARENT_ONLY_MIN_SERVER_VERSION_NUM,
+        )
+    return supported, unsupported
+
+
 def _analyze_sql(target: _AnalyzeTarget) -> str:
     """Render safe single-relation ``ANALYZE (SKIP_LOCKED)`` SQL.
 
@@ -3176,6 +3234,8 @@ def _run_analyze_targets(
     targets: tuple[_AnalyzeTarget, ...],
     *,
     dry_run: bool,
+    parent_only_supported: bool = True,
+    server_version: int | None = None,
 ) -> AnalyzeResult:
     """Plan or execute per-relation ``ANALYZE`` outside long transactions.
 
@@ -3185,31 +3245,41 @@ def _run_analyze_targets(
     every attached child partition when building ``ONLY`` parent histograms
     even without scanning individual heaps deeply. Every relation runs in its
     own short committed transaction under ``lock_timeout = '2s'`` and
-    ``SKIP_LOCKED`` so writers are never blocked.
+    ``SKIP_LOCKED`` so writers are never blocked. On PostgreSQL older than 18
+    (``parent_only_supported=False``), partitioned parents are excluded from
+    planning/execution and listed in ``AnalyzeResult.unsupported``.
 
     Args:
         connection: Clean PostgreSQL connection in ``public``.
         targets: Ordered targets to plan or analyze.
         dry_run: When true, return DDL without running transactions.
+        parent_only_supported: Whether ``ANALYZE ... ONLY`` is supported by the server.
+        server_version: Numeric ``server_version_num`` included in pre-PG18 warnings.
 
     Returns:
-        Exact planned, committed, and timeout-skipped relation summary.
+        Exact planned, committed, timeout-skipped, and unsupported relation summary.
 
     Raises:
         DailyPartitionError: If PostgreSQL fails with a non-timeout error.
     """
-    target_names = tuple(target.relation for target in targets)
-    statements = tuple(_analyze_sql(target) for target in targets)
-    if dry_run or not targets:
+    supported_targets, unsupported = _split_unsupported_targets(
+        targets,
+        parent_only_supported=parent_only_supported,
+        server_version=server_version,
+    )
+    target_names = tuple(target.relation for target in supported_targets)
+    statements = tuple(_analyze_sql(target) for target in supported_targets)
+    if dry_run or not supported_targets:
         return AnalyzeResult(
             targets=target_names,
             statements=statements,
             executed=(),
             skipped=(),
+            unsupported=unsupported,
         )
     executed: list[str] = []
     skipped: list[str] = []
-    for target, statement in zip(targets, statements, strict=True):
+    for target, statement in zip(supported_targets, statements, strict=True):
         statement_timeout = (
             ANALYZE_PARENT_STATEMENT_TIMEOUT if target.is_parent else ANALYZE_LEAF_STATEMENT_TIMEOUT
         )
@@ -3238,6 +3308,7 @@ def _run_analyze_targets(
         statements=statements,
         executed=tuple(executed),
         skipped=tuple(skipped),
+        unsupported=unsupported,
     )
 
 
@@ -3252,6 +3323,9 @@ def analyze_rollover_targets(
 
     Intended to run after DDL transactions commit so ``ACCESS EXCLUSIVE`` has
     already been released. Returns a typed no-op on non-PostgreSQL dialects.
+    On PostgreSQL servers older than 18, partitioned parents are excluded and
+    reported in ``AnalyzeResult.unsupported`` while leaves and ordinary tables
+    still run.
 
     Args:
         connection: Clean SQLAlchemy connection.
@@ -3278,6 +3352,7 @@ def analyze_rollover_targets(
         )
     _require_clean_connection(connection)
     _require_public_schema(connection)
+    server_version = _server_version_num(connection)
     relation_kind = cast(
         str | None,
         connection.scalar(
@@ -3310,7 +3385,13 @@ def analyze_rollover_targets(
         raise DailyPartitionError(
             f"refused: {spec.table} cannot be analyzed in state {state.value}"
         )
-    return _run_analyze_targets(connection, targets, dry_run=dry_run)
+    return _run_analyze_targets(
+        connection,
+        targets,
+        dry_run=dry_run,
+        parent_only_supported=server_version >= ANALYZE_PARENT_ONLY_MIN_SERVER_VERSION_NUM,
+        server_version=server_version,
+    )
 
 
 def _stale_sort_key(row: tuple[str, str, bool]) -> tuple[int, int, str]:
@@ -3361,7 +3442,9 @@ def analyze_stale_relations(
     filters out future daily leaves (``day > today UTC``) in Python so discovery
     acquires no relation locks, and rolls back the snapshot before running per-table
     ``ANALYZE`` transactions. Returns a clean no-op on SQLite and other non-PG
-    dialects.
+    dialects. On PostgreSQL servers older than 18, ``limit`` is applied first and
+    any selected partitioned parents are then split into ``AnalyzeResult.unsupported``
+    and skipped while leaves and ordinary tables continue to run.
 
     Args:
         connection: Clean SQLAlchemy connection.
@@ -3388,6 +3471,7 @@ def analyze_stale_relations(
         )
     _require_clean_connection(connection)
     _require_public_schema(connection)
+    server_version = _server_version_num(connection)
     rows = connection.execute(text("""
             SELECT c.relname::text,
                    c.relkind::text,
@@ -3404,4 +3488,10 @@ def analyze_stale_relations(
     effective_today = current_utc_anchor().date() if today is None else today
     catalog_rows = [(cast(str, row[0]), cast(str, row[1]), cast(bool, row[2])) for row in rows]
     targets = _select_stale_targets(catalog_rows, today=effective_today, limit=limit)
-    return _run_analyze_targets(connection, targets, dry_run=dry_run)
+    return _run_analyze_targets(
+        connection,
+        targets,
+        dry_run=dry_run,
+        parent_only_supported=server_version >= ANALYZE_PARENT_ONLY_MIN_SERVER_VERSION_NUM,
+        server_version=server_version,
+    )
