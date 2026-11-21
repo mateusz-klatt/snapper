@@ -13,8 +13,11 @@ from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy import text
 
+from snapper.application.portfolio.pnl_correction_planner import PnlCorrectionPlanInputs
+from snapper.application.portfolio.pnl_correction_planner import plan_correction_chunk
 from snapper.application.portfolio.pnl_snapshot_planner import MinuteInputs
 from snapper.application.portfolio.pnl_snapshot_planner import plan_chunk_samples
+from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import PortfolioPnlCorrectionFrontier
 from snapper.data.models import PortfolioPnlPoint
@@ -1135,3 +1138,183 @@ async def test_corrupt_spot_venue_set_is_refused_on_read(
         await session.commit()
     with pytest.raises(ValueError, match="spot venue"):
         await repository.get_portfolio_pnl_correction_frontier(samples._scope())
+
+
+@pytest.mark.parametrize("row_kind", ["current", "legacy", "foreign"])
+async def test_forged_unrepairable_withheld_is_refused_at_repository_fence(
+    repository: SQLAlchemyRepository,
+    row_kind: str,
+) -> None:
+    """Refuse a forged unrepairable list at commit_portfolio_pnl_correction_chunk.
+
+    Given: An active current, legacy calc_version, or foreign-epoch sample at M2 in SQLite.
+    When: A caller commits a chunk listing M2 in unrepairable_withheld_minutes without
+        retracting that physical version.
+    Then: The repository fence raises ValueError and leaves frontier and samples unchanged.
+    """
+    stored_row = samples._complete_sample(samples._M2)
+    if row_kind == "legacy":
+        stored_row["calc_version"] = "5C.3"
+    elif row_kind == "foreign":
+        stored_row["epoch_public_id"] = samples._OTHER_EPOCH
+    async with repository.session() as session:
+        session.add(
+            PortfolioPnlPoint(
+                **repository._portfolio_pnl_sample_orm_kwargs(stored_row), known_to=KNOWN_TO_MAX
+            )
+        )
+        await session.commit()
+    frontier = await _start(repository)
+    plan = await _plan(repository, frontier, samples._M3)
+    forged = replace(
+        plan,
+        prior_peak=None,
+        withheld_minutes=(samples._M2,),
+        unrepairable_withheld_minutes=(samples._M2,),
+    )
+    with pytest.raises(ValueError, match="cannot retain an active sample row"):
+        await repository.commit_portfolio_pnl_correction_chunk(samples._scope(), frontier, forged)
+    assert await repository.get_portfolio_pnl_correction_frontier(samples._scope()) == frontier
+
+
+def _repo_minute(minute: datetime, *, sum_unrepresentable: bool = False) -> MinuteInputs:
+    """Build planner MinuteInputs producing either a complete or sum-unrepresentable point."""
+    if sum_unrepresentable:
+        point = replace(
+            planner._untrusted_point(minute),
+            incompleteness_reasons=(
+                PnlIncompletenessReasonEntry(
+                    reason="instrument_sum_unrepresentable",
+                    withholding_tier="untrusted",
+                    withholding_scope="global",
+                    trigger_instrument_public_id=None,
+                ),
+            ),
+        )
+    else:
+        point = planner._complete_point(minute)
+    return MinuteInputs(
+        point,
+        {"kraken": planner._attempt(minute=minute)},
+        planner._crypto_evidence(),
+    )
+
+
+async def test_r1_retained_sum_unrepresentable_keeps_repair_from_and_gates_reconciled_reads(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Enforce R1 end-to-end across SQLite persistence and require_reconciled reads.
+
+    Given: Settled COMPLETE same-epoch 5C.5 rows at M1..M3 with M2 carrying equity 2500.0.
+    When: Changed evidence triggers pure instrument_sum_unrepresentable at M2, retaining M2
+        and latching repair_from=M2 across repeated withholding, followed by later settlement.
+    Then: M2 stays repairable, repair_from remains pinned at M2, require_reconciled=True
+        hides [M2..M3] before settlement, and exposes consistent rows after settlement.
+    """
+    scope = samples._scope()
+    query = samples._query()
+    published = replace(query, require_reconciled=True)
+    initial_rows = (
+        samples._mutate(
+            samples._complete_sample(samples._M1),
+            cash_usd=1000.0,
+            position_value_usd=0.0,
+            drawdown=0.0,
+        ),
+        samples._mutate(
+            samples._complete_sample(samples._M2),
+            cash_usd=2500.0,
+            position_value_usd=0.0,
+            drawdown=0.0,
+        ),
+        samples._mutate(
+            samples._complete_sample(samples._M3),
+            cash_usd=1000.0,
+            position_value_usd=0.0,
+            drawdown=0.6,
+        ),
+    )
+    req_g1 = PnlCorrectionRequest(samples._M1, samples._M3, samples._M5, {}, {"kraken": 5}, None)
+    g1 = await repository.invalidate_portfolio_pnl_correction(scope, req_g1, None)
+    g1_plan = await _plan(repository, g1, samples._M3, initial_rows)
+    settled_g1 = await repository.commit_portfolio_pnl_correction_chunk(
+        scope, g1, replace(g1_plan, prior_peak=2500.0)
+    )
+    assert settled_g1.repair_from is None
+    assert await repository.get_portfolio_pnl_samples(published, samples._M1, samples._M3) == list(
+        initial_rows
+    )
+
+    venues = frozenset({"kraken"})
+    req_g2 = replace(req_g1, pending_watermarks={"kraken": 6})
+    g2 = await repository.invalidate_portfolio_pnl_correction(scope, req_g2, settled_g1)
+    ev_g2 = await repository.get_portfolio_pnl_correction_evidence(scope, samples._M1, samples._M3)
+    planned_g2 = plan_correction_chunk(
+        PnlCorrectionPlanInputs(
+            evidence=ev_g2,
+            minute_inputs=(
+                _repo_minute(samples._M1),
+                _repo_minute(samples._M2, sum_unrepresentable=True),
+                _repo_minute(samples._M3),
+            ),
+            expected_venues=venues,
+            position_versions=(),
+            make_row=planner._to_row,
+        )
+    )
+    assert planned_g2.chunk.withheld_minutes == (samples._M2,)
+    assert planned_g2.chunk.unrepairable_withheld_minutes == ()
+    blocked = await repository.commit_portfolio_pnl_correction_chunk(scope, g2, planned_g2.chunk)
+    assert blocked.next_minute is None
+    assert blocked.repair_from == samples._M2
+    assert blocked.baseline_watermarks == {"kraken": 5}
+    reconciled_g2 = await repository.get_portfolio_pnl_samples(published, samples._M1, samples._M3)
+    assert [row["point_time"] for row in reconciled_g2] == [samples._M1]
+    all_g2 = await repository.get_portfolio_pnl_samples(query, samples._M1, samples._M3)
+    assert len(all_g2) == 3
+    assert all_g2[1] == initial_rows[1]
+
+    g3 = await repository.invalidate_portfolio_pnl_correction(
+        scope, replace(req_g2, start=samples._M2, prior_peak=1000.0), blocked
+    )
+    ev_g3 = await repository.get_portfolio_pnl_correction_evidence(scope, samples._M2, samples._M3)
+    planned_g3 = plan_correction_chunk(
+        PnlCorrectionPlanInputs(
+            evidence=ev_g3,
+            minute_inputs=(
+                _repo_minute(samples._M2, sum_unrepresentable=True),
+                _repo_minute(samples._M3),
+            ),
+            expected_venues=venues,
+            position_versions=(),
+            make_row=planner._to_row,
+        )
+    )
+    still_blocked = await repository.commit_portfolio_pnl_correction_chunk(
+        scope, g3, planned_g3.chunk
+    )
+    assert still_blocked.repair_from == samples._M2
+    reconciled_g3 = await repository.get_portfolio_pnl_samples(published, samples._M1, samples._M3)
+    assert [row["point_time"] for row in reconciled_g3] == [samples._M1]
+
+    req_g4 = replace(req_g2, start=samples._M2, pending_watermarks={"kraken": 7})
+    g4 = await repository.invalidate_portfolio_pnl_correction(
+        scope, replace(req_g4, prior_peak=1000.0), still_blocked
+    )
+    ev_g4 = await repository.get_portfolio_pnl_correction_evidence(scope, samples._M2, samples._M3)
+    planned_g4 = plan_correction_chunk(
+        PnlCorrectionPlanInputs(
+            evidence=ev_g4,
+            minute_inputs=(_repo_minute(samples._M2), _repo_minute(samples._M3)),
+            expected_venues=venues,
+            position_versions=(),
+            make_row=planner._to_row,
+        )
+    )
+    settled_g4 = await repository.commit_portfolio_pnl_correction_chunk(scope, g4, planned_g4.chunk)
+    assert settled_g4.next_minute is None
+    assert settled_g4.repair_from is None
+    assert settled_g4.baseline_watermarks == {"kraken": 7}
+    settled_rows = await repository.get_portfolio_pnl_samples(published, samples._M1, samples._M3)
+    assert len(settled_rows) == 3
+    assert [row["point_time"] for row in settled_rows] == [samples._M1, samples._M2, samples._M3]

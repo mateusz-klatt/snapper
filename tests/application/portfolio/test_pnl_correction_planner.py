@@ -7,7 +7,9 @@ from typing import Literal
 
 import pytest
 
+from snapper.application.portfolio.pnl_correction_planner import REPAIR_EXEMPT_WITHHOLD_REASONS
 from snapper.application.portfolio.pnl_correction_planner import PnlCorrectionPlanInputs
+from snapper.application.portfolio.pnl_correction_planner import _is_unrepairable_withhold
 from snapper.application.portfolio.pnl_correction_planner import plan_correction_chunk
 from snapper.application.portfolio.pnl_snapshot_planner import MinuteInputs
 from snapper.application.portfolio.pnl_snapshot_planner import WithheldMinute
@@ -304,3 +306,118 @@ def test_each_minute_in_a_full_zero_write_window_is_withheld() -> None:
     assert len(result.chunk.withheld_minutes) == MAX_CORRECTION_CHUNK_MINUTES
     assert result.chunk.withheld_minutes[0] == _M1
     assert result.chunk.withheld_minutes[-1] == end
+
+
+def test_repair_exempt_reason_set_matches_closed_deterministic_taxonomy() -> None:
+    """Pin the closed set of reasons eligible for repair exemption under PR-1.
+
+    Given: The planner module constant REPAIR_EXEMPT_WITHHOLD_REASONS.
+    When: Its members are inspected against the reconciliation and sum-unrepresentable taxonomy.
+    Then: It contains exactly the four deterministic post-input reasons and nothing else.
+    """
+    assert (
+        frozenset(
+            {
+                "instrument_reconciliation_failed",
+                "attribution_reconciliation_failed",
+                "instrument_sum_unrepresentable",
+                "attribution_sum_unrepresentable",
+            }
+        )
+        == REPAIR_EXEMPT_WITHHOLD_REASONS
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "instrument_reconciliation_failed",
+        "attribution_reconciliation_failed",
+        "instrument_sum_unrepresentable",
+        "attribution_sum_unrepresentable",
+    ],
+)
+def test_exempt_absent_withheld_minutes_become_unrepairable(
+    reason: PnlIncompletenessReason,
+) -> None:
+    """Exempt a pure deterministic withhold when no active row exists at that minute.
+
+    Given: An absent sample minute whose valuation withholds solely for one exempt reason.
+    When: plan_correction_chunk plans the minute against empty active evidence.
+    Then: The minute appears in both withheld_minutes and unrepairable_withheld_minutes.
+    """
+    result = plan_correction_chunk(_inputs((_minute(_M1, reason),), end=_M1))
+    assert result.chunk.edits == ()
+    assert result.chunk.withheld_minutes == (_M1,)
+    assert result.chunk.unrepairable_withheld_minutes == (_M1,)
+
+
+@pytest.mark.parametrize(
+    "reasons",
+    [
+        ("instrument_reconciliation_failed",),
+        ("attribution_reconciliation_failed",),
+        ("instrument_reconciliation_failed", "instrument_sum_unrepresentable"),
+    ],
+)
+def test_exempt_retracted_withheld_minutes_become_unrepairable(
+    reasons: tuple[PnlIncompletenessReason, ...],
+) -> None:
+    """Exempt an active-row minute when non-preserving exempt reasons retract it (R1).
+
+    Given: An active sample row at M1 and pure exempt reasons that include a retraction cause.
+    When: plan_correction_chunk plans the minute against that observed version.
+    Then: It emits the explicit retraction edit and classifies M1 as unrepairable.
+    """
+    existing = PnlCorrectionSampleVersion(88, _complete_row(_M1))
+    result = plan_correction_chunk(_inputs((_minute(_M1, *reasons),), (existing,), end=_M1))
+    assert result.chunk.edits == (PnlCorrectionEdit(_M1, existing, None),)
+    assert result.chunk.withheld_minutes == (_M1,)
+    assert result.chunk.unrepairable_withheld_minutes == (_M1,)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["instrument_sum_unrepresentable", "attribution_sum_unrepresentable"],
+)
+def test_sum_unrepresentable_with_retained_row_stays_repairable(
+    reason: PnlIncompletenessReason,
+) -> None:
+    """Retain the repair obligation whenever _withhold preserves an active row (R1).
+
+    Given: An existing active sample at M1 and a pure sum-unrepresentable refusal.
+    When: plan_correction_chunk retains the existing row via preserves_persisted_row.
+    Then: M1 stays in withheld_minutes and is excluded from unrepairable_withheld_minutes.
+    """
+    existing = PnlCorrectionSampleVersion(89, _complete_row(_M1))
+    result = plan_correction_chunk(_inputs((_minute(_M1, reason),), (existing,), end=_M1))
+    assert result.chunk.edits == ()
+    assert result.chunk.withheld_minutes == (_M1,)
+    assert result.chunk.unrepairable_withheld_minutes == ()
+
+
+def test_mixed_non_exempt_and_empty_reason_withholds_stay_repairable() -> None:
+    """Keep mixed, market-data, and empty-code withholds repairable.
+
+    Given: A four-minute chunk mixing an exempt+gap minute, missing_series_minute,
+        foreign_epoch_sample, and mark_unavailable, plus an empty-code WithheldMinute.
+    When: plan_correction_chunk and _is_unrepairable_withhold classify all minutes.
+    Then: All four appear in withheld_minutes and unrepairable_withheld_minutes stays empty.
+    """
+    foreign = _complete_row(_M3)
+    foreign["epoch_public_id"] = "foreign-epoch"
+    existing_m1 = PnlCorrectionSampleVersion(91, _complete_row(_M1))
+    inputs = _inputs(
+        (
+            _minute(_M1, "fill_evidence_gap", "instrument_sum_unrepresentable"),
+            _minute(_M3),
+            _minute(_M4, "mark_unavailable"),
+        ),
+        (existing_m1, PnlCorrectionSampleVersion(92, foreign)),
+        end=_M4,
+    )
+    result = plan_correction_chunk(inputs)
+    assert result.chunk.withheld_minutes == (_M1, _M2, _M3, _M4)
+    assert result.chunk.unrepairable_withheld_minutes == ()
+    assert PnlCorrectionEdit(_M1, existing_m1, None) in result.chunk.edits
+    assert not _is_unrepairable_withhold(WithheldMinute(_M1, ("custom",), ()), None, None)

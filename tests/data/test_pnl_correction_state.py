@@ -14,6 +14,7 @@ from snapper.data.pnl_correction_state import PnlCorrectionEvidence
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlCorrectionKey
 from snapper.data.pnl_correction_state import PnlCorrectionRequest
+from snapper.data.pnl_correction_state import PnlCorrectionSampleVersion
 from snapper.data.pnl_correction_state import advance_correction_frontier
 from snapper.data.pnl_correction_state import correction_watermarks
 from snapper.data.pnl_correction_state import start_correction_frontier
@@ -407,3 +408,148 @@ def test_certified_spot_venue_set_survives_chunk_advancement() -> None:
     renewed = start_correction_frontier(KEY, replace(request, expected_venues=replacement), partial)
     assert renewed.expected_venues == replacement
     assert partial.expected_venues == venues
+
+
+@pytest.mark.parametrize(
+    ("withheld", "unrepairable"),
+    [
+        ((), (samples._M1,)),
+        ((samples._M1,), (samples._M2,)),
+        ((samples._M1,), (samples._M1, samples._M1)),
+        ((samples._M1,), (samples._M1.replace(tzinfo=None),)),
+    ],
+)
+def test_unrepairable_withheld_rejects_subset_window_duplicate_and_boundary_violations(
+    withheld: tuple[datetime, ...],
+    unrepairable: tuple[datetime, ...],
+) -> None:
+    """Refuse malformed, non-subset, out-of-window, or duplicate unrepairable minutes.
+
+    Given: A one-minute frontier chunk ending at M1.
+    When: unrepairable_withheld_minutes omits withheld_minutes, steps outside [M1..M1],
+        duplicates a minute, or supplies a naive boundary.
+    Then: advance_correction_frontier rejects the chunk with ValueError.
+    """
+    chunk = replace(
+        _chunk(samples._M1, (), None),
+        withheld_minutes=withheld,
+        unrepairable_withheld_minutes=unrepairable,
+    )
+    with pytest.raises(ValueError):
+        advance_correction_frontier(_frontier(), chunk)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "retained_current",
+        "retained_legacy",
+        "retained_foreign",
+        "wrong_expected_row",
+        "duplicate_evidence_versions",
+    ],
+)
+def test_unrepairable_withheld_refuses_forged_retained_active_versions(case: str) -> None:
+    """Enforce R1 at the pure fence when active versions remain unretracted.
+
+    Given: Chunk evidence holding an active current, legacy, foreign, or mismatched row at M1.
+    When: unrepairable_withheld_minutes lists M1 without an exact retraction edit.
+    Then: advance_correction_frontier raises ValueError before accepting the chunk.
+    """
+    row = samples._complete_sample(samples._M1)
+    if case == "retained_legacy":
+        row["calc_version"] = "5C.3"
+    elif case == "retained_foreign":
+        row["epoch_public_id"] = samples._OTHER_EPOCH
+    version = PnlCorrectionSampleVersion(101, row)
+    versions: tuple[PnlCorrectionSampleVersion, ...] = (version,)
+    edits: tuple[PnlCorrectionEdit, ...] = ()
+    if case == "wrong_expected_row":
+        edits = (PnlCorrectionEdit(samples._M1, PnlCorrectionSampleVersion(999, row), None),)
+    elif case == "duplicate_evidence_versions":
+        versions = (version, PnlCorrectionSampleVersion(102, row))
+        edits = (PnlCorrectionEdit(samples._M1, version, None),)
+    evidence = PnlCorrectionEvidence(KEY, samples._M1, samples._M2, versions, None)
+    chunk = PnlCorrectionChunk(
+        end=samples._M2,
+        edits=edits,
+        prior_peak=None,
+        evidence=evidence,
+        withheld_minutes=(samples._M1,),
+        unrepairable_withheld_minutes=(samples._M1,),
+    )
+    with pytest.raises(ValueError, match="cannot retain an active sample row"):
+        advance_correction_frontier(_frontier(), chunk)
+
+
+def test_unrepairable_withheld_accepts_absent_and_exact_retraction_and_settles() -> None:
+    """Accept exempt minutes when absent or explicitly retracted and clear repair_from.
+
+    Given: M1 absent and M2 carrying an active version explicitly retracted in chunk.edits.
+    When: Both M1 and M2 are classified in unrepairable_withheld_minutes through tip M3.
+    Then: advance_correction_frontier accepts the chunk, sets repair_from to None, and
+        advances baseline_watermarks to pending_watermarks.
+    """
+    observed = PnlCorrectionSampleVersion(55, samples._complete_sample(samples._M2))
+    evidence = PnlCorrectionEvidence(KEY, samples._M1, samples._M3, (observed,), None)
+    chunk = PnlCorrectionChunk(
+        end=samples._M3,
+        edits=(PnlCorrectionEdit(samples._M2, observed, None),),
+        prior_peak=None,
+        evidence=evidence,
+        withheld_minutes=(samples._M1, samples._M2),
+        reconciles_repair=True,
+        unrepairable_withheld_minutes=(samples._M1, samples._M2),
+    )
+    done = advance_correction_frontier(_frontier(), chunk)
+    assert done.next_minute is None
+    assert done.repair_from is None
+    assert done.baseline_watermarks == {"kraken": 5}
+
+
+def test_remaining_repair_ignores_exempt_minutes_while_keeping_other_and_pending() -> None:
+    """Exclude unrepairable minutes without altering repairable or latched pending logic.
+
+    Given: Chunks combining unrepairable minutes, repairable withheld minutes, and an
+        already-latched repair_from across unacknowledged and acknowledged transitions.
+    When: advance_correction_frontier computes _remaining_correction_repair.
+    Then: Unrepairable minutes are ignored, repairable minutes latch or advance repair_from,
+        and an already-latched pending boundary survives unacknowledged chunks.
+    """
+    first = PnlCorrectionChunk(
+        end=samples._M3,
+        edits=(),
+        prior_peak=None,
+        evidence=PnlCorrectionEvidence(KEY, samples._M1, samples._M3, (), None),
+        withheld_minutes=(samples._M1, samples._M2, samples._M3),
+        unrepairable_withheld_minutes=(samples._M1, samples._M3),
+    )
+    latched = advance_correction_frontier(_frontier(), first)
+    assert latched.repair_from == samples._M2
+    assert latched.baseline_watermarks == {"kraken": 1}
+
+    renewed = start_correction_frontier(KEY, REQUEST, latched)
+    unacknowledged = PnlCorrectionChunk(
+        end=samples._M1,
+        edits=(),
+        prior_peak=None,
+        evidence=PnlCorrectionEvidence(KEY, samples._M1, samples._M1, (), None),
+        withheld_minutes=(samples._M1,),
+        reconciles_repair=False,
+        unrepairable_withheld_minutes=(samples._M1,),
+    )
+    kept = advance_correction_frontier(renewed, unacknowledged)
+    assert kept.repair_from == samples._M2
+
+    acknowledged = PnlCorrectionChunk(
+        end=samples._M3,
+        edits=(),
+        prior_peak=None,
+        evidence=PnlCorrectionEvidence(KEY, samples._M2, samples._M3, (), None),
+        withheld_minutes=(samples._M3,),
+        reconciles_repair=True,
+        unrepairable_withheld_minutes=(samples._M3,),
+    )
+    settled = advance_correction_frontier(kept, acknowledged)
+    assert settled.repair_from is None
+    assert settled.baseline_watermarks == {"kraken": 5}

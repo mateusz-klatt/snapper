@@ -8,6 +8,7 @@ transition with the checkpoint key, generation and revision.
 
 import math
 from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import UTC
@@ -143,9 +144,13 @@ class PnlCorrectionChunk:
     legitimate transaction and must still CAS-advance the explicit checkpoint.
     Repair acknowledgement is explicit; scan completion alone cannot consume
     an outstanding withheld obligation from an earlier chunk or generation.
-    The caller certifies semantic recomputation. The repository additionally
-    verifies post-edit occupancy for the acknowledged outstanding repair suffix;
-    presence alone does not prove that a retained row was correctly recomputed.
+    ``unrepairable_withheld_minutes`` names the subset of ``withheld_minutes``
+    that carry no future repair obligation because they are deterministic on
+    frozen evidence and leave no unproved active sample row (either absent or
+    explicitly retracted in ``edits``, guard R1). The caller certifies semantic
+    recomputation. The repository additionally verifies post-edit occupancy for
+    the acknowledged outstanding repair suffix; presence alone does not prove
+    that a retained row was correctly recomputed.
     """
 
     end: datetime
@@ -154,6 +159,7 @@ class PnlCorrectionChunk:
     evidence: PnlCorrectionEvidence
     withheld_minutes: tuple[datetime, ...] = ()
     reconciles_repair: bool = False
+    unrepairable_withheld_minutes: tuple[datetime, ...] = ()
 
 
 def validate_correction_minute(value: datetime) -> None:
@@ -436,16 +442,18 @@ def advance_correction_frontier(
 
 
 def _validate_correction_withheld(chunk: PnlCorrectionChunk, start: datetime) -> None:
-    """Allow withheld minutes to close observed rows while retaining their repair obligation.
+    """Allow withheld minutes to close observed rows while verifying unrepairable bounds.
 
     Args:
         chunk: The admitted plan, including its explicit withheld classification.
         start: The actual checkpoint's next minute.
 
     Raises:
-        ValueError: For an out-of-window minute or a simultaneous insert/replacement.
+        ValueError: For an out-of-window minute, simultaneous insert/replacement, or
+            invalid unrepairable classification.
     """
     edits = {edit.point_time: edit for edit in chunk.edits}
+    withheld = set(chunk.withheld_minutes)
     for minute in chunk.withheld_minutes:
         validate_correction_minute(minute)
         edit = edits.get(minute)
@@ -455,12 +463,77 @@ def _validate_correction_withheld(chunk: PnlCorrectionChunk, start: datetime) ->
             raise ValueError(
                 "Withheld P&L minutes must be inside the chunk and permit only observed-row retractions"
             )
+    _validate_correction_unrepairable_withheld(chunk, start, withheld, edits)
+
+
+def _is_unrepairable_minute_rowless(
+    active_versions: Sequence[PnlCorrectionSampleVersion],
+    edit: PnlCorrectionEdit | None,
+) -> bool:
+    """Return whether zero active rows survive at a minute after its planned edit (R1)."""
+    if not active_versions:
+        return True
+    return (
+        len(active_versions) == 1
+        and edit is not None
+        and edit.expected_row == active_versions[0]
+        and edit.replacement is None
+    )
+
+
+def _validate_correction_unrepairable_withheld(
+    chunk: PnlCorrectionChunk,
+    start: datetime,
+    withheld: set[datetime],
+    edits: Mapping[datetime, PnlCorrectionEdit],
+) -> None:
+    """Refuse malformed, non-subset, duplicate, or row-retaining exempt minutes (R1).
+
+    An unrepairable withheld minute relinquishes its future repair obligation, so
+    no active sample row may remain at that minute in ``chunk.evidence.versions``
+    after applying ``chunk.edits``. Validating this inside the pure transition
+    enforces R1 at the repository fence too, because the repository revalidates
+    ``chunk.evidence`` under its writer lock before commit.
+
+    Args:
+        chunk: The admitted plan, including its unrepairable subset classification.
+        start: The actual checkpoint's next minute.
+        withheld: All minutes withheld in this chunk.
+        edits: Planned sample edits indexed by minute.
+
+    Raises:
+        ValueError: If any listed minute is invalid, duplicated, outside the chunk
+            or ``withheld_minutes``, or leaves an active version unretracted.
+    """
+    if not chunk.unrepairable_withheld_minutes:
+        return
+    versions_by_minute: dict[datetime, list[PnlCorrectionSampleVersion]] = {}
+    for version in chunk.evidence.versions:
+        versions_by_minute.setdefault(version.row["point_time"], []).append(version)
+    seen: set[datetime] = set()
+    for minute in chunk.unrepairable_withheld_minutes:
+        validate_correction_minute(minute)
+        if minute in seen:
+            raise ValueError("Unrepairable withheld P&L minutes must not repeat a minute")
+        seen.add(minute)
+        if not start <= minute <= chunk.end or minute not in withheld:
+            raise ValueError(
+                "Unrepairable withheld P&L minutes must be inside the chunk and withheld"
+            )
+        if not _is_unrepairable_minute_rowless(
+            versions_by_minute.get(minute, ()), edits.get(minute)
+        ):
+            raise ValueError("Unrepairable withheld P&L minutes cannot retain an active sample row")
 
 
 def _remaining_correction_repair(
     current: PnlCorrectionFrontier, chunk: PnlCorrectionChunk, start: datetime
 ) -> datetime | None:
     """Advance an outstanding repair suffix only with explicit successful reconciliation.
+
+    Minutes in ``chunk.unrepairable_withheld_minutes`` are excluded from new
+    repair candidates while any already-latched ``current.repair_from`` pending
+    logic remains unchanged.
 
     Args:
         current: Durable pending repair, retained even across generation changes.
@@ -473,5 +546,9 @@ def _remaining_correction_repair(
     pending = current.repair_from
     if pending is not None and start <= pending <= chunk.end and chunk.reconciles_repair:
         pending = None if chunk.end == current.tip else chunk.end + _MINUTE
-    candidates = (*chunk.withheld_minutes, *((pending,) if pending is not None else ()))
+    unrepairable = set(chunk.unrepairable_withheld_minutes)
+    repairable_withheld = (
+        minute for minute in chunk.withheld_minutes if minute not in unrepairable
+    )
+    candidates = (*repairable_withheld, *((pending,) if pending is not None else ()))
     return min(candidates) if candidates else None
