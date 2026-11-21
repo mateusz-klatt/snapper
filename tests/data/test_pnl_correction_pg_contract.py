@@ -21,7 +21,6 @@ import pytest
 from sqlalchemy import delete
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.data.models import KNOWN_TO_MAX
@@ -215,33 +214,44 @@ _PG_DIGEST_B = "b" * 64
 _PG_SESSION = "00000000-0000-7000-8000-000000000799"
 
 
-def _configured_backend_name() -> str:
-    """Return the backend name of ``DB_URL`` or an empty string when unconfigured.
-
-    Returns:
-        SQLAlchemy backend name string such as ``"postgresql"`` or ``""``.
-    """
-    url = os.environ.get("DB_URL", "")
-    if not url:
-        return ""
-    try:
-        return make_url(url).get_backend_name()
-    except ArgumentError:
-        return ""
-
-
 @pytest.fixture
 async def pg_repository() -> AsyncIterator[SQLAlchemyRepository]:
-    """Create a repository connected to the live PostgreSQL opt-in database.
+    """Create an isolated PostgreSQL database from the ``PNL_TEST_POSTGRES_URL`` opt-in.
+
+    Follows the repository's PostgreSQL opt-in convention: the tests never touch
+    ``DB_URL``, create a throwaway database with the full schema, and drop it on
+    teardown, so no shared or live database is ever written.
 
     Yields:
-        Configured ``SQLAlchemyRepository`` disposed cleanly on teardown.
+        A repository bound to the freshly created database.
     """
-    repo = SQLAlchemyRepository(os.environ["DB_URL"])
+    configured = os.environ.get("PNL_TEST_POSTGRES_URL")
+    if configured is None:
+        pytest.skip("requires isolated PNL_TEST_POSTGRES_URL")
+    base = make_url(configured)
+    assert base.get_backend_name() == "postgresql"
+    database_name = f"pnl_opening_checkpoint_{uuid4().hex}"
+    maintenance = SQLAlchemyRepository(configured)
+    created = False
+    repo: SQLAlchemyRepository | None = None
     try:
+        async with maintenance.engine.connect() as connection:
+            admin = await connection.execution_options(isolation_level="AUTOCOMMIT")
+            await admin.exec_driver_sql(f'CREATE DATABASE "{database_name}"')
+            created = True
+        repo = SQLAlchemyRepository(
+            base.set(database=database_name).render_as_string(hide_password=False)
+        )
+        await repo.create_all()
         yield repo
     finally:
-        await repo.engine.dispose()
+        if repo is not None:
+            await repo.engine.dispose()
+        if created:
+            async with maintenance.engine.connect() as connection:
+                admin = await connection.execution_options(isolation_level="AUTOCOMMIT")
+                await admin.exec_driver_sql(f'DROP DATABASE IF EXISTS "{database_name}"')
+        await maintenance.engine.dispose()
 
 
 def _pg_scope() -> tuple[PortfolioPnlSampleScope, PortfolioPnlPoint, PnlCorrectionKey]:
@@ -347,10 +357,6 @@ async def _cleanup_pg_scope(repo: SQLAlchemyRepository, wallet: str) -> None:
         await session.commit()
 
 
-@pytest.mark.skipif(
-    _configured_backend_name() != "postgresql",
-    reason="live-PostgreSQL opt-in contract test requires postgresql DB_URL",
-)
 class TestOpeningCheckpointPgContract:
     """Opt-in live PostgreSQL persistence, concurrency, and bigint sum contracts."""
 

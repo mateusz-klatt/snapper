@@ -10,9 +10,12 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Final
 from typing import Literal
 from typing import cast
 from unittest.mock import Mock
+from unittest.mock import PropertyMock
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import and_
@@ -21,6 +24,8 @@ from sqlalchemy import event
 from sqlalchemy import select
 from sqlalchemy import tuple_
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import sqlite
+from sqlalchemy.engine import Dialect
 from sqlalchemy.engine import Result
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Executable
@@ -1049,3 +1054,122 @@ class TestGetPnlFxRateCandles:
             _NOW + timedelta(days=1),
         )
         assert rows == []
+
+
+_REPLAY_FX_CANDLE_SQL_SQLITE: Final[str] = (
+    "WITH pnl_fx_load_candidate_instruments AS \n"
+    "(SELECT DISTINCT instruments.public_id AS public_id \n"
+    "FROM instruments JOIN symbols ON instruments.symbol_public_id = symbols.public_id \n"
+    "WHERE (symbols.base, symbols.quote, instruments.exchange) IN (__[POSTCOMPILE_param_1]))\n"
+    " SELECT symbols.base, symbols.quote, instruments.exchange, candles.open_at, candles.close, symbols.native_symbol, instruments.public_id, candles.id, candles.public_id AS public_id_1, candles.session_id, candles.sequence_id, candles.timestamp, candles.known_to \n"
+    "FROM candles JOIN instruments ON candles.instrument_public_id = instruments.public_id AND instruments.timestamp <= candles.timestamp AND instruments.known_to > candles.timestamp JOIN symbols ON instruments.symbol_public_id = symbols.public_id AND symbols.timestamp <= candles.timestamp AND symbols.known_to > candles.timestamp \n"
+    "WHERE candles.instrument_public_id IN (SELECT pnl_fx_load_candidate_instruments.public_id \n"
+    "FROM pnl_fx_load_candidate_instruments) AND (symbols.base, symbols.quote, instruments.exchange) IN (__[POSTCOMPILE_param_2]) AND symbols.timestamp <= ? AND symbols.quote IS NOT NULL AND NOT (EXISTS (SELECT * \n"
+    "FROM symbols AS symbols_1 \n"
+    "WHERE symbols_1.public_id = symbols.public_id AND symbols_1.timestamp <= ? AND (symbols_1.base IS NOT symbols.base OR symbols_1.quote IS NOT symbols.quote))) AND (EXISTS (SELECT * \n"
+    "FROM symbols AS symbols_2 \n"
+    "WHERE symbols_2.public_id = symbols.public_id AND symbols_2.timestamp <= ? AND symbols_2.asset_type = ?)) AND candles.timeframe = ? AND candles.open_at IN (__[POSTCOMPILE_open_at_1]) AND candles.complete IS 1 AND candles.timestamp <= ? AND candles.known_to > ?"
+)
+"""Compiled SQLite text of the replay's FX candle read, pinned as a golden copy."""
+
+_REPLAY_FX_CANDLE_SQL_POSTGRESQL: Final[str] = (
+    "WITH pnl_fx_load_candidate_instruments AS MATERIALIZED \n"
+    "(SELECT DISTINCT instruments.public_id AS public_id \n"
+    "FROM instruments JOIN symbols ON instruments.symbol_public_id = symbols.public_id \n"
+    "WHERE (symbols.base, symbols.quote, instruments.exchange) IN (__[POSTCOMPILE_param_1]))\n"
+    " SELECT symbols.base, symbols.quote, instruments.exchange, candles.open_at, candles.close, symbols.native_symbol, instruments.public_id, candles.id, candles.public_id AS public_id_1, candles.session_id, candles.sequence_id, candles.timestamp, candles.known_to \n"
+    "FROM candles JOIN instruments ON candles.instrument_public_id = instruments.public_id AND instruments.timestamp <= candles.timestamp AND instruments.known_to > candles.timestamp JOIN symbols ON instruments.symbol_public_id = symbols.public_id AND symbols.timestamp <= candles.timestamp AND symbols.known_to > candles.timestamp \n"
+    "WHERE candles.instrument_public_id = ANY (CAST((SELECT array_agg(pnl_fx_load_candidate_instruments.public_id) AS array_agg_1 \n"
+    "FROM pnl_fx_load_candidate_instruments) AS UUID[])) AND (symbols.base, symbols.quote, instruments.exchange) IN (__[POSTCOMPILE_param_2]) AND symbols.timestamp <= %(timestamp_1)s::TIMESTAMP WITH TIME ZONE AND symbols.quote IS NOT NULL AND NOT (EXISTS (SELECT * \n"
+    "FROM symbols AS symbols_1 \n"
+    "WHERE symbols_1.public_id = symbols.public_id AND symbols_1.timestamp <= %(timestamp_2)s::TIMESTAMP WITH TIME ZONE AND (symbols_1.base IS DISTINCT FROM symbols.base OR symbols_1.quote IS DISTINCT FROM symbols.quote))) AND (EXISTS (SELECT * \n"
+    "FROM symbols AS symbols_2 \n"
+    "WHERE symbols_2.public_id = symbols.public_id AND symbols_2.timestamp <= %(timestamp_3)s::TIMESTAMP WITH TIME ZONE AND symbols_2.asset_type = %(asset_type_1)s::VARCHAR)) AND candles.timeframe = %(timeframe_1)s::VARCHAR AND candles.open_at IN (__[POSTCOMPILE_open_at_1]) AND candles.complete IS true AND candles.timestamp <= %(timestamp_4)s::TIMESTAMP WITH TIME ZONE AND candles.known_to > %(known_to_1)s::TIMESTAMP WITH TIME ZONE"
+)
+"""Compiled PostgreSQL text of the replay's FX candle read, pinned as a golden copy."""
+
+
+class _CapturingSession:
+    """Async session stand-in that records statements and returns no rows."""
+
+    def __init__(self, statements: list[Executable]) -> None:
+        """Bind the shared capture list.
+
+        Args:
+            statements: List receiving every executed statement.
+        """
+        self._statements = statements
+
+    async def __aenter__(self) -> _CapturingSession:
+        """Enter the context.
+
+        Returns:
+            This session.
+        """
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        """Leave the context without suppressing errors.
+
+        Args:
+            exc_info: Exception details, ignored.
+        """
+        del exc_info
+
+    async def execute(self, statement: Executable) -> Mock:
+        """Record a statement and return an empty result.
+
+        Args:
+            statement: Statement the repository executes.
+
+        Returns:
+            A result whose ``all()`` yields no rows.
+        """
+        self._statements.append(statement)
+        return Mock(all=Mock(return_value=[]))
+
+
+@pytest.mark.parametrize(
+    ("dialect_name", "dialect", "golden"),
+    [
+        ("sqlite", sqlite.dialect(), _REPLAY_FX_CANDLE_SQL_SQLITE),
+        ("postgresql", postgresql.dialect(), _REPLAY_FX_CANDLE_SQL_POSTGRESQL),
+    ],
+)
+async def test_replay_fx_candle_read_sql_is_pinned_to_its_golden_copy(
+    dialect_name: str,
+    dialect: Dialect,
+    golden: str,
+) -> None:
+    """Pin the replay's FX candle read so a change to its shared scope cannot pass silently.
+
+    Given: The replay FX candle read, which shares its joins and filters with the
+        checkpoint's FX candle fingerprint.
+    When: The executed statement is compiled for SQLite and for PostgreSQL.
+    Then: Its SQL text equals the golden copy taken before the scope was shared.
+    """
+    statements: list[Executable] = []
+    repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    try:
+        with (
+            patch.object(
+                SQLAlchemyRepository,
+                "dialect_name",
+                new_callable=PropertyMock,
+                return_value=dialect_name,
+            ),
+            patch.object(repo, "session", lambda: _CapturingSession(statements)),
+        ):
+            await repo._pnl_fx_rate_candles(
+                [("EUR", "USD", "kraken")],
+                datetime(2026, 1, 1, tzinfo=UTC),
+                Candle.open_at.in_([datetime(2026, 1, 1, tzinfo=UTC)]),
+            )
+    finally:
+        await repo.engine.dispose()
+    compiled = [
+        str(statement.compile(dialect=dialect))
+        for statement in statements
+        if isinstance(statement, Select)
+    ]
+    assert compiled == [golden]
