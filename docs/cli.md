@@ -840,7 +840,10 @@ prints planned SQL without running it; pass `--apply` to execute. Omitting
 `table` defaults to `--stale` with `--limit 200` to sweep PostgreSQL
 relations in the current schema whose `last_analyze` and `last_autoanalyze`
 timestamps are both `NULL` (ignoring future daily leaves so crash-reset
-cumulative stats self-heal cleanly).
+cumulative stats self-heal cleanly). On PostgreSQL servers older than 18,
+where `ANALYZE ... ONLY` is unavailable and plain parent `ANALYZE` would recurse
+into every child partition, partitioned parents are reported as `unsupported`
+and skipped while leaves and ordinary tables are still analyzed.
 
 ### `fx-proofs backfill`
 

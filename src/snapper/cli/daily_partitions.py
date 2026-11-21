@@ -206,6 +206,8 @@ def _render_analyze_result(result: AnalyzeResult) -> None:
     typer.echo(f"skipped: {len(result.skipped)}")
     for relation in result.skipped:
         typer.echo(f"  skipped: {relation}")
+    if result.unsupported:
+        _render_list("unsupported", result.unsupported)
 
 
 def _fatal(error: Exception) -> None:

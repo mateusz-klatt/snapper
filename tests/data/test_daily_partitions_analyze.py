@@ -40,8 +40,11 @@ class _SqlStateError(RuntimeError):
         self.sqlstate = sqlstate
 
 
-def _postgresql_double() -> tuple[MagicMock, list[str]]:
+def _postgresql_double(server_version: str | None = "180006") -> tuple[MagicMock, list[str]]:
     """Build a PostgreSQL connection double that records executed SQL text.
+
+    Args:
+        server_version: Raw ``SHOW server_version_num`` scalar response.
 
     Returns:
         Connection double and the ordered list of executed SQL strings.
@@ -50,7 +53,15 @@ def _postgresql_double() -> tuple[MagicMock, list[str]]:
     connection = MagicMock(spec=Connection)
     connection.in_transaction.return_value = False
     connection.dialect = SimpleNamespace(name="postgresql")
-    connection.scalar.return_value = "public"
+
+    def _default_scalar(statement: object, *_args: object, **_kwargs: object) -> str | None:
+        """Answer schema and server-version checks cleanly."""
+        sql_text = str(statement)
+        if "SHOW server_version_num" in sql_text:
+            return server_version
+        return "public"
+
+    connection.scalar.side_effect = _default_scalar
 
     @contextmanager
     def _begin() -> Generator[None]:
@@ -176,7 +187,7 @@ def test_analyze_rollover_targets_plans_and_executes_only_parent_and_yesterday_l
         with bounded timeouts (60s leaf, 300s parent).
     """
     connection, executed_sql = _postgresql_double()
-    connection.scalar.side_effect = ["public", "p", "public", "p"]
+    connection.scalar.side_effect = ["public", "180006", "p", "public", "180006", "p"]
     attached = (
         lifecycle.PartitionRef(
             name=_YESTERDAY_CANDLES,
@@ -237,7 +248,17 @@ def test_analyze_rollover_targets_handles_absent_yesterday_ordinary_and_invalid_
         using 60s timeout, and missing/default-anchor resolution behaves cleanly.
     """
     connection, executed_sql = _postgresql_double()
-    connection.scalar.side_effect = ["public", "p", "public", "r", "public", None]
+    connection.scalar.side_effect = [
+        "public",
+        "180006",
+        "p",
+        "public",
+        "180006",
+        "r",
+        "public",
+        "180006",
+        None,
+    ]
 
     with (
         patch.object(lifecycle, "_direct_partitions", return_value=()),
@@ -355,11 +376,10 @@ def test_analyze_stale_relations_executes_empty_noop_and_validates_inputs() -> N
         lifecycle.analyze_stale_relations(cast(Connection, connection))
 
     connection.in_transaction.return_value = False
-    connection.scalar.return_value = "analytics"
+    connection.scalar.side_effect = ["analytics", "public", "180006"]
     with pytest.raises(lifecycle.DailyPartitionError, match="expected 'public'"):
         lifecycle.analyze_stale_relations(cast(Connection, connection))
 
-    connection.scalar.return_value = "public"
     empty_result = MagicMock()
     empty_result.all.return_value = []
     connection.execute.side_effect = [empty_result]
@@ -440,6 +460,260 @@ def test_run_analyze_targets_skips_timeouts_warns_and_raises_other_db_errors() -
         )
 
 
+def test_analyze_rollover_targets_skips_parents_before_pg18_and_runs_leaves_and_ordinary() -> None:
+    """Pre-PG18 rollover ANALYZE must skip partitioned parents as unsupported.
+
+    Given: PostgreSQL ``server_version_num`` ``170005`` with partitioned ``candles``
+        (having yesterday's leaf), partitioned ``ticks`` (no yesterday leaf),
+        and ordinary ``trades``.
+    When: ``analyze_rollover_targets`` runs in dry-run and apply modes.
+    Then: Parents move to ``unsupported`` and are omitted from ``targets``,
+        ``statements``, and transactions while logging one warning naming ``170005``
+        and the parent; leaves and ordinary tables execute normally with no extra warning.
+    """
+    connection, executed_sql = _postgresql_double("170005")
+    connection.scalar.side_effect = [
+        "public",
+        "170005",
+        "p",
+        "public",
+        "170005",
+        "p",
+        "public",
+        "170005",
+        "p",
+        "public",
+        "170005",
+        "r",
+    ]
+    attached = (
+        lifecycle.PartitionRef(
+            name=_YESTERDAY_CANDLES,
+            bound="FOR VALUES FROM ('2026-08-01 00:00:00+00') TO ('2026-08-02 00:00:00+00')",
+        ),
+    )
+
+    with (
+        patch.object(lifecycle, "_direct_partitions", side_effect=[attached, attached, ()]),
+        patch.object(lifecycle, "logger") as logger_spy,
+    ):
+        planned = lifecycle.analyze_rollover_targets(
+            cast(Connection, connection),
+            "candles",
+            _ANCHOR,
+            dry_run=True,
+        )
+        applied = lifecycle.analyze_rollover_targets(
+            cast(Connection, connection),
+            "candles",
+            _ANCHOR,
+            dry_run=False,
+        )
+        parent_only = lifecycle.analyze_rollover_targets(
+            cast(Connection, connection),
+            "ticks",
+            _ANCHOR,
+            dry_run=False,
+        )
+        ordinary = lifecycle.analyze_rollover_targets(
+            cast(Connection, connection),
+            "trades",
+            _ANCHOR,
+            dry_run=False,
+        )
+
+    assert planned == lifecycle.AnalyzeResult(
+        targets=("candles_d20260801",),
+        statements=('ANALYZE (SKIP_LOCKED) "public"."candles_d20260801"',),
+        executed=(),
+        skipped=(),
+        unsupported=("candles",),
+    )
+    assert applied == lifecycle.AnalyzeResult(
+        targets=("candles_d20260801",),
+        statements=('ANALYZE (SKIP_LOCKED) "public"."candles_d20260801"',),
+        executed=("candles_d20260801",),
+        skipped=(),
+        unsupported=("candles",),
+    )
+    assert parent_only == lifecycle.AnalyzeResult(
+        targets=(),
+        statements=(),
+        executed=(),
+        skipped=(),
+        unsupported=("ticks",),
+    )
+    assert ordinary == lifecycle.AnalyzeResult(
+        targets=("trades",),
+        statements=('ANALYZE (SKIP_LOCKED) "public"."trades"',),
+        executed=("trades",),
+        skipped=(),
+        unsupported=(),
+    )
+    assert connection.begin.call_count == 2
+    assert executed_sql == [
+        "SET LOCAL TIME ZONE 'UTC'",
+        "SET LOCAL lock_timeout = '2s'",
+        "SET LOCAL statement_timeout = '60s'",
+        'ANALYZE (SKIP_LOCKED) "public"."candles_d20260801"',
+        "SET LOCAL TIME ZONE 'UTC'",
+        "SET LOCAL lock_timeout = '2s'",
+        "SET LOCAL statement_timeout = '60s'",
+        'ANALYZE (SKIP_LOCKED) "public"."trades"',
+    ]
+    warned = [call.args[0] % call.args[1:] for call in logger_spy.warning.call_args_list]
+    assert len(warned) == 3
+    assert "170005" in warned[0] and "candles" in warned[0]
+    assert "170005" in warned[1] and "candles" in warned[1]
+    assert "170005" in warned[2] and "ticks" in warned[2]
+
+
+def test_analyze_stale_relations_skips_parents_before_pg18_and_keeps_only_on_pg18() -> None:
+    """Pre-PG18 stale sweep must split parents after applying limit while PG18 keeps ONLY.
+
+    Given: Stale rows with two parents, one ordinary table, one past leaf, and one
+        future leaf on ``server_version_num`` ``170005`` and ``180006``.
+    When: ``analyze_stale_relations`` runs in dry-run, capped apply, and PG18 dry-run.
+    Then: Pre-PG18 reads ``SHOW server_version_num`` once before ``rollback()``, applies
+        ``limit`` first, places parents in ``unsupported`` with one warning naming
+        ``170005`` and the parents, and runs only non-parent targets; PG18 keeps ``ONLY``
+        and an empty ``unsupported`` tuple.
+    """
+    catalog_rows = [
+        ("candles_d20260805", "r", True),
+        ("venue_account_observations", "r", False),
+        ("candles", "p", False),
+        ("candles_d20260801", "r", True),
+        ("ticks", "p", False),
+    ]
+    connection, executed_sql = _postgresql_double("170005")
+    catalog_batches = [catalog_rows, catalog_rows]
+
+    def _stale_execute(statement: object, *_args: object, **_kwargs: object) -> MagicMock:
+        """Serve stale catalog snapshots and record executed ANALYZE SQL."""
+        sql_text = str(statement)
+        if "pg_stat_user_tables" in sql_text:
+            result = MagicMock()
+            result.all.return_value = catalog_batches.pop(0)
+            return result
+        executed_sql.append(sql_text)
+        return MagicMock()
+
+    connection.execute.side_effect = _stale_execute
+
+    with (
+        patch.object(lifecycle, "current_utc_anchor", return_value=_ANCHOR),
+        patch.object(lifecycle, "logger") as logger_spy,
+    ):
+        planned = lifecycle.analyze_stale_relations(
+            cast(Connection, connection),
+            limit=4,
+            dry_run=True,
+        )
+        applied = lifecycle.analyze_stale_relations(
+            cast(Connection, connection),
+            limit=3,
+            dry_run=False,
+        )
+
+    assert planned == lifecycle.AnalyzeResult(
+        targets=("venue_account_observations", "candles_d20260801"),
+        statements=(
+            'ANALYZE (SKIP_LOCKED) "public"."venue_account_observations"',
+            'ANALYZE (SKIP_LOCKED) "public"."candles_d20260801"',
+        ),
+        executed=(),
+        skipped=(),
+        unsupported=("candles", "ticks"),
+    )
+    assert applied == lifecycle.AnalyzeResult(
+        targets=("venue_account_observations",),
+        statements=('ANALYZE (SKIP_LOCKED) "public"."venue_account_observations"',),
+        executed=("venue_account_observations",),
+        skipped=(),
+        unsupported=("candles", "ticks"),
+    )
+    assert connection.rollback.call_count == 2
+    assert connection.begin.call_count == 1
+    assert executed_sql == [
+        "SET LOCAL TIME ZONE 'UTC'",
+        "SET LOCAL lock_timeout = '2s'",
+        "SET LOCAL statement_timeout = '60s'",
+        'ANALYZE (SKIP_LOCKED) "public"."venue_account_observations"',
+    ]
+    scalar_calls = [str(call.args[0]) for call in connection.scalar.call_args_list]
+    assert scalar_calls.count("SHOW server_version_num") == 2
+    call_names = [item[0] for item in connection.mock_calls]
+    rollback_index = call_names.index("rollback")
+    begin_index = call_names.index("begin")
+    show_index = [
+        index
+        for index, item in enumerate(connection.mock_calls)
+        if item[0] == "scalar" and "SHOW server_version_num" in str(item[1][0])
+    ][0]
+    assert show_index < rollback_index < begin_index
+    warned = [call.args[0] % call.args[1:] for call in logger_spy.warning.call_args_list]
+    assert len(warned) == 2
+    for message in warned:
+        assert "170005" in message
+        assert "candles" in message
+        assert "ticks" in message
+
+    pg18_connection, _pg18_sql = _postgresql_double("180006")
+    pg18_catalog = MagicMock()
+    pg18_catalog.all.return_value = catalog_rows
+    pg18_connection.execute.side_effect = [pg18_catalog]
+    with patch.object(lifecycle, "current_utc_anchor", return_value=_ANCHOR):
+        pg18_planned = lifecycle.analyze_stale_relations(
+            cast(Connection, pg18_connection),
+            limit=4,
+            dry_run=True,
+        )
+
+    assert pg18_planned.unsupported == ()
+    assert pg18_planned.targets == (
+        "candles",
+        "ticks",
+        "venue_account_observations",
+        "candles_d20260801",
+    )
+    assert pg18_planned.statements[:2] == (
+        'ANALYZE (SKIP_LOCKED) ONLY "public"."candles"',
+        'ANALYZE (SKIP_LOCKED) ONLY "public"."ticks"',
+    )
+
+
+@pytest.mark.parametrize("raw_version", [None, "", "non-numeric", "17beta1"])
+def test_analyze_rejects_missing_or_non_numeric_server_version_num(
+    raw_version: str | None,
+) -> None:
+    """Missing or non-numeric ``SHOW server_version_num`` must fail closed.
+
+    Args:
+        raw_version: Invalid or missing scalar value returned by ``SHOW``.
+
+    Given: A PostgreSQL connection whose ``SHOW server_version_num`` returns ``raw_version``.
+    When: Calling ``analyze_rollover_targets`` and ``analyze_stale_relations``.
+    Then: Both entry points raise ``DailyPartitionError`` without running transactions.
+    """
+    connection, _executed_sql = _postgresql_double(raw_version)
+
+    with pytest.raises(lifecycle.DailyPartitionError, match="server_version_num"):
+        lifecycle.analyze_rollover_targets(
+            cast(Connection, connection),
+            "candles",
+            _ANCHOR,
+            dry_run=True,
+        )
+    with pytest.raises(lifecycle.DailyPartitionError, match="server_version_num"):
+        lifecycle.analyze_stale_relations(
+            cast(Connection, connection),
+            today=_TODAY_DATE,
+            dry_run=False,
+        )
+    connection.begin.assert_not_called()
+
+
 @pytest.mark.skipif(
     _configured_postgresql_url() is None,
     reason="live PostgreSQL ANALYZE proof requires PNL_TEST_POSTGRES_URL",
@@ -511,6 +785,7 @@ def test_postgresql_live_stale_analyze_populates_stats_and_becomes_noop() -> Non
                     )
 
             first = lifecycle.analyze_stale_relations(setup_conn, limit=200, dry_run=False)
+            assert first.unsupported == ()
             assert parent_name in first.executed
             assert ordinary_name in first.executed
             assert past_leaf_name in first.executed

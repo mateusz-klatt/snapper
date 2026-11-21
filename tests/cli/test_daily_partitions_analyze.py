@@ -78,6 +78,76 @@ def test_render_analyze_result_formats_sqlite_noop_and_pg_summary() -> None:
     ]
 
 
+def test_render_analyze_result_prints_unsupported_only_when_nonempty() -> None:
+    """Renderer must emit ``unsupported`` lines only when unsupported parents exist.
+
+    Given: One ``AnalyzeResult`` with empty ``unsupported`` and one with two
+        unsupported parent names, plus CLI invocations returning unsupported parents.
+    When: ``_render_analyze_result``, ``ensure --apply``, and ``analyze --apply`` run.
+    Then: Empty ``unsupported`` emits no ``unsupported:`` line, while non-empty
+        ``unsupported`` prints the header and indented parent lines and exits 0.
+    """
+    pg_supported = AnalyzeResult(
+        targets=("candles_d20260801",),
+        statements=('ANALYZE (SKIP_LOCKED) "public"."candles_d20260801"',),
+        executed=("candles_d20260801",),
+        skipped=(),
+    )
+    pg_pre18 = AnalyzeResult(
+        targets=("candles_d20260801",),
+        statements=('ANALYZE (SKIP_LOCKED) "public"."candles_d20260801"',),
+        executed=("candles_d20260801",),
+        skipped=(),
+        unsupported=("candles", "ticks"),
+    )
+    with patch("snapper.cli.daily_partitions.typer.echo") as echo:
+        daily_partitions_cli._render_analyze_result(pg_supported)
+        without_unsupported = [entry.args[0] for entry in echo.call_args_list]
+        echo.reset_mock()
+        daily_partitions_cli._render_analyze_result(pg_pre18)
+        with_unsupported = [entry.args[0] for entry in echo.call_args_list]
+
+    assert not any(line.startswith("unsupported:") for line in without_unsupported)
+    assert with_unsupported == [
+        "targets: 1",
+        "  target: candles_d20260801",
+        "statements: 1",
+        'ANALYZE (SKIP_LOCKED) "public"."candles_d20260801"',
+        "executed: 1",
+        "  executed: candles_d20260801",
+        "skipped: 0",
+        "unsupported: 2",
+        "  unsupported: candles",
+        "  unsupported: ticks",
+    ]
+
+    runner = CliRunner()
+    engine, _connection = _engine_double()
+    ensured = LifecycleResult(
+        table="candles",
+        action=LifecycleAction.ENSURED,
+        statements=("CREATE TABLE candles_d20260815 PARTITION OF candles",),
+        future_leaf_count=14,
+        future_leaf_alarm=False,
+    )
+    with (
+        patch("snapper.cli.daily_partitions._engine", return_value=engine),
+        patch("snapper.cli.daily_partitions.ensure_future_leaves", return_value=ensured),
+        patch("snapper.cli.daily_partitions.analyze_rollover_targets", return_value=pg_pre18),
+        patch("snapper.cli.daily_partitions.analyze_stale_relations", return_value=pg_pre18),
+    ):
+        ensure_res = runner.invoke(
+            daily_partitions_app,
+            ["ensure", "candles", "--anchor", _ANCHOR, "--apply"],
+        )
+        analyze_res = runner.invoke(daily_partitions_app, ["analyze", "--apply"])
+
+    assert ensure_res.exit_code == 0, ensure_res.stderr
+    assert "unsupported: 2\n  unsupported: candles\n  unsupported: ticks\n" in ensure_res.stdout
+    assert analyze_res.exit_code == 0, analyze_res.stderr
+    assert "unsupported: 2\n  unsupported: candles\n  unsupported: ticks\n" in analyze_res.stdout
+
+
 def test_ensure_apply_runs_post_rollover_analyze_and_warns_nonfatally_on_failure() -> None:
     """Successful ``ensure --apply`` runs best-effort post-rollover ANALYZE without aborting.
 
