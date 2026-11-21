@@ -911,8 +911,8 @@ class TestCheckpointFailClosed:
                     {
                         "instrument_public_id": "I1",
                         "shard_key": "s",
-                        "position_qty_hex": "not-hex",
-                        "entry_price_hex": None,
+                        "position_qty": "not-hex",
+                        "entry_price": None,
                     }
                 ],
             },
@@ -922,8 +922,8 @@ class TestCheckpointFailClosed:
                     {
                         "instrument_public_id": "I1",
                         "shard_key": "s",
-                        "position_qty_hex": "0X1.0P+0",
-                        "entry_price_hex": None,
+                        "position_qty": "0X1.0P+0",
+                        "entry_price": None,
                     }
                 ],
             },
@@ -959,11 +959,11 @@ class TestCheckpointFailClosed:
                         "weights": [
                             {
                                 "attribution": {"origin": "unattributed", "strategy_name": None},
-                                "weight_hex": (1.0).hex(),
+                                "weight": (1.0).hex(),
                             },
                             {
                                 "attribution": {"origin": "unattributed", "strategy_name": None},
-                                "weight_hex": (1.0).hex(),
+                                "weight": (1.0).hex(),
                             },
                         ],
                     }
@@ -1440,13 +1440,39 @@ class TestReviewRegressionReproducers:
                             {
                                 "instrument_public_id": "I1",
                                 "shard_key": "shard-I1",
-                                "position_qty_hex": "0x1p+1024",
-                                "entry_price_hex": None,
+                                "position_qty": "0x1p+1024",
+                                "entry_price": None,
                             }
                         ],
                     }
                 )
             )
+        for bad_tagged in (
+            3,
+            3.0,
+            True,
+            {"int": 3},
+            {"int": True},
+            {"int": "03"},
+            {"int": "+3"},
+            {"int_value": "3"},
+        ):
+            with pytest.raises(ValueError):
+                checkpoint_from_json(
+                    json.dumps(
+                        {
+                            **base,
+                            "pools": [
+                                {
+                                    "instrument_public_id": "I1",
+                                    "shard_key": "shard-I1",
+                                    "position_qty": bad_tagged,
+                                    "entry_price": None,
+                                }
+                            ],
+                        }
+                    )
+                )
         with pytest.raises(ValueError):
             checkpoint_from_json(json.dumps({**base, "schema_version": True}))
         with pytest.raises(ValueError):
@@ -1502,7 +1528,20 @@ class TestReviewRegressionReproducers:
         )
         _assert_points_bit_identical(full.points[3:], resumed.points)
 
-        for bad_num in (2**53 + 1, 10**400, True):
+        exact_large = replace(
+            checkpoint,
+            pools=(TimelineCheckpointPool("I1", "shard-I1", cast(float, 2**53 + 1), 100.0),),
+            weights_by_pool=(
+                (("I1", "shard-I1"), ((("unattributed", None), cast(float, 2**53 + 1)),)),
+            ),
+        )
+        restored_large = checkpoint_from_json(checkpoint_to_json(exact_large))
+        assert restored_large.pools[0].position_qty == 2**53 + 1
+        assert type(restored_large.pools[0].position_qty) is int
+        assert restored_large.weights_by_pool[0][1][0][1] == 2**53 + 1
+        assert type(restored_large.weights_by_pool[0][1][0][1]) is int
+
+        for bad_num in (True, False, cast(object, "bad")):
             bad_pool = replace(
                 checkpoint,
                 pools=(TimelineCheckpointPool("I1", "shard-I1", cast(float, bad_num), 100.0),),
@@ -1944,3 +1983,164 @@ class TestRound2ReviewCases:
         assert resumed_i3.realized_pnl == pytest.approx(10.0)
         assert resumed_i3.fee_pnl == pytest.approx(-0.25)
         assert resumed_i3.unrealized_pnl == pytest.approx(0.0)
+
+
+class TestRound3ReviewCases:
+    """Tests reproducing every Round 3 review finding against HEAD cbb05273."""
+
+    def test_round3_item1_empty_seen_with_carried_pool_rejected(self) -> None:
+        """Every instrument with a carried pool must appear in checkpoint seen.
+
+        Given: A checkpoint carrying qty 1.0 and basis 100.0 for I1,
+        When: Parsed with seen=[] via JSON or constructed with seen=() directly,
+        Then: ValueError is raised rather than hiding holdings as 0.0 unrealized.
+        """
+        opening = TimelineOpening(pools=(_OPENING_POOL("I1", 1.0, 100.0),), t0=_M(0))
+        captured = build_pnl_timeline(
+            (),
+            (),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+            opening=opening,
+        )
+        checkpoint = captured.closing_checkpoint
+        assert checkpoint is not None
+        base = json.loads(checkpoint_to_json(checkpoint))
+
+        with pytest.raises(ValueError, match="seen"):
+            checkpoint_from_json(json.dumps({**base, "seen": []}))
+        with pytest.raises(ValueError, match="seen"):
+            replace(checkpoint, seen=())
+        with pytest.raises(ValueError, match="seen"):
+            replace(
+                checkpoint,
+                pools=(),
+                weights_by_pool=(),
+                basis_reasons_by_pool=(),
+                last_effective_by_pool=(),
+                seen=(),
+            )
+        with pytest.raises(ValueError, match="seen"):
+            checkpoint_from_json(
+                json.dumps(
+                    {
+                        **base,
+                        "pools": [],
+                        "weights_by_pool": [],
+                        "basis_reasons_by_pool": [],
+                        "last_effective_by_pool": [],
+                        "seen": [],
+                    }
+                )
+            )
+
+    def test_round3_item2_int_seeds_and_weights_preserve_type_and_2p54_arithmetic(
+        self,
+    ) -> None:
+        """Codec preserves exact Python int type so JSON resume matches anchor arithmetic.
+
+        Given: An integer opening seed qty=3 and entry_price=3 with suffix mark 2**54,
+        When: Replayed from anchor, resumed in memory, and resumed through JSON serialization,
+        Then: Restored position_qty, entry_price, and weight remain exact ints and all three
+            replays match bit-for-bit including unrealized hex 0x1.7ffffffffffffp+55.
+        """
+        opening = TimelineOpening(
+            pools=(_OPENING_POOL("I1", cast(float, 3), cast(float, 3)),),
+            t0=_M(0),
+        )
+        marks: MarkMap = {("I1", _M(minute)): cast(float, 2**54) for minute in range(5)}
+        full = build_pnl_timeline((), (), marks, _pointwise_window(0, 4), opening=opening)
+        captured = build_pnl_timeline(
+            (),
+            (),
+            marks,
+            _pointwise_window(0, 2, capture_checkpoint=True),
+            opening=opening,
+        )
+        checkpoint = captured.closing_checkpoint
+        assert checkpoint is not None
+        assert type(checkpoint.pools[0].position_qty) is int
+        assert type(checkpoint.pools[0].entry_price) is int
+        assert type(checkpoint.weights_by_pool[0][1][0][1]) is int
+
+        parsed = checkpoint_from_json(checkpoint_to_json(checkpoint))
+        assert type(parsed.pools[0].position_qty) is int
+        assert type(parsed.pools[0].entry_price) is int
+        assert type(parsed.weights_by_pool[0][1][0][1]) is int
+
+        resumed_mem = build_pnl_timeline((), (), marks, _pointwise_window(3, 4), opening=checkpoint)
+        resumed_json = build_pnl_timeline((), (), marks, _pointwise_window(3, 4), opening=parsed)
+        assert full.points[3].unrealized_pnl is not None
+        assert full.points[3].unrealized_pnl.hex() == "0x1.7ffffffffffffp+55"
+        _assert_points_bit_identical(full.points[3:], resumed_mem.points)
+        _assert_points_bit_identical(full.points[3:], resumed_json.points)
+
+    def test_round3_item3_exact_once_execution_keys_and_codex_missing_deferred(
+        self,
+    ) -> None:
+        """Resume requires every deferred execution key and rejects duplicate supplied keys.
+
+        Given: Capture at minute 2 with seq 10 deferred to minute 4,
+        When: Resume receives no executions, duplicate seq 10, or duplicate suffix seq 11,
+        Then: ValueError is raised for missing deferred executions and duplicate keys.
+        """
+        deferred = _EXEC("I1", 10, 4, "buy", 1.0, 104.0)
+        suffix = _EXEC("I1", 11, 5, "sell", 0.5, 110.0)
+        marks: MarkMap = {("I1", _M(minute)): 100.0 + minute for minute in range(6)}
+        checkpoint = build_pnl_timeline(
+            (deferred,),
+            (),
+            marks,
+            _pointwise_window(0, 2, capture_checkpoint=True),
+        ).closing_checkpoint
+        assert checkpoint is not None
+        assert checkpoint.deferred_execution_keys == (("kraken", 10),)
+
+        with pytest.raises(ValueError, match="missing deferred executions"):
+            build_pnl_timeline((), (), marks, _pointwise_window(3, 5), opening=checkpoint)
+        with pytest.raises(ValueError, match="missing deferred executions"):
+            build_pnl_timeline(
+                (),
+                (),
+                marks,
+                _pointwise_window(3, 4, capture_checkpoint=True),
+                opening=checkpoint,
+            )
+        with pytest.raises(ValueError, match="duplicate"):
+            build_pnl_timeline(
+                (deferred, deferred),
+                (),
+                marks,
+                _pointwise_window(3, 5),
+                opening=checkpoint,
+            )
+        with pytest.raises(ValueError, match="duplicate"):
+            build_pnl_timeline(
+                (deferred, suffix, suffix),
+                (),
+                marks,
+                _pointwise_window(3, 5),
+                opening=checkpoint,
+            )
+
+    def test_round3_item4_accrual_carried_and_mark_evidence_prefers_carried_event_inputs(
+        self,
+    ) -> None:
+        """Processed accrual with carried_inputs always refuses via carried_event_inputs.
+
+        Given: An accrual before C carrying both PnlCarriedInput and conversion_uses_mark_evidence,
+        When: Checkpoint capture is requested at C,
+        Then: Capture returns None with closing_checkpoint_refusal='carried_event_inputs'.
+        """
+        carried = (PnlCarriedInput("I1", "event", _M(0), 1, "USD/EUR"),)
+        accrual = TimelineAccrual(
+            "I1", _M(1), 1.0, carried_inputs=carried, conversion_uses_mark_evidence=True
+        )
+        captured = build_pnl_timeline(
+            (),
+            (accrual,),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+        )
+        assert captured.closing_checkpoint is None
+        assert captured.closing_checkpoint_refusal == "carried_event_inputs"

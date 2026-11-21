@@ -656,8 +656,9 @@ class TimelineCheckpointOpening:
 
 
 def _validate_checkpoint_pool_index(opening: TimelineCheckpointOpening) -> None:
-    """Verify every carried pool key matches ``pool_keys_by_instrument`` and shard scopes."""
+    """Verify every carried pool key matches ``pool_keys_by_instrument``, ``seen``, and scopes."""
     pool_keys_map = _pool_keys_map(opening.pool_keys_by_instrument)
+    seen_set = set(opening.seen)
     scope_map = dict(opening.scope_by_shard)
     exchange_map = dict(opening.exchange_by_instrument)
     carried_pools: tuple[PoolKey, ...] = (
@@ -672,6 +673,9 @@ def _validate_checkpoint_pool_index(opening: TimelineCheckpointOpening) -> None:
         exchange = exchange_map.get(instrument_public_id)
         if exchange is None or scope_map.get(shard_key) != (instrument_public_id, exchange):
             raise ValueError("carried pool key has missing or inconsistent shard/exchange scope")
+    for instrument_public_id in pool_keys_map:
+        if instrument_public_id not in seen_set:
+            raise ValueError("carried pool instrument missing from seen")
 
 
 @dataclass(frozen=True)
@@ -3147,7 +3151,12 @@ def _validate_resume_executions(
         ValueError: When a supplied fill applies at or before the checkpoint,
             or when a deferred fill is missing.
     """
-    supplied = {(execution.exchange, execution.scope_sequence) for execution in executions}
+    supplied: set[tuple[str, int]] = set()
+    for execution in executions:
+        key = (execution.exchange, execution.scope_sequence)
+        if key in supplied:
+            raise ValueError("checkpoint resume received duplicate execution key")
+        supplied.add(key)
     if any(key not in supplied for key in opening.deferred_execution_keys):
         raise ValueError("checkpoint resume is missing deferred executions")
     if any(item.effective_time <= opening.checkpoint_minute for item in prepared):
@@ -3780,9 +3789,7 @@ def _capture_refusal_reason(
     """Return a non-fatal refusal reason when state or processed events prevent capture."""
     if state.carried_event_inputs:
         return "carried_event_inputs"
-    if any(item.execution.carried_inputs for item in applied_executions) or any(
-        accrual.carried_inputs for accrual in applied_accruals
-    ):
+    if any(item.execution.carried_inputs for item in applied_executions):
         return "carried_inputs_on_processed_event"
     if any(item.execution.conversion_uses_mark_evidence for item in applied_executions) or any(
         accrual.conversion_uses_mark_evidence for accrual in applied_accruals

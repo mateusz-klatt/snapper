@@ -8,7 +8,6 @@ and insertion order for float-summation-sensitive pool and weight mappings.
 """
 
 import json
-import math
 from collections.abc import Callable
 from collections.abc import Hashable
 from collections.abc import Sequence
@@ -24,6 +23,7 @@ from typing import Self
 from pydantic import AfterValidator
 from pydantic import BaseModel
 from pydantic import ConfigDict
+from pydantic import Field
 from pydantic import StrictInt
 from pydantic import model_validator
 
@@ -89,24 +89,37 @@ def _require_hex_float(value: str) -> str:
     return value
 
 
-def _encode_float_hex(value: float) -> str:
-    """Encode an int or float losslessly into ``float.hex()``, rejecting lossy values.
+def _encode_carried_number(value: float) -> CarriedNumberPayload:
+    """Encode an exact Python ``int`` or ``float`` losslessly without coercion.
 
     Args:
-        value: Numeric quantity, cost basis, or weight to encode.
+        value: Carried numeric quantity, cost basis, or weight.
 
     Returns:
-        Canonical lowercase ``float.hex()`` string.
+        A :class:`TaggedIntPayload` for integers or canonical ``float.hex()``
+        string for floats.
     """
     if isinstance(value, bool):
         raise ValueError("checkpoint numeric value cannot be a boolean")
-    try:
-        converted = float(value)
-    except OverflowError as exc:
-        raise ValueError("checkpoint numeric value overflows IEEE-754 float") from exc
-    if not math.isnan(converted) and converted != value:
-        raise ValueError("checkpoint numeric value cannot convert losslessly to float")
-    return converted.hex()
+    if isinstance(value, int):
+        return TaggedIntPayload.model_validate({"int": str(value)}, strict=True)
+    if isinstance(value, float):
+        return value.hex()
+    raise ValueError("checkpoint numeric value must be an int or float")
+
+
+def _decode_carried_number(value: CarriedNumberPayload) -> float:
+    """Decode a carried numeric payload back into an exact ``int`` or ``float``.
+
+    Args:
+        value: Serialized ``TaggedIntPayload`` or canonical ``float.hex()`` string.
+
+    Returns:
+        Python ``int`` when ``value`` is a tagged int, or decoded ``float``.
+    """
+    if isinstance(value, TaggedIntPayload):
+        return int(value.int_value)
+    return float.fromhex(value)
 
 
 def _require_units_str(value: str) -> str:
@@ -270,6 +283,17 @@ class AttributionKeyPayload(BaseModel):
     strategy_name: str | None = None
 
 
+class TaggedIntPayload(BaseModel):
+    """Exact decimal integer payload preserving Python ``int`` type."""
+
+    model_config = _STRICT_CHECKPOINT_CONFIG
+
+    int_value: UnitsStr = Field(alias="int")
+
+
+type CarriedNumberPayload = HexFloatStr | TaggedIntPayload
+
+
 class CheckpointPoolPayload(BaseModel):
     """Serialized carried shard pool quantity and cost basis."""
 
@@ -277,8 +301,8 @@ class CheckpointPoolPayload(BaseModel):
 
     instrument_public_id: NonEmptyStr
     shard_key: NonEmptyStr
-    position_qty_hex: HexFloatStr
-    entry_price_hex: HexFloatStr | None = None
+    position_qty: CarriedNumberPayload
+    entry_price: CarriedNumberPayload | None = None
 
 
 class AttributionWeightPayload(BaseModel):
@@ -287,7 +311,7 @@ class AttributionWeightPayload(BaseModel):
     model_config = _STRICT_CHECKPOINT_CONFIG
 
     attribution: AttributionKeyPayload
-    weight_hex: HexFloatStr
+    weight: CarriedNumberPayload
 
 
 class PoolWeightsPayload(BaseModel):
@@ -523,13 +547,14 @@ class PnlOpeningCheckpointState(BaseModel):
 
 
 def _validate_payload_pool_index(state: PnlOpeningCheckpointState) -> None:
-    """Require every carried pool key to match ``pool_keys_by_instrument`` and scopes."""
+    """Require every carried pool key to match ``pool_keys_by_instrument``, ``seen``, and scopes."""
     pool_keys_map = {
         entry.instrument_public_id: {
             (pool.instrument_public_id, pool.shard_key) for pool in entry.pools
         }
         for entry in state.pool_keys_by_instrument
     }
+    seen_set = set(state.seen)
     scope_map = {
         entry.shard_key: (entry.instrument_public_id, entry.exchange)
         for entry in state.scope_by_shard
@@ -558,6 +583,9 @@ def _validate_payload_pool_index(state: PnlOpeningCheckpointState) -> None:
         exchange = exchange_map.get(instrument_public_id)
         if exchange is None or scope_map.get(shard_key) != (instrument_public_id, exchange):
             raise ValueError("carried pool key has missing or inconsistent shard/exchange scope")
+    for instrument_public_id in pool_keys_map:
+        if instrument_public_id not in seen_set:
+            raise ValueError("carried pool instrument missing from seen")
 
 
 def _validate_canonical_checkpoint_collections(state: PnlOpeningCheckpointState) -> None:
@@ -736,7 +764,7 @@ def _encode_pool_weights(
             weights=tuple(
                 AttributionWeightPayload(
                     attribution=_attribution_to_payload(attribution_key),
-                    weight_hex=_encode_float_hex(weight),
+                    weight=_encode_carried_number(weight),
                 )
                 for attribution_key, weight in entries
             ),
@@ -790,9 +818,9 @@ def checkpoint_to_payload(checkpoint: TimelineCheckpointOpening) -> PnlOpeningCh
             CheckpointPoolPayload(
                 instrument_public_id=pool.instrument_public_id,
                 shard_key=pool.shard_key,
-                position_qty_hex=_encode_float_hex(pool.position_qty),
-                entry_price_hex=(
-                    None if pool.entry_price is None else _encode_float_hex(pool.entry_price)
+                position_qty=_encode_carried_number(pool.position_qty),
+                entry_price=(
+                    None if pool.entry_price is None else _encode_carried_number(pool.entry_price)
                 ),
             )
             for pool in checkpoint.pools
@@ -884,9 +912,9 @@ def checkpoint_from_payload(payload: PnlOpeningCheckpointState) -> TimelineCheck
             TimelineCheckpointPool(
                 instrument_public_id=pool.instrument_public_id,
                 shard_key=pool.shard_key,
-                position_qty=float.fromhex(pool.position_qty_hex),
+                position_qty=_decode_carried_number(pool.position_qty),
                 entry_price=(
-                    None if pool.entry_price_hex is None else float.fromhex(pool.entry_price_hex)
+                    None if pool.entry_price is None else _decode_carried_number(pool.entry_price)
                 ),
             )
             for pool in payload.pools
@@ -897,7 +925,7 @@ def checkpoint_from_payload(payload: PnlOpeningCheckpointState) -> TimelineCheck
                 tuple(
                     (
                         _attribution_from_payload(weight_entry.attribution),
-                        float.fromhex(weight_entry.weight_hex),
+                        _decode_carried_number(weight_entry.weight),
                     )
                     for weight_entry in entry.weights
                 ),
@@ -979,7 +1007,7 @@ def checkpoint_to_json(checkpoint: TimelineCheckpointOpening) -> str:
     """
     payload = checkpoint_to_payload(checkpoint)
     return json.dumps(
-        payload.model_dump(mode="json"),
+        payload.model_dump(mode="json", by_alias=True),
         allow_nan=False,
         separators=(",", ":"),
         sort_keys=True,
