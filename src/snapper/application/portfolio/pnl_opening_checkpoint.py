@@ -8,6 +8,7 @@ and insertion order for float-summation-sensitive pool and weight mappings.
 """
 
 import json
+import math
 from collections.abc import Callable
 from collections.abc import Hashable
 from collections.abc import Sequence
@@ -23,6 +24,7 @@ from typing import Self
 from pydantic import AfterValidator
 from pydantic import BaseModel
 from pydantic import ConfigDict
+from pydantic import StrictInt
 from pydantic import model_validator
 
 from snapper.application.portfolio.exact_sum import ExactSum
@@ -80,11 +82,31 @@ def _require_hex_float(value: str) -> str:
     """
     try:
         decoded = float.fromhex(value)
-    except ValueError as exc:
+    except (ValueError, OverflowError) as exc:
         raise ValueError("checkpoint float must be a canonical float.hex() string") from exc
     if decoded.hex() != value:
         raise ValueError("checkpoint float must be canonical float.hex()")
     return value
+
+
+def _encode_float_hex(value: float) -> str:
+    """Encode an int or float losslessly into ``float.hex()``, rejecting lossy values.
+
+    Args:
+        value: Numeric quantity, cost basis, or weight to encode.
+
+    Returns:
+        Canonical lowercase ``float.hex()`` string.
+    """
+    if isinstance(value, bool):
+        raise ValueError("checkpoint numeric value cannot be a boolean")
+    try:
+        converted = float(value)
+    except OverflowError as exc:
+        raise ValueError("checkpoint numeric value overflows IEEE-754 float") from exc
+    if not math.isnan(converted) and converted != value:
+        raise ValueError("checkpoint numeric value cannot convert losslessly to float")
+    return converted.hex()
 
 
 def _require_units_str(value: str) -> str:
@@ -134,11 +156,60 @@ def _require_utc_minute(value: datetime) -> datetime:
     return normalized
 
 
+def _require_schema_version(value: int) -> Literal[1]:
+    """Require exact supported schema version 1 without boolean coercion.
+
+    Args:
+        value: Strict integer schema version.
+
+    Returns:
+        Literal ``1``.
+    """
+    if value != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError(f"unsupported checkpoint schema_version: {value}")
+    return CHECKPOINT_SCHEMA_VERSION
+
+
+def _require_infinity_sign(value: int) -> Literal[-1, 1]:
+    """Require signed infinity marker ``-1`` or ``1`` without boolean coercion.
+
+    Args:
+        value: Strict integer sign marker.
+
+    Returns:
+        Literal ``-1`` or ``1``.
+    """
+    if value == -1:
+        return -1
+    if value == 1:
+        return 1
+    raise ValueError(f"invalid checkpoint infinity sign: {value}")
+
+
+def _require_positive_scope_sequence(value: int) -> int:
+    """Require a positive execution scope sequence without boolean coercion.
+
+    Args:
+        value: Strict integer scope sequence.
+
+    Returns:
+        Validated positive sequence integer.
+    """
+    if value < 1:
+        raise ValueError("checkpoint deferred execution scope_sequence must be positive")
+    return value
+
+
 type NonEmptyStr = Annotated[str, AfterValidator(_require_nonempty)]
 type HexFloatStr = Annotated[str, AfterValidator(_require_hex_float)]
 type UnitsStr = Annotated[str, AfterValidator(_require_units_str)]
 type UtcDateTime = Annotated[datetime, AfterValidator(_require_utc_datetime)]
 type UtcMinuteDateTime = Annotated[datetime, AfterValidator(_require_utc_minute)]
+type SchemaVersionInt = Annotated[StrictInt, AfterValidator(_require_schema_version)]
+type InfinitySignInt = Annotated[StrictInt, AfterValidator(_require_infinity_sign)]
+type PositiveScopeSequenceInt = Annotated[
+    StrictInt, AfterValidator(_require_positive_scope_sequence)
+]
 
 
 def _attribution_key_tuple(attribution: AttributionKey) -> tuple[str, int, str]:
@@ -171,7 +242,7 @@ class ExactSumPayload(BaseModel):
     model_config = _STRICT_CHECKPOINT_CONFIG
 
     units: UnitsStr
-    infinities: tuple[Literal[-1, 1], ...] = ()
+    infinities: tuple[InfinitySignInt, ...] = ()
     saw_nan: bool = False
 
     @model_validator(mode="after")
@@ -346,7 +417,12 @@ class InstrumentPoolKeysPayload(BaseModel):
 
     @model_validator(mode="after")
     def _validate_pools(self) -> Self:
-        """Require pool keys to be canonically sorted and unique."""
+        """Require pool keys to match owning instrument and appear sorted and unique."""
+        for pool in self.pools:
+            if pool.instrument_public_id != self.instrument_public_id:
+                raise ValueError(
+                    "checkpoint pool_keys_by_instrument contains mismatched instrument"
+                )
         _require_strictly_sorted(self.pools, _pool_sort_key, "pool_keys_by_instrument.pools")
         return self
 
@@ -370,7 +446,11 @@ class AttributionExactSumPayload(BaseModel):
 
 
 class PoolLastEffectivePayload(BaseModel):
-    """Serialized per-pool running maximum effective timestamp through ``C``."""
+    """Serialized per-pool running maximum effective timestamp through ``C``.
+
+    Retained as defence in depth, since every carried value is at or before
+    ``checkpoint_minute`` and deferred fill re-passes rebuild those clamps.
+    """
 
     model_config = _STRICT_CHECKPOINT_CONFIG
 
@@ -378,14 +458,24 @@ class PoolLastEffectivePayload(BaseModel):
     last_effective_time: UtcDateTime
 
 
+class ExecutionKeyPayload(BaseModel):
+    """Serialized ``(exchange, scope_sequence)`` identity of one deferred fill."""
+
+    model_config = _STRICT_CHECKPOINT_CONFIG
+
+    exchange: NonEmptyStr
+    scope_sequence: PositiveScopeSequenceInt
+
+
 class PnlOpeningCheckpointState(BaseModel):
     """Version-tagged strict serialization of :class:`TimelineCheckpointOpening`."""
 
     model_config = _STRICT_CHECKPOINT_CONFIG
 
-    schema_version: Literal[1]
+    schema_version: SchemaVersionInt
     checkpoint_minute: UtcMinuteDateTime
     activation_time: UtcMinuteDateTime | None = None
+    valuation_ccy: NonEmptyStr
     pools: tuple[CheckpointPoolPayload, ...]
     weights_by_pool: tuple[PoolWeightsPayload, ...]
     seen: tuple[NonEmptyStr, ...]
@@ -405,11 +495,12 @@ class PnlOpeningCheckpointState(BaseModel):
     fee_total: ExactSumPayload
     accrual_total: ExactSumPayload
     last_effective_by_pool: tuple[PoolLastEffectivePayload, ...]
+    deferred_execution_keys: tuple[ExecutionKeyPayload, ...]
     carried_event_inputs: tuple[()] = ()
 
     @model_validator(mode="after")
     def _validate_state_invariants(self) -> Self:
-        """Enforce temporal bounds, insertion-key uniqueness, and canonical ordering."""
+        """Enforce temporal bounds, insertion-key uniqueness, pool index, and order."""
         if self.activation_time is not None and self.checkpoint_minute <= self.activation_time:
             raise ValueError("checkpoint_minute must follow activation_time")
         _require_unique_keys(
@@ -424,10 +515,49 @@ class PnlOpeningCheckpointState(BaseModel):
             "weights_by_pool",
         )
         _validate_canonical_checkpoint_collections(self)
+        _validate_payload_pool_index(self)
         for entry in self.last_effective_by_pool:
             if entry.last_effective_time > self.checkpoint_minute:
                 raise ValueError("checkpoint last_effective_time cannot exceed checkpoint_minute")
         return self
+
+
+def _validate_payload_pool_index(state: PnlOpeningCheckpointState) -> None:
+    """Require every carried pool key to match ``pool_keys_by_instrument`` and scopes."""
+    pool_keys_map = {
+        entry.instrument_public_id: {
+            (pool.instrument_public_id, pool.shard_key) for pool in entry.pools
+        }
+        for entry in state.pool_keys_by_instrument
+    }
+    scope_map = {
+        entry.shard_key: (entry.instrument_public_id, entry.exchange)
+        for entry in state.scope_by_shard
+    }
+    exchange_map = {
+        entry.instrument_public_id: entry.exchange for entry in state.exchange_by_instrument
+    }
+    carried_pools: tuple[PoolKey, ...] = (
+        *((pool.instrument_public_id, pool.shard_key) for pool in state.pools),
+        *(
+            (entry.pool.instrument_public_id, entry.pool.shard_key)
+            for entry in state.weights_by_pool
+        ),
+        *(
+            (entry.pool.instrument_public_id, entry.pool.shard_key)
+            for entry in state.basis_reasons_by_pool
+        ),
+        *(
+            (entry.pool.instrument_public_id, entry.pool.shard_key)
+            for entry in state.last_effective_by_pool
+        ),
+    )
+    for instrument_public_id, shard_key in dict.fromkeys(carried_pools):
+        if (instrument_public_id, shard_key) not in pool_keys_map.get(instrument_public_id, ()):
+            raise ValueError("carried pool key missing from pool_keys_by_instrument")
+        exchange = exchange_map.get(instrument_public_id)
+        if exchange is None or scope_map.get(shard_key) != (instrument_public_id, exchange):
+            raise ValueError("carried pool key has missing or inconsistent shard/exchange scope")
 
 
 def _validate_canonical_checkpoint_collections(state: PnlOpeningCheckpointState) -> None:
@@ -450,6 +580,11 @@ def _validate_canonical_checkpoint_collections(state: PnlOpeningCheckpointState)
         state.last_effective_by_pool,
         lambda item: _pool_sort_key(item.pool),
         "last_effective_by_pool",
+    )
+    _require_strictly_sorted(
+        state.deferred_execution_keys,
+        lambda item: (item.exchange, item.scope_sequence),
+        "deferred_execution_keys",
     )
     instrument_collections: tuple[
         tuple[
@@ -601,7 +736,7 @@ def _encode_pool_weights(
             weights=tuple(
                 AttributionWeightPayload(
                     attribution=_attribution_to_payload(attribution_key),
-                    weight_hex=weight.hex(),
+                    weight_hex=_encode_float_hex(weight),
                 )
                 for attribution_key, weight in entries
             ),
@@ -650,12 +785,15 @@ def checkpoint_to_payload(checkpoint: TimelineCheckpointOpening) -> PnlOpeningCh
         schema_version=CHECKPOINT_SCHEMA_VERSION,
         checkpoint_minute=checkpoint.checkpoint_minute,
         activation_time=checkpoint.activation_time,
+        valuation_ccy=checkpoint.valuation_ccy,
         pools=tuple(
             CheckpointPoolPayload(
                 instrument_public_id=pool.instrument_public_id,
                 shard_key=pool.shard_key,
-                position_qty_hex=pool.position_qty.hex(),
-                entry_price_hex=None if pool.entry_price is None else pool.entry_price.hex(),
+                position_qty_hex=_encode_float_hex(pool.position_qty),
+                entry_price_hex=(
+                    None if pool.entry_price is None else _encode_float_hex(pool.entry_price)
+                ),
             )
             for pool in checkpoint.pools
         ),
@@ -722,6 +860,10 @@ def checkpoint_to_payload(checkpoint: TimelineCheckpointOpening) -> PnlOpeningCh
                 key=lambda item: item[0],
             )
         ),
+        deferred_execution_keys=tuple(
+            ExecutionKeyPayload(exchange=exchange, scope_sequence=scope_sequence)
+            for exchange, scope_sequence in sorted(checkpoint.deferred_execution_keys)
+        ),
     )
 
 
@@ -737,6 +879,7 @@ def checkpoint_from_payload(payload: PnlOpeningCheckpointState) -> TimelineCheck
     return TimelineCheckpointOpening(
         checkpoint_minute=payload.checkpoint_minute,
         activation_time=payload.activation_time,
+        valuation_ccy=payload.valuation_ccy,
         pools=tuple(
             TimelineCheckpointPool(
                 instrument_public_id=pool.instrument_public_id,
@@ -802,6 +945,9 @@ def checkpoint_from_payload(payload: PnlOpeningCheckpointState) -> TimelineCheck
         last_effective_by_pool=tuple(
             (_pool_key_from_payload(entry.pool), entry.last_effective_time)
             for entry in payload.last_effective_by_pool
+        ),
+        deferred_execution_keys=tuple(
+            (entry.exchange, entry.scope_sequence) for entry in payload.deferred_execution_keys
         ),
     )
 

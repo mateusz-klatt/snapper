@@ -140,6 +140,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Hashable
+from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -176,6 +177,13 @@ class PnlTimelineWorkBudgetError(ValueError):
 
 ValuationStatus = Literal["complete", "incomplete"]
 """Whether a point's mark-to-market valuation is trustworthy or withheld."""
+
+CheckpointRefusalReason = Literal[
+    "carried_event_inputs",
+    "carried_inputs_on_processed_event",
+    "conversion_uses_mark_evidence",
+]
+"""Machine-readable reasons why optional checkpoint capture returned ``None``."""
 
 PnlIncompletenessReason = Literal[
     "scope_order_regression",
@@ -363,6 +371,8 @@ class TimelineExecution:
         fee_incompleteness_reason: Causal fee-conversion failure stamped by the
             caller, or ``None`` when no caller-side failure was established.
         carried_inputs: Rates this fill's price or fee reached back for.
+        conversion_uses_mark_evidence: Whether converting this fill relied on
+            mark-evidence fallbacks incompatible with checkpointing.
     """
 
     instrument_public_id: str
@@ -380,6 +390,7 @@ class TimelineExecution:
     price_incompleteness_reason: PnlIncompletenessReason | None = None
     fee_incompleteness_reason: PnlIncompletenessReason | None = None
     carried_inputs: tuple[PnlCarriedInput, ...] = ()
+    conversion_uses_mark_evidence: bool = False
 
 
 @dataclass(frozen=True)
@@ -418,6 +429,8 @@ class TimelineAccrual:
         incompleteness_reason: Causal conversion failure stamped by the caller,
             or ``None`` when no caller-side failure was established.
         carried_inputs: Rates this accrual reached back for.
+        conversion_uses_mark_evidence: Whether converting this accrual relied on
+            mark-evidence fallbacks incompatible with checkpointing.
     """
 
     instrument_public_id: str
@@ -425,6 +438,7 @@ class TimelineAccrual:
     amount_usd: float
     incompleteness_reason: PnlIncompletenessReason | None = None
     carried_inputs: tuple[PnlCarriedInput, ...] = ()
+    conversion_uses_mark_evidence: bool = False
 
 
 @dataclass(frozen=True)
@@ -511,6 +525,33 @@ def _require_unique_checkpoint_keys(keys: Collection[Hashable], label: str) -> N
         raise ValueError(f"duplicate checkpoint keys in {label}")
 
 
+def _validate_deferred_execution_keys(
+    deferred_execution_keys: Sequence[tuple[str, int]],
+) -> None:
+    """Require canonical strictly sorted unique ``(exchange, scope_sequence)`` keys."""
+    for exchange, scope_sequence in deferred_execution_keys:
+        if not exchange or isinstance(scope_sequence, bool) or scope_sequence < 1:
+            raise ValueError("checkpoint deferred_execution_keys must have positive sequences")
+    for index in range(len(deferred_execution_keys) - 1):
+        if not deferred_execution_keys[index] < deferred_execution_keys[index + 1]:
+            raise ValueError("checkpoint deferred_execution_keys must be sorted and unique")
+
+
+def _pool_keys_map(
+    pool_keys_by_instrument: Sequence[tuple[str, tuple[PoolKey, ...]]],
+) -> dict[str, set[PoolKey]]:
+    """Build instrument-to-pool-key lookup while rejecting cross-instrument pool entries."""
+    mapping: dict[str, set[PoolKey]] = {}
+    for instrument_public_id, pool_keys in pool_keys_by_instrument:
+        for pool_key in pool_keys:
+            if pool_key[0] != instrument_public_id:
+                raise ValueError(
+                    "checkpoint pool_keys_by_instrument contains mismatched instrument"
+                )
+        mapping[instrument_public_id] = set(pool_keys)
+    return mapping
+
+
 @dataclass(frozen=True)
 class TimelineCheckpointPool:
     """One durable shard pool's carried quantity and cost basis at a checkpoint.
@@ -535,11 +576,16 @@ class TimelineCheckpointOpening:
 
     Wraps the engine's replay state at ``checkpoint_minute`` so
     :func:`build_pnl_timeline` can resume subsequent minutes bit-identically
-    without replaying earlier events.
+    without replaying earlier events. ``last_effective_by_pool`` is retained as
+    defence in depth, since every carried value is at or before
+    ``checkpoint_minute`` and deferred fill re-passes rebuild those clamps.
+    Hashing is explicitly unsupported (``__hash__ = None``) because carried
+    state holds unhashable :class:`ExactSum` accumulators.
     """
 
     checkpoint_minute: datetime
     activation_time: datetime | None
+    valuation_ccy: str
     pools: tuple[TimelineCheckpointPool, ...]
     weights_by_pool: tuple[tuple[PoolKey, tuple[tuple[AttributionKey, float], ...]], ...]
     seen: tuple[str, ...]
@@ -562,9 +608,13 @@ class TimelineCheckpointOpening:
     fee_total: ExactSum
     accrual_total: ExactSum
     last_effective_by_pool: tuple[tuple[PoolKey, datetime], ...]
+    deferred_execution_keys: tuple[tuple[str, int], ...] = ()
+    __hash__ = cast(Callable[[object], int], None)
 
     def __post_init__(self) -> None:
-        """Validate boundary clock alignment, ordering, and key uniqueness."""
+        """Validate currency, boundary alignment, ordering, key uniqueness, and pool consistency."""
+        if not self.valuation_ccy:
+            raise ValueError("checkpoint valuation_ccy must be non-empty")
         _validate_utc_minute(self.checkpoint_minute, "checkpoint_minute")
         if self.activation_time is not None:
             _validate_utc_minute(self.activation_time, "activation_time")
@@ -601,6 +651,27 @@ class TimelineCheckpointOpening:
                 raise ValueError(
                     "checkpoint last_effective_by_pool must be UTC at or before checkpoint_minute"
                 )
+        _validate_deferred_execution_keys(self.deferred_execution_keys)
+        _validate_checkpoint_pool_index(self)
+
+
+def _validate_checkpoint_pool_index(opening: TimelineCheckpointOpening) -> None:
+    """Verify every carried pool key matches ``pool_keys_by_instrument`` and shard scopes."""
+    pool_keys_map = _pool_keys_map(opening.pool_keys_by_instrument)
+    scope_map = dict(opening.scope_by_shard)
+    exchange_map = dict(opening.exchange_by_instrument)
+    carried_pools: tuple[PoolKey, ...] = (
+        *((pool.instrument_public_id, pool.shard_key) for pool in opening.pools),
+        *(pool_key for pool_key, _ in opening.weights_by_pool),
+        *(pool_key for pool_key, _ in opening.basis_reasons_by_pool),
+        *(pool_key for pool_key, _ in opening.last_effective_by_pool),
+    )
+    for instrument_public_id, shard_key in dict.fromkeys(carried_pools):
+        if (instrument_public_id, shard_key) not in pool_keys_map.get(instrument_public_id, ()):
+            raise ValueError("carried pool key missing from pool_keys_by_instrument")
+        exchange = exchange_map.get(instrument_public_id)
+        if exchange is None or scope_map.get(shard_key) != (instrument_public_id, exchange):
+            raise ValueError("carried pool key has missing or inconsistent shard/exchange scope")
 
 
 @dataclass(frozen=True)
@@ -874,18 +945,27 @@ class PnlTimelinePoint:
 class PnlTimelineResult:
     """The built P&L series.
 
+    A result without a checkpoint stays hashable exactly as before. Hashing a
+    result that carries ``closing_checkpoint`` raises ``TypeError``, because the
+    checkpoint holds unhashable :class:`ExactSum` accumulators.
+
     Attributes:
         points: The ordered series points at the requested granularity.
         granularity: The granularity the points are bucketed at.
         valuation_ccy: The currency the components are expressed in.
         closing_checkpoint: Captured engine state after valuing ``to_time`` when
-            ``window.capture_checkpoint`` was requested, otherwise ``None``.
+            ``window.capture_checkpoint`` was requested and succeeded, otherwise
+            ``None``.
+        closing_checkpoint_refusal: Machine-readable refusal reason when
+            ``window.capture_checkpoint`` was requested and declined, otherwise
+            ``None``.
     """
 
     points: tuple[PnlTimelinePoint, ...]
     granularity: str
     valuation_ccy: str
     closing_checkpoint: TimelineCheckpointOpening | None = field(default=None, kw_only=True)
+    closing_checkpoint_refusal: CheckpointRefusalReason | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -2973,7 +3053,11 @@ def _validate_checkpoint_resume_window(
     window: TimelineWindow,
     opening: TimelineCheckpointOpening,
 ) -> None:
-    """Require UTC window bounds strictly following the resumed checkpoint minute."""
+    """Require matching currency and UTC window bounds strictly following ``C``."""
+    if window.valuation_ccy != opening.valuation_ccy:
+        raise ValueError(
+            "checkpoint resume window.valuation_ccy must match checkpoint valuation_ccy"
+        )
     if window.from_time.utcoffset() != timedelta(0) or window.to_time.utcoffset() != timedelta(0):
         raise ValueError("checkpoint resume window requires UTC bounds")
     if window.from_time.replace(second=0, microsecond=0) <= opening.checkpoint_minute:
@@ -3070,17 +3154,18 @@ def _timeline_schedule(
         prepared,
         window.to_time,
     )
-    accrual_cutoff = (
-        state.activation_time
-        if checkpoint_opening is None
-        else checkpoint_opening.checkpoint_minute
-    )
-    sorted_accruals = sorted(
-        (
+    if checkpoint_opening is None:
+        filtered_accruals: Iterable[TimelineAccrual] = (
             accrual
             for accrual in accruals
-            if accrual_cutoff is None or accrual.accrued_at > accrual_cutoff
-        ),
+            if state.activation_time is None or accrual.accrued_at > state.activation_time
+        )
+    else:
+        if any(accrual.accrued_at <= checkpoint_opening.checkpoint_minute for accrual in accruals):
+            raise ValueError("checkpoint resume received accrual at or before checkpoint_minute")
+        filtered_accruals = accruals
+    sorted_accruals = sorted(
+        filtered_accruals,
         key=lambda item: (item.accrued_at, item.instrument_public_id),
     )
     minute_grid = _minute_grid(window.from_time, window.to_time)
@@ -3661,66 +3746,98 @@ def _sorted_attribution_exact_sums(
     )
 
 
+def _capture_refusal_reason(
+    state: _TimelineBuildState,
+    applied_executions: Sequence[_PreparedExecution],
+    applied_accruals: Sequence[TimelineAccrual],
+) -> CheckpointRefusalReason | None:
+    """Return a non-fatal refusal reason when state or processed events prevent capture."""
+    if state.carried_event_inputs:
+        return "carried_event_inputs"
+    if any(item.execution.carried_inputs for item in applied_executions) or any(
+        accrual.carried_inputs for accrual in applied_accruals
+    ):
+        return "carried_inputs_on_processed_event"
+    if any(item.execution.conversion_uses_mark_evidence for item in applied_executions) or any(
+        accrual.conversion_uses_mark_evidence for accrual in applied_accruals
+    ):
+        return "conversion_uses_mark_evidence"
+    return None
+
+
 def _capture_closing_checkpoint(
     state: _TimelineBuildState,
     schedule: _TimelineSchedule,
-    applied_execution_count: int,
-    checkpoint_minute: datetime,
+    cursor: _EventCursor,
+    window: TimelineWindow,
     opening: TimelineOpening | TimelineCheckpointOpening | None,
-) -> TimelineCheckpointOpening:
-    """Snapshot carried engine state at ``checkpoint_minute`` after valuation."""
-    if state.carried_event_inputs:
-        raise ValueError("cannot capture checkpoint with non-empty carried_event_inputs")
-    applied_executions = schedule.prepared[:applied_execution_count]
+) -> tuple[TimelineCheckpointOpening | None, CheckpointRefusalReason | None]:
+    """Snapshot carried state at ``window.to_time`` or return a non-fatal refusal."""
+    applied_executions = schedule.prepared[: cursor.execution_index]
+    applied_accruals = schedule.accruals[: cursor.accrual_index]
+    refusal_reason = _capture_refusal_reason(state, applied_executions, applied_accruals)
+    if refusal_reason is not None:
+        return None, refusal_reason
     scope_by_shard, exchange_by_instrument = _captured_scope_maps(opening, applied_executions)
-    return TimelineCheckpointOpening(
-        checkpoint_minute=checkpoint_minute,
-        activation_time=state.activation_time,
-        pools=tuple(
-            TimelineCheckpointPool(
-                instrument_public_id=pool_key[0],
-                shard_key=pool_key[1],
-                position_qty=pool.position_qty,
-                entry_price=pool.entry_price,
-            )
-            for pool_key, pool in state.pools.items()
+    deferred_execution_keys = tuple(
+        sorted(
+            (item.exchange, item.scope_sequence)
+            for item in schedule.prepared[cursor.execution_index :]
+        )
+    )
+    return (
+        TimelineCheckpointOpening(
+            checkpoint_minute=window.to_time,
+            activation_time=state.activation_time,
+            valuation_ccy=window.valuation_ccy,
+            pools=tuple(
+                TimelineCheckpointPool(
+                    instrument_public_id=pool_key[0],
+                    shard_key=pool_key[1],
+                    position_qty=pool.position_qty,
+                    entry_price=pool.entry_price,
+                )
+                for pool_key, pool in state.pools.items()
+            ),
+            weights_by_pool=tuple(
+                (pool_key, tuple(weights.items()))
+                for pool_key, weights in state.weights_by_pool.items()
+            ),
+            seen=tuple(sorted(state.seen)),
+            attribution_seen=tuple(_sorted_attribution_keys(state.attribution_seen)),
+            basis_reasons_by_pool=tuple(
+                (pool_key, tuple(sorted(state.basis_reasons_by_pool[pool_key])))
+                for pool_key in sorted(state.basis_reasons_by_pool)
+            ),
+            untrusted_reasons_by_instrument=tuple(
+                (
+                    instrument_public_id,
+                    canonical_incompleteness_reasons(
+                        state.untrusted_reasons_by_instrument[instrument_public_id]
+                    ),
+                )
+                for instrument_public_id in sorted(state.untrusted_reasons_by_instrument)
+            ),
+            scope_by_shard=tuple((key, scope_by_shard[key]) for key in sorted(scope_by_shard)),
+            exchange_by_instrument=tuple(
+                (key, exchange_by_instrument[key]) for key in sorted(exchange_by_instrument)
+            ),
+            pool_keys_by_instrument=tuple(
+                (key, tuple(schedule.pool_index[key])) for key in sorted(schedule.pool_index)
+            ),
+            realized_by_instrument=_sorted_instrument_exact_sums(state.realized_by_instrument),
+            fee_by_instrument=_sorted_instrument_exact_sums(state.fee_by_instrument),
+            accrual_by_instrument=_sorted_instrument_exact_sums(state.accrual_by_instrument),
+            realized_by_attribution=_sorted_attribution_exact_sums(state.realized_by_attribution),
+            fee_by_attribution=_sorted_attribution_exact_sums(state.fee_by_attribution),
+            accrual_by_attribution=_sorted_attribution_exact_sums(state.accrual_by_attribution),
+            realized_total=_copy_exact_sum(state.realized_total),
+            fee_total=_copy_exact_sum(state.fee_total),
+            accrual_total=_copy_exact_sum(state.accrual_total),
+            last_effective_by_pool=_captured_last_effective(opening, applied_executions),
+            deferred_execution_keys=deferred_execution_keys,
         ),
-        weights_by_pool=tuple(
-            (pool_key, tuple(weights.items()))
-            for pool_key, weights in state.weights_by_pool.items()
-        ),
-        seen=tuple(sorted(state.seen)),
-        attribution_seen=tuple(_sorted_attribution_keys(state.attribution_seen)),
-        basis_reasons_by_pool=tuple(
-            (pool_key, tuple(sorted(state.basis_reasons_by_pool[pool_key])))
-            for pool_key in sorted(state.basis_reasons_by_pool)
-        ),
-        untrusted_reasons_by_instrument=tuple(
-            (
-                instrument_public_id,
-                canonical_incompleteness_reasons(
-                    state.untrusted_reasons_by_instrument[instrument_public_id]
-                ),
-            )
-            for instrument_public_id in sorted(state.untrusted_reasons_by_instrument)
-        ),
-        scope_by_shard=tuple((key, scope_by_shard[key]) for key in sorted(scope_by_shard)),
-        exchange_by_instrument=tuple(
-            (key, exchange_by_instrument[key]) for key in sorted(exchange_by_instrument)
-        ),
-        pool_keys_by_instrument=tuple(
-            (key, tuple(schedule.pool_index[key])) for key in sorted(schedule.pool_index)
-        ),
-        realized_by_instrument=_sorted_instrument_exact_sums(state.realized_by_instrument),
-        fee_by_instrument=_sorted_instrument_exact_sums(state.fee_by_instrument),
-        accrual_by_instrument=_sorted_instrument_exact_sums(state.accrual_by_instrument),
-        realized_by_attribution=_sorted_attribution_exact_sums(state.realized_by_attribution),
-        fee_by_attribution=_sorted_attribution_exact_sums(state.fee_by_attribution),
-        accrual_by_attribution=_sorted_attribution_exact_sums(state.accrual_by_attribution),
-        realized_total=_copy_exact_sum(state.realized_total),
-        fee_total=_copy_exact_sum(state.fee_total),
-        accrual_total=_copy_exact_sum(state.accrual_total),
-        last_effective_by_pool=_captured_last_effective(opening, applied_executions),
+        None,
     )
 
 
@@ -3797,20 +3914,21 @@ def build_pnl_timeline(
     _validate_timeline_execution_scopes(state, executions)
     schedule = _timeline_schedule(state, executions, accruals, window, opening)
     minute_points, cursor = _build_minute_points(state, evidence, schedule)
-    closing_checkpoint = (
-        _capture_closing_checkpoint(
+    if window.capture_checkpoint:
+        closing_checkpoint, closing_checkpoint_refusal = _capture_closing_checkpoint(
             state,
             schedule,
-            cursor.execution_index,
-            window.to_time,
+            cursor,
+            window,
             opening,
         )
-        if window.capture_checkpoint
-        else None
-    )
+    else:
+        closing_checkpoint = None
+        closing_checkpoint_refusal = None
     return PnlTimelineResult(
         points=tuple(_downsample(minute_points, step)),
         granularity=window.granularity,
         valuation_ccy=window.valuation_ccy,
         closing_checkpoint=closing_checkpoint,
+        closing_checkpoint_refusal=closing_checkpoint_refusal,
     )

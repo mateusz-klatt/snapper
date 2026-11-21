@@ -7,6 +7,7 @@ latched incompleteness persistence vs mark independence, and fail-closed gates.
 
 import json
 import math
+from collections.abc import Hashable
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -106,22 +107,28 @@ def _assert_points_bit_identical(
             _assert_opt_float_bit_identical(left_attr.unrealized_pnl, right_attr.unrealized_pnl)
 
 
-def _split_inputs_after_cutoff(
-    executions: Sequence[TimelineExecution],
-    accruals: Sequence[TimelineAccrual],
-    cutoff_minute: datetime,
+def _resume_inputs_from_checkpoint(
+    capture_executions: Sequence[TimelineExecution],
+    all_executions: Sequence[TimelineExecution],
+    all_accruals: Sequence[TimelineAccrual],
+    checkpoint: TimelineCheckpointOpening,
 ) -> tuple[tuple[TimelineExecution, ...], tuple[TimelineAccrual, ...]]:
-    """Select executions with effective time after ``cutoff_minute`` and later accruals."""
-    prepared, _ = _prepare_executions(executions)
-    effective_by_scope = {
-        (item.exchange, item.scope_sequence): item.effective_time for item in prepared
-    }
+    """Build resume inputs strictly from ``deferred_execution_keys`` and capture watermarks."""
+    max_seq_by_exchange: dict[str, int] = {}
+    for execution in capture_executions:
+        current = max_seq_by_exchange.get(execution.exchange, 0)
+        if execution.scope_sequence > current:
+            max_seq_by_exchange[execution.exchange] = execution.scope_sequence
+    deferred_keys = set(checkpoint.deferred_execution_keys)
     resumed_executions = tuple(
         execution
-        for execution in executions
-        if effective_by_scope[(execution.exchange, execution.scope_sequence)] > cutoff_minute
+        for execution in all_executions
+        if (execution.exchange, execution.scope_sequence) in deferred_keys
+        or execution.scope_sequence > max_seq_by_exchange.get(execution.exchange, 0)
     )
-    resumed_accruals = tuple(accrual for accrual in accruals if accrual.accrued_at > cutoff_minute)
+    resumed_accruals = tuple(
+        accrual for accrual in all_accruals if accrual.accrued_at > checkpoint.checkpoint_minute
+    )
     return resumed_executions, resumed_accruals
 
 
@@ -242,10 +249,11 @@ class TestCheckpointDifferential:
         assert captured.closing_checkpoint is not None
         _assert_points_bit_identical(full.points[: cutoff_minute + 1], captured.points)
 
-        resumed_executions, resumed_accruals = _split_inputs_after_cutoff(
+        resumed_executions, resumed_accruals = _resume_inputs_from_checkpoint(
+            executions,
             executions,
             accruals,
-            _M(cutoff_minute),
+            captured.closing_checkpoint,
         )
         resumed = build_pnl_timeline(
             resumed_executions,
@@ -302,8 +310,8 @@ class TestCheckpointDifferential:
         assert cap_zero.closing_checkpoint is not None
         _assert_points_bit_identical(full_1m.points[:1], cap_zero.points)
 
-        execs_after_0, accruals_after_0 = _split_inputs_after_cutoff(
-            anchored_execs, accruals, _M(0)
+        execs_after_0, accruals_after_0 = _resume_inputs_from_checkpoint(
+            anchored_execs, anchored_execs, accruals, cap_zero.closing_checkpoint
         )
         cap_four = build_pnl_timeline(
             execs_after_0,
@@ -317,10 +325,12 @@ class TestCheckpointDifferential:
         assert len(cap_four.points) == 1
         _assert_points_bit_identical(full_1m.points[4:5], cap_four.points)
 
-        execs_after_4, _ = _split_inputs_after_cutoff(anchored_execs, accruals, _M(4))
+        execs_after_4, accruals_after_4 = _resume_inputs_from_checkpoint(
+            execs_after_0, anchored_execs, accruals, cap_four.closing_checkpoint
+        )
         resumed_5m = build_pnl_timeline(
             execs_after_4,
-            accruals,
+            accruals_after_4,
             marks,
             _pointwise_window(5, 9, granularity="5m"),
             opening=cap_four.closing_checkpoint,
@@ -357,7 +367,9 @@ class TestCheckpointJsonRoundTrip:
         raw_second = checkpoint_to_json(parsed)
         assert raw_first == raw_second
 
-        resumed_execs, resumed_accruals = _split_inputs_after_cutoff(executions, accruals, _M(5))
+        resumed_execs, resumed_accruals = _resume_inputs_from_checkpoint(
+            executions, executions, accruals, checkpoint
+        )
         from_memory = build_pnl_timeline(
             resumed_execs,
             resumed_accruals,
@@ -400,6 +412,7 @@ class TestCheckpointJsonRoundTrip:
         checkpoint = TimelineCheckpointOpening(
             checkpoint_minute=_M(5),
             activation_time=_M(0),
+            valuation_ccy="USD",
             pools=(
                 TimelineCheckpointPool("I2", "s2", -0.0, None),
                 TimelineCheckpointPool("I1", "s1", 5e-324, math.nan),
@@ -416,11 +429,16 @@ class TestCheckpointJsonRoundTrip:
                 ("I1", (entry_global,)),
                 ("I2", (entry_instrument,)),
             ),
-            scope_by_shard=(("s1", ("I1", "kraken")), ("s2", ("I2", "coinbase"))),
-            exchange_by_instrument=(("I1", "kraken"), ("I2", "coinbase")),
+            scope_by_shard=(
+                ("s1", ("I1", "kraken")),
+                ("s2", ("I2", "coinbase")),
+                ("s3", ("I3", "kraken")),
+            ),
+            exchange_by_instrument=(("I1", "kraken"), ("I2", "coinbase"), ("I3", "kraken")),
             pool_keys_by_instrument=(
                 ("I1", (("I1", "s1"),)),
                 ("I2", (("I2", "s2"),)),
+                ("I3", (("I3", "s3"),)),
             ),
             realized_by_instrument=(("I1", ExactSum(units=1234567890123456789012345)),),
             fee_by_instrument=(("I2", ExactSum(units=-42, infinities={-1})),),
@@ -432,11 +450,13 @@ class TestCheckpointJsonRoundTrip:
             fee_total=ExactSum(units=-42, infinities={-1}),
             accrual_total=ExactSum(units=7, infinities={1, -1}, saw_nan=True),
             last_effective_by_pool=((("I1", "s1"), _M(4) + timedelta(microseconds=250)),),
+            deferred_execution_keys=(("coinbase", 7), ("kraken", 12)),
         )
         raw_first = checkpoint_to_json(checkpoint)
         restored = checkpoint_from_json(raw_first)
         raw_second = checkpoint_to_json(restored)
         assert raw_first == raw_second
+        assert restored.deferred_execution_keys == (("coinbase", 7), ("kraken", 12))
         assert math.copysign(1.0, restored.pools[0].position_qty) == -1.0
         assert restored.pools[1].position_qty == 5e-324
         assert math.isnan(cast(float, restored.pools[1].entry_price))
@@ -481,7 +501,7 @@ class TestCheckpointOutOfOrderFill:
         assert checkpoint is not None
         assert checkpoint.last_effective_by_pool == ((("I1", "shard-I1"), _M(2)),)
 
-        resumed_execs, _ = _split_inputs_after_cutoff(executions, (), _M(3))
+        resumed_execs, _ = _resume_inputs_from_checkpoint(executions, executions, (), checkpoint)
         resumed = build_pnl_timeline(
             resumed_execs,
             (),
@@ -546,7 +566,9 @@ class TestCheckpointLatchSourcesAndMarks:
             _pointwise_window(0, 2, capture_checkpoint=True),
         )
         assert captured.closing_checkpoint is not None
-        resumed_execs, _ = _split_inputs_after_cutoff(executions, (), _M(2))
+        resumed_execs, _ = _resume_inputs_from_checkpoint(
+            executions, executions, (), captured.closing_checkpoint
+        )
         resumed = build_pnl_timeline(
             resumed_execs,
             (),
@@ -623,7 +645,9 @@ class TestCheckpointLatchSourcesAndMarks:
             untrusted_price_reasons_by_instrument=untrusted,
         )
         assert captured.closing_checkpoint is not None
-        resumed_execs, _ = _split_inputs_after_cutoff(executions, (), _M(2))
+        resumed_execs, _ = _resume_inputs_from_checkpoint(
+            executions, executions, (), captured.closing_checkpoint
+        )
         resumed = build_pnl_timeline(
             resumed_execs,
             (),
@@ -663,7 +687,9 @@ class TestCheckpointLatchSourcesAndMarks:
             opening=opening,
         )
         assert captured.closing_checkpoint is not None
-        resumed_execs, _ = _split_inputs_after_cutoff(executions, (), _M(2))
+        resumed_execs, _ = _resume_inputs_from_checkpoint(
+            executions, executions, (), captured.closing_checkpoint
+        )
         resumed = build_pnl_timeline(
             resumed_execs,
             (),
@@ -787,30 +813,40 @@ class TestCheckpointFailClosed:
                 opening=checkpoint,
             )
 
-    def test_non_empty_carried_event_inputs_at_capture_raises(self) -> None:
-        """Capturing when an applied fill or accrual carried an event FX input fails closed.
+    def test_non_empty_carried_event_inputs_at_capture_refuses(self) -> None:
+        """Capturing with carried_inputs latches refusal without raising or dropping points.
 
-        Given: An execution or accrual before C carrying a PnlCarriedInput,
+        Given: An accepted execution or accrual before C carrying a PnlCarriedInput,
         When: Capture is requested at C,
-        Then: build_pnl_timeline raises ValueError.
+        Then: build_pnl_timeline returns closing_checkpoint=None with
+            closing_checkpoint_refusal='carried_event_inputs' and bit-identical points.
         """
         carried = (PnlCarriedInput("I1", "event", _M(0), 1, "USD/EUR"),)
         exec_with_carried = replace(_EXEC("I1", 1, 1, "buy", 1.0, 100.0), carried_inputs=carried)
-        with pytest.raises(ValueError, match="carried_event_inputs"):
-            build_pnl_timeline(
-                (exec_with_carried,),
-                (),
-                {},
-                _pointwise_window(0, 2, capture_checkpoint=True),
-            )
+        baseline_exec = build_pnl_timeline((exec_with_carried,), (), {}, _pointwise_window(0, 2))
+        captured_exec = build_pnl_timeline(
+            (exec_with_carried,),
+            (),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+        )
+        assert captured_exec.closing_checkpoint is None
+        assert captured_exec.closing_checkpoint_refusal == "carried_event_inputs"
+        _assert_points_bit_identical(baseline_exec.points, captured_exec.points)
+
         accrual_with_carried = TimelineAccrual("I1", _M(1), 1.0, carried_inputs=carried)
-        with pytest.raises(ValueError, match="carried_event_inputs"):
-            build_pnl_timeline(
-                (),
-                (accrual_with_carried,),
-                {},
-                _pointwise_window(0, 2, capture_checkpoint=True),
-            )
+        baseline_accrual = build_pnl_timeline(
+            (), (accrual_with_carried,), {}, _pointwise_window(0, 2)
+        )
+        captured_accrual = build_pnl_timeline(
+            (),
+            (accrual_with_carried,),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+        )
+        assert captured_accrual.closing_checkpoint is None
+        assert captured_accrual.closing_checkpoint_refusal == "carried_event_inputs"
+        _assert_points_bit_identical(baseline_accrual.points, captured_accrual.points)
 
     def test_wrong_schema_version_and_malformed_json_raise(self) -> None:
         """Wrong schema_version, malformed JSON, duplicate keys, and NaN constants fail closed.
@@ -1064,3 +1100,835 @@ class TestCheckpointFailClosed:
             replace(checkpoint, last_effective_by_pool=((("I1", "shard-I1"), _M(5)),))
         with pytest.raises(ValueError, match="last_effective_by_pool"):
             replace(checkpoint, last_effective_by_pool=((("I1", "shard-I1"), naive_time),))
+
+
+class TestReviewRegressionReproducers:
+    """Tests reproducing every owner-depth review finding on commit 001b53a3."""
+
+    def test_malformed_pool_index_and_shard_scope_mismatches_rejected(self) -> None:
+        """Malformed pool_keys_by_instrument or shard/exchange scopes must raise ValueError.
+
+        Given: A checkpoint carrying qty 1.0, basis 100.0 whose JSON or domain object
+            drops pool_keys_by_instrument or corrupts shard/exchange consistency,
+        When: Parsed by checkpoint_from_json or constructed as TimelineCheckpointOpening,
+        Then: ValueError is raised rather than silently dropping holdings to 0.0 unrealized.
+        """
+        opening = TimelineOpening(pools=(_OPENING_POOL("I1", 1.0, 100.0),), t0=_M(0))
+        captured = build_pnl_timeline(
+            (),
+            (),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+            opening=opening,
+        )
+        checkpoint = captured.closing_checkpoint
+        assert checkpoint is not None
+        valid_resumed = build_pnl_timeline(
+            (),
+            (),
+            {("I1", _M(3)): 110.0},
+            _pointwise_window(3, 3),
+            opening=checkpoint,
+        )
+        assert valid_resumed.points[0].valuation_status == "complete"
+        assert valid_resumed.points[0].unrealized_pnl == pytest.approx(10.0)
+        base = json.loads(checkpoint_to_json(checkpoint))
+
+        with pytest.raises(ValueError):
+            checkpoint_from_json(json.dumps({**base, "pool_keys_by_instrument": []}))
+        with pytest.raises(ValueError):
+            checkpoint_from_json(
+                json.dumps(
+                    {
+                        **base,
+                        "pool_keys_by_instrument": [
+                            {
+                                "instrument_public_id": "I1",
+                                "pools": [{"instrument_public_id": "I2", "shard_key": "shard-I1"}],
+                            }
+                        ],
+                    }
+                )
+            )
+        with pytest.raises(ValueError):
+            checkpoint_from_json(json.dumps({**base, "scope_by_shard": []}))
+        with pytest.raises(ValueError):
+            checkpoint_from_json(json.dumps({**base, "exchange_by_instrument": []}))
+        with pytest.raises(ValueError):
+            checkpoint_from_json(
+                json.dumps(
+                    {
+                        **base,
+                        "scope_by_shard": [
+                            {
+                                "shard_key": "shard-I1",
+                                "instrument_public_id": "I1",
+                                "exchange": "coinbase",
+                            }
+                        ],
+                    }
+                )
+            )
+        with pytest.raises(ValueError):
+            replace(checkpoint, pool_keys_by_instrument=())
+        with pytest.raises(ValueError):
+            replace(
+                checkpoint,
+                weights_by_pool=checkpoint.weights_by_pool + ((("I9", "s9"), ()),),
+            )
+        with pytest.raises(ValueError):
+            replace(
+                checkpoint,
+                basis_reasons_by_pool=((("I9", "s9"), ("cost_basis_unavailable",)),),
+            )
+        with pytest.raises(ValueError):
+            replace(
+                checkpoint,
+                last_effective_by_pool=checkpoint.last_effective_by_pool + ((("I9", "s9"), _M(1)),),
+            )
+        with pytest.raises(ValueError):
+            replace(
+                checkpoint,
+                pool_keys_by_instrument=(("I1", (("I2", "shard-I1"),)),),
+            )
+        with pytest.raises(ValueError):
+            replace(checkpoint, exchange_by_instrument=())
+        with pytest.raises(ValueError):
+            replace(
+                checkpoint,
+                scope_by_shard=(("shard-I1", ("I1", "coinbase")),),
+            )
+
+    def test_rejected_fill_with_carried_fx_refuses_capture(self) -> None:
+        """Rejected fills with carried_inputs refuse capture softly without losing points.
+
+        Given: An open position followed by an invalid-price partial close whose fee
+            is unproven and whose carried_inputs is non-empty, plus a caller-rejected fill,
+        When: Capture is requested at C,
+        Then: build_pnl_timeline returns closing_checkpoint=None,
+            closing_checkpoint_refusal='carried_inputs_on_processed_event', and normal points.
+        """
+        carried = (PnlCarriedInput("I1", "event", _M(0), 2, "USD/EUR"),)
+        rejected_close = replace(
+            _EXEC("I1", 2, 2, "sell", 0.5, float("nan"), fee=1.0),
+            fee_incompleteness_reason="fx_conversion_unproven",
+            carried_inputs=carried,
+        )
+        executions = (
+            _EXEC("I1", 1, 1, "buy", 1.0, 100.0),
+            rejected_close,
+        )
+        baseline_close = build_pnl_timeline(executions, (), {}, _pointwise_window(0, 2))
+        captured_close = build_pnl_timeline(
+            executions,
+            (),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+        )
+        assert captured_close.closing_checkpoint is None
+        assert captured_close.closing_checkpoint_refusal == "carried_inputs_on_processed_event"
+        _assert_points_bit_identical(baseline_close.points, captured_close.points)
+
+        rejected_provenance = replace(
+            _EXEC("I1", 1, 1, "buy", 1.0, 100.0),
+            carried_inputs=carried,
+        )
+        untrusted: dict[str, set[PnlIncompletenessReason]] = {
+            "I1": {"execution_price_provenance_unproven"}
+        }
+        baseline_prov = build_pnl_timeline(
+            (rejected_provenance,),
+            (),
+            {},
+            _pointwise_window(0, 2),
+            untrusted_price_reasons_by_instrument=untrusted,
+        )
+        captured_prov = build_pnl_timeline(
+            (rejected_provenance,),
+            (),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+            untrusted_price_reasons_by_instrument=untrusted,
+        )
+        assert captured_prov.closing_checkpoint is None
+        assert captured_prov.closing_checkpoint_refusal == "carried_inputs_on_processed_event"
+        _assert_points_bit_identical(baseline_prov.points, captured_prov.points)
+
+        future_carried = replace(_EXEC("I1", 2, 4, "buy", 1.0, 105.0), carried_inputs=carried)
+        cap_before_future = build_pnl_timeline(
+            (_EXEC("I1", 1, 1, "buy", 1.0, 100.0), future_carried),
+            (),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+        )
+        assert cap_before_future.closing_checkpoint is not None
+        assert cap_before_future.closing_checkpoint_refusal is None
+
+    def test_deferred_execution_keys_exported_and_reused_for_w12_resume(self) -> None:
+        """Export sorted deferred_execution_keys and rebuild W=12 resume strictly from them.
+
+        Given: A W=12 stream through C=5 where seq 10 on pool A is effective at C+2m,
+            seq 11 on pool B applies at C, and seq 12 on pool A regresses from C-1m
+            and clamps to C+2m, plus seq 13 arriving later,
+        When: Capture runs on seq 1..12 at C=5 and resume inputs are selected purely from
+            deferred_execution_keys plus seq > 12,
+        Then: deferred_execution_keys is (('kraken', 10), ('kraken', 12)), seq 12 retains
+            its C+2m clamp and regression shadow, and resume matches full replay bit-identically.
+        """
+        executions_w12 = tuple(
+            [
+                _EXEC("I1", seq, 1, "buy", 0.25, 100.0 + seq, shard_key="shard-A")
+                for seq in range(1, 10)
+            ]
+            + [
+                _EXEC("I1", 10, 7, "buy", 1.0, 110.0, shard_key="shard-A"),
+                _EXEC("I2", 11, 5, "buy", 2.0, 50.0, shard_key="shard-B"),
+                _EXEC("I1", 12, 4, "sell", 0.5, 112.0, shard_key="shard-A"),
+            ]
+        )
+        all_executions = (
+            *executions_w12,
+            _EXEC("I1", 13, 8, "buy", 0.5, 115.0, shard_key="shard-A"),
+        )
+        marks: MarkMap = {
+            (inst, _M(minute)): 110.0 + minute if inst == "I1" else 52.0 + minute
+            for minute in range(10)
+            for inst in ("I1", "I2")
+        }
+        full = build_pnl_timeline(all_executions, (), marks, _pointwise_window(0, 9))
+        captured = build_pnl_timeline(
+            executions_w12,
+            (),
+            marks,
+            _pointwise_window(0, 5, capture_checkpoint=True),
+        )
+        checkpoint = captured.closing_checkpoint
+        assert checkpoint is not None
+        assert checkpoint.deferred_execution_keys == (("kraken", 10), ("kraken", 12))
+        parsed = checkpoint_from_json(checkpoint_to_json(checkpoint))
+        assert parsed.deferred_execution_keys == (("kraken", 10), ("kraken", 12))
+
+        resumed_execs, _ = _resume_inputs_from_checkpoint(
+            executions_w12, all_executions, (), parsed
+        )
+        resumed = build_pnl_timeline(
+            resumed_execs,
+            (),
+            marks,
+            _pointwise_window(6, 9),
+            opening=parsed,
+        )
+        _assert_points_bit_identical(full.points[6:], resumed.points)
+        assert any(
+            entry.reason == "scope_order_regression" and entry.trigger_instrument_public_id == "I1"
+            for entry in resumed.points[0].incompleteness_reasons
+        )
+        assert resumed.points[1].valuation_status == "complete"
+
+        raw_payload = json.loads(checkpoint_to_json(checkpoint))
+        for bad_keys in (
+            [
+                {"exchange": "kraken", "scope_sequence": 12},
+                {"exchange": "kraken", "scope_sequence": 10},
+            ],
+            [
+                {"exchange": "kraken", "scope_sequence": 10},
+                {"exchange": "kraken", "scope_sequence": 10},
+            ],
+            [{"exchange": "kraken", "scope_sequence": True}],
+            [{"exchange": "kraken", "scope_sequence": 0}],
+            [{"exchange": "", "scope_sequence": 1}],
+        ):
+            with pytest.raises(ValueError):
+                checkpoint_from_json(
+                    json.dumps({**raw_payload, "deferred_execution_keys": bad_keys})
+                )
+        with pytest.raises(ValueError):
+            replace(checkpoint, deferred_execution_keys=(("kraken", 12), ("kraken", 10)))
+        with pytest.raises(ValueError):
+            replace(checkpoint, deferred_execution_keys=(("", 1),))
+        with pytest.raises(ValueError):
+            replace(checkpoint, deferred_execution_keys=(("kraken", 0),))
+
+    def test_conversion_uses_mark_evidence_refuses_capture(self) -> None:
+        """Processed execution or accrual with conversion_uses_mark_evidence refuses softly.
+
+        Given: A processed execution (accepted or rejected) or accrual marked with
+            conversion_uses_mark_evidence=True,
+        When: Checkpoint capture is requested at C,
+        Then: build_pnl_timeline returns closing_checkpoint=None with
+            closing_checkpoint_refusal='conversion_uses_mark_evidence' and normal points.
+        """
+        flagged_exec = replace(
+            _EXEC("I1", 1, 1, "buy", 1.0, 100.0), conversion_uses_mark_evidence=True
+        )
+        baseline_exec = build_pnl_timeline((flagged_exec,), (), {}, _pointwise_window(0, 2))
+        captured_exec = build_pnl_timeline(
+            (flagged_exec,),
+            (),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+        )
+        assert captured_exec.closing_checkpoint is None
+        assert captured_exec.closing_checkpoint_refusal == "conversion_uses_mark_evidence"
+        _assert_points_bit_identical(baseline_exec.points, captured_exec.points)
+
+        flagged_accrual = TimelineAccrual("I1", _M(1), 1.0, conversion_uses_mark_evidence=True)
+        baseline_accrual = build_pnl_timeline((), (flagged_accrual,), {}, _pointwise_window(0, 2))
+        captured_accrual = build_pnl_timeline(
+            (),
+            (flagged_accrual,),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+        )
+        assert captured_accrual.closing_checkpoint is None
+        assert captured_accrual.closing_checkpoint_refusal == "conversion_uses_mark_evidence"
+        _assert_points_bit_identical(baseline_accrual.points, captured_accrual.points)
+
+        future_flagged_exec = replace(
+            _EXEC("I1", 2, 4, "buy", 1.0, 105.0), conversion_uses_mark_evidence=True
+        )
+        future_flagged_accrual = TimelineAccrual(
+            "I1", _M(4), 1.0, conversion_uses_mark_evidence=True
+        )
+        clean_cap = build_pnl_timeline(
+            (_EXEC("I1", 1, 1, "buy", 1.0, 100.0), future_flagged_exec),
+            (future_flagged_accrual,),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+        )
+        assert clean_cap.closing_checkpoint is not None
+        assert clean_cap.closing_checkpoint_refusal is None
+
+    def test_scalar_validation_rejects_overflow_hex_and_bool_for_int_fields(self) -> None:
+        """Overflow hex strings raise ValueError and StrictInt rejects boolean values.
+
+        Given: Serialized JSON containing '0x1p+1024', boolean schema_version, or
+            boolean infinity signs,
+        When: Parsed by checkpoint_from_json,
+        Then: ValueError is raised rather than OverflowError or bool-to-int coercion.
+        """
+        opening = TimelineOpening(pools=(_OPENING_POOL("I1", 1.0, 100.0),), t0=_M(0))
+        checkpoint = build_pnl_timeline(
+            (),
+            (),
+            {},
+            _pointwise_window(0, 1, capture_checkpoint=True),
+            opening=opening,
+        ).closing_checkpoint
+        assert checkpoint is not None
+        base = json.loads(checkpoint_to_json(checkpoint))
+
+        with pytest.raises(ValueError):
+            checkpoint_from_json(
+                json.dumps(
+                    {
+                        **base,
+                        "pools": [
+                            {
+                                "instrument_public_id": "I1",
+                                "shard_key": "shard-I1",
+                                "position_qty_hex": "0x1p+1024",
+                                "entry_price_hex": None,
+                            }
+                        ],
+                    }
+                )
+            )
+        with pytest.raises(ValueError):
+            checkpoint_from_json(json.dumps({**base, "schema_version": True}))
+        with pytest.raises(ValueError):
+            checkpoint_from_json(
+                json.dumps(
+                    {
+                        **base,
+                        "realized_total": {"units": "0", "infinities": [True], "saw_nan": False},
+                    }
+                )
+            )
+        with pytest.raises(ValueError):
+            checkpoint_from_json(
+                json.dumps(
+                    {
+                        **base,
+                        "realized_total": {"units": "0", "infinities": [0], "saw_nan": False},
+                    }
+                )
+            )
+
+    def test_integer_valued_opening_seeds_and_weights_serialize_and_resume(self) -> None:
+        """Integer-valued qty, basis, and weights encode cleanly and reject lossy ints.
+
+        Given: An opening pool constructed with Python int values qty=1, entry_price=100,
+        When: Captured at C, serialized through checkpoint_to_json, parsed, and resumed,
+        Then: Serialization succeeds and resumed points match full replay bit-identically,
+            while lossy, overflowing, or boolean numeric values raise ValueError.
+        """
+        opening = TimelineOpening(
+            pools=(_OPENING_POOL("I1", cast(float, 1), cast(float, 100)),),
+            t0=_M(0),
+        )
+        executions = (_EXEC("I1", 1, 3, "sell", 1.0, 110.0),)
+        marks: MarkMap = {("I1", _M(minute)): 100.0 + minute * 2 for minute in range(5)}
+        full = build_pnl_timeline(executions, (), marks, _pointwise_window(0, 4), opening=opening)
+        captured = build_pnl_timeline(
+            executions,
+            (),
+            marks,
+            _pointwise_window(0, 2, capture_checkpoint=True),
+            opening=opening,
+        )
+        checkpoint = captured.closing_checkpoint
+        assert checkpoint is not None
+        parsed = checkpoint_from_json(checkpoint_to_json(checkpoint))
+        resumed = build_pnl_timeline(
+            (_EXEC("I1", 1, 3, "sell", 1.0, 110.0),),
+            (),
+            marks,
+            _pointwise_window(3, 4),
+            opening=parsed,
+        )
+        _assert_points_bit_identical(full.points[3:], resumed.points)
+
+        for bad_num in (2**53 + 1, 10**400, True):
+            bad_pool = replace(
+                checkpoint,
+                pools=(TimelineCheckpointPool("I1", "shard-I1", cast(float, bad_num), 100.0),),
+            )
+            with pytest.raises(ValueError):
+                checkpoint_to_json(bad_pool)
+            bad_weight = replace(
+                checkpoint,
+                weights_by_pool=(
+                    (("I1", "shard-I1"), ((("unattributed", None), cast(float, bad_num)),)),
+                ),
+            )
+            with pytest.raises(ValueError):
+                checkpoint_to_json(bad_weight)
+
+    def test_latch_seed_quantity_non_finite_differential(self) -> None:
+        """Non-finite opening seed quantity latches across checkpoint bit-identically.
+
+        Given: An opening with NaN quantity on I1 and a valid peer position on I2,
+        When: Captured at C=2, JSON round-tripped, and resumed across 3..5,
+        Then: Resumed points match full replay bit-identically.
+        """
+        opening = TimelineOpening(
+            pools=(
+                _OPENING_POOL("I1", math.nan, 100.0, exchange="kraken"),
+                _OPENING_POOL("I2", 1.0, 50.0, exchange="coinbase"),
+            ),
+            t0=_M(0),
+        )
+        executions = (_EXEC("I2", 1, 4, "sell", 1.0, 55.0, exchange="coinbase"),)
+        marks: MarkMap = {("I1", _M(minute)): 105.0 for minute in range(6)} | {
+            ("I2", _M(minute)): 52.0 for minute in range(6)
+        }
+        full = build_pnl_timeline(executions, (), marks, _pointwise_window(0, 5), opening=opening)
+        captured = build_pnl_timeline(
+            executions,
+            (),
+            marks,
+            _pointwise_window(0, 2, capture_checkpoint=True),
+            opening=opening,
+        )
+        assert captured.closing_checkpoint is not None
+        parsed = checkpoint_from_json(checkpoint_to_json(captured.closing_checkpoint))
+        resumed = build_pnl_timeline(
+            (_EXEC("I2", 1, 4, "sell", 1.0, 55.0, exchange="coinbase"),),
+            (),
+            marks,
+            _pointwise_window(3, 5),
+            opening=parsed,
+        )
+        _assert_points_bit_identical(full.points[3:], resumed.points)
+
+    def test_latch_execution_size_invalid_differential(self) -> None:
+        """Invalid negative fill size latched before C persists across checkpoint bit-identically.
+
+        Given: A negative-size execution on I1 before C alongside a valid peer I2,
+        When: Captured at C=2, JSON round-tripped, and resumed across 3..5,
+        Then: Resumed points match full replay bit-identically.
+        """
+        executions = (
+            _EXEC("I1", 1, 1, "buy", -1.0, 100.0),
+            _EXEC("I2", 2, 1, "buy", 1.0, 50.0),
+            _EXEC("I2", 3, 4, "sell", 1.0, 55.0),
+        )
+        marks: MarkMap = {("I1", _M(minute)): 105.0 for minute in range(6)} | {
+            ("I2", _M(minute)): 52.0 for minute in range(6)
+        }
+        full = build_pnl_timeline(executions, (), marks, _pointwise_window(0, 5))
+        captured = build_pnl_timeline(
+            executions, (), marks, _pointwise_window(0, 2, capture_checkpoint=True)
+        )
+        assert captured.closing_checkpoint is not None
+        parsed = checkpoint_from_json(checkpoint_to_json(captured.closing_checkpoint))
+        resumed = build_pnl_timeline(
+            (_EXEC("I2", 3, 4, "sell", 1.0, 55.0),),
+            (),
+            marks,
+            _pointwise_window(3, 5),
+            opening=parsed,
+        )
+        _assert_points_bit_identical(full.points[3:], resumed.points)
+
+    def test_default_path_without_checkpoint_is_unchanged(self) -> None:
+        """Default non-checkpoint timeline path leaves behavior and defaults unchanged.
+
+        Given: Standard executions and accruals with default conversion_uses_mark_evidence
+            and a window with capture_checkpoint=False and no checkpoint opening,
+        When: build_pnl_timeline evaluates the full window in both standard and pointwise mode,
+        Then: closing_checkpoint is None and points match identically without regression.
+        """
+        opening, executions, accruals, marks, lineage = _multi_instrument_fixture()
+        assert all(not execution.conversion_uses_mark_evidence for execution in executions)
+        assert all(not accrual.conversion_uses_mark_evidence for accrual in accruals)
+        default_window = TimelineWindow(_M(0), _M(10), "1m", "USD")
+        assert not default_window.capture_checkpoint
+        assert not default_window.recovery_budget_per_point
+        standard = build_pnl_timeline(
+            executions,
+            accruals,
+            marks,
+            default_window,
+            opening=opening,
+            lineage=lineage,
+        )
+        pointwise = build_pnl_timeline(
+            executions,
+            accruals,
+            marks,
+            _pointwise_window(0, 10),
+            opening=opening,
+            lineage=lineage,
+        )
+        assert standard.closing_checkpoint is None
+        assert standard.closing_checkpoint_refusal is None
+        assert pointwise.closing_checkpoint is None
+        assert pointwise.closing_checkpoint_refusal is None
+        _assert_points_bit_identical(standard.points, pointwise.points)
+
+
+class TestRound2ReviewCases:
+    """Tests covering Round 2 review items W1, W2, W3, m1, m2, and m3."""
+
+    def test_w1_checkpoint_binds_valuation_ccy_and_rejects_mismatch(self) -> None:
+        """Captured checkpoints record valuation_ccy and resume rejects currency mismatches.
+
+        Given: A checkpoint captured with valuation_ccy='USD',
+        When: Inspected, serialized, resumed under valuation_ccy='EUR', or chained under 'EUR',
+        Then: valuation_ccy='USD' is preserved in domain and JSON, and mismatches raise ValueError.
+        """
+        executions = (_EXEC("I1", 1, 1, "buy", 1.0, 100.0),)
+        marks: MarkMap = {("I1", _M(minute)): 100.0 + minute for minute in range(5)}
+        captured = build_pnl_timeline(
+            executions,
+            (),
+            marks,
+            TimelineWindow(_M(0), _M(2), "1m", "USD", True, True),
+        )
+        checkpoint = captured.closing_checkpoint
+        assert checkpoint is not None
+        assert checkpoint.valuation_ccy == "USD"
+        raw_payload = json.loads(checkpoint_to_json(checkpoint))
+        assert raw_payload["valuation_ccy"] == "USD"
+        assert checkpoint_from_json(checkpoint_to_json(checkpoint)).valuation_ccy == "USD"
+
+        with pytest.raises(ValueError, match="valuation_ccy"):
+            build_pnl_timeline(
+                (),
+                (),
+                marks,
+                TimelineWindow(_M(3), _M(4), "1m", "EUR", recovery_budget_per_point=True),
+                opening=checkpoint,
+            )
+        with pytest.raises(ValueError, match="valuation_ccy"):
+            build_pnl_timeline(
+                (),
+                (),
+                marks,
+                TimelineWindow(_M(3), _M(4), "1m", "EUR", True, True),
+                opening=checkpoint,
+            )
+        with pytest.raises(ValueError, match="valuation_ccy"):
+            replace(checkpoint, valuation_ccy="")
+        with pytest.raises(ValueError):
+            checkpoint_from_json(json.dumps({**raw_payload, "valuation_ccy": ""}))
+
+    def test_w2_resume_raises_on_accrual_at_or_before_checkpoint_minute(self) -> None:
+        """Passing accruals at or before checkpoint_minute on resume fails closed.
+
+        Given: A valid checkpoint captured at C=2,
+        When: build_pnl_timeline is called on resume with an accrual at C or before C,
+        Then: ValueError is raised rather than silently dropping the late accrual.
+        """
+        checkpoint = build_pnl_timeline(
+            (_EXEC("I1", 1, 1, "buy", 1.0, 100.0),),
+            (),
+            {},
+            _pointwise_window(0, 2, capture_checkpoint=True),
+        ).closing_checkpoint
+        assert checkpoint is not None
+
+        for stale_minute in (1, 2):
+            with pytest.raises(ValueError, match="accrual.*checkpoint_minute"):
+                build_pnl_timeline(
+                    (),
+                    (TimelineAccrual("I1", _M(stale_minute), 1.5),),
+                    {},
+                    _pointwise_window(3, 4),
+                    opening=checkpoint,
+                )
+
+    def test_m2_result_and_checkpoint_hashing_unsupported_without_changing_equality(
+        self,
+    ) -> None:
+        """A plain result stays hashable; a checkpoint and a result carrying one do not.
+
+        Given: Results with closing_checkpoint=None and with a populated checkpoint,
+        When: hash() is called and structural equality == is compared,
+        Then: the plain result hashes as before, hashing the checkpoint or a result
+        carrying it raises TypeError, and equality compares field values.
+        """
+        plain = build_pnl_timeline((), (), {}, _pointwise_window(0, 2))
+        captured = build_pnl_timeline((), (), {}, _pointwise_window(0, 2, capture_checkpoint=True))
+        assert plain.closing_checkpoint is None
+        assert captured.closing_checkpoint is not None
+
+        assert isinstance(plain, Hashable)
+        assert hash(plain) == hash(replace(plain))
+        assert not isinstance(captured.closing_checkpoint, Hashable)
+        with pytest.raises(TypeError):
+            hash(captured)
+        with pytest.raises(TypeError):
+            hash(captured.closing_checkpoint)
+
+        assert plain == replace(plain)
+        assert plain != replace(plain, valuation_ccy="EUR")
+        assert captured == replace(captured)
+        assert captured != plain
+
+    def test_m3_i_chained_capture_c1_then_c2_json_equals_direct_capture_at_c2(self) -> None:
+        """Chained capture C1->C2 produces identical checkpoint JSON to direct capture at C2.
+
+        Given: A multi-instrument lifecycle with deferred fills across C1=3 and C2=6,
+            attributions, fees, accruals, and a latched execution reason,
+        When: Direct capture runs 0..6 and chained capture runs 0..3 then resumes 4..6,
+        Then: checkpoint_to_json at C2 is byte-identical between direct and chained capture,
+            and subsequent resume 7..10 from both matches full replay bit-identically.
+        """
+        opening, executions, accruals, marks, lineage = _multi_instrument_fixture()
+        chained_execs = (
+            *executions,
+            replace(
+                _EXEC("I1", 6, 2, "buy", 0.5, 108.0, shard_key="shard-I1-a"),
+                fee_incompleteness_reason="fx_conversion_unproven",
+            ),
+        )
+        full = build_pnl_timeline(
+            chained_execs,
+            accruals,
+            marks,
+            _pointwise_window(0, 10),
+            opening=opening,
+            lineage=lineage,
+        )
+        direct_c2 = build_pnl_timeline(
+            chained_execs,
+            accruals,
+            marks,
+            _pointwise_window(0, 6, capture_checkpoint=True),
+            opening=opening,
+            lineage=lineage,
+        )
+        cap_c1 = build_pnl_timeline(
+            chained_execs,
+            accruals,
+            marks,
+            _pointwise_window(0, 3, capture_checkpoint=True),
+            opening=opening,
+            lineage=lineage,
+        )
+        assert direct_c2.closing_checkpoint is not None
+        assert cap_c1.closing_checkpoint is not None
+
+        execs_after_c1, accruals_after_c1 = _resume_inputs_from_checkpoint(
+            chained_execs, chained_execs, accruals, cap_c1.closing_checkpoint
+        )
+        chained_c2 = build_pnl_timeline(
+            execs_after_c1,
+            accruals_after_c1,
+            marks,
+            _pointwise_window(4, 6, capture_checkpoint=True),
+            opening=checkpoint_from_json(checkpoint_to_json(cap_c1.closing_checkpoint)),
+            lineage=lineage,
+        )
+        assert chained_c2.closing_checkpoint is not None
+        assert checkpoint_to_json(chained_c2.closing_checkpoint) == checkpoint_to_json(
+            direct_c2.closing_checkpoint
+        )
+
+        execs_after_c2, accruals_after_c2 = _resume_inputs_from_checkpoint(
+            execs_after_c1, chained_execs, accruals, chained_c2.closing_checkpoint
+        )
+        resumed = build_pnl_timeline(
+            execs_after_c2,
+            accruals_after_c2,
+            marks,
+            _pointwise_window(7, 10),
+            opening=chained_c2.closing_checkpoint,
+            lineage=lineage,
+        )
+        _assert_points_bit_identical(full.points[7:], resumed.points)
+
+    def test_m3_ii_subminute_fills_at_c_minus_30s_and_c_plus_30s_resume_bit_identically(
+        self,
+    ) -> None:
+        """Sub-minute fills at C-30s and C+30s capture exact clocks and resume bit-identically.
+
+        Given: Fills at C-30s (applied at C=3) and C+30s (tested both deferred and suffix),
+        When: Captured at C=3, JSON round-tripped, and resumed across 4..6,
+        Then: last_effective_by_pool preserves the C-30s timestamp and resumed points match full.
+        """
+        c_minus_30 = _M(3) - timedelta(seconds=30)
+        c_plus_30 = _M(3) + timedelta(seconds=30)
+        fill_before = replace(_EXEC("I1", 1, 2, "buy", 1.0, 100.0), event_time=c_minus_30)
+        fill_after = replace(_EXEC("I1", 2, 4, "buy", 1.0, 104.0), event_time=c_plus_30)
+        fill_later = _EXEC("I1", 3, 5, "sell", 1.5, 110.0)
+        all_execs = (fill_before, fill_after, fill_later)
+        marks: MarkMap = {("I1", _M(minute)): 100.0 + minute * 2 for minute in range(7)}
+        full = build_pnl_timeline(all_execs, (), marks, _pointwise_window(0, 6))
+
+        for capture_execs, expected_deferred in (
+            (all_execs, (("kraken", 2), ("kraken", 3))),
+            ((fill_before,), ()),
+        ):
+            captured = build_pnl_timeline(
+                capture_execs, (), marks, _pointwise_window(0, 3, capture_checkpoint=True)
+            )
+            checkpoint = captured.closing_checkpoint
+            assert checkpoint is not None
+            assert checkpoint.last_effective_by_pool == ((("I1", "shard-I1"), c_minus_30),)
+            assert checkpoint.deferred_execution_keys == expected_deferred
+            parsed = checkpoint_from_json(checkpoint_to_json(checkpoint))
+            resumed_execs, _ = _resume_inputs_from_checkpoint(capture_execs, all_execs, (), parsed)
+            resumed = build_pnl_timeline(
+                resumed_execs,
+                (),
+                marks,
+                _pointwise_window(4, 6),
+                opening=parsed,
+            )
+            _assert_points_bit_identical(full.points[4:], resumed.points)
+
+    def test_m3_iii_cutoff_minute_inside_regression_shadow_spanning_c(self) -> None:
+        """Minute C inside a [C-2m, C+2m) regression shadow reproduces exact boundary recovery.
+
+        Given: Pool I1 reaches C+2m on seq 1, and seq 2 arrives out of order with event_time C-2m
+            so the regression shadow [C-2m, C+2m) spans the cut C=4,
+        When: Captured at C=4, JSON round-tripped, and resumed from C+1m..7,
+        Then: Minute C=4 and C+1m=5 remain untrusted under scope_order_regression, C+2m=6
+            recovers as complete, and all post-C points match full replay bit-identically.
+        """
+        executions = (
+            _EXEC("I1", 1, 6, "buy", 1.0, 100.0),
+            _EXEC("I1", 2, 2, "buy", 0.5, 102.0),
+        )
+        marks: MarkMap = {("I1", _M(minute)): 105.0 + minute for minute in range(8)}
+        full = build_pnl_timeline(executions, (), marks, _pointwise_window(0, 7))
+        captured = build_pnl_timeline(
+            executions, (), marks, _pointwise_window(0, 4, capture_checkpoint=True)
+        )
+        assert captured.points[4].valuation_status == "incomplete"
+        assert any(
+            entry.reason == "scope_order_regression"
+            for entry in captured.points[4].incompleteness_reasons
+        )
+        checkpoint = captured.closing_checkpoint
+        assert checkpoint is not None
+        assert checkpoint.deferred_execution_keys == (("kraken", 1), ("kraken", 2))
+        parsed = checkpoint_from_json(checkpoint_to_json(checkpoint))
+
+        resumed_execs, _ = _resume_inputs_from_checkpoint(executions, executions, (), parsed)
+        resumed = build_pnl_timeline(
+            resumed_execs,
+            (),
+            marks,
+            _pointwise_window(5, 7),
+            opening=parsed,
+        )
+        _assert_points_bit_identical(full.points[5:], resumed.points)
+        assert resumed.points[0].valuation_status == "incomplete"
+        assert resumed.points[1].valuation_status == "complete"
+
+    def test_m3_iv_non_finite_and_latched_state_resumed_after_json_round_trip(self) -> None:
+        """Non-finite ExactSums and latched incompleteness reasons resume bit-identically from JSON.
+
+        Given: I1 accumulates overflow fees (infinities={1}) triggering cumulative_non_finite,
+            I2 holds an unknown opening basis, and I3 holds a clean finite position,
+        When: Captured at C=2, serialized through checkpoint_to_json/from_json, and resumed 3..5
+            while I3 closes at minute 4,
+        Then: Resumed points reproduce the exact incompleteness_reasons, per-instrument values,
+            attribution totals, and aggregate figures of full replay bit-identically.
+        """
+        opening = TimelineOpening(
+            pools=(
+                _OPENING_POOL("I2", 1.0, None, exchange="coinbase"),
+                _OPENING_POOL("I3", 2.0, 20.0, exchange="bitstamp"),
+            ),
+            t0=_M(0),
+        )
+        executions = (
+            _EXEC("I1", 1, 1, "buy", 1.0, 100.0, fee=1e308),
+            _EXEC("I1", 2, 2, "buy", 1.0, 100.0, fee=1e308),
+            _EXEC("I3", 1, 4, "sell", 2.0, 25.0, fee=0.25, exchange="bitstamp"),
+        )
+        accruals = (TimelineAccrual("I1", _M(2), 1.0),)
+        marks: MarkMap = {
+            (inst, _M(minute)): 101.0 + minute for minute in range(6) for inst in ("I1", "I2", "I3")
+        }
+        full = build_pnl_timeline(
+            executions, accruals, marks, _pointwise_window(0, 5), opening=opening
+        )
+        captured = build_pnl_timeline(
+            executions,
+            accruals,
+            marks,
+            _pointwise_window(0, 2, capture_checkpoint=True),
+            opening=opening,
+        )
+        checkpoint = captured.closing_checkpoint
+        assert checkpoint is not None
+        parsed = checkpoint_from_json(checkpoint_to_json(checkpoint))
+        resumed_execs, resumed_accruals = _resume_inputs_from_checkpoint(
+            executions, executions, accruals, parsed
+        )
+        resumed = build_pnl_timeline(
+            resumed_execs,
+            resumed_accruals,
+            marks,
+            _pointwise_window(3, 5),
+            opening=parsed,
+        )
+        _assert_points_bit_identical(full.points[3:], resumed.points)
+        assert [
+            (item.instrument_public_id, item.fee_pnl, item.realized_pnl)
+            for item in resumed.points[1].per_instrument
+        ] == [
+            (item.instrument_public_id, item.fee_pnl, item.realized_pnl)
+            for item in full.points[4].per_instrument
+        ]
+        assert {
+            (entry.reason, entry.trigger_instrument_public_id)
+            for entry in resumed.points[1].incompleteness_reasons
+        } == {
+            ("cumulative_non_finite", "I1"),
+            ("cost_basis_unavailable", "I2"),
+        }
+        resumed_i3 = next(
+            item for item in resumed.points[1].per_instrument if item.instrument_public_id == "I3"
+        )
+        assert resumed_i3.realized_pnl == pytest.approx(10.0)
+        assert resumed_i3.fee_pnl == pytest.approx(-0.25)
+        assert resumed_i3.unrealized_pnl == pytest.approx(0.0)
