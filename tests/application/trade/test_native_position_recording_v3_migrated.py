@@ -1,4 +1,4 @@
-"""Record genuine SDK sources against unchanged migrations through 0065 on both backends.
+"""Record genuine SDK sources against unchanged migrations through 0072 on both backends.
 
 PostgreSQL requires SNAPPER_NEXT38_PG_CONNECTION_FILE naming an owner-only JSON
 receipt with run_directory, socket_directory, role and port. The fixture accepts
@@ -162,7 +162,7 @@ def _require_blank(connection: Connection) -> None:
 
 
 def _upgrade_empty(url: URL) -> None:
-    """Apply the real blank-to0065 chain without model DDL or a substitute migration.
+    """Apply the real blank-to-0072 chain without model DDL or a substitute migration.
 
     Args:
         url: Newly owned empty SQLite file or PostgreSQL database.
@@ -181,7 +181,7 @@ def _upgrade_empty(url: URL) -> None:
     config.set_main_option(
         "sqlalchemy.url", url.render_as_string(hide_password=False).replace("%", "%%")
     )
-    command.upgrade(config, "0065")
+    command.upgrade(config, "0072")
 
 
 @asynccontextmanager
@@ -189,7 +189,7 @@ async def _migrated_source(url: URL) -> AsyncIterator[NativeAuthorityDatabase]:
     """Own actual migrated storage and independent observer resources for one complete SDK case.
 
     Args:
-        url: Fresh isolated target whose actual migration graph ends at0065.
+        url: Fresh isolated target whose actual migration graph ends at 0072.
 
     Yields:
         Explicit initialized source injection that bypasses every ORM create_all fixture.
@@ -199,7 +199,7 @@ async def _migrated_source(url: URL) -> AsyncIterator[NativeAuthorityDatabase]:
     observer = _CommittedObserver(create_engine(_sync_url(url), poolclass=NullPool))
     try:
         async with repository.session() as session:
-            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0065"
+            assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0072"
             assert await session.scalar(select(func.count()).select_from(Execution)) == 0
             symbol = (
                 await session.scalars(

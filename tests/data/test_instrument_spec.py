@@ -20,6 +20,7 @@ from snapper.data.models import Base
 from snapper.data.models import ExactDecimalNumeric
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
+from snapper.data.models import InstrumentSpecObservationSpan
 from snapper.data.models import Symbol
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
@@ -1039,10 +1040,10 @@ class TestInstrumentMetadataRevision:
         assert row.spec_observed_at is None
         assert row.unit_certified is False
 
-    def test_identical_reobservation_creates_new_scd2_version(
+    def test_identical_reobservation_extends_span_without_new_scd2_version(
         self, sync_repo: tuple[DatabaseRepository, str]
     ) -> None:
-        """A fresh observation time closes and inserts even when content is unchanged."""
+        """A value-identical re-observation keeps one SCD2 row and extends its span."""
         repo, instrument_public_id = sync_repo
         first = _ts()
         second = _ts(1)
@@ -1073,9 +1074,22 @@ class TestInstrumentMetadataRevision:
                 .scalars()
                 .all()
             )
-        assert len(rows) == 2
-        assert rows[0].known_to == second
-        assert rows[1].spec_observed_at == second
+            spans = (
+                session.execute(
+                    select(InstrumentSpecObservationSpan).where(
+                        InstrumentSpecObservationSpan.instrument_public_id == instrument_public_id
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 1
+        assert rows[0].spec_observed_at == first
+        assert len(spans) == 1
+        assert spans[0].spec_public_id == rows[0].public_id
+        assert spans[0].spec_timestamp == rows[0].timestamp
+        assert spans[0].first_observed_at == first
+        assert spans[0].last_observed_at == second
 
 
 class TestEffectiveUnitCertification:

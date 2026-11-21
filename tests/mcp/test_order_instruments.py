@@ -227,3 +227,43 @@ async def test_registered_discovery_uses_exact_native_identity() -> None:
     args = repo.get_instrument_public_id_by_symbol.await_args
     assert args is not None
     assert args.args[:2] == ("AAPLX-EUR", "kraken")
+
+
+def test_sizing_projects_last_observed_at_and_span_freshness() -> None:
+    """Expose span latest observation time separately from version first observation.
+
+    Given: A specification first observed 24 hours ago whose matching span was
+        re-observed one hour ago, and a second spec with no spans.
+    When: Sizing evidence is serialized for MCP callers.
+    Then: ``spec_observed_at`` remains the first observation, ``last_observed_at``
+        reflects the extended span (or falls back when absent), and certification holds.
+    """
+    as_of = datetime.now(UTC)
+    first_obs = as_of - timedelta(hours=24)
+    last_obs = as_of - timedelta(hours=1)
+    spec = _spec(first_obs)
+    spec["spec_public_id"] = "spec-1"
+    spec["spec_timestamp"] = first_obs
+    spec["observation_spans"] = (
+        {
+            "id": 7,
+            "instrument_public_id": "inst-1",
+            "spec_public_id": "spec-1",
+            "spec_timestamp": first_obs,
+            "spec_version": "test-v2",
+            "first_observed_at": first_obs,
+            "last_observed_at": last_obs,
+            "session_id": "sess-1",
+            "sequence_id": 1,
+        },
+    )
+    sizing = _sizing_spec(spec, as_of)
+    assert sizing is not None
+    assert sizing["spec_observed_at"] == first_obs.isoformat()
+    assert sizing["last_observed_at"] == last_obs.isoformat()
+    assert sizing["unit_certified"] is True
+
+    fallback = _spec(as_of)
+    fallback_sizing = _sizing_spec(fallback, as_of)
+    assert fallback_sizing is not None
+    assert fallback_sizing["last_observed_at"] == as_of.isoformat()

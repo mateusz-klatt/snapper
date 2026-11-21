@@ -41,6 +41,10 @@ from snapper.application.services.settings import SettingsService
 from snapper.config.settings import get_bootstrap_settings
 from snapper.core.json_types import JsonObject
 from snapper.core.json_types import JsonValue
+from snapper.data.instrument_spec_observation_spans import SPEC_OBSERVATION_FRESHNESS
+from snapper.data.instrument_spec_observation_spans import SpecVersionIdentity
+from snapper.data.instrument_spec_observation_spans import matching_observation_spans
+from snapper.data.instrument_spec_observation_spans import select_vouching_observation_span
 from snapper.data.repository import PortfolioPnlSampleQuery
 from snapper.data.repository import Repository
 from snapper.data.repository import dispose_repositories
@@ -220,6 +224,21 @@ class UsdCloseIndex:
 
 
 @dataclass(frozen=True)
+class SpecObservationEvidence:
+    """Copied observation-span evidence recorded for one excluded leg at a cut."""
+
+    spec_public_id: str | None
+    spec_timestamp: datetime | None
+    spec_version: str | None
+    spec_observed_at: datetime | None
+    fresh_at_cut: bool
+    vouching_span_id: int | None
+    first_observed_at: datetime | None
+    last_observed_as_of_recording: datetime | None
+    observed_at_or_before_cut_bound: datetime | None
+
+
+@dataclass(frozen=True)
 class BoundedExclusion:
     """One would-be exclusion with independent USD-bound evidence."""
 
@@ -232,9 +251,11 @@ class BoundedExclusion:
     minimum_symbol_public_id: str | None
     minimum_native_symbol: str | None
     minimum_spec_public_id: str | None
+    minimum_spec_timestamp: datetime | None
     minimum_spec_source: str | None
     minimum_spec_version: str | None
     minimum_spec_observed_at: datetime | None
+    minimum_spec_observation: SpecObservationEvidence
     price: UsdCloseEvidence | None
     bound_usd: float | None
     bound_overflow: bool
@@ -430,6 +451,69 @@ def select_best_usd_close(
     )
 
 
+def _spec_observation_evidence(
+    excluded: ExcludedBalance,
+    cut: datetime,
+) -> SpecObservationEvidence:
+    """Copy exact spec-observation freshness evidence at ``cut`` into the report.
+
+    Records the vouching span's bounds as of report generation alongside the
+    causal bound ``min(last_observed_at, cut)`` so later in-place extension of
+    the live span cannot alter already-recorded activation evidence.
+    """
+    if excluded.observation_spans:
+        matched = matching_observation_spans(
+            excluded.observation_spans,
+            SpecVersionIdentity(
+                instrument_public_id=excluded.instrument_public_id or "",
+                spec_public_id=excluded.spec_public_id,
+                spec_timestamp=excluded.spec_timestamp,
+            ),
+        )
+        vouching = select_vouching_observation_span(matched, cut)
+        if vouching is not None:
+            return SpecObservationEvidence(
+                spec_public_id=excluded.spec_public_id,
+                spec_timestamp=excluded.spec_timestamp,
+                spec_version=excluded.spec_version,
+                spec_observed_at=excluded.spec_observed_at,
+                fresh_at_cut=True,
+                vouching_span_id=vouching["id"],
+                first_observed_at=vouching["first_observed_at"],
+                last_observed_as_of_recording=vouching["last_observed_at"],
+                observed_at_or_before_cut_bound=min(vouching["last_observed_at"], cut),
+            )
+        return SpecObservationEvidence(
+            spec_public_id=excluded.spec_public_id,
+            spec_timestamp=excluded.spec_timestamp,
+            spec_version=excluded.spec_version,
+            spec_observed_at=excluded.spec_observed_at,
+            fresh_at_cut=False,
+            vouching_span_id=None,
+            first_observed_at=None,
+            last_observed_as_of_recording=None,
+            observed_at_or_before_cut_bound=None,
+        )
+    observed = excluded.spec_observed_at
+    fresh = (
+        observed is not None
+        and observed.utcoffset() is not None
+        and timedelta(0) <= cut - observed < SPEC_OBSERVATION_FRESHNESS
+    )
+    fallback_time = observed if fresh else None
+    return SpecObservationEvidence(
+        spec_public_id=excluded.spec_public_id,
+        spec_timestamp=excluded.spec_timestamp,
+        spec_version=excluded.spec_version,
+        spec_observed_at=observed,
+        fresh_at_cut=fresh,
+        vouching_span_id=None,
+        first_observed_at=fallback_time,
+        last_observed_as_of_recording=fallback_time,
+        observed_at_or_before_cut_bound=fallback_time,
+    )
+
+
 def _bounded_exclusion(
     excluded: ExcludedBalance,
     minute: datetime,
@@ -458,9 +542,11 @@ def _bounded_exclusion(
             minimum_symbol_public_id=excluded.symbol_public_id,
             minimum_native_symbol=excluded.native_symbol,
             minimum_spec_public_id=excluded.spec_public_id,
+            minimum_spec_timestamp=excluded.spec_timestamp,
             minimum_spec_source=excluded.spec_source,
             minimum_spec_version=excluded.spec_version,
             minimum_spec_observed_at=excluded.spec_observed_at,
+            minimum_spec_observation=_spec_observation_evidence(excluded, minute),
             price=price,
             bound_usd=bound,
             bound_overflow=bound_overflow,
@@ -911,6 +997,26 @@ def _price_json(price: UsdCloseEvidence | None) -> JsonValue:
     }
 
 
+def _optional_iso(value: datetime | None) -> str | None:
+    """Format an optional datetime as an ISO-8601 string."""
+    return value.isoformat() if value is not None else None
+
+
+def _spec_observation_json(evidence: SpecObservationEvidence) -> JsonObject:
+    """Project copied spec-observation evidence into deterministic JSON."""
+    return {
+        "spec_public_id": evidence.spec_public_id,
+        "spec_timestamp": _optional_iso(evidence.spec_timestamp),
+        "spec_version": evidence.spec_version,
+        "spec_observed_at": _optional_iso(evidence.spec_observed_at),
+        "fresh_at_cut": evidence.fresh_at_cut,
+        "vouching_span_id": evidence.vouching_span_id,
+        "first_observed_at": _optional_iso(evidence.first_observed_at),
+        "last_observed_as_of_recording": _optional_iso(evidence.last_observed_as_of_recording),
+        "observed_at_or_before_cut_bound": _optional_iso(evidence.observed_at_or_before_cut_bound),
+    }
+
+
 def _leg_json(leg: BoundedExclusion) -> JsonObject:
     """Project one excluded leg and both proof planes into JSON."""
     return {
@@ -923,13 +1029,11 @@ def _leg_json(leg: BoundedExclusion) -> JsonObject:
         "minimum_symbol_public_id": leg.minimum_symbol_public_id,
         "minimum_native_symbol": leg.minimum_native_symbol,
         "minimum_spec_public_id": leg.minimum_spec_public_id,
+        "minimum_spec_timestamp": _optional_iso(leg.minimum_spec_timestamp),
         "minimum_spec_source": leg.minimum_spec_source,
         "minimum_spec_version": leg.minimum_spec_version,
-        "minimum_spec_observed_at": (
-            leg.minimum_spec_observed_at.isoformat()
-            if leg.minimum_spec_observed_at is not None
-            else None
-        ),
+        "minimum_spec_observed_at": _optional_iso(leg.minimum_spec_observed_at),
+        "minimum_spec_observation": _spec_observation_json(leg.minimum_spec_observation),
         "price": _price_json(leg.price),
         "bound_usd": leg.bound_usd,
         "bound_overflow": leg.bound_overflow,

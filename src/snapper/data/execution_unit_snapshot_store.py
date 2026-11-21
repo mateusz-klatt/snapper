@@ -500,7 +500,15 @@ def _verify_fill_identity(event: VenueEvent, execution: Execution, order: Order)
 async def _verify_catalog(
     session: AsyncSession, payload: ExecutionUnitSnapshotPayload, effective_at: datetime
 ) -> None:
-    """Bind the copied interpretation to its exact temporal catalog and instrument observation."""
+    """Bind the copied interpretation to its exact temporal catalog version identity.
+
+    Catalog binding is keyed on ``(spec.public_id, spec.timestamp,
+    spec.instrument_public_id, spec.spec_source, spec.spec_version)`` and
+    ``spec.timestamp <= effective_at < spec.known_to``. ``catalog.observed_at``
+    remains copied payload evidence rather than a binding equality field so
+    heartbeat span extensions on a value-identical spec version never
+    invalidate an existing snapshot.
+    """
     catalog = payload.catalog
     spec = await _one(
         session,
@@ -516,13 +524,11 @@ async def _verify_catalog(
             spec.instrument_public_id,
             spec.spec_source,
             spec.spec_version,
-            spec.spec_observed_at,
         )
         == (
             payload.scope.instrument_public_id,
             catalog.source,
             catalog.version,
-            catalog.observed_at,
         ),
         "catalog_observation_mismatch",
     )

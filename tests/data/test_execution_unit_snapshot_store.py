@@ -43,6 +43,7 @@ from snapper.data.models import Symbol
 from snapper.data.models import TradeCommand
 from snapper.data.models import VenueEvent
 from snapper.data.repository import ExecutionPhysicalMutationError
+from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _guard_immutable_ledger
 
@@ -1286,3 +1287,72 @@ async def test_malformed_durable_receipt_contract_is_a_binding_refusal(
     async with snapshot_repo.session() as session:
         assert (await session.scalars(select(ExecutionUnitSnapshot))).all() == []
         assert (await session.scalars(select(VenueEvent))).one().payload_json == "{}"
+
+
+async def test_value_identical_reobservation_span_does_not_invalidate_snapshot(
+    snapshot_repo: SQLAlchemyRepository,
+) -> None:
+    """A heartbeat span extension on an unchanged spec version never breaks binding.
+
+    Given: A committed execution-unit snapshot bound to an InstrumentSpec version row.
+    When: A later value-identical spec revision extends the version's observation span
+        without writing a new SCD2 row, and a submission snapshot binds the same spec
+        version while carrying a distinct causal ``catalog.observed_at`` evidence instant.
+    Then: The original spec row remains active, exact retry returns the committed
+        snapshot, and catalog binding succeeds on version identity alone.
+    """
+    fill_payload = await _payload(snapshot_repo, "fill")
+    committed = await insert_execution_unit_snapshot(snapshot_repo, fill_payload, _provenance(29))
+    assert committed.created is True
+
+    later_obs = _NOW + timedelta(hours=6)
+    await snapshot_repo.revise_instrument_spec(
+        fill_payload.scope.instrument_public_id,
+        "session-heartbeat",
+        99,
+        later_obs,
+        InstrumentSpecInput(
+            tick_size=0.5,
+            lot_size=0.0001,
+            min_order_size=0.0001,
+            max_order_size=None,
+            cost_decimals=None,
+            qty_decimals=4,
+            margin_initial=None,
+            position_limit_long=None,
+            position_limit_short=None,
+            status="active",
+            contract_size=Decimal(1),
+            quantity_unit="contract_count",
+            native_order_quantity_unit="base_asset",
+            contract_payoff_model="linear",
+            contract_value_currency="BTC",
+            settlement_currency="USD",
+            spec_source=fill_payload.catalog.source,
+            spec_version=fill_payload.catalog.version,
+            spec_observed_at=later_obs,
+            unit_certified=True,
+            expiry_at=None,
+            instrument_kind="perpetual",
+        ),
+    )
+    retried = await insert_execution_unit_snapshot(snapshot_repo, fill_payload, _provenance(30))
+    assert retried.id == committed.id
+    assert retried.created is False
+
+    sub_payload = await _payload(snapshot_repo, "submission")
+    evidence_only_changed = sub_payload.model_copy(
+        update={
+            "catalog": sub_payload.catalog.model_copy(
+                update={"observed_at": _SPEC_TIME + timedelta(minutes=1)}
+            )
+        }
+    )
+    stored = await insert_execution_unit_snapshot(
+        snapshot_repo, evidence_only_changed, _provenance(31)
+    )
+    assert stored.created is True
+    async with snapshot_repo.session() as session:
+        specs = (await session.scalars(select(InstrumentSpec))).all()
+    assert len(specs) == 1
+    assert specs[0].spec_observed_at == _SPEC_TIME

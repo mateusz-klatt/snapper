@@ -565,3 +565,67 @@ async def test_exact_limit_minimum_and_high_precision_lots_survive_small_decimal
 
     assert result is not None
     assert result.error_code == "order_notional_below_minimum"
+
+
+async def test_observation_span_keeps_unchanged_token_spec_fresh_past_twelve_hours(
+    repo: MagicMock, terms: ManualOrderTerms, spec: InstrumentSpecRow
+) -> None:
+    """An active observation span keeps unchanged tokenized metadata usable past 12h.
+
+    Given: A token spec first observed 24 hours ago with an observation span extended
+        to one hour before evaluation, and a second spec with only an expired or foreign span.
+    When: Manual order terms validate the specification freshness.
+    Then: The active matching span accepts the order, while expired or older-version spans refuse.
+    """
+    first_obs = _NOW - timedelta(hours=24)
+    spec["spec_observed_at"] = first_obs
+    spec["spec_public_id"] = "spec-v1"
+    spec["spec_timestamp"] = first_obs
+    spec["observation_spans"] = (
+        {
+            "id": 1,
+            "instrument_public_id": "instrument-token",
+            "spec_public_id": "spec-v1",
+            "spec_timestamp": first_obs,
+            "spec_version": spec["spec_version"],
+            "first_observed_at": first_obs,
+            "last_observed_at": _NOW - timedelta(hours=1),
+            "session_id": "sess-1",
+            "sequence_id": 1,
+        },
+    )
+    assert await manual_order_terms_refusal(repo, terms, _NOW) is None
+
+    spec["observation_spans"] = (
+        {
+            "id": 2,
+            "instrument_public_id": "instrument-token",
+            "spec_public_id": "spec-v1",
+            "spec_timestamp": first_obs,
+            "spec_version": spec["spec_version"],
+            "first_observed_at": first_obs,
+            "last_observed_at": _NOW - timedelta(hours=12),
+            "session_id": "sess-1",
+            "sequence_id": 2,
+        },
+    )
+    expired = await manual_order_terms_refusal(repo, terms, _NOW)
+    assert expired is not None
+    assert expired.error_code == "tokenized_order_metadata_unavailable"
+
+    spec["observation_spans"] = (
+        {
+            "id": 3,
+            "instrument_public_id": "instrument-token",
+            "spec_public_id": "spec-v1",
+            "spec_timestamp": first_obs - timedelta(hours=1),
+            "spec_version": spec["spec_version"],
+            "first_observed_at": first_obs,
+            "last_observed_at": _NOW - timedelta(minutes=5),
+            "session_id": "sess-1",
+            "sequence_id": 3,
+        },
+    )
+    foreign = await manual_order_terms_refusal(repo, terms, _NOW)
+    assert foreign is not None
+    assert foreign.error_code == "tokenized_order_metadata_unavailable"

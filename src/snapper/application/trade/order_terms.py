@@ -12,6 +12,7 @@ from snapper.application.trade.execution_modifiers import ModifierRefusal
 from snapper.application.trade.execution_products import product_execution_refusal
 from snapper.core.json_types import JsonObject
 from snapper.core.types import ExchangeEnum
+from snapper.data.instrument_spec_observation_spans import is_spec_observation_fresh
 from snapper.data.repository import Repository
 from snapper.data.repository_types import InstrumentOrderCapabilityRow
 from snapper.data.repository_types import InstrumentSpecRow
@@ -157,6 +158,9 @@ def _precision_valid(value: object) -> bool:
 def _observation_fresh(spec: InstrumentSpecRow, as_of: datetime) -> bool:
     """Require an aware, nonfuture catalog observation less than twelve hours old.
 
+    Uses matching observation spans for the exact active spec version when
+    present, falling back to ``spec["spec_observed_at"]`` when no span exists.
+
     Args:
         spec: Exact specification whose observation is being evaluated.
         as_of: Aware evaluation time shared with the catalog reads.
@@ -164,10 +168,7 @@ def _observation_fresh(spec: InstrumentSpecRow, as_of: datetime) -> bool:
     Returns:
         Whether the observation is usable at the evaluation instant.
     """
-    observed = spec["spec_observed_at"]
-    if observed is None or observed.utcoffset() is None or as_of.utcoffset() is None:
-        return False
-    return timedelta(0) <= as_of - observed < _SPEC_MAX_AGE
+    return is_spec_observation_fresh(spec, as_of, freshness=_SPEC_MAX_AGE)
 
 
 def _specification_valid(spec: InstrumentSpecRow, terms: ManualOrderTerms, as_of: datetime) -> bool:

@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from datetime import timedelta
 from fractions import Fraction
 
 from sqlalchemy import or_
@@ -45,6 +44,8 @@ from snapper.data.execution_unit_snapshot_store import _bind_submission
 from snapper.data.execution_unit_snapshot_store import _submission_knowledge_time
 from snapper.data.execution_unit_snapshot_store import _verify_catalog
 from snapper.data.execution_unit_snapshot_store import durable_command_material
+from snapper.data.instrument_spec_observation_spans import SpecVersionIdentity
+from snapper.data.instrument_spec_observation_spans import is_observation_fresh_for_version
 from snapper.data.models import ExecutionUnitSnapshot
 from snapper.data.models import SubmissionUnitAdmission
 from snapper.data.models import TradeCommand
@@ -295,6 +296,25 @@ async def observe_submission_catalogs(
     )
 
 
+def _derivative_catalog_fresh(
+    observation: UnitCatalogObservation,
+    catalog_observed_at: datetime,
+    interpreted_at: datetime,
+) -> bool:
+    """Require a matching observation span or non-future fallback observation under 12 hours old."""
+    spec = observation.spec
+    return is_observation_fresh_for_version(
+        observation.observation_spans,
+        SpecVersionIdentity(
+            instrument_public_id=spec.instrument_public_id,
+            spec_public_id=spec.public_id,
+            spec_timestamp=spec.timestamp,
+        ),
+        catalog_observed_at,
+        interpreted_at,
+    )
+
+
 def _verify_current_catalog_admission(
     material: SnapshotCommandMaterial,
     observation: UnitCatalogObservation,
@@ -311,7 +331,7 @@ def _verify_current_catalog_admission(
             "admission_current_derivative_status_policy_unproven",
         )
         _require(
-            interpreted_at - catalog.observed_at <= timedelta(hours=12),
+            _derivative_catalog_fresh(observation, catalog.observed_at, interpreted_at),
             "admission_current_derivative_catalog_stale",
         )
         _require(

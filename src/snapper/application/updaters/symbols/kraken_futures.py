@@ -99,6 +99,7 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
             force: If True, bypass the update threshold check.
         """
         super().__init__(update_threshold_hours=update_threshold_hours, force=force)
+        self._last_fetch_observed_at: datetime | None = None
 
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
@@ -128,6 +129,15 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
         """
         return "kraken_futures_symbols_last_update"
 
+    async def _fetch_symbols(
+        self,
+        client: KrakenFuturesExchangeClient,
+    ) -> list[dict[str, Any]]:
+        """Fetch instruments and record catalog fetch time for observation spans."""
+        symbols = await super()._fetch_symbols(client)
+        self._last_fetch_observed_at = datetime.now(UTC)
+        return symbols
+
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Persist Kraken Futures symbol catalog to the database.
 
@@ -148,13 +158,21 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
             with self.repository.get_session() as session:
                 processed_symbol_public_ids: set[str] = set()
                 now = datetime.now(UTC)
+                if not self._enter_locked_update(session, now):
+                    return
+                observed_at = self._last_fetch_observed_at or now
                 for raw_instrument in symbols:
                     schema = self._validate_instrument_schema(raw_instrument)
                     if schema is None:
                         skipped_count += 1
                         continue
 
-                    symbol_public_id = self._persist_instrument_schema(session, schema, now)
+                    symbol_public_id = self._persist_instrument_schema(
+                        session,
+                        schema,
+                        now,
+                        observed_at,
+                    )
                     if symbol_public_id is None:
                         skipped_count += 1
                         continue
@@ -177,6 +195,7 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
                     processed_symbol_public_ids,
                     now,
                 )
+                self._finalize_locked_update(session, now)
                 session.commit()
                 logger.info(
                     f"Kraken Futures update complete: {created_count} processed, "
@@ -188,6 +207,8 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
         except Exception as e:
             logger.error(f"Error updating Kraken Futures database: {e}")
             raise
+        finally:
+            self._last_fetch_observed_at = None
 
     @staticmethod
     def _close_runtime_trade_channel_capabilities(
@@ -244,6 +265,7 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
         session: Any,
         schema: KrakenFuturesInstrumentSchema,
         now: datetime,
+        observed_at: datetime | None = None,
     ) -> str | None:
         """Persist one validated instrument and return its symbol public ID."""
         symbol_metadata = self._resolve_symbol_metadata(schema)
@@ -283,7 +305,13 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence("instruments"),
         )
-        self._revise_schema_instrument_spec(session, instrument_public_id, schema, now)
+        self._revise_schema_instrument_spec(
+            session,
+            instrument_public_id,
+            schema,
+            now,
+            observed_at or now,
+        )
         return symbol_public_id
 
     @staticmethod
@@ -339,6 +367,7 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
         instrument_public_id: str,
         schema: KrakenFuturesInstrumentSchema,
         now: datetime,
+        observed_at: datetime,
     ) -> None:
         """Persist instrument spec fields derived from the Kraken catalog."""
         (
@@ -348,7 +377,7 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
             funding_frequency_hours,
             max_funding_rate,
             metadata,
-        ) = self._instrument_spec_fields(schema, now)
+        ) = self._instrument_spec_fields(schema, observed_at)
         self._revise_instrument_spec(
             session,
             instrument_public_id,
