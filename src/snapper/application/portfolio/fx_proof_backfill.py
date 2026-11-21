@@ -25,6 +25,7 @@ from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_evaluat
 from snapper.application.portfolio.fx_conversion_shadow import fx_shadow_pin_metrics
 from snapper.application.portfolio.fx_conversion_shadow import shadow_pin_fx_evaluations
 from snapper.application.portfolio.pnl_timeline_service import _event_fx_minutes
+from snapper.application.portfolio.pnl_timeline_service import _EventFxContext
 from snapper.application.portfolio.pnl_timeline_service import _general_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _identity_fx_planes
 from snapper.application.portfolio.pnl_timeline_service import _load_request_fx_rates
@@ -44,8 +45,8 @@ FX_PROOF_BACKFILL_BATCH_SIZE = 50
 _RANGE_ELECTION_CALC_VERSIONS = frozenset({"5A.13", "5B.1", "5B.2", "5C.1", "5C.2", "5C.3", "5C.4"})
 """Persisted anchor and sample versions that use a range-wide FX election."""
 
-_POINTWISE_SAMPLE_CALC_VERSION = "5C.5"
-"""Historical sample version whose FX proofs require pointwise election."""
+_POINTWISE_SAMPLE_CALC_VERSIONS = frozenset({"5C.5", "5C.6"})
+"""Sample versions whose FX proofs require pointwise election."""
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[4]
 FX_PROOF_BACKFILL_CHECKPOINT = _PROJECT_ROOT / "data" / "fx-proof-backfill-checkpoint.json"
@@ -386,7 +387,7 @@ async def _consumer_discovery(
             instrument_public_id="*",
             reason=(
                 "pointwise_fx_backfill_unsupported"
-                if consumer.calculation_version == _POINTWISE_SAMPLE_CALC_VERSION
+                if consumer.calculation_version in _POINTWISE_SAMPLE_CALC_VERSIONS
                 else "unsupported_calculation_version"
             ),
             lost_requirements=(),
@@ -431,9 +432,7 @@ async def _consumer_discovery(
     event_requirements = _event_fx_minutes(
         trusted_executions,
         accruals,
-        base,
-        quote,
-        consumer.valuation_ccy,
+        _EventFxContext(base, quote, consumer.valuation_ccy),
     )
     identities = _identity_fx_planes(trusted_refs, event_requirements)
     context = FxShadowPinContext(consumer.calculation_version, [], manifest_limit=None)

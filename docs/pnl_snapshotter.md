@@ -1,7 +1,7 @@
 # Portfolio P&L snapshotter catch-up
 
 The snapshotter remains disabled unless `PNL_SNAPSHOTTER_ENABLED` is enabled
-explicitly. It writes calculation version `5C.5` for scopes with an existing
+explicitly. It writes calculation version `5C.6` for scopes with an existing
 activation anchor.
 
 A replay generation fixes the finalized target minute and knowledge horizon.
@@ -201,14 +201,26 @@ evidence independently for each mark, execution, accrual and basket minute.
 Evidence is loaded in batches. Other minutes in the batch cannot choose which
 venue prices a given minute. An instrument-owned canonical FX plane keeps its
 precedence. A missing required exact rate withholds the affected valuation.
-The public timeline keeps its existing `5A.16` calculation and FX policy.
+The public timeline keeps its existing `5A.16` calculation and FX policy and
+enables neither `5C.6` behaviour.
+
+Sample version `5C.6` adds two snapshotter-only behaviours: (i) the
+compensated-total unrealized fallback (lazy builtin `sum` T1 then `math.fsum`
+T2, with naive then compensated attribution buckets, used only where `5C.5`
+withheld `instrument_reconciliation_failed`; compensated attribution values may
+differ from the naive sum by at most the rounding of a faithful sum, relying on
+CPython 3.12+ compensated `sum` pinned by a test) and (ii) width-independent
+event-FX reasons, requesting every nonzero fee, positive-price and
+nonzero-accrual conversion minute before trust-state early returns so persisted
+reasons no longer depend on the replay chunk's mark window.
 
 The snapshotter checks price references and display identity through the
 generation's fixed target. A symbol or venue revision therefore produces the
 same trust decision at every chunk width. Pointwise FX shadow proofs use the
 `pnl-fiat-pointwise-v1` policy, with at most 64 evaluations per tick and
 64 rows per pair and minute. FX proof backfill accepts only known versions
-that used the range-wide policy. That excludes pointwise 5C.5 consumers.
+that used the range-wide policy. That excludes pointwise `5C.5` and `5C.6`
+consumers.
 
 Each snapshotter minute has a separate faithful flow-recovery allowance.
 Its financial result is independent of the recovery work performed for
@@ -216,9 +228,13 @@ other minutes in the same chunk. A separate limit on recovery work for an
 entire chunk triggers subdivision before any rows from that attempt are
 committed.
 
-Only a recomputed row receives `5C.5`. The current overlay reads the selected
-sample version. Older rows remain available as historical evidence until the
-writer recomputes them.
+Only a recomputed row receives `5C.6`. During the `5C.6` catch-up, the equity
+overlay serves only the reconciled `5C.6` prefix: `require_reconciled` hides
+rows at or after the same-version frontier's `next_minute` or `repair_from`, so
+coverage restarts from the anchor and grows forward as the `5C.6` frontier
+advances. `5C.5` rows are never served and there is no mixed-version fallback.
+Older rows remain available as historical evidence until the writer recomputes
+them.
 
 ## Known limits
 
@@ -289,7 +305,7 @@ Run the complete quality gate on the same source. Production enablement
 requires a separate decision after this verification.
 
 A standalone writer-disabled release may publish reconstructed live P&L while
-all sample writers remain off. With zero qualifying `5C.5` rows, persisted
+all sample writers remain off. With zero qualifying `5C.6` rows, persisted
 equity/cash/position/drawdown overlay fields stay null and `sampled` stays false;
 these values are unavailable, not reconstructed equity. Runtime preflight must
 verify both writer settings and the absence of qualifying rows. Enabling a

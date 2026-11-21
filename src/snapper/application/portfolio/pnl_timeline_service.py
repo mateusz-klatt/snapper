@@ -2946,6 +2946,7 @@ class _EventFxContext:
     base_by_instrument: Mapping[str, str]
     quote_by_instrument: Mapping[str, str]
     valuation_ccy: str
+    request_all_conversion_minutes: bool = False
 
 
 @dataclass(slots=True)
@@ -3018,6 +3019,39 @@ def _record_event_position(
     state.position_qty[pool_key] = new_qty
 
 
+def _request_execution_conversion_minutes(
+    state: _EventFxReplayState,
+    context: _EventFxContext,
+    row: PnlTimelineOpeningExecutionRow,
+) -> None:
+    """Request exact fee and positive-price FX minutes regardless of trust state.
+
+    Args:
+        state: Mutable replay state holding accumulated FX requirements.
+        context: Immutable denomination and conversion-policy context.
+        row: Execution row whose service conversions may consult the FX book.
+    """
+    instrument_public_id = row["instrument_public_id"]
+    minute = _rate_minute(row["timestamp"])
+    quote_currency = context.quote_by_instrument.get(instrument_public_id)
+    if not _is_exact_zero(row["fee"]):
+        _add_fx_minute(
+            state.requirements,
+            instrument_public_id,
+            row["fee_asset"],
+            context.valuation_ccy,
+            minute,
+        )
+    if quote_currency is not None and is_positive_finite(row["price"]):
+        _add_fx_minute(
+            state.requirements,
+            instrument_public_id,
+            quote_currency,
+            context.valuation_ccy,
+            minute,
+        )
+
+
 def _add_execution_fx_requirements(
     state: _EventFxReplayState,
     context: _EventFxContext,
@@ -3031,6 +3065,8 @@ def _add_execution_fx_requirements(
         pool_key,
         row["timestamp"],
     )
+    if context.request_all_conversion_minutes:
+        _request_execution_conversion_minutes(state, context, row)
     if instrument_public_id in state.untrusted_at:
         return
     size = row["size"]
@@ -3087,20 +3123,21 @@ def _add_execution_fx_requirements(
 
 def _add_accrual_fx_requirement(
     state: _EventFxReplayState,
-    valuation_ccy: str,
+    context: _EventFxContext,
     accrual: PnlTimelineAccrualRow,
 ) -> None:
     """Add one publishable nonzero accrual's exact conversion minute."""
     if _is_exact_zero(accrual["amount"]):
         return
-    invalid_at = state.untrusted_at.get(accrual["instrument_public_id"])
-    if invalid_at is not None and accrual["accrued_at"] >= invalid_at:
-        return
+    if not context.request_all_conversion_minutes:
+        invalid_at = state.untrusted_at.get(accrual["instrument_public_id"])
+        if invalid_at is not None and accrual["accrued_at"] >= invalid_at:
+            return
     _add_fx_minute(
         state.requirements,
         accrual["instrument_public_id"],
         accrual["amount_asset"],
-        valuation_ccy,
+        context.valuation_ccy,
         _rate_minute(accrual["accrued_at"]),
     )
 
@@ -3108,26 +3145,43 @@ def _add_accrual_fx_requirement(
 def _event_fx_minutes(
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
     accrual_rows: Sequence[PnlTimelineAccrualRow],
-    base_by_instrument: Mapping[str, str],
-    quote_by_instrument: Mapping[str, str],
-    valuation_ccy: str,
+    context: _EventFxContext,
     opening: TimelineOpening | None = None,
 ) -> _FxInstrumentRequirements:
     """Collect exact rate minutes needed by prices, fees, and accruals.
 
     A positive foreign execution price enters the average-cost kernel only after
-    conversion at its fill minute. Requirements stop when an invalid size or an
-    unknown-basis close permanently withholds that instrument, and prices that
-    cannot repair an already unknown basis do not steer peer selection. Nonzero
-    foreign fees and accruals need the same proof while their instrument remains
-    publishable; exact zero and native-currency values need no candle.
+    conversion at its fill minute. Under the default timeline and anchor policy,
+    requirements stop when an invalid size or an unknown-basis close permanently
+    withholds that instrument, and prices that cannot repair an already unknown
+    basis do not steer peer selection; nonzero foreign fees and accruals need
+    proof while their instrument remains publishable. Under the ``5C.6``
+    snapshotter policy (``context.request_all_conversion_minutes``), every nonzero
+    fee minute, every positive-finite price minute (any size or basis/trust
+    state), and every nonzero accrual minute is requested before trust-state
+    early returns so persisted ``fx_conversion_unproven`` reasons never depend on
+    the replay chunk's mark window. Exact zero and native-currency values need no
+    candle.
+
+    Service FX conversion inventory (a new conversion site must add an explicit
+    FX-minute requirement or a justified exemption here):
+    - ``_to_timeline_execution`` fee -> fee minute.
+    - ``_to_timeline_execution`` price (any size) -> price minute.
+    - ``_to_timeline_accrual`` -> accrual minute.
+    - ``_record_mark`` -> none needed (the point's own minute, always in the
+      chunk).
+    - ``_opening_marks_from_candles`` (``convert_amount``) -> covered by
+      ``_opening_mark_requirements`` and fails closed with
+      ``PnlAnchorEvidenceError``.
+    - ``_converted_point_overlay`` (``convert_amount``) -> none needed
+      (reader-side, never persisted).
 
     Args:
         execution_rows: Trusted scope executions replayed by the kernel.
         accrual_rows: Scope accruals, whose amount carries ``amount_asset``.
-        base_by_instrument: Proven base asset of each execution instrument.
-        quote_by_instrument: Proven execution-price denominations.
-        valuation_ccy: Currency the series is valued in.
+        context: Proven base and quote denominations, the valuation currency,
+            and whether every service-side conversion minute is requested before
+            trust-state early returns (the ``5C.6`` snapshotter policy).
         opening: Rebased per-shard quantities active before the suffix.
 
     Returns:
@@ -3140,15 +3194,10 @@ def _event_fx_minutes(
         basis_unknown=set(),
         untrusted_at={},
     )
-    context = _EventFxContext(
-        base_by_instrument=base_by_instrument,
-        quote_by_instrument=quote_by_instrument,
-        valuation_ccy=valuation_ccy,
-    )
     for row in execution_rows:
         _add_execution_fx_requirements(state, context, row)
     for accrual in accrual_rows:
-        _add_accrual_fx_requirement(state, valuation_ccy, accrual)
+        _add_accrual_fx_requirement(state, context, accrual)
     return state.requirements
 
 
@@ -5455,9 +5504,7 @@ async def _derive_anchor_candidate(
     event_requirements = _event_fx_minutes(
         execution_rows,
         (),
-        base_by_instrument,
-        quote_by_instrument,
-        valuation_ccy,
+        _EventFxContext(base_by_instrument, quote_by_instrument, valuation_ccy),
     )
     mark_requirements = _opening_mark_requirements(
         mark_candles,
@@ -6934,9 +6981,12 @@ async def build_wallet_pnl_series(
         event_requirements = _event_fx_minutes(
             trusted_replayed_rows,
             replay.accrual_rows,
-            base_by_instrument,
-            quote_by_instrument,
-            valuation_ccy,
+            _EventFxContext(
+                base_by_instrument,
+                quote_by_instrument,
+                valuation_ccy,
+                request_all_conversion_minutes=options.pointwise_exact_fx,
+            ),
             anchor.opening,
         )
         mark_carry = (
@@ -7039,6 +7089,7 @@ async def build_wallet_pnl_series(
                 granularity=granularity,
                 valuation_ccy=valuation_ccy,
                 recovery_budget_per_point=options.replay_generation_tip is not None,
+                compensated_unrealized_fallback=options.pointwise_exact_fx,
             )
             result = _timed_build_pnl_timeline(
                 executions,

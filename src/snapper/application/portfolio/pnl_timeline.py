@@ -141,6 +141,7 @@ from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Hashable
 from collections.abc import Iterable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -781,6 +782,9 @@ class TimelineWindow:
             allowance and terminal state, independent of the replay chunk.
         capture_checkpoint: Capture the engine's carried replay state after
             valuing ``to_time`` and return it on :attr:`PnlTimelineResult.closing_checkpoint`.
+        compensated_unrealized_fallback: Fall back to compensated unrealized
+            totals and attribution buckets when naive instrument reconciliation
+            fails; set by the service only for pointwise 5C.6 snapshotter samples.
     """
 
     from_time: datetime
@@ -789,6 +793,7 @@ class TimelineWindow:
     valuation_ccy: str
     recovery_budget_per_point: bool = False
     capture_checkpoint: bool = False
+    compensated_unrealized_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -1943,6 +1948,7 @@ class _PointValuationContext:
     mark_carried_inputs: MarkCarriedInputMap
     carried_event_inputs: Collection[PnlCarriedInput]
     widen_unrealized_absorber: bool = False
+    compensated_unrealized_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -1986,13 +1992,21 @@ class _InstrumentValuationInputs:
 
 @dataclass
 class _PointAccumulator:
-    """Mutable point-local valuation outputs collected in stable order."""
+    """Mutable point-local valuation outputs collected in stable order.
+
+    ``unrealized_allocations_by_attribution`` stores per-key allocation shares
+    in allocation order for the current point only (bounded by the point's
+    allocation count) and is discarded each minute once valuation finishes.
+    """
 
     point_reasons: set[PnlIncompletenessReasonEntry] = field(default_factory=set)
     carried_inputs: set[PnlCarriedInput] = field(default_factory=set)
     contributions: list[PnlInstrumentContribution] = field(default_factory=list)
     unrealized_by_attribution: defaultdict[AttributionKey, float] = field(
         default_factory=lambda: defaultdict(float)
+    )
+    unrealized_allocations_by_attribution: defaultdict[AttributionKey, list[float]] = field(
+        default_factory=lambda: defaultdict(list)
     )
     unrealized_incomplete: set[AttributionKey] = field(default_factory=set)
     unrealized_total: float = 0.0
@@ -2345,6 +2359,7 @@ def _allocate_instrument_unrealized(
         )
         for key, amount in allocations.items():
             accumulator.unrealized_by_attribution[key] += amount
+            accumulator.unrealized_allocations_by_attribution[key].append(amount)
             if not math.isfinite(accumulator.unrealized_by_attribution[key]):
                 accumulator.unrealized_incomplete.add(key)
                 accumulator.point_reasons.add(
@@ -2535,6 +2550,24 @@ def _instrument_untrusted_valued_point(
     )
 
 
+def _unrealized_by_instrument(
+    contributions: Sequence[PnlInstrumentContribution],
+) -> dict[str, float]:
+    """Collect finite per-instrument unrealized values from point contributions.
+
+    Args:
+        contributions: Point-level instrument contribution rows in ``seen`` order.
+
+    Returns:
+        Mapping of instrument identity to its finite unrealized P&L.
+    """
+    return {
+        contribution.instrument_public_id: contribution.unrealized_pnl
+        for contribution in contributions
+        if contribution.unrealized_pnl is not None
+    }
+
+
 def _reconcile_instrument_unrealized(
     context: _PointValuationContext,
     accumulator: _PointAccumulator,
@@ -2542,11 +2575,7 @@ def _reconcile_instrument_unrealized(
     """Reconcile finite per-instrument marks and report exact representability."""
     if accumulator.point_reasons or not math.isfinite(accumulator.unrealized_total):
         return True
-    unrealized_by_instrument = {
-        contribution.instrument_public_id: contribution.unrealized_pnl
-        for contribution in accumulator.contributions
-        if contribution.unrealized_pnl is not None
-    }
+    unrealized_by_instrument = _unrealized_by_instrument(accumulator.contributions)
     reconciled = _values_with_residue(
         unrealized_by_instrument,
         context.seen,
@@ -2568,6 +2597,195 @@ def _reconcile_instrument_unrealized(
         for contribution in accumulator.contributions
     ]
     return True
+
+
+def _compensated_unrealized_candidates(
+    ordered_values: Sequence[float],
+    naive_total: float,
+) -> Iterator[float]:
+    """Yield distinct finite compensated total candidates lazily in priority order.
+
+    Evaluates the builtin compensated ``sum`` first and defers ``math.fsum``
+    until ``T1`` is unavailable or rejected by reconciliation. Any candidate
+    that raises ``OverflowError``, overflows to a non-finite float, or
+    duplicates ``naive_total`` or an earlier candidate is skipped.
+
+    Args:
+        ordered_values: Per-instrument unrealized values in ``context.seen`` order.
+        naive_total: Running ``+=`` total already rejected by reconciliation.
+
+    Yields:
+        Distinct finite candidate totals ``T1`` then ``T2``.
+    """
+    seen_totals: set[float] = {naive_total}
+    summations: tuple[Callable[[Sequence[float]], float], ...] = (sum, math.fsum)
+    for summarize in summations:
+        try:
+            candidate = summarize(ordered_values)
+        except OverflowError:
+            continue
+        if not math.isfinite(candidate) or candidate in seen_totals:
+            continue
+        seen_totals.add(candidate)
+        yield candidate
+
+
+def _compensated_attribution_buckets(
+    accumulator: _PointAccumulator,
+) -> dict[AttributionKey, float]:
+    """Build compensated per-attribution unrealized sums in allocation order.
+
+    Re-sums each attribution bucket's per-point allocation list with builtin
+    ``sum`` so its value differs from the naive ``+=`` bucket by at most the
+    rounding of a faithful sum. Keys absent from the allocation lists retain
+    their naive value (``0.0``). The per-key allocation lists are per point
+    (bounded by the point's allocation count) and discarded each minute.
+
+    Args:
+        accumulator: Point-local accumulator holding naive and ordered shares.
+
+    Returns:
+        New mapping of compensated per-key unrealized values.
+    """
+    return {
+        **accumulator.unrealized_by_attribution,
+        **{
+            key: sum(allocations)
+            for key, allocations in accumulator.unrealized_allocations_by_attribution.items()
+        },
+    }
+
+
+def _attribution_representation(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+    attribution_keys: Sequence[AttributionKey],
+    candidate_total: float,
+) -> Mapping[AttributionKey, float] | None:
+    """Select the first reconciling attribution representation for a candidate.
+
+    Mirrors :func:`_reconcile_attribution` by requiring no attribution trial
+    when ``accumulator.unrealized_incomplete`` is non-empty. Otherwise tests
+    the naive ``+=`` buckets first and builds compensated buckets only when
+    the naive representation fails.
+
+    Args:
+        context: Immutable point valuation inputs and absorber configuration.
+        accumulator: Point-local accumulator holding naive and ordered shares.
+        attribution_keys: Complete deterministic attribution key order.
+        candidate_total: Candidate compensated aggregate unrealized total.
+
+    Returns:
+        The accepted naive or compensated bucket mapping, or ``None`` when
+        neither representation reconciles to ``candidate_total``.
+    """
+    if accumulator.unrealized_incomplete:
+        return accumulator.unrealized_by_attribution
+    naive_reconciled = _values_with_residue(
+        accumulator.unrealized_by_attribution,
+        attribution_keys,
+        candidate_total,
+        widen=context.widen_unrealized_absorber,
+    )
+    if naive_reconciled is not None:
+        return accumulator.unrealized_by_attribution
+    compensated = _compensated_attribution_buckets(accumulator)
+    compensated_reconciled = _values_with_residue(
+        compensated,
+        attribution_keys,
+        candidate_total,
+        widen=context.widen_unrealized_absorber,
+    )
+    if compensated_reconciled is not None:
+        return compensated
+    return None
+
+
+def _apply_compensated_total(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+    candidate_total: float,
+    attribution_buckets: Mapping[AttributionKey, float],
+) -> bool:
+    """Commit an accepted compensated total and rewrite instrument contributions.
+
+    Updates ``accumulator`` only after both trials have succeeded on
+    non-mutating copies, preserving the ``defaultdict(float)`` container on
+    ``unrealized_by_attribution`` before re-running instrument reconciliation
+    against the accepted total.
+
+    Args:
+        context: Immutable point valuation inputs and absorber configuration.
+        accumulator: Point-local accumulator to update on acceptance.
+        candidate_total: Accepted compensated aggregate unrealized total.
+        attribution_buckets: Accepted naive or compensated bucket mapping.
+
+    Returns:
+        ``True`` once ``_reconcile_instrument_unrealized`` rewrites
+        ``accumulator.contributions``.
+    """
+    accumulator.unrealized_total = candidate_total
+    if attribution_buckets is not accumulator.unrealized_by_attribution:
+        accumulator.unrealized_by_attribution.clear()
+        accumulator.unrealized_by_attribution.update(attribution_buckets)
+    return _reconcile_instrument_unrealized(context, accumulator)
+
+
+def _reconcile_compensated_unrealized(
+    context: _PointValuationContext,
+    accumulator: _PointAccumulator,
+    attribution_keys: Sequence[AttributionKey],
+) -> bool:
+    """Attempt opt-in compensated unrealized fallback without partial mutation.
+
+    Runs only when naive instrument reconciliation fails and
+    ``context.compensated_unrealized_fallback`` is enabled by the service for
+    the snapshotter's 5C.6 pointwise samples. Evaluates lazy candidate totals
+    ``T1`` (builtin ``sum``) and ``T2`` (``math.fsum``), skipping
+    ``OverflowError``, non-finite results, and duplicates of ``T0`` or earlier
+    candidates. All trials operate on new dicts so a rejected fallback leaves
+    ``accumulator`` untouched and withholds the point identically to the
+    default path.
+
+    Args:
+        context: Immutable point valuation inputs and fallback configuration.
+        accumulator: Point-local valuation accumulator with naive totals.
+        attribution_keys: Complete deterministic attribution key order.
+
+    Returns:
+        ``True`` if a compensated total and attribution representation both
+        reconciled and were committed, otherwise ``False``.
+    """
+    if not context.compensated_unrealized_fallback:
+        return False
+    unrealized_by_instrument = _unrealized_by_instrument(accumulator.contributions)
+    ordered_values = [unrealized_by_instrument.get(key, 0.0) for key in context.seen]
+    for candidate_total in _compensated_unrealized_candidates(
+        ordered_values,
+        accumulator.unrealized_total,
+    ):
+        instrument_reconciled = _values_with_residue(
+            unrealized_by_instrument,
+            context.seen,
+            candidate_total,
+            widen=context.widen_unrealized_absorber,
+        )
+        if instrument_reconciled is None:
+            continue
+        attribution_buckets = _attribution_representation(
+            context,
+            accumulator,
+            attribution_keys,
+            candidate_total,
+        )
+        if attribution_buckets is not None:
+            return _apply_compensated_total(
+                context,
+                accumulator,
+                candidate_total,
+                attribution_buckets,
+            )
+    return False
 
 
 def _reconcile_attribution(
@@ -2735,7 +2953,10 @@ def _value_point(context: _PointValuationContext) -> PnlTimelinePoint:
             accumulator,
             attribution_keys,
         )
-    if not _reconcile_instrument_unrealized(context, accumulator):
+    reconciled = _reconcile_instrument_unrealized(context, accumulator)
+    if not reconciled:
+        reconciled = _reconcile_compensated_unrealized(context, accumulator, attribution_keys)
+    if not reconciled:
         return _context_untrusted_point(
             context,
             attribution_keys,
@@ -2825,6 +3046,7 @@ class _TimelineBuildEvidence:
     mark_carried_inputs: MarkCarriedInputMap
     widen_unrealized_absorber: bool
     replay_recovery_work: _ReplayRecoveryWork | None
+    compensated_unrealized_fallback: bool = False
 
 
 @dataclass
@@ -2912,7 +3134,7 @@ def _resolved_build_evidence(
     untrusted_price_reasons_by_instrument: Mapping[str, Collection[PnlIncompletenessReason]] | None,
     mark_evidence: TimelineMarkEvidence | None,
     *,
-    recovery_budget_per_point: bool,
+    window: TimelineWindow,
 ) -> _TimelineBuildEvidence:
     """Resolve optional caller evidence to immutable empty mappings."""
     resolved_mark_evidence = TimelineMarkEvidence() if mark_evidence is None else mark_evidence
@@ -2929,9 +3151,10 @@ def _resolved_build_evidence(
         widen_unrealized_absorber=resolved_mark_evidence.widen_unrealized_absorber,
         replay_recovery_work=(
             _ReplayRecoveryWork(MAX_REPLAY_RECOVERY_KEY_VISITS)
-            if recovery_budget_per_point
+            if window.recovery_budget_per_point
             else None
         ),
+        compensated_unrealized_fallback=window.compensated_unrealized_fallback,
     )
 
 
@@ -3682,6 +3905,7 @@ def _point_valuation_context(
         mark_carried_inputs=evidence.mark_carried_inputs,
         carried_event_inputs=state.carried_event_inputs,
         widen_unrealized_absorber=evidence.widen_unrealized_absorber,
+        compensated_unrealized_fallback=evidence.compensated_unrealized_fallback,
     )
 
 
@@ -3941,7 +4165,7 @@ def build_pnl_timeline(
         lineage,
         untrusted_price_reasons_by_instrument,
         mark_evidence,
-        recovery_budget_per_point=window.recovery_budget_per_point,
+        window=window,
     )
     state = _initialize_timeline_state(opening)
     _validate_timeline_execution_scopes(state, executions)

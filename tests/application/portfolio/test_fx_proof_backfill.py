@@ -393,7 +393,11 @@ async def test_true_pair_electorate_accrual_horizon_and_instrument_refusal(
 @pytest.mark.parametrize("apply", [False, True])
 @pytest.mark.parametrize(
     ("calculation_version", "reason"),
-    [("5C.5", "pointwise_fx_backfill_unsupported"), ("5C.6", "unsupported_calculation_version")],
+    [
+        ("5C.5", "pointwise_fx_backfill_unsupported"),
+        ("5C.6", "pointwise_fx_backfill_unsupported"),
+        ("5C.7", "unsupported_calculation_version"),
+    ],
 )
 async def test_unsupported_consumer_refuses_legacy_fx_backfill(
     apply: bool,
