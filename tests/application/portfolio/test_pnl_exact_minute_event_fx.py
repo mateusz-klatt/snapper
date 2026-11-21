@@ -512,58 +512,45 @@ def _without_candle_uuid(row: PnlFxRateRow) -> PnlFxRateRow:
     return {**row, "candle_public_id": ""}
 
 
-def _row_identity(row: PnlFxRateRow) -> tuple[datetime, str, str, str, int]:
-    """Order rows by the repository sort key, then by durable candle identity."""
-    return (row["open_at"], row["base"], row["quote"], row["exchange"], row["candle_id"])
+def _row_identity(row: PnlFxRateRow) -> tuple[datetime, str, str, str, str, int]:
+    """Return the total order every FX reader must return rows in."""
+    return (
+        row["open_at"],
+        row["base"],
+        row["quote"],
+        row["exchange"],
+        row["instrument_public_id"],
+        row["candle_id"],
+    )
 
 
 def _comparable(
-    evaluations: Sequence[FxShadowEvaluation], *, fresh_stores: bool, tie_insensitive: bool
+    evaluations: Sequence[FxShadowEvaluation], *, fresh_stores: bool
 ) -> list[FxShadowEvaluation]:
-    """Normalise what may legitimately differ between two reads of one store.
-
-    Args:
-        evaluations: Shadow evaluations collected by one replay.
-        fresh_stores: Whether replays seeded separate stores, so candle UUIDs differ.
-        tie_insensitive: Whether rows tying on the repository sort key may arrive
-            in a different order, as PostgreSQL leaves them unordered.
-
-    Returns:
-        Evaluations with only those differences removed.
-    """
-    comparable: list[FxShadowEvaluation] = []
-    for evaluation in evaluations:
-        rows = evaluation.rows
-        if fresh_stores:
-            rows = tuple(_without_candle_uuid(row) for row in rows)
-        if tie_insensitive:
-            rows = tuple(sorted(rows, key=_row_identity))
-        comparable.append(replace(evaluation, rows=rows))
-    return comparable
+    """Normalise store-generated candle UUIDs only when replays used separate stores."""
+    if not fresh_stores:
+        return list(evaluations)
+    return [
+        replace(evaluation, rows=tuple(_without_candle_uuid(row) for row in evaluation.rows))
+        for evaluation in evaluations
+    ]
 
 
-def _assert_parity(
-    exact: _Run, dense: _Run, *, fresh_stores: bool = False, tie_insensitive: bool = False
-) -> None:
+def _assert_parity(exact: _Run, dense: _Run, *, fresh_stores: bool = False) -> None:
     """Assert identical series output, shadow evaluations and built artifacts.
 
     Args:
         exact: Replay using the exact event read.
         dense: Replay using the original interval or dense event read.
         fresh_stores: Whether each replay seeded its own store, so candle UUIDs differ.
-        tie_insensitive: Whether evidence rows tying on the sort key may be reordered.
     """
     assert exact.result.points == dense.result.points
     assert exact.result.replay_metadata == dense.result.replay_metadata
     assert exact.result.replay_metadata is not None
     assert exact.result.rate_sources == dense.result.rate_sources
     assert exact.result == dense.result
-    exact_evaluations = _comparable(
-        exact.evaluations, fresh_stores=fresh_stores, tie_insensitive=tie_insensitive
-    )
-    dense_evaluations = _comparable(
-        dense.evaluations, fresh_stores=fresh_stores, tie_insensitive=tie_insensitive
-    )
+    exact_evaluations = _comparable(exact.evaluations, fresh_stores=fresh_stores)
+    dense_evaluations = _comparable(dense.evaluations, fresh_stores=fresh_stores)
     assert exact_evaluations == dense_evaluations
     assert _artifacts(exact_evaluations) == _artifacts(dense_evaluations)
     assert exact.repo.fx_exact_minute_calls
@@ -952,7 +939,8 @@ async def test_exact_reads_match_dense_rows_order_and_duplicates(databases: _Dat
 
     Given: Shuffled inserts of every plane with gaps and equal or conflicting duplicates.
     When: Exact discovery and loading run beside the range, interval and per-minute reads.
-    Then: Rows match in multiplicity and order, and discovered planes match too.
+    Then: Rows match in multiplicity and in the total order that breaks minute and
+    plane ties by instrument and candle id, and discovered planes match too.
     """
     candles = _standard_candles(range(-30, 11))
     random.Random(7).shuffle(candles)
@@ -977,6 +965,8 @@ async def test_exact_reads_match_dense_rows_order_and_duplicates(databases: _Dat
     wanted = set(opens)
     assert exact == [row for row in dense if row["open_at"] in wanted]
     assert exact == [row for row in intervals if row["open_at"] in wanted]
+    assert exact == sorted(exact, key=_row_identity)
+    assert dense == sorted(dense, key=_row_identity)
     duplicates = [row for row in exact if row["exchange"] == "kraken" and row["base"] == "EUR"]
     assert len(duplicates) > len({row["open_at"] for row in duplicates})
     per_minute: set[PnlFxRatePlane] = set()
@@ -1059,8 +1049,8 @@ async def test_postgres_exact_reads_match_dense_rows_and_planes(
 
     Given: Shuffled PostgreSQL inserts of every plane with gaps and duplicates.
     When: Exact discovery and loading run beside the range and per-minute reads.
-    Then: Exact rows keep the sort key and equal the dense rows at those minutes
-    as a multiset, and the discovered planes equal the per-minute union.
+    Then: Exact rows equal the dense rows at those minutes in the same total
+    order, and the discovered planes equal the per-minute union.
     """
     candles = _standard_candles(range(-30, 11))
     random.Random(11).shuffle(candles)
@@ -1079,11 +1069,8 @@ async def test_postgres_exact_reads_match_dense_rows_and_planes(
     dense = await database.get_pnl_fx_rate_candles(planes, _m(-31), _m(10), horizon)
     exact = await database.get_pnl_fx_rate_candles_at(planes, list(reversed(opens)), horizon)
     wanted = set(opens)
-    restricted = [row for row in dense if row["open_at"] in wanted]
-    assert [_row_identity(row)[:4] for row in exact] == [
-        _row_identity(row)[:4] for row in restricted
-    ]
-    assert sorted(exact, key=_row_identity) == sorted(restricted, key=_row_identity)
+    assert exact == [row for row in dense if row["open_at"] in wanted]
+    assert exact == sorted(exact, key=_row_identity)
     duplicates = [row for row in exact if row["exchange"] == "kraken" and row["base"] == "EUR"]
     assert len(duplicates) > len({row["open_at"] for row in duplicates})
     per_minute: set[PnlFxRatePlane] = set()
@@ -1105,8 +1092,8 @@ async def test_postgres_exact_event_read_matches_dense_series(
 
     Given: Every FX minute stored in PostgreSQL with equal and conflicting duplicates.
     When: One shadow-pinned chunk replays with the exact read and the dense oracle.
-    Then: The series and the built artifacts are identical as returned, and the
-    evaluations are identical once rows tying on the sort key are ordered.
+    Then: The series, the evaluations with their row order, and the built
+    artifacts are identical as returned.
     """
     eur_fills, pln_fills = _EVENT_LAYOUTS[event_layout]
     window = range(0, 10)
@@ -1122,7 +1109,7 @@ async def test_postgres_exact_event_read_matches_dense_series(
 
     exact, dense = await _exact_and_dense(make_repo, window, monkeypatch, shadow=True)
 
-    _assert_parity(exact, dense, tie_insensitive=True)
+    _assert_parity(exact, dense)
     assert exact.evaluations
     assert _artifacts(exact.evaluations) == _artifacts(dense.evaluations)
     assert sum(exact.repo.exact_rows) < dense.repo.range_rows[1]

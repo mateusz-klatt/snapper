@@ -1678,6 +1678,32 @@ _PNL_FX_MINUTE_BATCH: Final[int] = 400
 """Exact-minute batch size, kept well under the strictest driver parameter cap."""
 
 
+def _pnl_fx_rate_row_order(row: PnlFxRateRow) -> tuple[datetime, str, str, str, str, int]:
+    """Totally order FX candle rows so every reader returns one sequence.
+
+    Rows tying on minute and plane, such as two listings of one pair on one
+    venue, arrive from SQL in plan order, and the range, interval and
+    exact-minute reads use different plans. Ordering those ties by instrument
+    and then by the immutable candle id makes the sequence identical across
+    reads and dialects. No valuation depends on it, because conflicting
+    duplicates already refuse their rate.
+
+    Args:
+        row: One loaded FX candle row.
+
+    Returns:
+        The minute, plane and durable identity key the readers sort by.
+    """
+    return (
+        row["open_at"],
+        row["base"],
+        row["quote"],
+        row["exchange"],
+        row["instrument_public_id"],
+        row["candle_id"],
+    )
+
+
 def _pnl_fx_symbol_proof_filters(as_of: datetime) -> list[ColumnElement[bool]]:
     """Prove one FX symbol's denomination and spot classification at a horizon.
 
@@ -5687,7 +5713,8 @@ class Repository(ABC):
             as_of: Snapshot time threading the temporal predicates.
 
         Returns:
-            Rows ordered by ``(open_at, base, quote, exchange)``.
+            Rows ordered by ``(open_at, base, quote, exchange)``, then by
+            instrument and candle identity within a tie.
         """
 
     @abstractmethod
@@ -5727,7 +5754,8 @@ class Repository(ABC):
                 the outer bounds. Empty input retains the entire bounded range.
 
         Returns:
-            Rows ordered by candle open time and plane identity.
+            Rows ordered by candle open time and plane identity, then by
+            instrument and candle identity within a tie.
         """
         ...
 
@@ -23117,7 +23145,8 @@ class SQLAlchemyRepository(Repository):
             as_of: Snapshot time threading the temporal predicates.
 
         Returns:
-            Rows ordered by ``(open_at, base, quote, exchange)``.
+            Rows ordered by ``(open_at, base, quote, exchange)``, then by
+            instrument and candle identity within a tie.
         """
         if not planes or not open_ats:
             return []
@@ -23126,7 +23155,7 @@ class SQLAlchemyRepository(Repository):
         for index in range(0, len(wanted), _PNL_FX_MINUTE_BATCH):
             batch = wanted[index : index + _PNL_FX_MINUTE_BATCH]
             rows.extend(await self._pnl_fx_rate_candles(planes, as_of, Candle.open_at.in_(batch)))
-        rows.sort(key=lambda row: (row["open_at"], row["base"], row["quote"], row["exchange"]))
+        rows.sort(key=_pnl_fx_rate_row_order)
         return rows
 
     async def get_pnl_fx_rate_candles(
@@ -23152,7 +23181,8 @@ class SQLAlchemyRepository(Repository):
             open_intervals: Optional intervals intersected with the outer bounds.
 
         Returns:
-            Rows ordered by ``(open_at, base, quote, exchange)``.
+            Rows ordered by ``(open_at, base, quote, exchange)``, then by
+            instrument and candle identity within a tie.
         """
         if not planes:
             return []
@@ -23168,7 +23198,7 @@ class SQLAlchemyRepository(Repository):
                 ),
             )
         rows = await self._pnl_fx_rate_candles(planes, as_of, minute_filter)
-        rows.sort(key=lambda row: (row["open_at"], row["base"], row["quote"], row["exchange"]))
+        rows.sort(key=_pnl_fx_rate_row_order)
         return rows
 
     async def _pnl_fx_rate_candles(
