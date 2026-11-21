@@ -284,11 +284,32 @@ class AttributionKeyPayload(BaseModel):
 
 
 class TaggedIntPayload(BaseModel):
-    """Exact decimal integer payload preserving Python ``int`` type."""
+    """Exact decimal integer payload preserving Python ``int`` type.
+
+    The integer is kept exact for arithmetic, but valuation converts it to a
+    float, so a value beyond the float range is rejected when the payload is
+    built. That covers encoding and decoding alike.
+    """
 
     model_config = _STRICT_CHECKPOINT_CONFIG
 
     int_value: UnitsStr = Field(alias="int")
+
+    @model_validator(mode="after")
+    def _require_float_range(self) -> Self:
+        """Reject an integer whose float conversion would overflow.
+
+        Returns:
+            The validated payload.
+
+        Raises:
+            ValueError: When the integer lies beyond the finite float range.
+        """
+        try:
+            float(int(self.int_value))
+        except OverflowError as exc:
+            raise ValueError("checkpoint carried integer exceeds the float range") from exc
+        return self
 
 
 type CarriedNumberPayload = HexFloatStr | TaggedIntPayload

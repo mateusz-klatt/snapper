@@ -7,6 +7,7 @@ latched incompleteness persistence vs mark independence, and fail-closed gates.
 
 import json
 import math
+import sys
 from collections.abc import Hashable
 from collections.abc import Sequence
 from dataclasses import replace
@@ -2074,6 +2075,45 @@ class TestRound3ReviewCases:
         assert full.points[3].unrealized_pnl.hex() == "0x1.7ffffffffffffp+55"
         _assert_points_bit_identical(full.points[3:], resumed_mem.points)
         _assert_points_bit_identical(full.points[3:], resumed_json.points)
+
+    def test_round4_carried_integers_beyond_the_float_range_are_rejected(self) -> None:
+        """Carried integers must convert to a finite float when encoded and decoded.
+
+        Given: A valid checkpoint whose carried quantity and basis are exact integers,
+        When: The JSON quantity becomes ``10**400``, or a checkpoint carrying an
+            integer at or beyond the float range is serialized,
+        Then: Decoding and encoding raise ValueError, while the largest integer that
+            converts to a finite float still round-trips as an int.
+        """
+        opening = TimelineOpening(
+            pools=(_OPENING_POOL("I1", cast(float, 3), cast(float, 3)),),
+            t0=_M(0),
+        )
+        marks: MarkMap = {("I1", _M(minute)): 110.0 for minute in range(5)}
+        captured = build_pnl_timeline(
+            (),
+            (),
+            marks,
+            _pointwise_window(0, 2, capture_checkpoint=True),
+            opening=opening,
+        )
+        checkpoint = captured.closing_checkpoint
+        assert checkpoint is not None
+        raw = json.loads(checkpoint_to_json(checkpoint))
+        raw["pools"][0]["position_qty"] = {"int": str(10**400)}
+        with pytest.raises(ValueError, match="float range"):
+            checkpoint_from_json(json.dumps(raw))
+        largest = int(sys.float_info.max)
+        largest_pool = replace(checkpoint.pools[0], position_qty=cast(float, largest))
+        round_tripped = checkpoint_from_json(
+            checkpoint_to_json(replace(checkpoint, pools=(largest_pool,)))
+        )
+        assert round_tripped.pools[0].position_qty == largest
+        assert type(round_tripped.pools[0].position_qty) is int
+        for oversized in (2**1024, 10**400):
+            pool = replace(checkpoint.pools[0], position_qty=cast(float, oversized))
+            with pytest.raises(ValueError, match="float range"):
+                checkpoint_to_json(replace(checkpoint, pools=(pool,)))
 
     def test_round3_item3_exact_once_execution_keys_and_codex_missing_deferred(
         self,
