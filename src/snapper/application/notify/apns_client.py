@@ -12,6 +12,7 @@ tests can fake out both ends without needing an event loop.
 """
 
 from dataclasses import dataclass
+from typing import Final
 
 from aioapns import APNs as _AioApns
 from aioapns import NotificationRequest
@@ -207,16 +208,35 @@ def _status_code_from(status: str) -> int:
         return 0
 
 
-def _coarse_status(status_code: int, description: str) -> str:
-    """Derive the coarse outbox status from the numeric HTTP/2 code.
+_UNREGISTERED_400_DESCRIPTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "BadDeviceToken",
+        "DeviceTokenNotForTopic",
+    }
+)
+"""APNs HTTP 400 reasons proving a device token can never succeed on this topic/env."""
 
-    The outbox persists this value on the SCD2 ``alert_deliveries``
-    row so retries can dispatch without re-deriving it from a
-    library-specific representation.
+
+def _coarse_status(status_code: int, description: str) -> str:
+    """Derive the coarse outbox status from the numeric HTTP/2 code and reason.
+
+    Apple APNs returns HTTP 410 for ``Unregistered`` and HTTP 400 for
+    permanently invalid device tokens (``BadDeviceToken`` and
+    ``DeviceTokenNotForTopic``). Both map to ``unregistered`` so the sidecar
+    deactivates the unusable device immediately instead of exhausting its retry
+    budget into ``failed`` on every subsequent alert.
+
+    Args:
+        status_code: Numeric HTTP/2 status code from APNs.
+        description: APNs reason string (empty on 200).
+
+    Returns:
+        Coarse outbox status string (``success``, ``unregistered``,
+        ``throttled``, ``server_error``, ``other``, or ``unknown``).
     """
     if status_code == 200:
         return "success"
-    if status_code == 410:
+    if status_code == 410 or (status_code == 400 and description in _UNREGISTERED_400_DESCRIPTIONS):
         return "unregistered"
     if status_code == 429:
         return "throttled"

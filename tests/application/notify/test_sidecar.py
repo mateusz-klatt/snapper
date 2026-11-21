@@ -1072,6 +1072,35 @@ class TestScopePreSendSkip:
         assert active == []
 
     @pytest.mark.asyncio
+    async def test_400_bad_device_token_deactivates_device_without_retry(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """APNs 400 BadDeviceToken deactivates the device immediately without retrying."""
+        from aioapns.common import NotificationResult
+
+        from snapper.application.notify.apns_client import _map_result
+
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        mapped = _map_result(NotificationResult("", "400", "BadDeviceToken", None))
+        sidecar, _ = _make_sidecar(repo, send_result=mapped)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        await sidecar._attempt_once(delivery_pid, device, event, _ts())
+
+        assert await repo.list_active_notification_devices_for_user(user) == []
+        counts = await repo.count_deliveries_by_status()
+        assert counts == {"unregistered": 1}
+
+    @pytest.mark.asyncio
     async def test_410_path_writes_inactive_successor_row(self, repo: SQLAlchemyRepository) -> None:
         """Regression: 410 writes a tombstone successor, not a gap."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"

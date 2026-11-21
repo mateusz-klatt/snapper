@@ -58,7 +58,13 @@ class TestCoarseStatus:
 
     def test_unregistered(self) -> None:
         """410 maps to ``unregistered`` (triggers device de-activation)."""
+        assert _coarse_status(410, "Unregistered") == "unregistered"
         assert _coarse_status(410, "BadDeviceToken") == "unregistered"
+
+    def test_400_terminal_invalid_token_maps_to_unregistered(self) -> None:
+        """400 BadDeviceToken and DeviceTokenNotForTopic map to ``unregistered``."""
+        assert _coarse_status(400, "BadDeviceToken") == "unregistered"
+        assert _coarse_status(400, "DeviceTokenNotForTopic") == "unregistered"
 
     def test_throttled(self) -> None:
         """429 maps to ``throttled``."""
@@ -94,13 +100,33 @@ class TestMapResult:
 
     def test_410_result_populates_description(self) -> None:
         """410 response carries the APNs error string in description."""
-        raw = NotificationResult("", "410", "BadDeviceToken", None)
+        raw = NotificationResult("", "410", "Unregistered", None)
 
         mapped = _map_result(raw)
 
         assert mapped.status_code == 410
         assert mapped.status == "unregistered"
+        assert mapped.description == "Unregistered"
+
+    def test_400_bad_device_token_result_maps_to_unregistered(self) -> None:
+        """400 BadDeviceToken maps to ``unregistered`` while keeping status_code 400."""
+        raw = NotificationResult("", "400", "BadDeviceToken", None)
+
+        mapped = _map_result(raw)
+
+        assert mapped.status_code == 400
+        assert mapped.status == "unregistered"
         assert mapped.description == "BadDeviceToken"
+
+    def test_400_device_token_not_for_topic_maps_to_unregistered(self) -> None:
+        """400 DeviceTokenNotForTopic maps to ``unregistered`` while keeping status_code 400."""
+        raw = NotificationResult("", "400", "DeviceTokenNotForTopic", None)
+
+        mapped = _map_result(raw)
+
+        assert mapped.status_code == 400
+        assert mapped.status == "unregistered"
+        assert mapped.description == "DeviceTokenNotForTopic"
 
     def test_missing_notification_id_becomes_empty_string(self) -> None:
         """None ``notification_id`` is normalised to empty string."""
