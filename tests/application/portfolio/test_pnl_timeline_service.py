@@ -595,6 +595,7 @@ class FakeRepo:
         self._has_fill_gap = has_fill_gap
         self._fx_rows: list[PnlFxRateRow] = list(fx_rows or [])
         self.fx_exact_minute_calls: list[tuple[list[PnlFxRatePlane], list[datetime]]] = []
+        self.fx_exact_candidate_calls: list[list[datetime]] = []
         self._fx_repository = fx_repository
         self._has_anchor = has_anchor
         self._anchor = anchor
@@ -944,6 +945,27 @@ class FakeRepo:
                     not open_intervals
                     or any(lower <= row["open_at"] <= upper for lower, upper in open_intervals)
                 )
+            }
+        )
+
+    async def get_pnl_fx_rate_exchanges_at(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[PnlFxRatePlane]:
+        """Discover venue-qualified FX planes with canned evidence at exact opens."""
+        self.fx_candidate_pair_calls.append(list(pairs))
+        self.fx_exact_candidate_calls.append(list(open_ats))
+        if self._fx_repository is not None:
+            return await self._fx_repository.get_pnl_fx_rate_exchanges_at(pairs, open_ats, as_of)
+        requested = set(pairs)
+        wanted = set(open_ats)
+        return sorted(
+            {
+                (row["base"], row["quote"], row["exchange"])
+                for row in self._fx_rows
+                if (row["base"], row["quote"]) in requested and row["open_at"] in wanted
             }
         )
 
