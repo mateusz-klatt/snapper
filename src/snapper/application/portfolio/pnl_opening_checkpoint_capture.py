@@ -6,14 +6,20 @@ from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
 from datetime import timedelta
+from typing import Literal
 from typing import Protocol
 
+from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.execution_chain import execution_chain_genesis
 from snapper.application.portfolio.fx_conversion_shadow import POINTWISE_FX_ELECTION_POLICY_VERSION
 from snapper.application.portfolio.fx_rates import FxVenueMap
 from snapper.application.portfolio.pnl_engine_options import pnl_engine_options_for
 from snapper.application.portfolio.pnl_opening_checkpoint import CHECKPOINT_SCHEMA_VERSION
 from snapper.application.portfolio.pnl_opening_checkpoint import checkpoint_to_payload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import BUNDLE_VERSION
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import (
+    PnlCheckpointBundleIdentityPayload,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlCheckpointStateBundle
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlEventFxCandlePlanePayload
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlEventFxReplayStatePayload
@@ -96,12 +102,26 @@ def event_rate_source_payloads(
     return tuple(sources[key] for key in sorted(sources))
 
 
+type PnlCheckpointCaptureRefusal = Literal[
+    "capture_value_error",
+    "capture_not_permitted",
+    "capture_not_at_tip",
+    "capture_execution_chain_error",
+    "global_withhold",
+    "engine_checkpoint_missing",
+    "carried_event_inputs",
+    "carried_inputs_on_processed_event",
+    "conversion_uses_mark_evidence",
+]
+"""Closed refusal vocabulary emitted by service-side checkpoint capture."""
+
+
 @dataclass(slots=True)
 class _CaptureEvidence:
     """Mutable evidence collected for one single-use capture request."""
 
     active: bool = False
-    refusal: str | None = None
+    refusal: PnlCheckpointCaptureRefusal | None = None
     prefix: PnlTimelineExecutionPrefix | None = None
     execution_counts: dict[str, tuple[int, int]] | None = None
     execution_chain_digests: dict[str, str] | None = None
@@ -179,7 +199,7 @@ class PnlCheckpointCaptureRequest:
         return self._evidence.active
 
     @property
-    def refusal(self) -> str | None:
+    def refusal(self) -> PnlCheckpointCaptureRefusal | None:
         """Return the current soft refusal, if any.
 
         Returns:
@@ -187,7 +207,11 @@ class PnlCheckpointCaptureRequest:
         """
         return self._evidence.refusal
 
-    def activate(self, to_time: datetime, replay_generation_tip: datetime | None) -> str | None:
+    def activate(
+        self,
+        to_time: datetime,
+        replay_generation_tip: datetime | None,
+    ) -> PnlCheckpointCaptureRefusal | None:
         """Resolve capture permission and the exact settling-tip requirement.
 
         Args:
@@ -209,7 +233,7 @@ class PnlCheckpointCaptureRequest:
         self._evidence.active = True
         return None
 
-    def _refuse(self, reason: str) -> str:
+    def _refuse(self, reason: PnlCheckpointCaptureRefusal) -> PnlCheckpointCaptureRefusal:
         """Stop capture and retain one stable refusal reason."""
         self._evidence.active = False
         self._evidence.refusal = reason
@@ -268,6 +292,8 @@ class PnlCheckpointCaptureRequest:
                 prefix["annulments"],
                 watermarks,
             )
+        except ExecutionChainError:
+            self._refuse("capture_execution_chain_error")
         except ValueError:
             self._refuse("capture_value_error")
 
@@ -435,7 +461,15 @@ class PnlCheckpointCaptureRequest:
             "event_fx_candles_by_plane",
         )
         bundle = PnlCheckpointStateBundle(
-            bundle_version=1,
+            bundle_version=BUNDLE_VERSION,
+            identity=PnlCheckpointBundleIdentityPayload(
+                wallet_public_id=self.key.wallet_public_id,
+                mode=self.key.mode,
+                valuation_ccy=self.key.valuation_ccy,
+                epoch_public_id=self.key.epoch_public_id,
+                calc_version=self.key.calc_version,
+                source_generation=self.source_generation,
+            ),
             engine_state=checkpoint_to_payload(assembly.engine_state),
             price_ref_spans_by_instrument=dict(assembly.price_ref_spans_by_instrument),
             display_activity_spans_by_instrument=dict(
@@ -558,7 +592,7 @@ class PnlCheckpointCaptureFinalization:
 
 def capture_checkpoint_write(
     final: PnlCheckpointCaptureFinalization,
-) -> tuple[PnlOpeningCheckpointWrite | None, str | None]:
+) -> tuple[PnlOpeningCheckpointWrite | None, PnlCheckpointCaptureRefusal | None]:
     """Assemble a capture write or convert every expected failure to a refusal.
 
     Args:

@@ -22505,6 +22505,8 @@ class SQLAlchemyRepository(Repository):
             Exact set of ``(exchange, scope_sequence)`` coordinates required for the suffix.
 
         Raises:
+            ValueError: When any watermark is negative, any exchange name is blank,
+                or any deferred sequence lies outside ``1..generation``.
             ExecutionChainError: When any generation watermark regresses below its cutoff.
         """
         expected: set[tuple[str, int]] = set()
@@ -22516,6 +22518,8 @@ class SQLAlchemyRepository(Repository):
         for exchange in exchanges:
             cutoff = request.cutoff_watermarks.get(exchange, 0)
             generation = request.generation_watermarks.get(exchange, 0)
+            if not exchange or cutoff < 0 or generation < 0:
+                raise ValueError("execution suffix watermark map is invalid")
             if generation < cutoff:
                 raise ExecutionChainError(
                     "regressed_execution_suffix_watermarks: "
@@ -22525,6 +22529,8 @@ class SQLAlchemyRepository(Repository):
             for sequence in range(cutoff + 1, generation + 1):
                 expected.add((exchange, sequence))
             for deferred in request.deferred_execution_sequences.get(exchange, ()):
+                if deferred < 1 or deferred > generation:
+                    raise ValueError("deferred execution sequence lies outside 1..generation")
                 expected.add((exchange, deferred))
         return expected
 
@@ -23144,7 +23150,24 @@ class SQLAlchemyRepository(Repository):
         source_rows: list[tuple[Execution, Order | None, Instrument | None]],
         horizon: _ExecutionKnowledgeHorizon,
     ) -> PnlTimelineExecutionSuffix:
-        """Load lineage, fills, and manifest rows for bounded suffix validation."""
+        """Load lineage, fills, and manifest rows for bounded suffix validation.
+
+        Passes ``request.fill_witness_cut`` watermarks as the SQL upper bound in
+        :meth:`_read_pnl_timeline_fill_lineage` without re-verifying the
+        full-prefix witness digest against suffix-only fill rows. Boundary
+        integrity is covered by prefix verification in the checkpoint verifier
+        together with the ``uq_executions_order_exec`` and
+        ``uq_executions_order_trade`` unique constraints.
+
+        Args:
+            s: Active snapshot-pinned read session.
+            request: Suffix cutoff, generation, deferred coordinates, and cut.
+            source_rows: Loaded raw suffix and deferred execution rows.
+            horizon: Resolved knowledge horizon for the read.
+
+        Returns:
+            Certified effective suffix executions and suffix-applied annulments.
+        """
         client_order_ids = list(
             dict.fromkeys(
                 order.client_order_id

@@ -3,10 +3,12 @@
 from dataclasses import replace
 from datetime import datetime
 from datetime import timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 
 from snapper.application.portfolio import pnl_timeline_service as service
+from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointResume
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
     verify_checkpoint_for_resume,
@@ -333,7 +335,7 @@ async def _capture_and_verify_custom(
     cutoff_watermarks: dict[str, int],
     *,
     manifest_digest: str = capture._MANIFEST,
-    anchor_t0: datetime = fixtures._T0,
+    anchor_t0: datetime = fixtures._EMPTY_ANCHOR_T0,
 ) -> PnlCheckpointResume:
     """Capture at C and verify at the resuming horizon for custom constellations.
 
@@ -788,6 +790,68 @@ async def test_checkpoint_resume_with_carry_valuation_is_rejected(
         )
 
 
+async def test_checkpoint_resume_with_previous_replay_as_of_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject checkpoint resume when previous_replay_as_of is set.
+
+    Given: A verified checkpoint resume state and frozen generation watermarks.
+    When: ``build_wallet_pnl_series`` is called with ``previous_replay_as_of`` set.
+    Then: ``_validate_checkpoint_resume_policy`` raises ``ValueError`` before
+        any suffix read runs.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    repo = _ResumeRepo()
+    resume = await _verified_resume(monkeypatch, repo)
+    options = replace(_resume_options(resume), previous_replay_as_of=fixtures._m(9))
+    with pytest.raises(ValueError, match="checkpoint resume does not permit previous_replay_as_of"):
+        await build_wallet_pnl_series(
+            repo,
+            fixtures._W1,
+            "live",
+            fixtures._m(5),
+            _T,
+            "1m",
+            fixtures._m(10),
+            "USD",
+            policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+            options=options,
+        )
+
+
+async def test_checkpoint_resume_with_metadata_only_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject checkpoint resume when metadata_only is true.
+
+    Given: A verified checkpoint resume state and frozen generation watermarks.
+    When: ``build_wallet_pnl_series`` is called with ``metadata_only=True``.
+    Then: ``_validate_checkpoint_resume_policy`` raises ``ValueError`` before
+        any suffix read runs.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    repo = _ResumeRepo()
+    resume = await _verified_resume(monkeypatch, repo)
+    options = replace(_resume_options(resume), metadata_only=True)
+    with pytest.raises(ValueError, match="checkpoint resume does not permit metadata_only"):
+        await build_wallet_pnl_series(
+            repo,
+            fixtures._W1,
+            "live",
+            fixtures._m(5),
+            _T,
+            "1m",
+            fixtures._m(10),
+            "USD",
+            policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+            options=options,
+        )
+
+
 async def test_resume_forwards_prefix_has_idless_executions_to_suffix_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -827,3 +891,31 @@ async def test_resume_threads_frozen_fill_witness_cut_into_suffix_request(
     await _read_window(repo, resume)
     assert len(repo.suffix_requests) == 1
     assert getattr(repo.suffix_requests[0], "fill_witness_cut", None) == capture._WITNESS
+
+
+async def test_resume_wraps_suffix_execution_chain_error_as_frozen_evidence_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrap ExecutionChainError from suffix loading as PnlFrozenReplayEvidenceChangedError.
+
+    Given: A verified checkpoint resume whose suffix execution read raises
+        ``ExecutionChainError``.
+    When: ``build_wallet_pnl_series`` resumes the suffix window.
+    Then: It raises ``PnlFrozenReplayEvidenceChangedError`` chaining the
+        underlying ``ExecutionChainError``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    repo = _ResumeRepo()
+    resume = await _verified_resume(monkeypatch, repo)
+    monkeypatch.setattr(
+        repo,
+        "get_pnl_timeline_execution_suffix_at_watermarks",
+        AsyncMock(side_effect=ExecutionChainError("missing_execution_suffix_row")),
+    )
+    with pytest.raises(
+        PnlFrozenReplayEvidenceChangedError, match="could not be recertified"
+    ) as err:
+        await _read_window(repo, resume)
+    assert isinstance(err.value.__cause__, ExecutionChainError)

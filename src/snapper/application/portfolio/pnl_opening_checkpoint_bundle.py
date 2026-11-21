@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Annotated
+from typing import Final
 from typing import Literal
 from typing import Self
 
@@ -17,18 +18,74 @@ from pydantic import model_validator
 from snapper.application.portfolio.pnl_fx_replay_state import _EventFxReplayState
 from snapper.application.portfolio.pnl_fx_replay_state import _MarkReplayState
 from snapper.application.portfolio.pnl_opening_checkpoint import _STRICT_CHECKPOINT_CONFIG
-from snapper.application.portfolio.pnl_opening_checkpoint import HexFloatStr
+from snapper.application.portfolio.pnl_opening_checkpoint import CarriedNumberPayload
 from snapper.application.portfolio.pnl_opening_checkpoint import NonEmptyStr
 from snapper.application.portfolio.pnl_opening_checkpoint import PnlOpeningCheckpointState
 from snapper.application.portfolio.pnl_opening_checkpoint import PoolKeyPayload
 from snapper.application.portfolio.pnl_opening_checkpoint import PoolLastEffectivePayload
 from snapper.application.portfolio.pnl_opening_checkpoint import UtcDateTime
+from snapper.application.portfolio.pnl_opening_checkpoint import _decode_carried_number
+from snapper.application.portfolio.pnl_opening_checkpoint import _encode_carried_number
 from snapper.application.portfolio.pnl_opening_checkpoint import _pool_key_from_payload
 from snapper.application.portfolio.pnl_opening_checkpoint import _pool_key_to_payload
 from snapper.application.portfolio.pnl_opening_checkpoint import _reject_json_constant
 from snapper.application.portfolio.pnl_opening_checkpoint import _require_strictly_sorted
 from snapper.application.portfolio.pnl_opening_checkpoint import _unique_json_pairs
 from snapper.data.pnl_correction_state import IdAggregate
+
+BUNDLE_VERSION: Final[Literal[2]] = 2
+"""Current strict envelope version embedding scope and generation identity."""
+
+
+def _require_checkpoint_mode(value: str) -> str:
+    """Require a valid checkpoint trading mode without coercion.
+
+    Args:
+        value: Mode string to validate.
+
+    Returns:
+        The validated ``"live"`` or ``"paper"`` mode string.
+
+    Raises:
+        ValueError: When ``value`` is not ``"live"`` or ``"paper"``.
+    """
+    if value not in ("live", "paper"):
+        raise ValueError("checkpoint mode must be 'live' or 'paper'")
+    return value
+
+
+def _require_positive_generation(value: int) -> int:
+    """Require a positive source generation without boolean coercion.
+
+    Args:
+        value: Strict integer generation number.
+
+    Returns:
+        The validated positive generation integer.
+
+    Raises:
+        ValueError: When ``value`` is less than 1.
+    """
+    if value < 1:
+        raise ValueError("checkpoint source_generation must be positive")
+    return value
+
+
+def _require_non_negative_int(value: int) -> int:
+    """Require a non-negative integer cursor without boolean coercion.
+
+    Args:
+        value: Strict integer cursor value.
+
+    Returns:
+        The validated non-negative integer.
+
+    Raises:
+        ValueError: When ``value`` is negative.
+    """
+    if value < 0:
+        raise ValueError("checkpoint event_index must be non-negative")
+    return value
 
 
 def _require_canonical_decimal_int(value: str) -> str:
@@ -55,6 +112,28 @@ def _require_canonical_decimal_int(value: str) -> str:
 type ExactDecimalIntStr = Annotated[str, AfterValidator(_require_canonical_decimal_int)]
 """Canonical exact decimal integer used by row-identity aggregates."""
 
+type CheckpointModeStr = Annotated[str, AfterValidator(_require_checkpoint_mode)]
+"""Strict checkpoint trading mode (``"live"`` or ``"paper"``)."""
+
+type PositiveGenerationInt = Annotated[StrictInt, AfterValidator(_require_positive_generation)]
+"""Strict positive source generation integer."""
+
+type NonNegativeInt = Annotated[StrictInt, AfterValidator(_require_non_negative_int)]
+"""Strict non-negative replay cursor integer."""
+
+
+class PnlCheckpointBundleIdentityPayload(BaseModel):
+    """Scope, calculation version, and generation identity bound inside ``state_json``."""
+
+    model_config = _STRICT_CHECKPOINT_CONFIG
+
+    wallet_public_id: NonEmptyStr
+    mode: CheckpointModeStr
+    valuation_ccy: NonEmptyStr
+    epoch_public_id: NonEmptyStr
+    calc_version: NonEmptyStr
+    source_generation: PositiveGenerationInt
+
 
 class PnlEventFxRequirementPayload(BaseModel):
     """Exact event-FX minutes required for one normalized currency pair."""
@@ -63,6 +142,13 @@ class PnlEventFxRequirementPayload(BaseModel):
 
     pair: tuple[NonEmptyStr, NonEmptyStr]
     minutes: tuple[UtcDateTime, ...]
+
+    @field_validator("minutes")
+    @classmethod
+    def _validate_minutes(cls, value: tuple[datetime, ...]) -> tuple[datetime, ...]:
+        """Require event-FX requirement minutes in strictly sorted unique order."""
+        _require_strictly_sorted(value, lambda minute: minute, "event_walk_state.minutes")
+        return value
 
 
 class PnlEventFxInstrumentRequirementsPayload(BaseModel):
@@ -73,6 +159,16 @@ class PnlEventFxInstrumentRequirementsPayload(BaseModel):
     instrument_public_id: NonEmptyStr
     requirements: tuple[PnlEventFxRequirementPayload, ...]
 
+    @field_validator("requirements")
+    @classmethod
+    def _validate_pairs(
+        cls,
+        value: tuple[PnlEventFxRequirementPayload, ...],
+    ) -> tuple[PnlEventFxRequirementPayload, ...]:
+        """Require pair entries in strictly sorted unique pair order."""
+        _require_strictly_sorted(value, lambda item: item.pair, "event_walk_state.pairs")
+        return value
+
 
 class PnlEventFxPoolQuantityPayload(BaseModel):
     """Canonical carried position quantity for one durable pool."""
@@ -80,7 +176,7 @@ class PnlEventFxPoolQuantityPayload(BaseModel):
     model_config = _STRICT_CHECKPOINT_CONFIG
 
     pool: PoolKeyPayload
-    position_qty: HexFloatStr
+    position_qty: CarriedNumberPayload
 
 
 class PnlEventFxUntrustedPayload(BaseModel):
@@ -103,6 +199,36 @@ class PnlEventFxReplayStatePayload(BaseModel):
     basis_unknown: tuple[PoolKeyPayload, ...]
     untrusted_at: tuple[PnlEventFxUntrustedPayload, ...]
 
+    @model_validator(mode="after")
+    def _validate_canonical_keys(self) -> Self:
+        """Require strictly sorted unique keys across every event-walk collection."""
+        _require_strictly_sorted(
+            self.requirements,
+            lambda item: item.instrument_public_id,
+            "event_walk_state.requirements",
+        )
+        _require_strictly_sorted(
+            self.last_effective,
+            lambda item: (item.pool.instrument_public_id, item.pool.shard_key),
+            "event_walk_state.last_effective",
+        )
+        _require_strictly_sorted(
+            self.position_qty,
+            lambda item: (item.pool.instrument_public_id, item.pool.shard_key),
+            "event_walk_state.position_qty",
+        )
+        _require_strictly_sorted(
+            self.basis_unknown,
+            lambda item: (item.instrument_public_id, item.shard_key),
+            "event_walk_state.basis_unknown",
+        )
+        _require_strictly_sorted(
+            self.untrusted_at,
+            lambda item: item.instrument_public_id,
+            "event_walk_state.untrusted_at",
+        )
+        return self
+
 
 class PnlMarkPoolQuantityPayload(BaseModel):
     """Canonical carried mark-walk quantity for one instrument shard."""
@@ -110,7 +236,7 @@ class PnlMarkPoolQuantityPayload(BaseModel):
     model_config = _STRICT_CHECKPOINT_CONFIG
 
     shard_key: NonEmptyStr
-    quantity: HexFloatStr
+    quantity: CarriedNumberPayload
 
 
 class PnlMarkInstrumentReplayStatePayload(BaseModel):
@@ -119,9 +245,23 @@ class PnlMarkInstrumentReplayStatePayload(BaseModel):
     model_config = _STRICT_CHECKPOINT_CONFIG
 
     instrument_public_id: NonEmptyStr
-    event_index: StrictInt
+    event_index: NonNegativeInt
     pool_quantities: tuple[PnlMarkPoolQuantityPayload, ...]
     mark_eligible: bool
+
+    @field_validator("pool_quantities")
+    @classmethod
+    def _validate_pool_quantities(
+        cls,
+        value: tuple[PnlMarkPoolQuantityPayload, ...],
+    ) -> tuple[PnlMarkPoolQuantityPayload, ...]:
+        """Require shard quantities in strictly sorted unique shard-key order."""
+        _require_strictly_sorted(
+            value,
+            lambda item: item.shard_key,
+            "mark_walk_state.pool_quantities",
+        )
+        return value
 
 
 class PnlRegressionShadowPayload(BaseModel):
@@ -132,6 +272,15 @@ class PnlRegressionShadowPayload(BaseModel):
     event_time: UtcDateTime
     previous_effective: UtcDateTime
 
+    @model_validator(mode="after")
+    def _validate_interval(self) -> Self:
+        """Require a non-empty half-open regression shadow interval."""
+        if self.event_time >= self.previous_effective:
+            raise ValueError(
+                "checkpoint regression shadow event_time must precede previous_effective"
+            )
+        return self
+
 
 class PnlMarkFxReplayStatePayload(BaseModel):
     """Per-instrument mark states and every global regression shadow."""
@@ -140,6 +289,20 @@ class PnlMarkFxReplayStatePayload(BaseModel):
 
     instruments: tuple[PnlMarkInstrumentReplayStatePayload, ...]
     regression_shadows: tuple[PnlRegressionShadowPayload, ...]
+
+    @field_validator("instruments")
+    @classmethod
+    def _validate_instruments(
+        cls,
+        value: tuple[PnlMarkInstrumentReplayStatePayload, ...],
+    ) -> tuple[PnlMarkInstrumentReplayStatePayload, ...]:
+        """Require mark instrument states in strictly sorted unique instrument order."""
+        _require_strictly_sorted(
+            value,
+            lambda item: item.instrument_public_id,
+            "mark_walk_state.instruments",
+        )
+        return value
 
 
 class PnlFxRateSourcePayload(BaseModel):
@@ -192,7 +355,8 @@ class PnlCheckpointStateBundle(BaseModel):
 
     model_config = _STRICT_CHECKPOINT_CONFIG
 
-    bundle_version: Literal[1]
+    bundle_version: Literal[2]
+    identity: PnlCheckpointBundleIdentityPayload
     engine_state: PnlOpeningCheckpointState
     price_ref_spans_by_instrument: dict[NonEmptyStr, tuple[UtcDateTime, UtcDateTime]]
     display_activity_spans_by_instrument: dict[NonEmptyStr, tuple[UtcDateTime, UtcDateTime]]
@@ -201,6 +365,18 @@ class PnlCheckpointStateBundle(BaseModel):
     event_walk_state: PnlEventFxReplayStatePayload
     mark_walk_state: PnlMarkFxReplayStatePayload
     event_fx_candles_by_plane: tuple[PnlEventFxCandlePlanePayload, ...]
+
+    @field_validator("price_ref_spans_by_instrument", "display_activity_spans_by_instrument")
+    @classmethod
+    def _validate_spans(
+        cls,
+        value: dict[str, tuple[datetime, datetime]],
+    ) -> dict[str, tuple[datetime, datetime]]:
+        """Require every carried activity span to satisfy ``start <= end``."""
+        for start, end in value.values():
+            if start > end:
+                raise ValueError("checkpoint span start cannot exceed end")
+        return value
 
     @field_validator("rate_sources_prefix")
     @classmethod
@@ -272,7 +448,7 @@ def event_walk_state_from_replay(state: _EventFxReplayState) -> PnlEventFxReplay
         position_qty=tuple(
             PnlEventFxPoolQuantityPayload(
                 pool=_pool_key_to_payload(pool_key),
-                position_qty=quantity.hex(),
+                position_qty=_encode_carried_number(quantity),
             )
             for pool_key, quantity in sorted(state.position_qty.items())
         ),
@@ -311,7 +487,7 @@ def event_walk_state_to_replay(payload: PnlEventFxReplayStatePayload) -> _EventF
             for entry in payload.last_effective
         },
         position_qty={
-            _pool_key_from_payload(entry.pool): float.fromhex(entry.position_qty)
+            _pool_key_from_payload(entry.pool): _decode_carried_number(entry.position_qty)
             for entry in payload.position_qty
         },
         basis_unknown={_pool_key_from_payload(pool) for pool in payload.basis_unknown},
@@ -340,7 +516,10 @@ def mark_walk_state_from_replay(
                 instrument_public_id=instrument_public_id,
                 event_index=state.event_index,
                 pool_quantities=tuple(
-                    PnlMarkPoolQuantityPayload(shard_key=shard_key, quantity=quantity.hex())
+                    PnlMarkPoolQuantityPayload(
+                        shard_key=shard_key,
+                        quantity=_encode_carried_number(quantity),
+                    )
                     for shard_key, quantity in sorted(state.pool_quantities.items())
                 ),
                 mark_eligible=state.mark_eligible,
@@ -369,7 +548,7 @@ def mark_walk_state_to_replay(
         entry.instrument_public_id: _MarkReplayState(
             event_index=entry.event_index,
             pool_quantities={
-                quantity.shard_key: float.fromhex(quantity.quantity)
+                quantity.shard_key: _decode_carried_number(quantity.quantity)
                 for quantity in entry.pool_quantities
             },
             mark_eligible=entry.mark_eligible,
@@ -392,7 +571,7 @@ def bundle_to_json(bundle: PnlCheckpointStateBundle) -> str:
         Compact JSON with recursively sorted object keys.
     """
     return json.dumps(
-        bundle.model_dump(mode="json"),
+        bundle.model_dump(mode="json", by_alias=True),
         allow_nan=False,
         separators=(",", ":"),
         sort_keys=True,

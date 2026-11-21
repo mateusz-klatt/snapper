@@ -1601,6 +1601,10 @@ def _derive_series_replay_metadata(
     the earliest affected minute only when its ``scope_sequence`` exceeds the
     caller's baseline for its exchange (defaulting to zero for an unseen exchange).
 
+    A late-fill probe must never run over a resumed suffix: on a resumed read,
+    ``earliest_affected_minute`` only sees suffix rows and cannot see earlier
+    prefix rows.
+
     Args:
         execution_rows: The suffix rows already filtered above the anchor
             watermark, in commit order.
@@ -6396,16 +6400,21 @@ async def _load_checkpoint_resume_inputs(
     scope = anchor_load.scope
     anchor = cast(_ResolvedPnlAnchor, anchor_load.anchor)
     reference_tip = options.replay_generation_tip or to_time
-    evidence = await load_checkpoint_suffix(
-        repo,
-        resume,
-        PnlCheckpointSuffixBounds(
-            generation_watermarks=frozen,
-            reference_tip=reference_tip,
-            as_of=scope.knowledge_horizon,
-            fill_witness_cut=options.frozen_fill_witness_cut,
-        ),
-    )
+    try:
+        evidence = await load_checkpoint_suffix(
+            repo,
+            resume,
+            PnlCheckpointSuffixBounds(
+                generation_watermarks=frozen,
+                reference_tip=reference_tip,
+                as_of=scope.knowledge_horizon,
+                fill_witness_cut=options.frozen_fill_witness_cut,
+            ),
+        )
+    except ExecutionChainError as error:
+        raise PnlFrozenReplayEvidenceChangedError(
+            "P&L frozen execution and fill witnesses could not be recertified"
+        ) from error
     manifest = options.frozen_execution_manifest_digest
     if manifest is not None and _execution_manifest_digest(evidence.annulments) != manifest:
         raise PnlFrozenReplayEvidenceChangedError("P&L frozen execution manifest changed")
@@ -6685,13 +6694,32 @@ def _validate_checkpoint_resume_policy(
     options: PnlSeriesReplayOptions,
     policy: PnlSeriesReadPolicy,
 ) -> None:
-    """Require frozen execution watermarks and exact valuation for checkpoint resume."""
+    """Require frozen exact non-probe reads for checkpoint resume.
+
+    A late-fill probe must never run over a resumed suffix: on a resumed read,
+    ``earliest_affected_minute`` only sees suffix rows. Rejecting both
+    ``previous_replay_as_of`` and ``metadata_only`` ensures late-fill probes
+    always inspect the full post-anchor prefix.
+
+    Args:
+        options: Replay options carrying optional verified resume state.
+        policy: Series read policy controlling carry valuation.
+
+    Raises:
+        ValueError: When checkpoint resume omits a frozen execution cut, enables
+            carry valuation, sets ``previous_replay_as_of``, or enables
+            ``metadata_only``.
+    """
     if options.checkpoint_resume is None:
         return
     if options.frozen_execution_watermarks is None:
         raise ValueError("A P&L checkpoint resume requires a captured raw execution cut")
     if policy.carry_valuation:
         raise ValueError("A P&L checkpoint resume does not permit carry valuation")
+    if options.previous_replay_as_of is not None:
+        raise ValueError("A P&L checkpoint resume does not permit previous_replay_as_of")
+    if options.metadata_only:
+        raise ValueError("A P&L checkpoint resume does not permit metadata_only")
 
 
 def _validate_frozen_replay_policy(
@@ -7764,7 +7792,7 @@ async def build_wallet_pnl_series(
                 result = _withhold_series_for_global_reason(
                     result,
                     global_reason,
-                    capture_requested=options.checkpoint_capture is not None,
+                    capture_requested=(capture_request is not None and capture_request.active),
                 )
             result = _with_instrument_display_identities(
                 result,

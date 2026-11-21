@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from snapper.application.portfolio.execution_chain import ExecutionChainError
+from snapper.application.portfolio.execution_chain import execution_chain_genesis
 from snapper.application.portfolio.pnl_engine_options import pnl_engine_options_for
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlCheckpointStateBundle
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_from_json
@@ -31,6 +33,7 @@ PnlCheckpointFallbackReason = Literal[
     "checkpoint_payload_corrupt",
     "checkpoint_anchor_mismatch",
     "checkpoint_execution_counts_changed",
+    "checkpoint_execution_chain_changed",
     "checkpoint_prefix_annulment_changed",
     "checkpoint_prefix_witness_changed",
     "checkpoint_accrual_prefix_changed",
@@ -47,6 +50,7 @@ _DELETE_REASONS: frozenset[str] = frozenset(
         "checkpoint_payload_corrupt",
         "checkpoint_anchor_mismatch",
         "checkpoint_execution_counts_changed",
+        "checkpoint_execution_chain_changed",
         "checkpoint_prefix_annulment_changed",
         "checkpoint_prefix_witness_changed",
         "checkpoint_accrual_prefix_changed",
@@ -155,13 +159,48 @@ def _bundle_candle_aggregates(
     }
 
 
+async def _execution_chain_matches(
+    repo: Repository,
+    scope: PortfolioPnlSampleScope,
+    certificate: PnlOpeningCheckpointCertificate,
+) -> bool:
+    """Recompute every exchange's raw execution chain tip at W_C and compare to the certificate.
+
+    Performance note: folds from genesis over ``(0, W_C]`` at every resume,
+    which is an O(prefix) read. PR-C2's benchmark must measure this cost.
+
+    Args:
+        repo: Repository providing the raw execution chain fold.
+        scope: Resuming anchor-bound sample scope.
+        certificate: Persisted checkpoint certificate carrying expected tips.
+
+    Returns:
+        ``True`` when every exchange's recomputed tip matches the certificate.
+    """
+    try:
+        for exchange, watermark in sorted(certificate.cutoff_execution_watermarks.items()):
+            tip = await repo.get_spot_execution_chain_tip(
+                scope.wallet_public_id,
+                exchange,
+                scope.mode,
+                0,
+                execution_chain_genesis(scope.wallet_public_id, exchange, scope.mode),
+                watermark,
+            )
+            if tip != certificate.execution_chain_digests[exchange]:
+                return False
+    except ExecutionChainError:
+        return False
+    return True
+
+
 async def _verify_execution_prefix(
     repo: Repository,
     scope: PortfolioPnlSampleScope,
     record: PnlOpeningCheckpointRecord,
     frontier_as_of: datetime,
 ) -> tuple[PnlCheckpointFallback | None, tuple[PnlTimelineAppliedAnnulment, ...]]:
-    """Verify counts, prefix annulments, and fill-witness membership in order."""
+    """Verify counts, chain tips, prefix annulments, and fill-witness membership in order."""
     certificate = record.certificate
     counts = await repo.get_pnl_execution_prefix_counts(
         scope.wallet_public_id,
@@ -170,6 +209,8 @@ async def _verify_execution_prefix(
     )
     if not _execution_counts_match(certificate, counts):
         return _fallback("checkpoint_execution_counts_changed"), ()
+    if not await _execution_chain_matches(repo, scope, certificate):
+        return _fallback("checkpoint_execution_chain_changed"), ()
     prefix = await repo.get_pnl_timeline_execution_prefix_at_watermarks(
         scope.wallet_public_id,
         scope.mode,
@@ -282,6 +323,82 @@ def _initial_fallback(
     return None
 
 
+def _certificate_matches_scope(
+    certificate: PnlOpeningCheckpointCertificate,
+    scope: PortfolioPnlSampleScope,
+) -> bool:
+    """Require certificate scope identity to match the resuming sample scope."""
+    return (
+        certificate.key.wallet_public_id,
+        certificate.key.mode,
+        certificate.key.valuation_ccy,
+        certificate.key.epoch_public_id,
+    ) == (
+        scope.wallet_public_id,
+        scope.mode,
+        scope.valuation_ccy,
+        scope.epoch_public_id,
+    )
+
+
+def _bundle_matches_certificate_and_scope(
+    certificate: PnlOpeningCheckpointCertificate,
+    bundle: PnlCheckpointStateBundle,
+    scope: PortfolioPnlSampleScope,
+) -> bool:
+    """Cross-check embedded bundle identity and engine header against certificate and scope."""
+    identity = bundle.identity
+    engine = bundle.engine_state
+    bundle_deferred = tuple(
+        (item.exchange, item.scope_sequence) for item in engine.deferred_execution_keys
+    )
+    cert_deferred = tuple(
+        (exchange, sequence)
+        for exchange, sequences in sorted(certificate.deferred_execution_sequences.items())
+        for sequence in sequences
+    )
+    return (
+        identity.wallet_public_id,
+        identity.mode,
+        identity.valuation_ccy,
+        identity.epoch_public_id,
+        identity.calc_version,
+        identity.source_generation,
+        engine.checkpoint_minute,
+        engine.activation_time,
+        engine.valuation_ccy,
+        bundle_deferred,
+    ) == (
+        certificate.key.wallet_public_id,
+        certificate.key.mode,
+        certificate.key.valuation_ccy,
+        certificate.key.epoch_public_id,
+        certificate.key.calc_version,
+        certificate.source_generation,
+        certificate.checkpoint_minute,
+        scope.anchor_point_time,
+        certificate.key.valuation_ccy,
+        cert_deferred,
+    )
+
+
+def _decode_and_bind_bundle(
+    record: PnlOpeningCheckpointRecord,
+    scope: PortfolioPnlSampleScope,
+) -> PnlCheckpointStateBundle | PnlCheckpointFallback:
+    """Decode ``state_json`` and verify certificate, bundle, and engine identity binding."""
+    certificate = record.certificate
+    if not _certificate_matches_scope(certificate, scope):
+        return _fallback("checkpoint_payload_corrupt")
+    try:
+        bundle = bundle_from_json(record.state_json)
+    except ValueError:
+        return _fallback("checkpoint_payload_corrupt")
+    if not _bundle_matches_certificate_and_scope(certificate, bundle, scope):
+        return _fallback("checkpoint_payload_corrupt")
+    return bundle
+
+
 async def verify_checkpoint_for_resume(
     repo: Repository,
     record: PnlOpeningCheckpointRecord | None,
@@ -306,10 +423,10 @@ async def verify_checkpoint_for_resume(
         return initial
     assert record is not None
     certificate = record.certificate
-    try:
-        bundle = bundle_from_json(record.state_json)
-    except ValueError:
-        return _fallback("checkpoint_payload_corrupt")
+    decoded = _decode_and_bind_bundle(record, scope)
+    if isinstance(decoded, PnlCheckpointFallback):
+        return decoded
+    bundle = decoded
     if (
         certificate.anchor_public_id != eligibility.expected_anchor_public_id
         or certificate.anchor_digest != eligibility.expected_anchor_digest

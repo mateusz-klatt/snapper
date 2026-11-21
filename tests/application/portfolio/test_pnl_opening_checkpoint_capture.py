@@ -14,6 +14,7 @@ import pytest
 
 from snapper.application.portfolio import pnl_engine_options
 from snapper.application.portfolio import pnl_opening_checkpoint_capture
+from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlCheckpointStateBundle
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlEventFxReplayStatePayload
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlMarkFxReplayStatePayload
@@ -1076,3 +1077,79 @@ def test_capture_request_rejects_mismatched_calc_version() -> None:
     """
     with pytest.raises(ValueError, match="calc_version"):
         replace(_request("5C.5"), calc_version=_CAPTURE_VERSION)
+
+
+async def test_inactive_capture_request_under_global_withhold_preserves_inactive_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep closing_checkpoint_refusal as None when an inactive capture sees a global withhold.
+
+    Given: A scope with a global fill gap read with an unpermitted ``"5C.5"``
+        capture request and with an off-tip permitted capture request.
+    When: ``build_wallet_pnl_series`` builds both globally withheld results.
+    Then: Neither mutates ``closing_checkpoint_refusal`` to ``"global_withhold"``
+        and each retains its inactive capture refusal reason.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    unpermitted = await _build(_CaptureRepo(), _request("5C.5"), has_fill_gap=True)
+    assert unpermitted.closing_checkpoint is None
+    assert unpermitted.closing_checkpoint_refusal is None
+    assert unpermitted.checkpoint_capture_refusal == "capture_not_permitted"
+    _permit_capture(monkeypatch)
+    off_tip = await _build(
+        _CaptureRepo(),
+        _request(),
+        has_fill_gap=True,
+        replay_tip=fixtures._m(8),
+    )
+    assert off_tip.closing_checkpoint is None
+    assert off_tip.closing_checkpoint_refusal is None
+    assert off_tip.checkpoint_capture_refusal == "capture_not_at_tip"
+
+
+async def test_capture_execution_prefix_refuses_execution_chain_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Convert ExecutionChainError during capture_execution_prefix into a closed refusal.
+
+    Given: An active capture request whose chain-tip or prefix-certification read
+        raises ``ExecutionChainError``.
+    When: ``capture_execution_prefix`` and ``build_wallet_pnl_series`` run.
+    Then: ``ExecutionChainError`` does not escape, the request becomes inactive
+        with ``capture_execution_chain_error``, and the series completes cleanly.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    _permit_capture(monkeypatch)
+    for failing_method in (
+        "get_spot_execution_chain_tip",
+        "get_pnl_timeline_execution_prefix_at_watermarks",
+    ):
+        request = _request()
+        request.activate(_C, _C)
+        repo = _CaptureRepo()
+        monkeypatch.setattr(
+            repo,
+            failing_method,
+            AsyncMock(side_effect=ExecutionChainError("broken chain")),
+        )
+        await request.capture_execution_prefix(
+            cast(Repository, repo),
+            fixtures._W1,
+            "live",
+            _AS_OF,
+        )
+        assert not request.active
+        assert request.refusal == "capture_execution_chain_error"
+    end_to_end_repo = _CaptureRepo()
+    monkeypatch.setattr(
+        end_to_end_repo,
+        "get_spot_execution_chain_tip",
+        AsyncMock(side_effect=ExecutionChainError("broken chain")),
+    )
+    result = await _build(end_to_end_repo, _request())
+    assert result.checkpoint_write is None
+    assert result.checkpoint_capture_refusal == "capture_execution_chain_error"

@@ -4128,3 +4128,46 @@ async def test_execution_suffix_threads_fill_witness_cut_on_both_paths(
     assert suffix["executions"] == [
         row for row in anchor["executions"] if row["scope_sequence"] == 2
     ]
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "generation", "deferred", "pattern"),
+    [
+        ({"kraken": -1}, {"kraken": 0}, {}, "watermark"),
+        ({"kraken": -2}, {"kraken": -1}, {}, "watermark"),
+        ({"kraken": 0}, {"kraken": -1}, {}, "watermark"),
+        ({"kraken": 1}, {"kraken": 2}, {"kraken": (3,)}, "deferred"),
+        ({"kraken": 1}, {"kraken": 2}, {"kraken": (0,)}, "deferred"),
+    ],
+)
+async def test_execution_suffix_rejects_negative_watermarks_and_out_of_range_deferred(
+    repository: SQLAlchemyRepository,
+    cutoff: dict[str, int],
+    generation: dict[str, int],
+    deferred: dict[str, tuple[int, ...]],
+    pattern: str,
+) -> None:
+    """Reject negative watermarks and deferred sequences outside 1..generation.
+
+    Given: A direct caller supplying negative cutoff or generation watermarks or
+        a deferred execution sequence below 1 or above the generation watermark.
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` validates the request.
+    Then: It raises ``ValueError`` before executing suffix queries.
+
+    Args:
+        repository: Isolated SQLite repository.
+        cutoff: Cutoff watermark map under test.
+        generation: Generation watermark map under test.
+        deferred: Deferred sequence map under test.
+        pattern: Substring expected in the raised ``ValueError``.
+    """
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks=cutoff,
+        generation_watermarks=generation,
+        deferred_execution_sequences=deferred,
+        as_of=_AS_OF,
+    )
+    with pytest.raises(ValueError, match=pattern):
+        await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)

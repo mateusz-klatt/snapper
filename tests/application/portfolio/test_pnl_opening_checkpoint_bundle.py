@@ -10,6 +10,9 @@ import pytest
 
 from snapper.application.portfolio.pnl_opening_checkpoint import PnlOpeningCheckpointState
 from snapper.application.portfolio.pnl_opening_checkpoint import checkpoint_to_payload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import (
+    PnlCheckpointBundleIdentityPayload,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlCheckpointStateBundle
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlEventFxCandlePlanePayload
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlFxRateSourcePayload
@@ -260,6 +263,22 @@ def _candle_plane_payload() -> PnlEventFxCandlePlanePayload:
     )
 
 
+def _identity_payload() -> PnlCheckpointBundleIdentityPayload:
+    """Build one canonical embedded bundle identity payload.
+
+    Returns:
+        A strict identity payload binding scope, calc version, and generation.
+    """
+    return PnlCheckpointBundleIdentityPayload(
+        wallet_public_id="00000000-0000-7000-8000-000000000b04",
+        mode="live",
+        valuation_ccy="USD",
+        epoch_public_id="00000000-0000-7000-8000-000000000e01",
+        calc_version="5C.6",
+        source_generation=2,
+    )
+
+
 def _populated_bundle() -> PnlCheckpointStateBundle:
     """Build an envelope populated from real replay and engine states.
 
@@ -268,7 +287,8 @@ def _populated_bundle() -> PnlCheckpointStateBundle:
     """
     event_state, mark_states, shadows = _real_walk_states()
     return PnlCheckpointStateBundle(
-        bundle_version=1,
+        bundle_version=2,
+        identity=_identity_payload(),
         engine_state=_engine_state(),
         price_ref_spans_by_instrument={
             "I2": (_m(1), _m(5)),
@@ -383,7 +403,8 @@ def test_empty_collections_round_trip() -> None:
         untrusted_at={},
     )
     bundle = PnlCheckpointStateBundle(
-        bundle_version=1,
+        bundle_version=2,
+        identity=_identity_payload(),
         engine_state=_engine_state(),
         price_ref_spans_by_instrument={},
         display_activity_spans_by_instrument={},
@@ -414,17 +435,38 @@ def test_rejects_extra_field() -> None:
         bundle_from_json(json.dumps(payload))
 
 
-def test_rejects_wrong_bundle_version() -> None:
-    """Reject unsupported envelope versions.
+@pytest.mark.parametrize("version", [1, 3])
+def test_rejects_wrong_bundle_version(version: int) -> None:
+    """Reject legacy and unknown envelope versions.
 
-    Given: Otherwise valid bundle JSON with ``bundle_version`` set to two.
+    Given: Otherwise valid bundle JSON with ``bundle_version`` set to 1 or 3.
     When: Strict decoding runs.
     Then: ``ValueError`` is raised.
+
+    Args:
+        version: Unsupported bundle version number to plant.
     """
     payload = _json_object(bundle_to_json(_populated_bundle()))
-    payload["bundle_version"] = 2
+    payload["bundle_version"] = version
     with pytest.raises(ValueError, match="bundle_version"):
         bundle_from_json(json.dumps(payload))
+
+
+def test_rejects_invalid_bundle_identity_fields() -> None:
+    """Reject unsupported mode and non-positive source_generation in bundle identity.
+
+    Given: Serialized bundles with an invalid mode or zero ``source_generation``.
+    When: Strict decoding runs.
+    Then: ``ValueError`` rejects each malformed identity field.
+    """
+    bad_mode = _json_object(bundle_to_json(_populated_bundle()))
+    _nested_object(bad_mode, "identity")["mode"] = "sim"
+    with pytest.raises(ValueError, match="mode"):
+        bundle_from_json(json.dumps(bad_mode))
+    bad_generation = _json_object(bundle_to_json(_populated_bundle()))
+    _nested_object(bad_generation, "identity")["source_generation"] = 0
+    with pytest.raises(ValueError, match="source_generation"):
+        bundle_from_json(json.dumps(bad_generation))
 
 
 def test_rejects_bool_as_int() -> None:
@@ -483,8 +525,8 @@ def test_rejects_duplicate_json_keys() -> None:
     """
     encoded = bundle_to_json(_populated_bundle())
     duplicated = encoded.replace(
-        '"bundle_version":1',
-        '"bundle_version":1,"bundle_version":1',
+        '"bundle_version":2',
+        '"bundle_version":2,"bundle_version":2',
         1,
     )
     with pytest.raises(ValueError, match="duplicate JSON key"):
@@ -536,4 +578,182 @@ def test_rejects_unsorted_lineage_order_ids() -> None:
     payload = _json_object(bundle_to_json(_populated_bundle()))
     payload["prefix_lineage_order_ids"] = ["order-2", "order-1"]
     with pytest.raises(ValueError, match="sorted and unique"):
+        bundle_from_json(json.dumps(payload))
+
+
+def test_walk_states_round_trip_int_quantities_with_tagged_int_codec() -> None:
+    """Round-trip exact Python int and float walk quantities without AttributeError.
+
+    Given: Event and mark replay states carrying exact ``int`` and ``float``
+        pool quantities.
+    When: Both walk states are serialized inside a bundle to JSON and decoded back.
+    Then: The JSON uses tagged-int payloads, round-trips bit-identically, and
+        restores exact ``int`` and ``float`` types and values.
+    """
+    event_state = _EventFxReplayState(
+        requirements={},
+        last_effective={},
+        position_qty={_POOL: 3, ("I2", "shard-I2"): 1.5},
+        basis_unknown=set(),
+        untrusted_at={},
+    )
+    mark_states = {
+        _INSTRUMENT: _MarkReplayState(
+            event_index=1,
+            pool_quantities={"shard-I1": 2, "shard-I1-b": -0.0},
+            mark_eligible=True,
+        ),
+    }
+    bundle = _populated_bundle().model_copy(
+        update={
+            "event_walk_state": event_walk_state_from_replay(event_state),
+            "mark_walk_state": mark_walk_state_from_replay(mark_states, ()),
+        }
+    )
+    encoded = bundle_to_json(bundle)
+    assert '{"int":"3"}' in encoded
+    assert '{"int":"2"}' in encoded
+    decoded = bundle_from_json(encoded)
+    assert decoded == bundle
+    assert bundle_to_json(decoded) == encoded
+    restored_event = event_walk_state_to_replay(decoded.event_walk_state)
+    restored_marks, restored_shadows = mark_walk_state_to_replay(decoded.mark_walk_state)
+    assert restored_shadows == ()
+    assert type(restored_event.position_qty[_POOL]) is int
+    assert restored_event.position_qty[_POOL] == 3
+    assert type(restored_event.position_qty[("I2", "shard-I2")]) is float
+    assert restored_event.position_qty[("I2", "shard-I2")] == 1.5
+    assert type(restored_marks[_INSTRUMENT].pool_quantities["shard-I1"]) is int
+    assert restored_marks[_INSTRUMENT].pool_quantities["shard-I1"] == 2
+    assert type(restored_marks[_INSTRUMENT].pool_quantities["shard-I1-b"]) is float
+    assert restored_marks[_INSTRUMENT].pool_quantities["shard-I1-b"].hex() == (-0.0).hex()
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "event_requirements_instrument",
+        "event_requirements_pair",
+        "event_requirements_minute",
+        "event_last_effective",
+        "event_position_qty",
+        "event_basis_unknown",
+        "event_untrusted_at",
+        "mark_instruments",
+        "mark_pool_quantities",
+    ],
+)
+def test_rejects_duplicate_walk_state_keys(target: str) -> None:
+    """Reject duplicate keys in every event-walk and mark-walk state collection.
+
+    Given: A serialized bundle with one duplicated key in a walk-state list.
+    When: ``bundle_from_json`` validates the document.
+    Then: ``ValueError`` rejects the duplicate key.
+
+    Args:
+        target: Walk-state collection to duplicate an entry in.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    event_walk = _nested_object(payload, "event_walk_state")
+    mark_walk = _nested_object(payload, "mark_walk_state")
+    if target == "event_requirements_instrument":
+        items = cast(list[object], event_walk["requirements"])
+        event_walk["requirements"] = [items[0], items[0]]
+    elif target == "event_requirements_pair":
+        items = cast(list[object], event_walk["requirements"])
+        first = cast(dict[str, object], items[0])
+        pairs = cast(list[object], first["requirements"])
+        first["requirements"] = [pairs[0], pairs[0]]
+    elif target == "event_requirements_minute":
+        items = cast(list[object], event_walk["requirements"])
+        first = cast(dict[str, object], items[0])
+        pairs = cast(list[object], first["requirements"])
+        pair_entry = cast(dict[str, object], pairs[0])
+        minutes = cast(list[object], pair_entry["minutes"])
+        pair_entry["minutes"] = [minutes[0], minutes[0]]
+    elif target == "event_last_effective":
+        entries = cast(list[object], event_walk["last_effective"])
+        event_walk["last_effective"] = [entries[0], entries[0]]
+    elif target == "event_position_qty":
+        entries = cast(list[object], event_walk["position_qty"])
+        event_walk["position_qty"] = [entries[0], entries[0]]
+    elif target == "event_basis_unknown":
+        entries = cast(list[object], event_walk["basis_unknown"])
+        event_walk["basis_unknown"] = [entries[0], entries[0]]
+    elif target == "event_untrusted_at":
+        entries = cast(list[object], event_walk["untrusted_at"])
+        event_walk["untrusted_at"] = [entries[0], entries[0]]
+    elif target == "mark_instruments":
+        entries = cast(list[object], mark_walk["instruments"])
+        mark_walk["instruments"] = [entries[0], entries[0]]
+    else:
+        entries = cast(list[object], mark_walk["instruments"])
+        first = cast(dict[str, object], entries[0])
+        pools = cast(list[object], first["pool_quantities"])
+        first["pool_quantities"] = [pools[0], pools[0]]
+    with pytest.raises(ValueError, match="sorted and unique"):
+        bundle_from_json(json.dumps(payload))
+
+
+def test_rejects_negative_mark_event_index() -> None:
+    """Reject negative mark-replay cursors in strict bundle decoding.
+
+    Given: A serialized bundle whose mark instrument state has ``event_index=-1``.
+    When: ``bundle_from_json`` validates the document.
+    Then: ``ValueError`` rejects the negative index.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    mark_walk = _nested_object(payload, "mark_walk_state")
+    instruments = cast(list[object], mark_walk["instruments"])
+    first = cast(dict[str, object], instruments[0])
+    first["event_index"] = -1
+    with pytest.raises(ValueError, match="event_index"):
+        bundle_from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    ("event_offset", "prev_offset"),
+    [(5, 5), (6, 5)],
+)
+def test_rejects_inverted_regression_shadow(event_offset: int, prev_offset: int) -> None:
+    """Reject empty or inverted half-open regression shadow intervals.
+
+    Given: A regression shadow with ``event_time >= previous_effective``.
+    When: ``bundle_from_json`` validates the document.
+    Then: ``ValueError`` rejects the non-increasing interval.
+
+    Args:
+        event_offset: Minute offset for ``event_time``.
+        prev_offset: Minute offset for ``previous_effective``.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    mark_walk = _nested_object(payload, "mark_walk_state")
+    mark_walk["regression_shadows"] = [
+        {
+            "event_time": _m(event_offset).isoformat(),
+            "previous_effective": _m(prev_offset).isoformat(),
+        }
+    ]
+    with pytest.raises(ValueError, match="precede"):
+        bundle_from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    "span_field",
+    ["price_ref_spans_by_instrument", "display_activity_spans_by_instrument"],
+)
+def test_rejects_inverted_activity_spans(span_field: str) -> None:
+    """Reject price-reference or display-activity spans where start exceeds end.
+
+    Given: A serialized bundle with ``start > end`` in one span map.
+    When: ``bundle_from_json`` validates the document.
+    Then: ``ValueError`` rejects the inverted span.
+
+    Args:
+        span_field: Span map field name on ``PnlCheckpointStateBundle``.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    spans = _nested_object(payload, span_field)
+    spans[_INSTRUMENT] = [_m(6).isoformat(), _m(2).isoformat()]
+    with pytest.raises(ValueError, match="span"):
         bundle_from_json(json.dumps(payload))

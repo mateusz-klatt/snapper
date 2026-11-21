@@ -1,5 +1,6 @@
 """Tests for ordered checkpoint resume eligibility and evidence verification."""
 
+import json
 from dataclasses import dataclass
 from dataclasses import replace
 from typing import cast
@@ -7,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import PnlCheckpointCaptureRequest
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointFallback
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointResume
@@ -84,7 +86,7 @@ def _scope(request: PnlCheckpointCaptureRequest) -> PortfolioPnlSampleScope:
         mode=request.key.mode,
         valuation_ccy=request.key.valuation_ccy,
         epoch_public_id=request.key.epoch_public_id,
-        anchor_point_time=fixtures._T0,
+        anchor_point_time=capture._anchor()["point_time"],
     )
 
 
@@ -415,3 +417,251 @@ async def test_capture_and_verify_with_deferred_execution_on_new_instrument(
     assert isinstance(outcome, PnlCheckpointResume)
     assert outcome.bundle.engine_state.seen == (fixtures._I1,)
     assert outcome.record.certificate.deferred_execution_sequences == {"kraken": (2,)}
+
+
+@pytest.mark.parametrize(
+    ("scope_field", "scope_value"),
+    [
+        ("wallet_public_id", "00000000-0000-7000-8000-000000008888"),
+        ("mode", "paper"),
+        ("valuation_ccy", "EUR"),
+        ("epoch_public_id", "00000000-0000-7000-8000-000000009999"),
+    ],
+)
+async def test_certificate_key_scope_mismatch_returns_corrupt_with_delete(
+    monkeypatch: pytest.MonkeyPatch,
+    scope_field: str,
+    scope_value: str,
+) -> None:
+    """Reject a certificate whose scope identity differs from the resuming scope.
+
+    Given: A valid captured checkpoint record and a resuming scope differing in one
+        key field (wallet, mode, valuation currency, or epoch).
+    When: ``verify_checkpoint_for_resume`` verifies the record.
+    Then: It returns ``checkpoint_payload_corrupt`` with ``delete_required=True``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        scope_field: Scope attribute to mutate.
+        scope_value: Mismatched value to substitute.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    mismatched_scope = replace(_scope(request), **{scope_field: scope_value})
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        mismatched_scope,
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
+
+
+@pytest.mark.parametrize(
+    ("identity_field", "identity_value"),
+    [
+        ("wallet_public_id", "00000000-0000-7000-8000-000000008888"),
+        ("mode", "paper"),
+        ("valuation_ccy", "EUR"),
+        ("epoch_public_id", "00000000-0000-7000-8000-000000009999"),
+        ("calc_version", "5C.5"),
+        ("source_generation", 99),
+    ],
+)
+async def test_bundle_identity_mismatch_returns_corrupt_with_delete(
+    monkeypatch: pytest.MonkeyPatch,
+    identity_field: str,
+    identity_value: object,
+) -> None:
+    """Reject a state_json bundle whose embedded identity differs from the certificate.
+
+    Given: A valid captured checkpoint whose serialized bundle identity has one
+        mutated field.
+    When: ``verify_checkpoint_for_resume`` verifies the record.
+    Then: It returns ``checkpoint_payload_corrupt`` with ``delete_required=True``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        identity_field: Embedded identity field to mutate.
+        identity_value: Mismatched value to plant in ``state_json``.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    payload = cast(dict[str, object], json.loads(record.state_json))
+    assert "identity" in payload
+    identity = cast(dict[str, object], payload["identity"])
+    identity[identity_field] = identity_value
+    payload["identity"] = identity
+    tampered = replace(record, state_json=json.dumps(payload))
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        tampered,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
+
+
+@pytest.mark.parametrize(
+    ("engine_field", "engine_value"),
+    [
+        ("checkpoint_minute", fixtures._m(6).isoformat()),
+        ("activation_time", fixtures._m(0).isoformat()),
+        ("activation_time", None),
+        ("valuation_ccy", "EUR"),
+        ("deferred_execution_keys", [{"exchange": "kraken", "scope_sequence": 1}]),
+    ],
+)
+async def test_bundle_engine_header_mismatch_returns_corrupt_with_delete(
+    monkeypatch: pytest.MonkeyPatch,
+    engine_field: str,
+    engine_value: object,
+) -> None:
+    """Reject a state_json engine header disagreeing with the certificate or scope.
+
+    Given: A valid captured checkpoint whose serialized ``engine_state`` has one
+        mismatched boundary, activation time, valuation currency, or deferred key.
+    When: ``verify_checkpoint_for_resume`` verifies the record.
+    Then: It returns ``checkpoint_payload_corrupt`` with ``delete_required=True``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        engine_field: Engine-state field to mutate.
+        engine_value: Mismatched JSON value to plant in ``state_json``.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    payload = cast(dict[str, object], json.loads(record.state_json))
+    engine_state = cast(dict[str, object], payload["engine_state"])
+    engine_state[engine_field] = engine_value
+    tampered = replace(record, state_json=json.dumps(payload))
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        tampered,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
+
+
+async def test_legacy_bundle_version_1_payload_fails_closed_as_corrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject an old bundle_version=1 payload without embedded identity.
+
+    Given: A captured checkpoint whose ``state_json`` is downgraded to
+        ``bundle_version=1`` without an ``identity`` block.
+    When: ``verify_checkpoint_for_resume`` verifies the record.
+    Then: It fails closed with ``checkpoint_payload_corrupt`` and ``delete_required=True``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    payload = cast(dict[str, object], json.loads(record.state_json))
+    payload["bundle_version"] = 1
+    payload.pop("identity", None)
+    legacy = replace(record, state_json=json.dumps(payload))
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        legacy,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
+
+
+async def test_mutated_execution_chain_tip_returns_fallback_with_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recompute execution chain tips and fall back on digest mismatch or chain error.
+
+    Given: A valid captured checkpoint and a repository whose execution chain tip
+        differs from the certificate digest or raises ``ExecutionChainError``.
+    When: ``verify_checkpoint_for_resume`` verifies the record.
+    Then: Both cases return ``checkpoint_execution_chain_changed`` with
+        ``delete_required=True``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    monkeypatch.setattr(repo, "get_spot_execution_chain_tip", AsyncMock(return_value="0" * 64))
+    mismatch = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert mismatch == PnlCheckpointFallback(
+        "checkpoint_execution_chain_changed",
+        delete_required=True,
+    )
+    monkeypatch.setattr(
+        repo,
+        "get_spot_execution_chain_tip",
+        AsyncMock(side_effect=ExecutionChainError("purged execution")),
+    )
+    chain_error = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert chain_error == PnlCheckpointFallback(
+        "checkpoint_execution_chain_changed",
+        delete_required=True,
+    )
+
+
+@pytest.mark.parametrize("mutation", ["dup_walk", "neg_index", "inv_shadow", "inv_span"])
+async def test_invalid_walk_state_or_span_bundle_returns_corrupt_with_delete(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    """Reject corrupt walk states or inverted spans during resume verification.
+
+    Given: A captured checkpoint whose serialized bundle contains a duplicate
+        walk-state key, a negative ``event_index``, an inverted regression shadow,
+        or an inverted activity span.
+    When: ``verify_checkpoint_for_resume`` decodes and verifies the record.
+    Then: Every case returns ``checkpoint_payload_corrupt`` with ``delete_required=True``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        mutation: Corruption variant to inject into ``state_json``.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    payload = cast(dict[str, object], json.loads(record.state_json))
+    if mutation == "dup_walk":
+        event_walk = cast(dict[str, object], payload["event_walk_state"])
+        quantities = cast(list[object], event_walk["position_qty"])
+        event_walk["position_qty"] = [quantities[0], quantities[0]]
+    elif mutation == "neg_index":
+        mark_walk = cast(dict[str, object], payload["mark_walk_state"])
+        instruments = cast(list[object], mark_walk["instruments"])
+        first = cast(dict[str, object], instruments[0])
+        first["event_index"] = -1
+    elif mutation == "inv_shadow":
+        mark_walk = cast(dict[str, object], payload["mark_walk_state"])
+        mark_walk["regression_shadows"] = [
+            {
+                "event_time": fixtures._m(5).isoformat(),
+                "previous_effective": fixtures._m(4).isoformat(),
+            }
+        ]
+    else:
+        spans = cast(dict[str, object], payload["price_ref_spans_by_instrument"])
+        spans[fixtures._I1] = [fixtures._m(5).isoformat(), fixtures._m(3).isoformat()]
+    tampered = replace(record, state_json=json.dumps(payload))
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        tampered,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
