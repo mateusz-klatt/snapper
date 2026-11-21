@@ -11,6 +11,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock
+from unittest.mock import Mock
+from unittest.mock import PropertyMock
 from unittest.mock import patch
 from uuid import uuid7
 
@@ -1706,3 +1708,300 @@ async def test_execution_prefix_counts_match_the_replay_prefix_rows(
         "kraken": (4, 4),
         "walutomat": (1, 1),
     }
+
+
+def _rows_id_aggregates_by_plane(rows: Sequence[PnlFxRateRow]) -> dict[PnlFxRatePlane, IdAggregate]:
+    """Group FX replay rows by ``(base, quote, exchange)`` and aggregate each plane.
+
+    Args:
+        rows: Rows returned by ``get_pnl_fx_rate_candles_at``.
+
+    Returns:
+        Expected per-plane ``IdAggregate`` map, omitting empty planes.
+    """
+    grouped: dict[PnlFxRatePlane, list[tuple[int, datetime]]] = {}
+    for row in rows:
+        plane: PnlFxRatePlane = (row["base"], row["quote"], row["exchange"])
+        grouped.setdefault(plane, []).append((row["candle_id"], row["candle_timestamp"]))
+    return {plane: _python_id_aggregate(items) for plane, items in grouped.items()}
+
+
+def _combine_all_aggregates(aggregates: Sequence[IdAggregate]) -> IdAggregate:
+    """Reduce a sequence of disjoint ``IdAggregate`` instances via ``_combine_id_aggregates``.
+
+    Args:
+        aggregates: Per-plane or per-batch aggregates to fold.
+
+    Returns:
+        Combined ``IdAggregate``, or the zero aggregate when ``aggregates`` is empty.
+    """
+    total = IdAggregate(0, 0, 0, None)
+    for item in aggregates:
+        total = _combine_id_aggregates(total, item)
+    return total
+
+
+async def _assert_fx_fingerprints_by_plane_match_replay(
+    repository: SQLAlchemyRepository,
+    planes: Sequence[PnlFxRatePlane],
+    opens: Sequence[datetime],
+    as_of: datetime,
+) -> tuple[dict[PnlFxRatePlane, IdAggregate], list[PnlFxRateRow]]:
+    """Assert per-plane FX aggregates match grouped replay and combine to the pooled total.
+
+    Args:
+        repository: Repository under test.
+        planes: Pinned FX planes.
+        opens: Target 1-minute candle open timestamps.
+        as_of: Knowledge horizon.
+
+    Returns:
+        Tuple of the per-plane map and underlying replay rows.
+    """
+    rows = await repository.get_pnl_fx_rate_candles_at(planes, opens, as_of)
+    expected = _rows_id_aggregates_by_plane(rows)
+    actual = await repository.get_pnl_event_fx_candle_fingerprints_by_plane(planes, opens, as_of)
+    assert actual == expected
+    pooled = await repository.get_pnl_event_fx_candle_fingerprint(planes, opens, as_of)
+    assert _combine_all_aggregates(list(actual.values())) == pooled
+    return actual, rows
+
+
+async def test_event_fx_candle_fingerprints_by_plane_empty_inputs_skip_query(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Short-circuit empty planes or opens to ``{}`` without opening a session.
+
+    Given: A SQLite repository whose ``session`` factory is spied upon.
+    When: ``get_pnl_event_fx_candle_fingerprints_by_plane`` receives empty ``planes``
+        or empty ``open_ats``.
+    Then: Both return ``{}`` without invoking ``repository.session``.
+    """
+    with patch.object(repository, "session") as session_mock:
+        assert (
+            await repository.get_pnl_event_fx_candle_fingerprints_by_plane(
+                [], [samples._M1], samples._M5
+            )
+            == {}
+        )
+        assert (
+            await repository.get_pnl_event_fx_candle_fingerprints_by_plane(
+                [("EUR", "USD", "kraken")], [], samples._M5
+            )
+            == {}
+        )
+        session_mock.assert_not_called()
+
+
+async def test_event_fx_candle_fingerprints_by_plane_matches_grouped_replay_and_total(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Match grouped ``get_pnl_fx_rate_candles_at`` and omit empty planes across proofs.
+
+    Given: Multiplicity on ``("EUR", "USD", "kraken")``, a second populated plane
+        ``("USD", "EUR", "walutomat")``, an empty plane ``("GBP", "USD", "kraken")``,
+        retired/replaced candles, non-1m/incomplete candles, and future-horizon rows.
+    When: ``get_pnl_event_fx_candle_fingerprints_by_plane`` queries at ``M2`` and ``M5``.
+    Then: Each returned plane matches grouped replay rows, empty planes are absent from
+        the map, and ``_combine_id_aggregates`` over map values equals the pooled total.
+    """
+    t_base = samples._M1
+    t_retire = samples._M2 + timedelta(seconds=15)
+    t_retire_only = samples._M4
+    seed_rows: list[object] = [
+        _fx_symbol("sym-eu-1", "EUR-USD", "EUR", "USD", timestamp=t_base),
+        _fx_instrument("ins-eu-1", "sym-eu-1", "kraken", timestamp=t_base),
+        _fx_symbol("sym-eu-2", "EURUSD-ALT", "EUR", "USD", timestamp=t_base),
+        _fx_instrument("ins-eu-2", "sym-eu-2", "kraken", timestamp=t_base),
+        _fx_symbol("sym-ue", "USD-EUR", "USD", "EUR", timestamp=t_base),
+        _fx_instrument("ins-ue", "sym-ue", "walutomat", timestamp=t_base),
+        _fx_symbol("sym-gbp-empty", "GBP-USD", "GBP", "USD", timestamp=t_base),
+        _fx_instrument("ins-gbp-empty", "sym-gbp-empty", "kraken", timestamp=t_base),
+        _fx_candle_seeded("ins-eu-1", samples._M1, 101, window=(t_base, t_retire)),
+        _fx_candle_seeded("ins-eu-1", samples._M1, 151, window=(t_retire, KNOWN_TO_MAX)),
+        _fx_candle_seeded("ins-eu-2", samples._M1, 175, window=(t_base, KNOWN_TO_MAX)),
+        _fx_candle_seeded("ins-eu-1", samples._M2, 200, window=(t_base, t_retire_only)),
+        _fx_candle_seeded("ins-ue", samples._M2, 250, window=(samples._M2, KNOWN_TO_MAX)),
+        _fx_candle_seeded(
+            "ins-eu-1", samples._M1, 300, window=(t_base, KNOWN_TO_MAX), variant=("5m", True)
+        ),
+        _fx_candle_seeded(
+            "ins-eu-1", samples._M3, 310, window=(t_base, KNOWN_TO_MAX), variant=("1m", False)
+        ),
+        _fx_candle_seeded(
+            "ins-eu-1",
+            samples._M4,
+            500,
+            window=(samples._M5 + timedelta(seconds=1), KNOWN_TO_MAX),
+        ),
+    ]
+    async with repository.session() as session:
+        session.add_all(seed_rows)
+        await session.commit()
+
+    planes: list[PnlFxRatePlane] = [
+        ("EUR", "USD", "kraken"),
+        ("GBP", "USD", "kraken"),
+        ("USD", "EUR", "walutomat"),
+    ]
+    opens = [samples._M1, samples._M2, samples._M3, samples._M4]
+
+    before_map, _ = await _assert_fx_fingerprints_by_plane_match_replay(
+        repository, planes, opens, samples._M2
+    )
+    assert ("GBP", "USD", "kraken") not in before_map
+    assert set(before_map) == {("EUR", "USD", "kraken"), ("USD", "EUR", "walutomat")}
+
+    after_map, _ = await _assert_fx_fingerprints_by_plane_match_replay(
+        repository, planes, opens, samples._M5
+    )
+    assert ("GBP", "USD", "kraken") not in after_map
+    assert after_map[("EUR", "USD", "kraken")].id_sum == 151 + 175
+    assert after_map[("USD", "EUR", "walutomat")].id_sum == 250
+
+
+async def test_event_fx_candle_fingerprints_by_plane_detects_symbol_remap_with_equal_pool(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Detect a candle remapped between two consumed planes while the pooled total is unchanged.
+
+    Given: Two consumed planes ``("EUR", "USD", "kraken")`` and
+        ``("GBP", "USD", "kraken")`` and three active candles, one of which moves
+        from the EUR symbol to the GBP symbol via an SCD2 symbol-mapping revision.
+    When: Per-plane and pooled fingerprints are queried before and after the remap.
+    Then: The pooled ``get_pnl_event_fx_candle_fingerprint`` stays equal while
+        ``get_pnl_event_fx_candle_fingerprints_by_plane`` shifts the candle between planes.
+    """
+    t1 = samples._M1
+    t2 = samples._M2
+    t3 = samples._M3
+    remap_inst_v1 = _fx_instrument("ins-remap", "sym-eu-remap", "kraken", timestamp=t1)
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _fx_symbol("sym-eu-keep", "EUR-USD", "EUR", "USD", timestamp=t1),
+                _fx_symbol("sym-gbp-keep", "GBP-USD", "GBP", "USD", timestamp=t1),
+                _fx_symbol("sym-eu-remap", "EUR-USD-ALT", "EUR", "USD", timestamp=t1),
+                _fx_symbol("sym-gbp-remap", "GBP-USD-ALT", "GBP", "USD", timestamp=t1),
+                _fx_instrument("ins-eur-keep", "sym-eu-keep", "kraken", timestamp=t1),
+                _fx_instrument("ins-gbp-keep", "sym-gbp-keep", "kraken", timestamp=t1),
+                remap_inst_v1,
+                _fx_candle_seeded("ins-eur-keep", samples._M1, 799, window=(t2, KNOWN_TO_MAX)),
+                _fx_candle_seeded("ins-remap", samples._M2, 800, window=(t2, KNOWN_TO_MAX)),
+                _fx_candle_seeded("ins-gbp-keep", samples._M2, 801, window=(t2, KNOWN_TO_MAX)),
+            ]
+        )
+        await session.commit()
+
+    planes: list[PnlFxRatePlane] = [("EUR", "USD", "kraken"), ("GBP", "USD", "kraken")]
+    opens = [samples._M1, samples._M2]
+    before_pooled = await repository.get_pnl_event_fx_candle_fingerprint(planes, opens, t3)
+    before_by_plane, _ = await _assert_fx_fingerprints_by_plane_match_replay(
+        repository, planes, opens, t3
+    )
+
+    async with repository.session() as session:
+        stored_inst = (
+            await session.execute(
+                select(Instrument).where(
+                    Instrument.public_id == "ins-remap",
+                    Instrument.known_to == KNOWN_TO_MAX,
+                )
+            )
+        ).scalar_one()
+        stored_inst.known_to = t2
+        remap_inst_v2 = _fx_instrument("ins-remap", "sym-gbp-remap", "kraken", timestamp=t2)
+        remap_inst_v2.sequence_id = 2
+        session.add(remap_inst_v2)
+        await session.commit()
+
+    after_pooled = await repository.get_pnl_event_fx_candle_fingerprint(planes, opens, t3)
+    after_by_plane, _ = await _assert_fx_fingerprints_by_plane_match_replay(
+        repository, planes, opens, t3
+    )
+    assert after_pooled == before_pooled == IdAggregate(3, 799 + 800 + 801, 801, t2)
+    assert after_by_plane != before_by_plane
+    assert before_by_plane[("EUR", "USD", "kraken")].id_sum == 799 + 800
+    assert before_by_plane[("GBP", "USD", "kraken")].id_sum == 801
+    assert after_by_plane[("EUR", "USD", "kraken")].id_sum == 799
+    assert after_by_plane[("GBP", "USD", "kraken")].id_sum == 800 + 801
+
+
+async def test_event_fx_candle_fingerprints_by_plane_combines_batches_and_postgresql_jit(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Combine >400 open-minute batches per plane and issue PostgreSQL ``SET LOCAL jit = off``.
+
+    Given: 450 opens across two FX planes plus 400 empty opens spanning three
+        ``_PNL_FX_MINUTE_BATCH`` batches, and a mock PostgreSQL dialect session.
+    When: ``get_pnl_event_fx_candle_fingerprints_by_plane`` executes on SQLite and
+        under a mocked PostgreSQL session.
+    Then: Multi-batch per-plane reduction matches grouped replay and pooled total,
+        and the PostgreSQL path emits ``SET LOCAL jit = off``.
+    """
+    batch_base = samples._M5 + timedelta(hours=1)
+    many_opens = [batch_base + timedelta(minutes=offset) for offset in range(450)]
+    batch_rows: list[object] = [
+        _fx_symbol("sym-b-eu", "EUR-USD", "EUR", "USD", timestamp=samples._M1),
+        _fx_instrument("ins-b-eu", "sym-b-eu", "kraken", timestamp=samples._M1),
+        _fx_symbol("sym-b-gb", "GBP-USD", "GBP", "USD", timestamp=samples._M1),
+        _fx_instrument("ins-b-gb", "sym-b-gb", "walutomat", timestamp=samples._M1),
+        *[
+            _fx_candle_seeded(
+                "ins-b-eu" if offset % 2 == 0 else "ins-b-gb",
+                open_at,
+                20_000 + offset,
+                window=(samples._M1 + timedelta(milliseconds=offset), KNOWN_TO_MAX),
+            )
+            for offset, open_at in enumerate(many_opens)
+        ],
+    ]
+    async with repository.session() as session:
+        session.add_all(batch_rows)
+        await session.commit()
+
+    planes: list[PnlFxRatePlane] = [("EUR", "USD", "kraken"), ("GBP", "USD", "walutomat")]
+    opens_with_empty = [
+        *many_opens,
+        *[batch_base + timedelta(minutes=offset) for offset in range(500, 900)],
+    ]
+    by_plane, replay_rows = await _assert_fx_fingerprints_by_plane_match_replay(
+        repository, planes, opens_with_empty, samples._M5
+    )
+    assert len(replay_rows) == 450
+    assert by_plane[("EUR", "USD", "kraken")].count == 225
+    assert by_plane[("GBP", "USD", "walutomat")].count == 225
+
+    executed: list[object] = []
+
+    class _PgSession:
+        async def __aenter__(self) -> _PgSession:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            del exc_info
+
+        async def execute(self, statement: object) -> Mock:
+            executed.append(statement)
+            return Mock(
+                all=Mock(
+                    return_value=[("EUR", "USD", "kraken", 1, 5, 5, samples._M1)],
+                )
+            )
+
+    with (
+        patch.object(
+            SQLAlchemyRepository,
+            "dialect_name",
+            new_callable=PropertyMock,
+            return_value="postgresql",
+        ),
+        patch.object(repository, "session", lambda: _PgSession()),
+    ):
+        pg_result = await repository.get_pnl_event_fx_candle_fingerprints_by_plane(
+            [("EUR", "USD", "kraken")],
+            [samples._M1],
+            samples._M5,
+        )
+    assert pg_result == {("EUR", "USD", "kraken"): IdAggregate(1, 5, 5, samples._M1)}
+    assert str(executed[0]) == "SET LOCAL jit = off"

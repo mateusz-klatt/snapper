@@ -138,7 +138,9 @@ class _ReadRepo:
         """Supply no initiating orders for the empty scope."""
         return []
 
-    async def get_accruals_for_pnl(self, *_args: object) -> list[PnlTimelineAccrualRow]:
+    async def get_accruals_for_pnl(
+        self, *_args: object, **_kwargs: object
+    ) -> list[PnlTimelineAccrualRow]:
         """Supply no funding flows rather than replacing any financial calculation."""
         return []
 

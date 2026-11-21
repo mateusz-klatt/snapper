@@ -2237,6 +2237,8 @@ def _withhold_series_for_global_reason(
         points=points,
         granularity=result.granularity,
         valuation_ccy=result.valuation_ccy,
+        closing_checkpoint=None,
+        closing_checkpoint_refusal="global_withhold",
     )
 
 
@@ -2328,6 +2330,8 @@ def _with_instrument_display_identities(
         points=points,
         granularity=result.granularity,
         valuation_ccy=result.valuation_ccy,
+        closing_checkpoint=result.closing_checkpoint,
+        closing_checkpoint_refusal=result.closing_checkpoint_refusal,
     )
 
 
@@ -6686,6 +6690,8 @@ async def _finalize_wallet_pnl_series(
         equity_overlay=overlay.overlay,
         equity_coverage=overlay.coverage,
         applied_annulments=assembly.applied_annulments,
+        closing_checkpoint=result.closing_checkpoint,
+        closing_checkpoint_refusal=result.closing_checkpoint_refusal,
     )
 
 

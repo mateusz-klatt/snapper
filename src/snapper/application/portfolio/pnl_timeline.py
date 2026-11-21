@@ -182,8 +182,13 @@ CheckpointRefusalReason = Literal[
     "carried_event_inputs",
     "carried_inputs_on_processed_event",
     "conversion_uses_mark_evidence",
+    "global_withhold",
 ]
-"""Machine-readable reasons why optional checkpoint capture returned ``None``."""
+"""Machine-readable reasons why optional checkpoint capture returned ``None``.
+
+``"global_withhold"`` indicates that a downstream service wrapper replaced a
+built series with globally withheld points across the timeline.
+"""
 
 PnlIncompletenessReason = Literal[
     "scope_order_regression",

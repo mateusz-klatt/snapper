@@ -5462,6 +5462,7 @@ class Repository(ABC):
         as_of: datetime,
         *,
         fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
+        capture_fill_witness_cut: bool = False,
     ) -> PnlTimelineExecutionPrefix:
         """Prove supplied execution bounds and any exact fill candidate cut."""
         ...
@@ -5635,11 +5636,15 @@ class Repository(ABC):
         wallet_public_id: str,
         mode: str,
         as_of: datetime,
+        *,
+        after_exclusive: datetime | None = None,
+        through: datetime | None = None,
     ) -> list[PnlTimelineAccrualRow]:
         """Retrieve a scope's funding accruals for the P&L timeline.
 
         Every active accrual for ``(wallet_public_id, mode)`` with
-        ``accrued_at <= as_of``, ordered by ``accrued_at`` ascending. The native
+        ``accrued_at <= as_of``, ordered by ``accrued_at`` ascending, optionally
+        bounded by ``after_exclusive < accrued_at <= through``. The native
         ``amount``/``amount_asset`` pass through unconverted — the caller
         resolves the valuation-currency amount before feeding the pure builder.
         Live spot data carries no funding, so this read is normally empty.
@@ -5649,6 +5654,8 @@ class Repository(ABC):
             mode: Trading mode scope (``live``, ``paper``).
             as_of: Point-in-time for the temporal query; also the inclusive
                 ``accrued_at`` upper bound.
+            after_exclusive: Optional exclusive lower ``accrued_at`` bound.
+            through: Optional inclusive upper ``accrued_at`` bound.
 
         Returns:
             Accrual rows ordered by ``accrued_at`` ascending.
@@ -6031,6 +6038,26 @@ class Repository(ABC):
         Returns:
             Combined aggregate over exactly the rows ``get_pnl_fx_rate_candles_at``
             returns for the same arguments.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_event_fx_candle_fingerprints_by_plane(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> dict[PnlFxRatePlane, IdAggregate]:
+        """Return per-plane ``(count, id_sum, max_id, max_timestamp)`` for FX candles.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` FX planes of the consumed pairs.
+            open_ats: Exact 1-minute candle open timestamps to fingerprint.
+            as_of: Knowledge horizon of the replay's FX candle read.
+
+        Returns:
+            Mapping from populated ``(base, quote, exchange)`` planes to their
+            exact aggregates, omitting planes with zero matching rows.
         """
         ...
 
@@ -22876,8 +22903,11 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         *,
         fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
+        capture_fill_witness_cut: bool = False,
     ) -> PnlTimelineExecutionPrefix:
         """Certify a persisted cut while refusing to capture any newer execution."""
+        if capture_fill_witness_cut and fill_witness_cut is not None:
+            raise ValueError("capture_fill_witness_cut cannot be combined with fill_witness_cut")
         normalized = dict(sorted(watermarks.items()))
         if any(not exchange or watermark < 0 for exchange, watermark in normalized.items()):
             raise ValueError("execution watermark map is invalid")
@@ -22887,7 +22917,11 @@ class SQLAlchemyRepository(Repository):
                 s,
                 wallet_public_id,
                 mode,
-                _PnlTimelineExecutionCut(normalized, fill_witness_cut=fill_witness_cut),
+                _PnlTimelineExecutionCut(
+                    normalized,
+                    capture_fill_witness_cut=capture_fill_witness_cut,
+                    fill_witness_cut=fill_witness_cut,
+                ),
                 _resolved_knowledge_horizon(as_of),
             )
 
@@ -23483,6 +23517,9 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         mode: str,
         as_of: datetime,
+        *,
+        after_exclusive: datetime | None = None,
+        through: datetime | None = None,
     ) -> list[PnlTimelineAccrualRow]:
         """Retrieve a scope's funding accruals for the P&L timeline.
 
@@ -23493,21 +23530,24 @@ class SQLAlchemyRepository(Repository):
             wallet_public_id: Wallet scope to reconstruct.
             mode: Trading mode scope.
             as_of: Point-in-time and inclusive ``accrued_at`` upper bound.
+            after_exclusive: Optional exclusive lower ``accrued_at`` bound.
+            through: Optional inclusive upper ``accrued_at`` bound.
 
         Returns:
             Accrual rows ordered by ``accrued_at`` ascending.
         """
+        filters: list[ColumnElement[bool]] = [
+            AccrualLedger.wallet_public_id == wallet_public_id,
+            AccrualLedger.mode == mode,
+            AccrualLedger.accrued_at <= as_of,
+        ]
+        if after_exclusive is not None:
+            filters.append(AccrualLedger.accrued_at > after_exclusive)
+        if through is not None:
+            filters.append(AccrualLedger.accrued_at <= through)
+        filters.extend(where_active(AccrualLedger, as_of))
         async with self.session() as s:
-            stmt = (
-                select(AccrualLedger)
-                .where(
-                    AccrualLedger.wallet_public_id == wallet_public_id,
-                    AccrualLedger.mode == mode,
-                    AccrualLedger.accrued_at <= as_of,
-                    *where_active(AccrualLedger, as_of),
-                )
-                .order_by(AccrualLedger.accrued_at.asc())
-            )
+            stmt = select(AccrualLedger).where(*filters).order_by(AccrualLedger.accrued_at.asc())
             result = await s.execute(stmt)
             return [
                 {
@@ -23666,6 +23706,85 @@ class SQLAlchemyRepository(Repository):
                 await s.execute(text("SET LOCAL jit = off"))
             count, id_sum, max_id, max_ts = (await s.execute(stmt)).one()
         return self._id_aggregate_from_row(count, id_sum, max_id, max_ts)
+
+    async def get_pnl_event_fx_candle_fingerprints_by_plane(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> dict[PnlFxRatePlane, IdAggregate]:
+        """Aggregate consumed event-FX candles per ``(base, quote, exchange)`` plane.
+
+        Runs over :meth:`_scope_pnl_fx_rate_candles` batched by
+        :data:`_PNL_FX_MINUTE_BATCH`, grouping by plane and combining batch
+        aggregates per plane via :func:`_combine_id_aggregates`. Planes with no
+        matching rows are omitted from the returned map.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` FX planes of the consumed pairs.
+            open_ats: Exact 1-minute candle open timestamps to fingerprint.
+            as_of: Knowledge horizon of the replay's FX candle read.
+
+        Returns:
+            Per-plane ``IdAggregate`` map for populated planes, or ``{}`` without
+            querying when ``planes`` or ``open_ats`` is empty.
+        """
+        if not planes or not open_ats:
+            return {}
+        wanted = sorted(set(open_ats))
+        by_plane: dict[PnlFxRatePlane, IdAggregate] = {}
+        for index in range(0, len(wanted), _PNL_FX_MINUTE_BATCH):
+            batch = wanted[index : index + _PNL_FX_MINUTE_BATCH]
+            batch_by_plane = await self._pnl_fx_rate_candle_aggregates_by_plane(
+                planes, as_of, batch
+            )
+            for plane, aggregate in batch_by_plane.items():
+                previous = by_plane.get(plane)
+                by_plane[plane] = (
+                    aggregate if previous is None else _combine_id_aggregates(previous, aggregate)
+                )
+        return by_plane
+
+    async def _pnl_fx_rate_candle_aggregates_by_plane(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        as_of: datetime,
+        batch: Sequence[datetime],
+    ) -> dict[PnlFxRatePlane, IdAggregate]:
+        """Aggregate one batch of opens per FX plane over the shared candle scope.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` FX planes.
+            as_of: Knowledge horizon of the replay's FX candle read.
+            batch: Exact candle opens of this batch.
+
+        Returns:
+            Per-plane ``(count, id_sum, max_id, max_timestamp)`` for populated planes.
+        """
+        stmt = self._scope_pnl_fx_rate_candles(
+            select(
+                Symbol.base,
+                Symbol.quote,
+                Instrument.exchange,
+                func.count(Candle.id),
+                func.sum(Candle.id),
+                func.max(Candle.id),
+                func.max(Candle.timestamp),
+            ),
+            planes,
+            as_of,
+            Candle.open_at.in_(list(batch)),
+        ).group_by(Symbol.base, Symbol.quote, Instrument.exchange)
+        async with self.session() as s:
+            if self.dialect_name == "postgresql":
+                await s.execute(text("SET LOCAL jit = off"))
+            rows = (await s.execute(stmt)).all()
+        return {
+            (base, cast(str, quote), exchange): self._id_aggregate_from_row(
+                count, id_sum, max_id, max_ts
+            )
+            for base, quote, exchange, count, id_sum, max_id, max_ts in rows
+        }
 
     async def get_pnl_execution_prefix_counts(
         self,

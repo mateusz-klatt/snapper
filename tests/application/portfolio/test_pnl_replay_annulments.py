@@ -4,6 +4,8 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
+from typing import TypedDict
+from typing import Unpack
 
 import pytest
 
@@ -23,6 +25,13 @@ from tests.application.portfolio import test_pnl_timeline_service as fixtures
 
 _WALLET = fixtures._W1
 _minute = fixtures._m
+
+
+class _AtWatermarksOptions(TypedDict, total=False):
+    """Typed optional keyword arguments for watermarked execution-prefix cuts."""
+
+    fill_witness_cut: PnlTimelineFillWitnessCut | None
+    capture_fill_witness_cut: bool
 
 
 class _ReplayRepo(fixtures.FakeRepo):
@@ -55,10 +64,13 @@ class _ReplayRepo(fixtures.FakeRepo):
         mode: str,
         watermarks: Mapping[str, int],
         as_of: datetime,
-        *,
-        fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
+        **options: Unpack[_AtWatermarksOptions],
     ) -> PnlTimelineExecutionPrefix:
         """Record the cut and return only annulments proved within its coordinates."""
+        fill_witness_cut = options.get("fill_witness_cut")
+        capture_fill_witness_cut = options.get("capture_fill_witness_cut", False)
+        if capture_fill_witness_cut and fill_witness_cut is not None:
+            raise ValueError("capture_fill_witness_cut cannot be combined with fill_witness_cut")
         self.previous_cuts.append((wallet_public_id, mode, dict(watermarks), as_of))
         self.fixed_witnesses.append(fill_witness_cut)
         if self._refuse_previous_cut:
@@ -77,7 +89,9 @@ class _ReplayRepo(fixtures.FakeRepo):
                 if row["scope_sequence"] <= watermarks.get(row["exchange"], 0)
             ],
         }
-        if fill_witness_cut is not None and not self.drop_witness_cut:
+        if capture_fill_witness_cut:
+            result["fill_witness_cut"] = {"watermarks": {}, "digest": self._fill_witness_digest}
+        elif fill_witness_cut is not None and not self.drop_witness_cut:
             result["fill_witness_cut"] = fill_witness_cut
         return result
 
