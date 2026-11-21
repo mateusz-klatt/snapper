@@ -5949,6 +5949,30 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def has_active_portfolio_pnl_samples(
+        self,
+        scope: PortfolioPnlSampleScope,
+        start: datetime,
+        end: datetime,
+    ) -> bool:
+        """Return whether any active sample occupies an inclusive window across all epochs and versions.
+
+        Unlike :meth:`get_active_portfolio_pnl_samples_any_version`, this probe
+        checks every epoch and calculation version sharing the wallet, mode,
+        and valuation currency key so active foreign-epoch or legacy rows block
+        a persistent fill-gap skip.
+
+        Args:
+            scope: Canonical sample scope identifying wallet, mode, and currency.
+            start: Inclusive lower ``point_time`` boundary.
+            end: Inclusive upper ``point_time`` boundary.
+
+        Returns:
+            ``True`` when at least one active ``sample`` row falls in ``[start .. end]``.
+        """
+        ...
+
+    @abstractmethod
     async def get_venue_account_observation_attempts_at(
         self,
         wallet_public_id: str,
@@ -19593,6 +19617,35 @@ class SQLAlchemyRepository(Repository):
         async with self.session() as s:
             rows = (await s.execute(stmt)).scalars().all()
             return [self._portfolio_pnl_sample_to_row(row) for row in rows]
+
+    async def has_active_portfolio_pnl_samples(
+        self,
+        scope: PortfolioPnlSampleScope,
+        start: datetime,
+        end: datetime,
+    ) -> bool:
+        """Return whether any active sample occupies ``[start .. end]`` across all epochs and versions.
+
+        Args:
+            scope: Canonical sample scope identifying wallet, mode, and currency.
+            start: Inclusive lower ``point_time`` boundary.
+            end: Inclusive upper ``point_time`` boundary.
+
+        Returns:
+            ``True`` when at least one active ``sample`` row falls in ``[start .. end]``.
+        """
+        canonical = self._normalize_portfolio_pnl_sample_scope(scope)
+        candidate = (
+            select(PortfolioPnlPoint.id)
+            .where(
+                *self._portfolio_pnl_sample_scope_filters(canonical),
+                PortfolioPnlPoint.point_time >= start,
+                PortfolioPnlPoint.point_time <= end,
+            )
+            .limit(1)
+        )
+        async with self.session() as s:
+            return bool(await s.scalar(select(exists(candidate))))
 
     @staticmethod
     def _venue_account_observation_attempt_to_row(
