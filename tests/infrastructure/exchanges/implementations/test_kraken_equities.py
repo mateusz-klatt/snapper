@@ -34,6 +34,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_equities import (
 from snapper.infrastructure.exchanges.implementations.kraken_equities import _enqueue_or_drop_oldest
 from snapper.infrastructure.exchanges.implementations.kraken_equities import _timeframe_to_interval
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_CLOSE_TIMEOUT_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_MAX_MESSAGE_BYTES
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_INTERVAL_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_TIMEOUT_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _wrap_connect_factory
@@ -919,6 +920,7 @@ class TestRealtimeAuthWebSocket:
             "ping_interval": _WS_PING_INTERVAL_S,
             "ping_timeout": _WS_PING_TIMEOUT_S,
             "close_timeout": _WS_CLOSE_TIMEOUT_S,
+            "max_size": _WS_MAX_MESSAGE_BYTES,
         }
 
     @pytest.mark.asyncio

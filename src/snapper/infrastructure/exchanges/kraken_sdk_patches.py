@@ -107,6 +107,18 @@ _WS_CLOSE_TIMEOUT_S: Final[float] = 10.0
 """Closing-handshake deadline (seconds), enforced over any caller value, so a
 half-open socket cannot stall teardown during a reconnect."""
 
+_WS_MAX_MESSAGE_BYTES: Final[int] = 16 * 1024 * 1024
+"""Default largest inbound WebSocket message (bytes) injected into every Kraken
+handshake when the caller does not specify ``max_size``.
+
+The SDK's ``connect(...)`` passes no ``max_size``, so ``websockets`` falls back
+to its 1 MiB default. Kraken's spot ``instrument`` snapshot outgrew that limit
+on 2026-11-21 (a 1,048,702-byte frame): the handshake then closed with 1009
+MESSAGE_TOO_BIG, the symbol updater verified only 89% of the symbols, and the
+update aborted. 16 MiB leaves roughly sixteen-fold headroom while still bounding
+the memory one frame can claim. An explicit caller value, including ``None``
+for no limit, wins over this default."""
+
 _CLOSE_CODE_BACKOFF_S: Final[dict[int, float]] = {
     1008: 15.0,
     1011: 10.0,
@@ -368,8 +380,9 @@ class _ConnectShim:
 
     1. ``__init__`` (sync): reserve a route from the pool when
        enabled, merge the proxy kwarg, enforce transport keepalive
-       (``ping_timeout``/``close_timeout``, default ``ping_interval``),
-       then build the underlying ``original_connect(...)`` context
+       (``ping_timeout``/``close_timeout``), default ``ping_interval``
+       and the inbound message cap ``max_size`` when the caller omits
+       them, then build the underlying ``original_connect(...)`` context
        manager. Synchronous failure of ``original_connect`` releases
        the reservation.
     2. ``__aenter__``: opens the handshake. On HTTP 429,
@@ -407,6 +420,7 @@ class _ConnectShim:
             kwargs = {**kwargs, **self._reservation.websocket_kwargs()}
         kwargs = {
             "ping_interval": _WS_PING_INTERVAL_S,
+            "max_size": _WS_MAX_MESSAGE_BYTES,
             **kwargs,
             "ping_timeout": _WS_PING_TIMEOUT_S,
             "close_timeout": _WS_CLOSE_TIMEOUT_S,
