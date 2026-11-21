@@ -242,6 +242,14 @@ from snapper.data.fx_conversion_digests import build_decision_inputs_digest
 from snapper.data.fx_conversion_digests import build_proof_digest
 from snapper.data.fx_conversion_digests import build_refusal_reason_digest
 from snapper.data.fx_conversion_digests import build_requirement_manifest_digest
+from snapper.data.instrument_spec_observation_spans import SpecObservationSpanTarget
+from snapper.data.instrument_spec_observation_spans import SpecVersionKey
+from snapper.data.instrument_spec_observation_spans import is_spec_observation_fresh
+from snapper.data.instrument_spec_observation_spans import load_instrument_spec_observation_spans
+from snapper.data.instrument_spec_observation_spans import record_instrument_spec_observation_span
+from snapper.data.instrument_spec_observation_spans import (
+    record_instrument_spec_observation_span_sync,
+)
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
 from snapper.data.models import AiDelegate
@@ -421,6 +429,7 @@ from snapper.data.repository_types import InstrumentFrontMonthRow
 from snapper.data.repository_types import InstrumentOrderCapabilityRow
 from snapper.data.repository_types import InstrumentRelatedRow
 from snapper.data.repository_types import InstrumentSourceResolution
+from snapper.data.repository_types import InstrumentSpecObservationSpanRow
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import InstrumentSymbolRow
@@ -2185,6 +2194,7 @@ class _PnlOrderMinimumEvidence:
     """Raw SQL planes needed to prove a complete venue sibling set."""
 
     spec_records: list[_PnlOrderMinimumSpecRecord]
+    spec_observation_spans: Mapping[SpecVersionKey, tuple[InstrumentSpecObservationSpanRow, ...]]
     identity_records: list[_PnlOrderMinimumIdentityRecord]
     capability_records: list[_PnlOrderMinimumCapabilityRecord]
     instrument_records: list[_PnlOrderMinimumInstrumentRecord]
@@ -2416,8 +2426,13 @@ async def _pnl_order_minimum_records(
             )
         ).all()
     )
+    spec_observation_spans = await load_instrument_spec_observation_spans(
+        session,
+        [(record[4], record[10], record[17]) for record in spec_records],
+    )
     return _PnlOrderMinimumEvidence(
         spec_records=spec_records,
+        spec_observation_spans=spec_observation_spans,
         identity_records=identity_records,
         capability_records=capability_records,
         instrument_records=instrument_records,
@@ -2446,6 +2461,7 @@ def _pnl_order_minimum_spec_rows(
     records: Sequence[_PnlOrderMinimumSpecRecord],
     window: _PnlOrderMinimumWindow,
     capabilities: _PnlOrderMinimumCapabilities,
+    spec_observation_spans: Mapping[SpecVersionKey, tuple[InstrumentSpecObservationSpanRow, ...]],
 ) -> list[PnlVenueOrderMinimumVersionRow]:
     """Project author-time spec records and split them by capability seams."""
     rows: list[PnlVenueOrderMinimumVersionRow] = []
@@ -2472,6 +2488,10 @@ def _pnl_order_minimum_spec_rows(
     ) in records:
         clipped_from = max(valid_from, window.start)
         clipped_to = min(valid_to, window.end)
+        observation_spans = spec_observation_spans.get(
+            (instrument_public_id, spec_public_id, valid_from),
+            (),
+        )
         for role, currency, counter_currency in _pnl_order_minimum_role_values(
             base,
             quote,
@@ -2497,9 +2517,11 @@ def _pnl_order_minimum_spec_rows(
                         "quantity_unit": quantity_unit,
                         "status": status,
                         "spec_public_id": spec_public_id,
+                        "spec_timestamp": valid_from,
                         "spec_source": spec_source,
                         "spec_version": spec_version,
                         "spec_observed_at": spec_observed_at,
+                        "observation_spans": observation_spans,
                         "min_order_size": min_order_size,
                         "can_trade": can_trade,
                         "identity_conflicted": bool(identity_conflict),
@@ -3449,6 +3471,39 @@ def _current_futures_quantity_interpretation(spec: InstrumentSpecRow) -> bool:
     )
 
 
+_SPEC_EQUALITY_IGNORED_FIELDS: Final[frozenset[str]] = frozenset({"spec_observed_at"})
+
+
+def _instrument_spec_values_equal(
+    existing: InstrumentSpec,
+    payload: Mapping[str, object],
+) -> bool:
+    """Return whether all value-versioned specification columns match."""
+    return all(
+        getattr(existing, key) == value
+        for key, value in payload.items()
+        if key not in _SPEC_EQUALITY_IGNORED_FIELDS
+    )
+
+
+def _spec_span_target(
+    row: InstrumentSpec,
+    observed_at: datetime,
+    session_id: str,
+    sequence_id: int,
+) -> SpecObservationSpanTarget:
+    """Build a validated span-write target from one persisted InstrumentSpec row."""
+    return SpecObservationSpanTarget(
+        instrument_public_id=row.instrument_public_id,
+        spec_public_id=row.public_id,
+        spec_timestamp=row.timestamp,
+        spec_version=row.spec_version,
+        observed_at=observed_at,
+        session_id=session_id,
+        sequence_id=sequence_id,
+    )
+
+
 def is_effective_unit_certified(
     spec: InstrumentSpecRow,
     evaluated_at: datetime,
@@ -3456,20 +3511,18 @@ def is_effective_unit_certified(
     """Return whether stored unit evidence is valid at the evaluation instant.
 
     Certification fails closed for missing, naive, future-dated, or twelve-hour-old
-    observations and superseded Kraken Futures interpretations. Callers must evaluate
-    this predicate every time rather than treating the stored flag as permanent.
+    observations and superseded Kraken Futures interpretations. Freshness is
+    evaluated against matching observation spans when present, falling back to
+    ``spec["spec_observed_at"]`` when no span exists. Callers must evaluate this
+    predicate every time rather than treating the stored flag as permanent.
     """
     if spec["spec_source"] == FUTURES_SPEC_SOURCE and not _current_futures_quantity_interpretation(
         spec
     ):
         return False
-    observed_at = spec["spec_observed_at"]
-    if not spec["unit_certified"] or observed_at is None:
+    if not spec["unit_certified"] or spec["spec_observed_at"] is None:
         return False
-    if observed_at.utcoffset() is None or evaluated_at.utcoffset() is None:
-        return False
-    age = evaluated_at - observed_at
-    return timedelta(0) <= age < timedelta(hours=12)
+    return is_spec_observation_fresh(spec, evaluated_at)
 
 
 class _ClosableConnection(Protocol):
@@ -11706,11 +11759,24 @@ class SQLAlchemyRepository(Repository):
             exchange, base, quote, spec = row
             if not base or not quote:
                 return None
+            spec_row: InstrumentSpecRow | None = None
+            if spec is not None:
+                spans_by_key = await load_instrument_spec_observation_spans(
+                    s,
+                    [(spec.instrument_public_id, spec.public_id, spec.timestamp)],
+                )
+                spec_row = self._instrument_spec_row(
+                    spec,
+                    spans_by_key.get(
+                        (spec.instrument_public_id, spec.public_id, spec.timestamp),
+                        (),
+                    ),
+                )
             metadata: InstrumentValuationMetadataRow = {
                 "exchange": exchange,
                 "base": base,
                 "quote": quote,
-                "spec": self._instrument_spec_row(spec) if spec is not None else None,
+                "spec": spec_row,
             }
             return metadata
 
@@ -11905,7 +11971,7 @@ class SQLAlchemyRepository(Repository):
         timestamp: datetime,
         spec: InstrumentSpecInput,
     ) -> int:
-        """SCD2 close+insert for instrument trading specifications."""
+        """SCD2 close+insert for value-versioned instrument trading specifications."""
         payload = asdict(spec)
         async with self.session() as s:
             ts_filter, kt_filter = where_active(InstrumentSpec, timestamp)
@@ -11917,10 +11983,19 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             existing_spec = q.scalar_one_or_none()
-            if existing_spec is not None:
-                same = all(getattr(existing_spec, k) == v for k, v in payload.items())
-                if same:
-                    return int(existing_spec.id)
+            if existing_spec is not None and _instrument_spec_values_equal(existing_spec, payload):
+                if spec.spec_observed_at is not None:
+                    await record_instrument_spec_observation_span(
+                        s,
+                        _spec_span_target(
+                            existing_spec,
+                            spec.spec_observed_at,
+                            session_id,
+                            sequence_id,
+                        ),
+                    )
+                    await s.commit()
+                return int(existing_spec.id)
             new_values = {
                 "instrument_public_id": instrument_public_id,
                 "session_id": session_id,
@@ -11934,6 +12009,17 @@ class SQLAlchemyRepository(Repository):
                 new_values,
                 timestamp,
             )
+            await s.flush()
+            if spec.spec_observed_at is not None:
+                await record_instrument_spec_observation_span(
+                    s,
+                    _spec_span_target(
+                        new_row,
+                        spec.spec_observed_at,
+                        session_id,
+                        sequence_id,
+                    ),
+                )
             await s.commit()
             await s.refresh(new_row)
             return int(new_row.id)
@@ -11956,35 +12042,13 @@ class SQLAlchemyRepository(Repository):
             row = q.scalar_one_or_none()
             if row is None:
                 return None
-            return InstrumentSpecRow(
-                instrument_public_id=row.instrument_public_id,
-                tick_size=row.tick_size,
-                lot_size=row.lot_size,
-                min_order_size=row.min_order_size,
-                max_order_size=row.max_order_size,
-                cost_decimals=row.cost_decimals,
-                qty_decimals=row.qty_decimals,
-                margin_initial=row.margin_initial,
-                position_limit_long=row.position_limit_long,
-                position_limit_short=row.position_limit_short,
-                status=row.status,
-                contract_size=row.contract_size,
-                quantity_unit=row.quantity_unit,
-                native_order_quantity_unit=row.native_order_quantity_unit,
-                contract_payoff_model=row.contract_payoff_model,
-                contract_value_currency=row.contract_value_currency,
-                settlement_currency=row.settlement_currency,
-                spec_source=row.spec_source,
-                spec_version=row.spec_version,
-                spec_observed_at=row.spec_observed_at,
-                unit_certified=row.unit_certified,
-                expiry_at=row.expiry_at,
-                instrument_kind=row.instrument_kind,
-                funding_type=row.funding_type,
-                funding_frequency_hours=row.funding_frequency_hours,
-                rollover_rate_long=row.rollover_rate_long,
-                rollover_rate_short=row.rollover_rate_short,
-                max_funding_rate=row.max_funding_rate,
+            spans_by_key = await load_instrument_spec_observation_spans(
+                s,
+                [(row.instrument_public_id, row.public_id, row.timestamp)],
+            )
+            return self._instrument_spec_row(
+                row,
+                spans_by_key.get((row.instrument_public_id, row.public_id, row.timestamp), ()),
             )
 
     async def _acquire_spot_asset_precision_evidence_process_lock(
@@ -24776,6 +24840,7 @@ class SQLAlchemyRepository(Repository):
             evidence.spec_records,
             window,
             capabilities,
+            evidence.spec_observation_spans,
         )
         rows.extend(
             _pnl_order_minimum_identity_rows(
@@ -24909,7 +24974,10 @@ class SQLAlchemyRepository(Repository):
         )
 
     @staticmethod
-    def _instrument_spec_row(spec: InstrumentSpec) -> InstrumentSpecRow:
+    def _instrument_spec_row(
+        spec: InstrumentSpec,
+        observation_spans: tuple[InstrumentSpecObservationSpanRow, ...] = (),
+    ) -> InstrumentSpecRow:
         """Project one instrument specification for evaluator consumption."""
         return InstrumentSpecRow(
             instrument_public_id=spec.instrument_public_id,
@@ -24940,6 +25008,9 @@ class SQLAlchemyRepository(Repository):
             rollover_rate_long=spec.rollover_rate_long,
             rollover_rate_short=spec.rollover_rate_short,
             max_funding_rate=spec.max_funding_rate,
+            spec_public_id=spec.public_id,
+            spec_timestamp=spec.timestamp,
+            observation_spans=observation_spans,
         )
 
     @staticmethod
@@ -25037,6 +25108,7 @@ class SQLAlchemyRepository(Repository):
         cls,
         specs: Sequence[InstrumentSpec],
         candidate_ids: set[str],
+        spans_by_key: Mapping[SpecVersionKey, tuple[InstrumentSpecObservationSpanRow, ...]],
     ) -> tuple[dict[str, InstrumentSpecRow | None], str | None]:
         """Validate one active specification per candidate instrument."""
         rows: dict[str, InstrumentSpecRow | None] = dict.fromkeys(candidate_ids)
@@ -25045,7 +25117,10 @@ class SQLAlchemyRepository(Repository):
             if spec.instrument_public_id in seen_spec_ids:
                 return {}, "duplicate_futures_instrument_spec"
             seen_spec_ids.add(spec.instrument_public_id)
-            rows[spec.instrument_public_id] = cls._instrument_spec_row(spec)
+            rows[spec.instrument_public_id] = cls._instrument_spec_row(
+                spec,
+                spans_by_key.get((spec.instrument_public_id, spec.public_id, spec.timestamp), ()),
+            )
         return rows, None
 
     async def get_futures_reconciliation_bundle(
@@ -25143,7 +25218,18 @@ class SQLAlchemyRepository(Repository):
                     .order_by(InstrumentSpec.instrument_public_id, InstrumentSpec.id)
                 )
                 persisted_specs = spec_result.scalars().all()
-            specs, spec_error = self._futures_spec_mappings(persisted_specs, candidate_ids)
+            spans_by_key = await load_instrument_spec_observation_spans(
+                s,
+                [
+                    (spec.instrument_public_id, spec.public_id, spec.timestamp)
+                    for spec in persisted_specs
+                ],
+            )
+            specs, spec_error = self._futures_spec_mappings(
+                persisted_specs,
+                candidate_ids,
+                spans_by_key,
+            )
             if spec_error is not None:
                 return self._futures_bundle_unavailable(spec_error)
             return FuturesReconciliationBundle(
@@ -31279,17 +31365,20 @@ class SQLAlchemyRepository(Repository):
             except ExecutionChainError:
                 return self._spot_bundle_unavailable("execution_chain_broken")
 
-            spec_result = await s.execute(
-                select(InstrumentSpec).where(
-                    InstrumentSpec.instrument_public_id.in_(tuple(instruments)),
-                    *where_active(InstrumentSpec, as_of),
-                )
+            persisted_specs, spans_by_key = await self._load_spot_reconciliation_spec_records(
+                s, tuple(instruments), as_of
             )
             specs: dict[str, InstrumentSpecRow | None] = dict.fromkeys(instruments)
-            for spec in spec_result.scalars().all():
+            for spec in persisted_specs:
                 if specs.get(spec.instrument_public_id) is not None:
                     return self._spot_bundle_unavailable("duplicate_spot_instrument_spec")
-                specs[spec.instrument_public_id] = self._instrument_spec_row(spec)
+                specs[spec.instrument_public_id] = self._instrument_spec_row(
+                    spec,
+                    spans_by_key.get(
+                        (spec.instrument_public_id, spec.public_id, spec.timestamp),
+                        (),
+                    ),
+                )
 
             replay_assets = {row["base_asset"] for row in replay}
             replay_assets |= {row["quote_asset"] for row in replay}
@@ -31316,6 +31405,32 @@ class SQLAlchemyRepository(Repository):
             boundary_chain_tip=boundary_chain_tip,
             error=None,
         )
+
+    @staticmethod
+    async def _load_spot_reconciliation_spec_records(
+        session: AsyncSession,
+        instrument_public_ids: Sequence[str],
+        as_of: datetime,
+    ) -> tuple[
+        Sequence[InstrumentSpec],
+        Mapping[SpecVersionKey, tuple[InstrumentSpecObservationSpanRow, ...]],
+    ]:
+        """Load active spot specs alongside their matching observation spans."""
+        spec_result = await session.execute(
+            select(InstrumentSpec).where(
+                InstrumentSpec.instrument_public_id.in_(tuple(instrument_public_ids)),
+                *where_active(InstrumentSpec, as_of),
+            )
+        )
+        persisted_specs = spec_result.scalars().all()
+        spans_by_key = await load_instrument_spec_observation_spans(
+            session,
+            [
+                (spec.instrument_public_id, spec.public_id, spec.timestamp)
+                for spec in persisted_specs
+            ],
+        )
+        return persisted_specs, spans_by_key
 
     @staticmethod
     async def _effective_spot_replay_rows(
@@ -41770,6 +41885,42 @@ class DatabaseRepository:
         ).scalar_one_or_none()
 
     @staticmethod
+    def acquire_symbol_updater_lock_sync(
+        session: SyncSession,
+        exchange: str,
+    ) -> None:
+        """Acquire the per-exchange transaction-scoped lock for a symbol updater.
+
+        On PostgreSQL, acquires ``pg_advisory_xact_lock`` keyed by the
+        ``symbol_updater`` domain and exchange identifier, holding it until
+        transaction commit or rollback. On SQLite, upgrades the transaction
+        with ``BEGIN IMMEDIATE`` when no transaction is already active.
+
+        Args:
+            session: Caller-owned synchronous SQLAlchemy session.
+            exchange: Canonical exchange updater lock key.
+
+        Raises:
+            TypeError: If a SQLite session does not expose a ``sqlite3.Connection``.
+            NotImplementedError: If called on an unsupported SQL dialect.
+        """
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
+                {"identity": f"symbol_updater\x1f{exchange}"},
+            )
+            return
+        if dialect == "sqlite":
+            driver_connection = session.connection().connection.driver_connection
+            if not isinstance(driver_connection, sqlite3.Connection):
+                raise TypeError("SQLite session did not expose a sqlite3 connection")
+            if not driver_connection.in_transaction:
+                session.execute(text("BEGIN IMMEDIATE"))
+            return
+        raise NotImplementedError(f"symbol updater lock not implemented for dialect={dialect}")
+
+    @staticmethod
     def revise_instrument_spec_sync(
         session: SyncSession,
         instrument_public_id: str,
@@ -41778,9 +41929,11 @@ class DatabaseRepository:
         timestamp: datetime,
         spec: InstrumentSpecInput,
     ) -> str:
-        """Synchronous SCD2 close+insert for instrument specs.
+        """Synchronous value-versioned SCD2 revision for instrument specs.
 
-        Used by symbol updaters operating inside sync transactions.
+        Excludes ``spec_observed_at`` from value-change detection and records
+        observation heartbeats in ``instrument_spec_observation_spans`` inside
+        the caller's transaction.
 
         Args:
             session: SQLAlchemy sync session.
@@ -41801,23 +41954,42 @@ class DatabaseRepository:
                 InstrumentSpec.known_to > timestamp,
             )
         ).scalar_one_or_none()
-        if existing is not None:
-            same = all(getattr(existing, k) == v for k, v in payload.items())
-            if same:
-                return "unchanged"
+        if existing is not None and _instrument_spec_values_equal(existing, payload):
+            if spec.spec_observed_at is not None:
+                record_instrument_spec_observation_span_sync(
+                    session,
+                    _spec_span_target(
+                        existing,
+                        spec.spec_observed_at,
+                        session_id,
+                        sequence_id,
+                    ),
+                )
+            return "unchanged"
         new_values = {
             "instrument_public_id": instrument_public_id,
             "session_id": session_id,
             "sequence_id": sequence_id,
             **payload,
         }
-        close_and_insert_sync(
+        new_row = close_and_insert_sync(
             session=session,
             model=InstrumentSpec,
             match_filters=[InstrumentSpec.instrument_public_id == instrument_public_id],
             new_values=new_values,
             bus_time=timestamp,
         )
+        session.flush()
+        if spec.spec_observed_at is not None:
+            record_instrument_spec_observation_span_sync(
+                session,
+                _spec_span_target(
+                    new_row,
+                    spec.spec_observed_at,
+                    session_id,
+                    sequence_id,
+                ),
+            )
         if existing is None:
             return "created"
         return "updated"

@@ -1740,6 +1740,20 @@ class PnlCryptoUsdPlaneRow(TypedDict):
     candle_timestamp: datetime
 
 
+class InstrumentSpecObservationSpanRow(TypedDict):
+    """One maximal observation span for one exact InstrumentSpec version row."""
+
+    id: int
+    instrument_public_id: str
+    spec_public_id: str
+    spec_timestamp: datetime
+    spec_version: str | None
+    first_observed_at: datetime
+    last_observed_at: datetime
+    session_id: str
+    sequence_id: int
+
+
 class PnlVenueOrderMinimumVersionRow(TypedDict):
     """One temporal venue-order-minimum evidence row for Phase-5B.
 
@@ -1765,9 +1779,11 @@ class PnlVenueOrderMinimumVersionRow(TypedDict):
     quantity_unit: str | None
     status: str | None
     spec_public_id: str | None
+    spec_timestamp: NotRequired[datetime | None]
     spec_source: str | None
     spec_version: str | None
     spec_observed_at: datetime | None
+    observation_spans: NotRequired[tuple[InstrumentSpecObservationSpanRow, ...]]
     min_order_size: float | None
     can_trade: bool | None
     identity_conflicted: bool
@@ -2658,9 +2674,12 @@ class InstrumentSpecRow(TypedDict):
     contract_payoff_model: NotRequired[str | None]
     contract_value_currency: NotRequired[str | None]
     settlement_currency: NotRequired[str | None]
+    spec_public_id: NotRequired[str]
+    spec_timestamp: NotRequired[datetime]
     spec_source: str | None
     spec_version: str | None
     spec_observed_at: datetime | None
+    observation_spans: NotRequired[tuple[InstrumentSpecObservationSpanRow, ...]]
     unit_certified: bool
     expiry_at: datetime | None
     instrument_kind: str | None

@@ -206,6 +206,7 @@ class TestUpdateDatabase:
         updater = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -250,6 +251,7 @@ class TestUpdateDatabase:
         updater = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -272,6 +274,7 @@ class TestUpdateDatabase:
         updater = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )

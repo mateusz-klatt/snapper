@@ -22,6 +22,7 @@ from typing import Literal
 from typing import TypeIs
 
 from snapper.core.numeric import is_positive_finite
+from snapper.data.repository_types import InstrumentSpecObservationSpanRow
 
 type MinimumRefusal = Literal[
     "not_positive",
@@ -70,6 +71,8 @@ class VenueOrderMinimumVersion:
     minimum_unstable: bool
     valid_from: datetime
     valid_to: datetime
+    spec_timestamp: datetime | None = None
+    observation_spans: tuple[InstrumentSpecObservationSpanRow, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -86,6 +89,8 @@ class MinimumResolution:
     argmin_spec_source: str | None
     argmin_spec_version: str | None
     argmin_spec_observed_at: datetime | None
+    argmin_spec_timestamp: datetime | None = None
+    argmin_observation_spans: tuple[InstrumentSpecObservationSpanRow, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -104,6 +109,8 @@ class ExcludedBalance:
     spec_source: str | None
     spec_version: str | None
     spec_observed_at: datetime | None
+    spec_timestamp: datetime | None = None
+    observation_spans: tuple[InstrumentSpecObservationSpanRow, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -188,6 +195,8 @@ def _resolved_minimum(
         argmin_spec_source=chosen.spec_source,
         argmin_spec_version=chosen.spec_version,
         argmin_spec_observed_at=chosen.spec_observed_at,
+        argmin_spec_timestamp=chosen.spec_timestamp,
+        argmin_observation_spans=chosen.observation_spans,
     )
 
 
@@ -290,6 +299,8 @@ def _excluded_balance(
         spec_source=resolution.argmin_spec_source,
         spec_version=resolution.argmin_spec_version,
         spec_observed_at=resolution.argmin_spec_observed_at,
+        spec_timestamp=resolution.argmin_spec_timestamp,
+        observation_spans=resolution.argmin_observation_spans,
     )
 
 

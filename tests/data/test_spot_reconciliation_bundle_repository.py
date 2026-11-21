@@ -326,10 +326,10 @@ def _evaluation(
     }
 
 
-async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_eight_sets(
+async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_nine_sets(
     tmp_path: Path,
 ) -> None:
-    """One snapshot serves every evaluator input from exactly eight set reads.
+    """One snapshot serves every evaluator input from exactly nine set reads.
 
     Given: An anchored scope at watermark 2 with two later ingested fills,
         an active spec, and precision evidence for anchor, replay, and
@@ -337,12 +337,12 @@ async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_eight_sets
     When: The bundle is read at boundary watermark 4,
     Then: Replay, identity, spec, precision, and confirmed collections are
         complete, the counted proof passes, the boundary tip equals the
-        independently derived genesis fold, and eight SELECTs were issued
+        independently derived genesis fold, and nine SELECTs were issued
         (anchor, replay, annulment manifest, state, chain fold, specs,
-        precisions). The manifest read joins the snapshot because the replay
-        the evaluator folds is the EFFECTIVE range, and evidence about which
-        bookings still count has to come from the same pinned instant as the
-        bookings themselves.
+        spec observation spans, precisions). The manifest read joins the
+        snapshot because the replay the evaluator folds is the EFFECTIVE
+        range, and evidence about which bookings still count has to come
+        from the same pinned instant as the bookings themselves.
     """
     repo = await _repo(tmp_path)
     await _seed_market(repo, with_spec=True)
@@ -417,7 +417,7 @@ async def test_bundle_reads_anchor_replay_specs_precisions_and_tip_in_eight_sets
     assert bundle.previously_confirmed_assets == frozenset({"BTC", "USD"})
     assert bundle.range_complete is True
     assert bundle.boundary_chain_tip == await _derived_tip(repo, 4)
-    assert len(select_statements) == 8
+    assert len(select_statements) == 9
     await repo.engine.dispose()
 
 

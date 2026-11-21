@@ -264,6 +264,7 @@ __all__ = [
     "SymbolMarketDataChannelCapability",
     "ProcessRun",
     "InstrumentSpec",
+    "InstrumentSpecObservationSpan",
     "SpotAssetPrecisionEvidence",
     "UnderlyingAsset",
     "InstrumentUnderlyingMapping",
@@ -3185,6 +3186,44 @@ class InstrumentSpec(TemporalMixin, Base):
     unit_certified: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+
+
+class InstrumentSpecObservationSpan(Base):
+    """Non-temporal maximal observation spans for one exact InstrumentSpec version row.
+
+    Keyed by ``(instrument_public_id, spec_public_id, spec_timestamp)`` because
+    SCD2 ``close_and_insert`` preserves ``public_id`` across versions. Extending
+    an open span in place is the sole mutation on this table and is explicitly
+    permitted outside SCD2 temporal rules.
+    """
+
+    __tablename__ = "instrument_spec_observation_spans"
+    __table_args__ = (
+        Index(
+            "ix_inst_spec_obs_spans_lookup",
+            "instrument_public_id",
+            "spec_public_id",
+            "spec_timestamp",
+            text("last_observed_at DESC"),
+        ),
+        CheckConstraint(
+            "first_observed_at <= last_observed_at",
+            name="ck_inst_spec_obs_spans_bounds",
+        ),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    instrument_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    spec_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    spec_timestamp: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    spec_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    first_observed_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    session_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    sequence_id: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class SpotAssetPrecisionEvidence(TemporalMixin, Base):

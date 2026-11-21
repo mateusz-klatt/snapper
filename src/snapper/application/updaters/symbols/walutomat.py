@@ -133,6 +133,8 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
         with self.repository.get_session() as session:
             processed_symbol_public_ids: set[str] = set()
             now = datetime.now(UTC)
+            if not self._enter_locked_update(session, now):
+                return
             sid = self._tracker.session_id
             metadata = _spot_metadata()
             precision_observations = [
@@ -250,6 +252,7 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                 next_sequence_fn=lambda: self._tracker.next_sequence("capabilities"),
             )
             closed_aliases = self._reconcile_aliases(session, ExchangeEnum.WALUTOMAT, now)
+            self._finalize_locked_update(session, now)
             session.commit()
         logger.info(
             f"Walutomat update complete: {created_count} created, "

@@ -28,6 +28,14 @@ WHITELIST_FILES: Final[set[str]] = {
     "repository.py",
 }
 
+ALLOWED_NON_TEMPORAL_MUTABLE_TABLES: Final[frozenset[str]] = frozenset(
+    {
+        "portfolio_pnl_correction_frontiers",
+        "instrument_spec_observation_spans",
+    }
+)
+"""Non-temporal tables whose controlled in-place mutations are explicitly permitted."""
+
 Violation = tuple[int, str, str]
 
 FORBIDDEN_ATTR_PATTERNS: Final[list[tuple[re.Pattern[str], str]]] = [

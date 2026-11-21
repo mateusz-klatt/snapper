@@ -15,6 +15,7 @@ from snapper.application.portfolio.spot_precision_certification import (
     SpotPrecisionCertificationFailure,
 )
 from snapper.application.portfolio.spot_precision_certification import SpotPrecisionEvidencePlane
+from snapper.data.repository_types import InstrumentSpecObservationSpanRow
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
 
@@ -1018,6 +1019,70 @@ def test_walutomat_instrument_rejects_future_artifact_dates(
         certification.is_spot_instrument_precision_certified(
             "walutomat",
             _walutomat_spec(),
+            _EVALUATED_AT,
+        )
+        is False
+    )
+
+
+def test_kraken_instrument_precision_uses_observation_spans_past_twelve_hours() -> None:
+    """Kraken spot precision remains certified via matching spans past first-observation TTL.
+
+    Given: A Kraken instrument spec first observed 24 hours before evaluation, with either
+        a fresh matching span, an expired matching span, or a fresh span for an older version.
+    When: ``is_spot_instrument_precision_certified`` evaluates the specification.
+    Then: The fresh matching span certifies while expired and foreign-version spans fail.
+    """
+    first_obs = _EVALUATED_AT - timedelta(hours=24)
+    fresh_span: InstrumentSpecObservationSpanRow = {
+        "id": 1,
+        "instrument_public_id": "inst-kraken-1",
+        "spec_public_id": "spec-1",
+        "spec_timestamp": first_obs,
+        "spec_version": _kraken_spec()["spec_version"],
+        "first_observed_at": first_obs,
+        "last_observed_at": _EVALUATED_AT - timedelta(hours=1),
+        "session_id": "sess-1",
+        "sequence_id": 1,
+    }
+    fresh_spec = _changed_spec(
+        _kraken_spec(),
+        instrument_public_id="inst-kraken-1",
+        spec_observed_at=first_obs,
+        spec_public_id="spec-1",
+        spec_timestamp=first_obs,
+        observation_spans=(fresh_span,),
+    )
+    assert (
+        certification.is_spot_instrument_precision_certified(
+            "kraken",
+            fresh_spec,
+            _EVALUATED_AT,
+        )
+        is True
+    )
+    expired_spec = _changed_spec(
+        fresh_spec,
+        observation_spans=(
+            {**fresh_span, "last_observed_at": _EVALUATED_AT - timedelta(hours=12)},
+        ),
+    )
+    assert (
+        certification.is_spot_instrument_precision_certified(
+            "kraken",
+            expired_spec,
+            _EVALUATED_AT,
+        )
+        is False
+    )
+    foreign_spec = _changed_spec(
+        fresh_spec,
+        observation_spans=({**fresh_span, "spec_timestamp": first_obs - timedelta(hours=1)},),
+    )
+    assert (
+        certification.is_spot_instrument_precision_certified(
+            "kraken",
+            foreign_spec,
             _EVALUATED_AT,
         )
         is False

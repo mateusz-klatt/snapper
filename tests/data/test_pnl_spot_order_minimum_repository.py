@@ -24,6 +24,7 @@ from snapper.application.portfolio.basket_realizability import resolve_venue_ord
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
+from snapper.data.models import InstrumentSpecObservationSpan
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import SQLAlchemyRepository
@@ -219,6 +220,7 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
     Symbol.__table__.create(schema_engine)
     Instrument.__table__.create(schema_engine)
     InstrumentSpec.__table__.create(schema_engine)
+    InstrumentSpecObservationSpan.__table__.create(schema_engine)
     SymbolExchangeCapability.__table__.create(schema_engine)
     schema_engine.dispose()
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
@@ -295,9 +297,11 @@ class TestPnlSpotOrderMinimumRepository:
             "quantity_unit": "base_asset",
             "status": "active",
             "spec_public_id": "spec-TRUMP-USD",
+            "spec_timestamp": _EARLY,
             "spec_source": "kraken:venue_metadata",
             "spec_version": "venue-v1",
             "spec_observed_at": _EARLY,
+            "observation_spans": (),
             "min_order_size": 3.0,
             "can_trade": True,
             "identity_conflicted": False,
@@ -1507,3 +1511,40 @@ class TestPnlSpotOrderMinimumRepository:
             )
             == []
         )
+
+    async def test_persisted_observation_spans_attach_with_unclipped_spec_timestamp(
+        self,
+        repository: SQLAlchemyRepository,
+    ) -> None:
+        """Spec rows carry copied observation spans keyed by unclipped spec timestamp."""
+        await _seed_pair(repository, _Pair("TRUMP-USD", "TRUMP", "USD"))
+        span_last = _WINDOW_END - timedelta(minutes=5)
+        async with repository.session() as session:
+            session.add(
+                InstrumentSpecObservationSpan(
+                    instrument_public_id="ins-TRUMP-USD",
+                    spec_public_id="spec-TRUMP-USD",
+                    spec_timestamp=_EARLY,
+                    spec_version="venue-v1",
+                    first_observed_at=_EARLY,
+                    last_observed_at=span_last,
+                    session_id="sess-span",
+                    sequence_id=9,
+                )
+            )
+            await session.commit()
+        rows = await repository.get_pnl_spot_order_minimum_window(
+            ["kraken"],
+            ["TRUMP"],
+            _WINDOW_START,
+            _WINDOW_END,
+            _AS_OF,
+        )
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["valid_from"] == _WINDOW_START
+        assert row["spec_timestamp"] == _EARLY
+        spans = row["observation_spans"]
+        assert len(spans) == 1
+        assert spans[0]["first_observed_at"] == _EARLY
+        assert spans[0]["last_observed_at"] == span_last

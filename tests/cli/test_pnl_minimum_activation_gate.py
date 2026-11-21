@@ -39,6 +39,7 @@ from snapper.cli.pnl_minimum_activation_gate import resolve_live_wallet_scope
 from snapper.cli.pnl_minimum_activation_gate import run_activation_report
 from snapper.cli.pnl_minimum_activation_gate import select_best_usd_close
 from snapper.data.repository import Repository
+from snapper.data.repository_types import InstrumentSpecObservationSpanRow
 from snapper.data.repository_types import PnlCryptoUsdPlaneRow
 from snapper.data.repository_types import PnlVenueOrderMinimumVersionRow
 from snapper.data.repository_types import PortfolioPnlAnchorRow
@@ -1672,3 +1673,122 @@ def test_cli_group_is_registered() -> None:
     Then: The F6 report and monitor group is reachable by its documented name.
     """
     assert "pnl-minimum-gate" in [group.name for group in app.registered_groups]
+
+
+def test_activation_gate_copies_spec_observation_evidence_and_cut_bound() -> None:
+    """Activation evidence copies span bounds and labels ``min(last, cut)`` explicitly.
+
+    Given: An excluded balance backed by a spec with an observation span extending past
+        the evaluated minute cut, plus stale-span and no-span fallback cases.
+    When: Activation reports are built and serialized to JSON.
+    Then: The recorded evidence carries ``spec_public_id``, ``spec_timestamp``,
+        ``spec_version``, ``spec_observed_at``, ``fresh_at_cut``, vouching span id,
+        ``first_observed_at``, ``last_observed_as_of_recording``, and
+        ``observed_at_or_before_cut_bound == min(last, cut)``; mutating the source
+        span list afterward does not alter the recorded evidence.
+    """
+    spec_ts = _MINUTE - timedelta(days=2)
+    span_last = _MINUTE + timedelta(hours=3)
+    live_span: InstrumentSpecObservationSpanRow = {
+        "id": 42,
+        "instrument_public_id": "instrument-TRUMP",
+        "spec_public_id": "spec-TRUMP",
+        "spec_timestamp": spec_ts,
+        "spec_version": "v1",
+        "first_observed_at": spec_ts,
+        "last_observed_at": span_last,
+        "session_id": "sess-1",
+        "sequence_id": 1,
+    }
+    minimum = replace(
+        _minimum(),
+        spec_timestamp=spec_ts,
+        spec_observed_at=spec_ts,
+        observation_spans=(live_span,),
+    )
+    report = build_activation_report(
+        _request(),
+        [_basket({("kraken", "TRUMP"): 1.0, ("kraken", "USD"): 100.0})],
+        [minimum],
+        [_close()],
+        [_sample(1000.0)],
+    )
+    live_span["last_observed_at"] = span_last + timedelta(hours=9)
+    leg = report.impacts[0].legs[0]
+    evidence = leg.minimum_spec_observation
+    assert leg.minimum_spec_timestamp == spec_ts
+    assert evidence.spec_public_id == "spec-TRUMP"
+    assert evidence.spec_timestamp == spec_ts
+    assert evidence.spec_version == "v1"
+    assert evidence.spec_observed_at == spec_ts
+    assert evidence.fresh_at_cut is True
+    assert evidence.vouching_span_id == 42
+    assert evidence.first_observed_at == spec_ts
+    assert evidence.last_observed_as_of_recording == span_last
+    assert evidence.observed_at_or_before_cut_bound == _MINUTE
+
+    payload = report_as_json(report)
+    impacts_json = payload["impacts"]
+    assert isinstance(impacts_json, list)
+    first_impact = impacts_json[0]
+    assert isinstance(first_impact, dict)
+    legs_json = first_impact["legs"]
+    assert isinstance(legs_json, list)
+    leg_json = legs_json[0]
+    assert isinstance(leg_json, dict)
+    assert leg_json["minimum_spec_timestamp"] == spec_ts.isoformat()
+    obs_json = leg_json["minimum_spec_observation"]
+    assert obs_json == {
+        "spec_public_id": "spec-TRUMP",
+        "spec_timestamp": spec_ts.isoformat(),
+        "spec_version": "v1",
+        "spec_observed_at": spec_ts.isoformat(),
+        "fresh_at_cut": True,
+        "vouching_span_id": 42,
+        "first_observed_at": spec_ts.isoformat(),
+        "last_observed_as_of_recording": span_last.isoformat(),
+        "observed_at_or_before_cut_bound": _MINUTE.isoformat(),
+    }
+
+    stale_minimum = replace(
+        _minimum(),
+        spec_timestamp=spec_ts,
+        spec_observed_at=spec_ts,
+        observation_spans=(
+            {
+                "id": 43,
+                "instrument_public_id": "instrument-TRUMP",
+                "spec_public_id": "spec-TRUMP",
+                "spec_timestamp": spec_ts,
+                "spec_version": "v1",
+                "first_observed_at": spec_ts,
+                "last_observed_at": _MINUTE - timedelta(hours=12),
+                "session_id": "sess-1",
+                "sequence_id": 2,
+            },
+        ),
+    )
+    stale_report = build_activation_report(
+        _request(),
+        [_basket({("kraken", "TRUMP"): 1.0, ("kraken", "USD"): 100.0})],
+        [stale_minimum],
+        [_close()],
+        [_sample(1000.0)],
+    )
+    stale_evidence = stale_report.impacts[0].legs[0].minimum_spec_observation
+    assert stale_evidence.fresh_at_cut is False
+    assert stale_evidence.vouching_span_id is None
+    assert stale_evidence.observed_at_or_before_cut_bound is None
+
+    fresh_fallback = replace(_minimum(), spec_observed_at=_MINUTE - timedelta(hours=1))
+    fallback_report = build_activation_report(
+        _request(),
+        [_basket({("kraken", "TRUMP"): 1.0, ("kraken", "USD"): 100.0})],
+        [fresh_fallback],
+        [_close()],
+        [_sample(1000.0)],
+    )
+    fb_evidence = fallback_report.impacts[0].legs[0].minimum_spec_observation
+    assert fb_evidence.fresh_at_cut is True
+    assert fb_evidence.vouching_span_id is None
+    assert fb_evidence.observed_at_or_before_cut_bound == _MINUTE - timedelta(hours=1)

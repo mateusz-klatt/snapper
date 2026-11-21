@@ -21,6 +21,7 @@ from loguru import logger
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import update
+from sqlalchemy.orm import Session as SyncSession
 
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.services.settings import get_settings_service
@@ -88,6 +89,17 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.msg_publisher: MessagePublisher | None = None
         self.update_threshold_hours = update_threshold_hours
         self.force = force
+        self._in_managed_run = False
+        self._last_update_skipped = False
+        self._last_update_committed_timestamp = False
+
+    def _lock_exchange(self) -> str:
+        """Return the canonical per-exchange advisory-lock key for this updater.
+
+        Returns:
+            Exchange identifier derived from the updater's setting key.
+        """
+        return self._get_setting_key().removesuffix("_symbols_last_update")
 
     @abstractmethod
     def _create_exchange_client(self) -> T:
@@ -942,6 +954,16 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.info(f"Reconciled {exchange} aliases: closed {closed} retired alias rows")
         return closed
 
+    def _get_last_update_timestamp_in_session(self, session: Any) -> datetime | None:
+        """Retrieve this updater's active last-update setting inside an open session."""
+        stmt = select(Setting).where(
+            Setting.key == self._get_setting_key(), *where_active_now(Setting)
+        )
+        setting = session.execute(stmt).scalar_one_or_none()
+        if setting is None or setting.value == "null" or not setting.value:
+            return None
+        return datetime.fromisoformat(setting.value.replace("Z", "+00:00"))
+
     def _get_last_update_timestamp(self) -> datetime | None:
         """Retrieve the timestamp of the last symbol mapping update from database.
 
@@ -952,16 +974,29 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             if self.repository is None:
                 raise RuntimeError("Repository not initialized")
             with self.repository.get_session() as session:
-                stmt = select(Setting).where(
-                    Setting.key == self._get_setting_key(), *where_active_now(Setting)
-                )
-                setting = session.execute(stmt).scalar_one_or_none()
-                if setting is None or setting.value == "null" or not setting.value:
-                    return None
-                return datetime.fromisoformat(setting.value.replace("Z", "+00:00"))
+                return self._get_last_update_timestamp_in_session(session)
         except Exception as e:
             logger.warning(f"Error getting last update timestamp: {e}")
             return None
+
+    def _set_last_update_timestamp_sync(self, session: Any, timestamp: datetime) -> None:
+        """Store this updater's last-update setting inside the caller's transaction."""
+        iso_timestamp = timestamp.isoformat()
+        close_and_insert_sync(
+            session=session,
+            model=Setting,
+            match_filters=[Setting.key == self._get_setting_key()],
+            new_values={
+                "key": self._get_setting_key(),
+                "value": iso_timestamp,
+                "category": "system",
+                "description": f"Timestamp of last {self._get_setting_key()} update",
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence("settings"),
+            },
+            bus_time=timestamp,
+        )
+        logger.info(f"Updated timestamp: {self._get_setting_key()} = {iso_timestamp}")
 
     async def _set_last_update_timestamp(self, timestamp: datetime) -> None:
         """Store the timestamp of the current symbol mapping update to database.
@@ -993,20 +1028,16 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.error(f"Error setting last update timestamp: {e}")
             raise
 
-    def should_update(self) -> bool:
-        """Check if symbol mappings should be updated based on threshold and force flag.
-
-        Returns:
-            True if update should proceed, False otherwise.
-        """
-        if self.force:
-            logger.info("Force mode enabled - update will proceed")
-            return True
-        last_update = self._get_last_update_timestamp()
+    def _should_update_for_last_timestamp(
+        self,
+        last_update: datetime | None,
+        now: datetime,
+    ) -> bool:
+        """Evaluate update threshold eligibility against a previously read instant."""
         if last_update is None:
             logger.info("No previous update found - update will proceed")
             return True
-        time_since_update = datetime.now(UTC) - last_update
+        time_since_update = now - last_update
         threshold = timedelta(hours=self.update_threshold_hours)
         if time_since_update < threshold:
             remaining = threshold - time_since_update
@@ -1022,6 +1053,58 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             f"(threshold: {self.update_threshold_hours}h)"
         )
         return True
+
+    def should_update(self) -> bool:
+        """Check if symbol mappings should be updated based on threshold and force flag.
+
+        Returns:
+            True if update should proceed, False otherwise.
+        """
+        if self.force:
+            logger.info("Force mode enabled - update will proceed")
+            return True
+        return self._should_update_for_last_timestamp(
+            self._get_last_update_timestamp(),
+            datetime.now(UTC),
+        )
+
+    def _should_update_in_session(self, session: Any, now: datetime) -> bool:
+        """Re-evaluate update eligibility inside the locked update transaction."""
+        if self.force:
+            return True
+        return self._should_update_for_last_timestamp(
+            self._get_last_update_timestamp_in_session(session),
+            now,
+        )
+
+    def _enter_locked_update(self, session: Any, now: datetime) -> bool:
+        """Acquire the per-exchange transaction lock and re-check managed eligibility.
+
+        Args:
+            session: Caller-owned synchronous database session.
+            now: Transaction timestamp for threshold re-evaluation.
+
+        Returns:
+            True when the update should proceed, False when a concurrent run
+            already satisfied the threshold while waiting on the lock.
+        """
+        assert self.repository is not None
+        if isinstance(session, SyncSession):
+            DatabaseRepository.acquire_symbol_updater_lock_sync(session, self._lock_exchange())
+        if self._in_managed_run and not self._should_update_in_session(session, now):
+            self._last_update_skipped = True
+            logger.info(
+                f"Skipping {self._lock_exchange()} update after lock acquisition: "
+                "a concurrent run already completed within threshold"
+            )
+            return False
+        return True
+
+    def _finalize_locked_update(self, session: Any, now: datetime) -> None:
+        """Write the last-update timestamp inside the locked transaction for managed runs."""
+        if self._in_managed_run:
+            self._set_last_update_timestamp_sync(session, now)
+            self._last_update_committed_timestamp = True
 
     async def _fetch_symbols(self, client: T) -> list[dict[str, Any]]:
         """Fetch symbol data from the exchange client.
@@ -1062,9 +1145,19 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.info(f"Exchange client connected: {type(client).__name__}")
             try:
                 symbols = await self._fetch_symbols(client)
-                await self._update_database(symbols)
+                self._in_managed_run = True
+                self._last_update_skipped = False
+                self._last_update_committed_timestamp = False
+                try:
+                    await self._update_database(symbols)
+                finally:
+                    self._in_managed_run = False
+                if self._last_update_skipped:
+                    logger.info("Skipping update after per-exchange lock re-check")
+                    return
                 await self.broadcast_cache_invalidation()
-                await self._set_last_update_timestamp(datetime.now(UTC))
+                if not self._last_update_committed_timestamp:
+                    await self._set_last_update_timestamp(datetime.now(UTC))
                 logger.info("Symbol mapping update completed successfully")
             finally:
                 await client.disconnect()

@@ -37,8 +37,10 @@ from snapper.data.account_bound_submission_admission_store import (
     get_bound_account_submission_admission,
 )
 from snapper.data.contract_accounting_capture_session import capture_bound_accounting_observation
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
+from snapper.data.models import InstrumentSpecObservationSpan
 from snapper.data.models import Order
 from snapper.data.models import SymbolAlias
 from snapper.data.models import TradeCommand
@@ -173,17 +175,23 @@ async def _observe_current_unit_catalog(
     new_id = await repository.revise_instrument_spec(
         admission_id(2), native_authority_uuid(9000), 6050, observed_at, spec
     )
-    assert new_id != old_id
+    assert new_id == old_id
     async with repository.session() as session:
-        original = await session.get(InstrumentSpec, old_id)
-        current = await session.get(InstrumentSpec, new_id)
-        assert original is not None and current is not None
-        assert (original.timestamp, original.spec_observed_at) == (old_at, old_observed)
-        assert original.known_to == current.timestamp == current.spec_observed_at == observed_at
-        assert current.contract_size == original.contract_size
-        assert current.native_order_quantity_unit == original.native_order_quantity_unit
-        assert current.contract_payoff_model == original.contract_payoff_model
-        assert current.settlement_currency == original.settlement_currency
+        current = await session.get(InstrumentSpec, old_id)
+        assert current is not None
+        assert (current.timestamp, current.spec_observed_at) == (old_at, old_observed)
+        assert current.known_to == KNOWN_TO_MAX
+        spans = (
+            await session.scalars(
+                select(InstrumentSpecObservationSpan).where(
+                    InstrumentSpecObservationSpan.instrument_public_id == admission_id(2),
+                    InstrumentSpecObservationSpan.spec_public_id == current.public_id,
+                    InstrumentSpecObservationSpan.spec_timestamp == current.timestamp,
+                )
+            )
+        ).all()
+        assert spans
+        assert max(span.last_observed_at for span in spans) == observed_at
 
 
 async def _seed_original_intent(

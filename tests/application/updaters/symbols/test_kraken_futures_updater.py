@@ -2,7 +2,9 @@
 
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -24,8 +26,10 @@ from snapper.core.types import AliasChannelEnum
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import InstrumentSpec
+from snapper.data.models import InstrumentSpecObservationSpan
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import SymbolMarketDataChannelCapability
+from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
@@ -326,6 +330,7 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -365,6 +370,7 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -387,6 +393,7 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -447,6 +454,7 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -490,6 +498,7 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -532,6 +541,7 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -576,6 +586,7 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -621,6 +632,7 @@ class TestUpdateDatabase:
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.execute.return_value.scalar_one_or_none.return_value = None
         mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
             KNOWN_TO_MAX
         )
@@ -1163,3 +1175,63 @@ class TestBuildCcxtSymbol:
         """
         schema = _make_schema(last_trading_time="2026-06-26T16:00:00Z")
         assert _build_ccxt_symbol(schema) is None
+
+
+class TestFetchObservedAtOptionB:
+    """Verify Kraken Futures captures catalog fetch time before DB write lock."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_symbols_captures_fetch_time_for_observation_span(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Record fetch instant rather than later DB transaction time in observation spans.
+
+        Given: A Kraken Futures catalog fetched at ``fetch_time`` and persisted later at
+            ``write_time``.
+        When: ``_fetch_symbols`` runs followed by ``_update_database``.
+        Then: Both ``InstrumentSpec.spec_observed_at`` and the observation span use
+            ``fetch_time``, while ``InstrumentSpec.timestamp`` uses ``write_time``.
+        """
+        fetch_time = datetime(2026, 11, 21, 10, 0, tzinfo=UTC)
+        write_time = fetch_time + timedelta(minutes=7)
+        raw = {
+            "symbol": "PF_XBTUSD",
+            "type": "futures_vanilla",
+            "tickSize": 0.5,
+            "contractSize": 1,
+            "contractValueTradePrecision": 4,
+            "tradeable": True,
+            "base": "XBT",
+            "quote": "USD",
+        }
+
+        async def _subscribe() -> object:
+            yield raw
+
+        client = MagicMock(spec=KrakenFuturesExchangeClient)
+        client.subscribe_instruments = _subscribe
+        repo = DatabaseRepository(f"sqlite:///{tmp_path / 'kf-fetch.db'}")
+        repo.create_all()
+        updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
+        updater.repository = repo
+        try:
+            with patch("snapper.application.updaters.symbols.kraken_futures.datetime") as dt_mock:
+                dt_mock.now.return_value = fetch_time
+                dt_mock.fromisoformat.side_effect = datetime.fromisoformat
+                fetched = await updater._fetch_symbols(client)
+            assert updater._last_fetch_observed_at == fetch_time
+            with patch("snapper.application.updaters.symbols.kraken_futures.datetime") as dt_mock:
+                dt_mock.now.return_value = write_time
+                dt_mock.fromisoformat.side_effect = datetime.fromisoformat
+                await updater._update_database(fetched)
+            assert updater._last_fetch_observed_at is None
+            with repo.get_session() as session:
+                spec = session.execute(select(InstrumentSpec)).scalar_one()
+                span = session.execute(select(InstrumentSpecObservationSpan)).scalar_one()
+            assert spec.timestamp == write_time
+            assert spec.spec_observed_at == fetch_time
+            assert span.first_observed_at == fetch_time
+            assert span.last_observed_at == fetch_time
+        finally:
+            repo.engine.dispose()

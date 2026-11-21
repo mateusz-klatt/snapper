@@ -109,10 +109,10 @@ def _position(
     )
 
 
-async def test_bundle_reads_complete_projection_mappings_and_specs_in_three_sets(
+async def test_bundle_reads_complete_projection_mappings_and_specs_in_four_sets(
     tmp_path: Path,
 ) -> None:
-    """One snapshot uses three set reads regardless of candidate count."""
+    """One snapshot uses four set reads regardless of candidate count."""
     repository = await _make_repo(tmp_path, "complete-bundle.db")
     async with repository.session() as session:
         session.add_all(
@@ -186,7 +186,7 @@ async def test_bundle_reads_complete_projection_mappings_and_specs_in_three_sets
     }
     assert bundle.specs_by_instrument_public_id[_TARGET_INSTRUMENT] is not None
     assert bundle.specs_by_instrument_public_id[_VENUE_ONLY_INSTRUMENT] is None
-    assert len(select_statements) == 3
+    assert len(select_statements) == 4
 
 
 async def test_bundle_preserves_proven_complete_zero_position_projection(
