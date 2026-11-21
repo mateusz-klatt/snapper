@@ -36,6 +36,7 @@ import contextlib
 import json
 import logging
 import os
+import time
 from bisect import bisect_right
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -120,6 +121,17 @@ _CRYPTO_PLANE_LIMIT_SQLSTATES: Final[frozenset[str]] = frozenset({"57014", "55P0
 
 ``57014`` is a statement timeout (``query_canceled``) and ``55P03`` a lock timeout
 (``lock_not_available``); both are expected budget outcomes logged once per streak.
+"""
+
+_CHUNK_RECOVERY_STREAK: Final[int] = 3
+"""Consecutive fast committed chunks required before a reduced chunk limit doubles."""
+
+_CHUNK_RECOVERY_BUDGET_FRACTION: Final[float] = 0.25
+"""Share of the tick budget below which a committed chunk counts toward recovery.
+
+Doubling a chunk that finished within a quarter of the tick keeps the doubled
+chunk within about half of it, so recovery cannot oscillate against the timeout
+that originally halved the limit.
 """
 
 _FAILURE_MESSAGES: Final[dict[str, str]] = {
@@ -259,6 +271,7 @@ class PortfolioPnlSnapshotter:
         self._interval_seconds = interval_seconds
         self._disabled = disabled
         self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
+        self._monotonic: Callable[[], float] = time.monotonic
         self._settings_service = settings_service
         self._stopping = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
@@ -266,6 +279,7 @@ class PortfolioPnlSnapshotter:
         self._sequence = 0
         self._last_scheduled_wallet: str | None = None
         self._replay_chunk_limits: dict[str, int] = {}
+        self._replay_chunk_streaks: dict[str, int] = {}
         self._unsupported_logged: set[str] = set()
         self._mint_identity_logged: set[str] = set()
         self._no_anchor_logged: set[str] = set()
@@ -411,6 +425,37 @@ class PortfolioPnlSnapshotter:
     def _reduce_replay_chunk(self, wallet: str) -> None:
         """Retry less valuation work after cancellation or a database query deadline."""
         self._replay_chunk_limits[wallet] = max(1, self._replay_chunk_limit(wallet) // 2)
+        self._replay_chunk_streaks.pop(wallet, None)
+
+    def _record_chunk_outcome(self, wallet: str, elapsed: float) -> None:
+        """Grow a reduced chunk limit back after consecutive fast committed chunks.
+
+        A halved limit otherwise persists for the life of the process, so one
+        transient deadline would multiply every later chunk's fixed prefix cost.
+        Only committed chunks reach this method; rows stay width-independent
+        because valuation is per point, so recovery changes only throughput.
+
+        Args:
+            wallet: Wallet whose replay chunk has just committed.
+            elapsed: Monotonic wall time of that chunk, in seconds.
+        """
+        limit = self._replay_chunk_limit(wallet)
+        if limit >= MAX_CORRECTION_CHUNK_MINUTES:
+            self._replay_chunk_streaks.pop(wallet, None)
+            return
+        if elapsed >= self._interval_seconds * _CHUNK_RECOVERY_BUDGET_FRACTION:
+            self._replay_chunk_streaks[wallet] = 0
+            return
+        streak = self._replay_chunk_streaks.get(wallet, 0) + 1
+        if streak < _CHUNK_RECOVERY_STREAK:
+            self._replay_chunk_streaks[wallet] = streak
+            return
+        self._replay_chunk_streaks.pop(wallet, None)
+        grown = min(limit * 2, MAX_CORRECTION_CHUNK_MINUTES)
+        if grown >= MAX_CORRECTION_CHUNK_MINUTES:
+            self._replay_chunk_limits.pop(wallet, None)
+        else:
+            self._replay_chunk_limits[wallet] = grown
 
     async def _read_mint_wallet_pin(self) -> JsonValue:
         """Read the current mint pin directly from storage, failing open."""
@@ -475,6 +520,11 @@ class PortfolioPnlSnapshotter:
         self._replay_chunk_limits = {
             wallet: limit
             for wallet, limit in self._replay_chunk_limits.items()
+            if wallet in current_wallets
+        }
+        self._replay_chunk_streaks = {
+            wallet: streak
+            for wallet, streak in self._replay_chunk_streaks.items()
             if wallet in current_wallets
         }
         self._persistent_fill_gap_skip_logged = {
@@ -904,6 +954,7 @@ class PortfolioPnlSnapshotter:
         limit = self._replay_chunk_limit(ctx.wallet_public_id)
         end = min(start + (limit - 1) * _MINUTE, frontier.tip)
         frozen = replace(ctx, as_of=frontier.as_of, expected_venues=venues)
+        started = self._monotonic()
         try:
             chunk, result = await self._replay_series(
                 repo, frozen, ChunkWindow(start, end), frontier
@@ -921,6 +972,7 @@ class PortfolioPnlSnapshotter:
         committed = await repo.commit_portfolio_pnl_correction_chunk(
             ctx.scope, frontier, plan.chunk
         )
+        self._record_chunk_outcome(ctx.wallet_public_id, self._monotonic() - started)
         self._log_repair_from_lag(ctx, committed)
         self._report_withheld(ctx.wallet_public_id, plan.withheld, bool(plan.chunk.edits))
 
