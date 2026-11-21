@@ -679,6 +679,79 @@ async def test_repair_from_lag_emits_once_above_24h_and_rearms_per_distinct_valu
         assert snap._repair_from_lag_logged == {}
 
 
+def test_repair_from_lag_rearms_after_dropping_to_the_threshold_at_the_same_repair_from() -> None:
+    """Log again once a lag that fell back to 24 h exceeds it at the same repair_from.
+
+    Given: One scope whose repair_from stays at M1 while frontier.tip moves to 24 h 1 m,
+        then back to exactly 24 h, then to 24 h 2 m behind it.
+    When: _log_repair_from_lag inspects each frontier in turn.
+    Then: The first breach logs, the drop to the threshold clears the scope entry
+        without logging, and the second breach logs again for the same repair_from.
+    """
+    repo = series_fixtures._FakeRepo(
+        credentials=[series_fixtures._cred("kraken")],
+        anchor=series_fixtures._anchor(),
+    )
+    as_of = _M1 + timedelta(hours=24, minutes=10)
+    snap = series_fixtures._snapshotter(repo, as_of)
+    ctx = snap._build_scope_context(
+        series_fixtures._WALLET,
+        series_fixtures._anchor(),
+        frozenset({"kraken"}),
+        as_of,
+    )
+    scope_key = snap._scope_streak_key(ctx.scope)
+    lags = (
+        timedelta(hours=24, minutes=1),
+        timedelta(hours=24),
+        timedelta(hours=24, minutes=2),
+    )
+    logged: list[bool] = []
+    for lag in lags:
+        before = dict(snap._repair_from_lag_logged)
+        frontier = _seed_frontier_with_repair(repo, _M1, _M1 + lag)
+        snap._log_repair_from_lag(ctx, frontier)
+        logged.append(scope_key in snap._repair_from_lag_logged and scope_key not in before)
+    assert logged == [True, False, True]
+    assert snap._repair_from_lag_logged == {scope_key: _M1}
+
+
+def test_repair_from_lag_log_drops_entries_of_a_superseded_epoch() -> None:
+    """Forget a re-anchored scope's earlier-epoch lag entry while keeping other scopes.
+
+    Given: Lag entries for this wallet under an earlier epoch and for another wallet.
+    When: _log_repair_from_lag runs for this wallet's current epoch, first without a
+        repair_from and then with a lag beyond 24 h.
+    Then: The earlier-epoch entry is dropped at once, the other wallet's entry
+        survives, and only the current epoch's entry is recorded for this wallet.
+    """
+    repo = series_fixtures._FakeRepo(
+        credentials=[series_fixtures._cred("kraken")],
+        anchor=series_fixtures._anchor(),
+    )
+    as_of = _M1 + timedelta(hours=24, minutes=10)
+    snap = series_fixtures._snapshotter(repo, as_of)
+    ctx = snap._build_scope_context(
+        series_fixtures._WALLET,
+        series_fixtures._anchor(),
+        frozenset({"kraken"}),
+        as_of,
+    )
+    current_key = snap._scope_streak_key(ctx.scope)
+    wallet, mode, ccy, epoch = current_key
+    stale_key = (wallet, mode, ccy, "0000dead-0000-7000-8000-0000000000e1")
+    other_key = ("0000face-0000-7000-8000-0000000000b9", mode, ccy, epoch)
+    snap._repair_from_lag_logged = {stale_key: _M1, other_key: _M2}
+
+    snap._log_repair_from_lag(ctx, None)
+    assert snap._repair_from_lag_logged == {other_key: _M2}
+
+    snap._repair_from_lag_logged[stale_key] = _M1
+    frontier = _seed_frontier_with_repair(repo, _M1, _M1 + timedelta(hours=24, minutes=1))
+    snap._log_repair_from_lag(ctx, frontier)
+    assert snap._repair_from_lag_logged == {other_key: _M2, current_key: _M1}
+
+
 async def test_repair_from_lag_fires_on_advance_replay_commit_and_prunes_absent_scopes(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

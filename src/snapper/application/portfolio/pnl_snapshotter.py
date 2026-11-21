@@ -812,16 +812,36 @@ class PortfolioPnlSnapshotter:
             },
         )
 
+    def _drop_superseded_epoch_lag_logs(self, scope_key: tuple[str, str, str, str]) -> None:
+        """Forget lag-log entries of earlier epochs once a scope re-anchors.
+
+        :meth:`_prune_absent_scopes` prunes by wallet, so a wallet that keeps its
+        credential and venues across a re-anchor would otherwise keep its old
+        epoch's entry for the life of the process, one stale entry per re-anchor.
+
+        Args:
+            scope_key: The ``(wallet, mode, valuation_ccy, epoch)`` scope now logged.
+        """
+        self._repair_from_lag_logged = {
+            key: repair_from
+            for key, repair_from in self._repair_from_lag_logged.items()
+            if key[:3] != scope_key[:3] or key == scope_key
+        }
+
     def _log_repair_from_lag(
         self, ctx: _ScopeContext, frontier: PnlCorrectionFrontier | None
     ) -> None:
         """Emit one structured liveness log per scope and distinct ``repair_from`` past 24 h.
+
+        Entries for earlier epochs of the same wallet, mode and currency are dropped
+        first, so a re-anchored scope keeps at most one entry.
 
         Args:
             ctx: Active scope binding and tick clock.
             frontier: Persisted or newly started correction frontier, if any.
         """
         scope_key = self._scope_streak_key(ctx.scope)
+        self._drop_superseded_epoch_lag_logs(scope_key)
         if frontier is None or frontier.repair_from is None:
             self._repair_from_lag_logged.pop(scope_key, None)
             return
