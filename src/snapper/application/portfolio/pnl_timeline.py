@@ -499,6 +499,110 @@ class TimelineOpening:
                 raise ValueError("one opening instrument cannot span multiple exchanges")
 
 
+def _validate_utc_minute(instant: datetime, label: str) -> None:
+    """Require one timestamp to be aligned to a UTC minute."""
+    if instant.utcoffset() != timedelta(0) or instant.second != 0 or instant.microsecond != 0:
+        raise ValueError(f"{label} must be aligned to a UTC minute")
+
+
+def _require_unique_checkpoint_keys(keys: Collection[Hashable], label: str) -> None:
+    """Reject duplicate keys in carried checkpoint state collections."""
+    if len(keys) != len(set(keys)):
+        raise ValueError(f"duplicate checkpoint keys in {label}")
+
+
+@dataclass(frozen=True)
+class TimelineCheckpointPool:
+    """One durable shard pool's carried quantity and cost basis at a checkpoint.
+
+    Attributes:
+        instrument_public_id: Stable instrument identity used for marks/output.
+        shard_key: Exact durable ``fill_observed`` shard identity.
+        position_qty: Signed position quantity carried at ``checkpoint_minute``.
+        entry_price: Carried average-cost basis, or ``None`` when flat or
+            unknown.
+    """
+
+    instrument_public_id: str
+    shard_key: str
+    position_qty: float
+    entry_price: float | None
+
+
+@dataclass(frozen=True)
+class TimelineCheckpointOpening:
+    """Carried pure-engine state captured at a settled UTC minute boundary.
+
+    Wraps the engine's replay state at ``checkpoint_minute`` so
+    :func:`build_pnl_timeline` can resume subsequent minutes bit-identically
+    without replaying earlier events.
+    """
+
+    checkpoint_minute: datetime
+    activation_time: datetime | None
+    pools: tuple[TimelineCheckpointPool, ...]
+    weights_by_pool: tuple[tuple[PoolKey, tuple[tuple[AttributionKey, float], ...]], ...]
+    seen: tuple[str, ...]
+    attribution_seen: tuple[AttributionKey, ...]
+    basis_reasons_by_pool: tuple[tuple[PoolKey, tuple[PnlIncompletenessReason, ...]], ...]
+    untrusted_reasons_by_instrument: tuple[
+        tuple[str, tuple[PnlIncompletenessReasonEntry, ...]],
+        ...,
+    ]
+    scope_by_shard: tuple[tuple[str, tuple[str, str]], ...]
+    exchange_by_instrument: tuple[tuple[str, str], ...]
+    pool_keys_by_instrument: tuple[tuple[str, tuple[PoolKey, ...]], ...]
+    realized_by_instrument: tuple[tuple[str, ExactSum], ...]
+    fee_by_instrument: tuple[tuple[str, ExactSum], ...]
+    accrual_by_instrument: tuple[tuple[str, ExactSum], ...]
+    realized_by_attribution: tuple[tuple[AttributionKey, ExactSum], ...]
+    fee_by_attribution: tuple[tuple[AttributionKey, ExactSum], ...]
+    accrual_by_attribution: tuple[tuple[AttributionKey, ExactSum], ...]
+    realized_total: ExactSum
+    fee_total: ExactSum
+    accrual_total: ExactSum
+    last_effective_by_pool: tuple[tuple[PoolKey, datetime], ...]
+
+    def __post_init__(self) -> None:
+        """Validate boundary clock alignment, ordering, and key uniqueness."""
+        _validate_utc_minute(self.checkpoint_minute, "checkpoint_minute")
+        if self.activation_time is not None:
+            _validate_utc_minute(self.activation_time, "activation_time")
+            if self.checkpoint_minute <= self.activation_time:
+                raise ValueError("checkpoint_minute must follow activation_time")
+        key_groups: tuple[tuple[str, Collection[Hashable]], ...] = (
+            ("pools", [(pool.instrument_public_id, pool.shard_key) for pool in self.pools]),
+            ("weights_by_pool", [pool_key for pool_key, _ in self.weights_by_pool]),
+            ("seen", self.seen),
+            ("attribution_seen", self.attribution_seen),
+            ("basis_reasons_by_pool", [pool_key for pool_key, _ in self.basis_reasons_by_pool]),
+            (
+                "untrusted_reasons_by_instrument",
+                [inst for inst, _ in self.untrusted_reasons_by_instrument],
+            ),
+            ("scope_by_shard", [shard for shard, _ in self.scope_by_shard]),
+            ("exchange_by_instrument", [inst for inst, _ in self.exchange_by_instrument]),
+            ("pool_keys_by_instrument", [inst for inst, _ in self.pool_keys_by_instrument]),
+            ("realized_by_instrument", [inst for inst, _ in self.realized_by_instrument]),
+            ("fee_by_instrument", [inst for inst, _ in self.fee_by_instrument]),
+            ("accrual_by_instrument", [inst for inst, _ in self.accrual_by_instrument]),
+            ("realized_by_attribution", [key for key, _ in self.realized_by_attribution]),
+            ("fee_by_attribution", [key for key, _ in self.fee_by_attribution]),
+            ("accrual_by_attribution", [key for key, _ in self.accrual_by_attribution]),
+            ("last_effective_by_pool", [pool_key for pool_key, _ in self.last_effective_by_pool]),
+        )
+        for label, keys in key_groups:
+            _require_unique_checkpoint_keys(keys, label)
+        for _, effective_time in self.last_effective_by_pool:
+            if (
+                effective_time.utcoffset() != timedelta(0)
+                or effective_time > self.checkpoint_minute
+            ):
+                raise ValueError(
+                    "checkpoint last_effective_by_pool must be UTC at or before checkpoint_minute"
+                )
+
+
 @dataclass(frozen=True)
 class OpeningPoolValuation:
     """One surviving historical shard pool and its t0 valuation audit.
@@ -600,6 +704,8 @@ class TimelineWindow:
         valuation_ccy: Currency all monetary components are expressed in.
         recovery_budget_per_point: Give each persisted sample its own recovery
             allowance and terminal state, independent of the replay chunk.
+        capture_checkpoint: Capture the engine's carried replay state after
+            valuing ``to_time`` and return it on :attr:`PnlTimelineResult.closing_checkpoint`.
     """
 
     from_time: datetime
@@ -607,6 +713,7 @@ class TimelineWindow:
     granularity: str
     valuation_ccy: str
     recovery_budget_per_point: bool = False
+    capture_checkpoint: bool = False
 
 
 @dataclass(frozen=True)
@@ -771,11 +878,14 @@ class PnlTimelineResult:
         points: The ordered series points at the requested granularity.
         granularity: The granularity the points are bucketed at.
         valuation_ccy: The currency the components are expressed in.
+        closing_checkpoint: Captured engine state after valuing ``to_time`` when
+            ``window.capture_checkpoint`` was requested, otherwise ``None``.
     """
 
     points: tuple[PnlTimelinePoint, ...]
     granularity: str
     valuation_ccy: str
+    closing_checkpoint: TimelineCheckpointOpening | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -1441,6 +1551,7 @@ def _minute_grid(from_time: datetime, to_time: datetime) -> list[datetime]:
 
 def _prepare_executions(
     executions: Sequence[TimelineExecution],
+    initial_last_effective: Mapping[PoolKey, datetime] | None = None,
 ) -> tuple[list[_PreparedExecution], list[_RegressionShadow]]:
     """Clamp per-pool event times monotone and collect regression shadows.
 
@@ -1451,12 +1562,16 @@ def _prepare_executions(
 
     Args:
         executions: Executions in ``(exchange, scope_sequence)`` order.
+        initial_last_effective: Optional per-pool running maximum event times
+            carried from an opening checkpoint.
 
     Returns:
         The prepared executions sorted for the grid walk, and the shadowed
         ``[economic_time, clamped_time)`` intervals produced by regressions.
     """
-    last_effective: dict[PoolKey, datetime] = {}
+    last_effective: dict[PoolKey, datetime] = (
+        {} if initial_last_effective is None else dict(initial_last_effective)
+    )
     shadows: list[_RegressionShadow] = []
     prepared: list[_PreparedExecution] = []
     for execution in executions:
@@ -2769,17 +2884,131 @@ def _seed_timeline_pool(
         state.basis_reasons_by_pool.setdefault(pool_key, set()).add("cost_basis_unavailable")
 
 
-def _initialize_timeline_state(
-    opening: TimelineOpening | None,
+def _copy_exact_sum(accumulator: ExactSum) -> ExactSum:
+    """Return an isolated copy of one exact cumulative accumulator."""
+    return ExactSum(
+        units=accumulator.units,
+        infinities=set(accumulator.infinities),
+        saw_nan=accumulator.saw_nan,
+    )
+
+
+def _restore_exact_sum_map[KeyT: Hashable](
+    entries: Sequence[tuple[KeyT, ExactSum]],
+) -> defaultdict[KeyT, ExactSum]:
+    """Restore one keyed ExactSum map with fresh accumulator instances."""
+    restored: defaultdict[KeyT, ExactSum] = defaultdict(ExactSum)
+    for key, value in entries:
+        restored[key] = _copy_exact_sum(value)
+    return restored
+
+
+def _restore_timeline_state(
+    opening: TimelineCheckpointOpening,
 ) -> _TimelineBuildState:
-    """Return empty replay state optionally seeded at the activation anchor."""
-    state = _TimelineBuildState()
+    """Rebuild mutable replay state from one captured checkpoint opening."""
+    state = _TimelineBuildState(
+        pools={
+            (pool.instrument_public_id, pool.shard_key): _Pool(
+                pool.position_qty,
+                pool.entry_price,
+            )
+            for pool in opening.pools
+        },
+        weights_by_pool={pool_key: dict(entries) for pool_key, entries in opening.weights_by_pool},
+        seen=set(opening.seen),
+        attribution_seen=set(opening.attribution_seen),
+        basis_reasons_by_pool={
+            pool_key: set(reasons) for pool_key, reasons in opening.basis_reasons_by_pool
+        },
+        untrusted_reasons_by_instrument={
+            instrument_public_id: set(entries)
+            for instrument_public_id, entries in opening.untrusted_reasons_by_instrument
+        },
+        activation_time=opening.activation_time,
+        scope_by_shard=dict(opening.scope_by_shard),
+        exchange_by_instrument=dict(opening.exchange_by_instrument),
+        realized_by_instrument=_restore_exact_sum_map(opening.realized_by_instrument),
+        fee_by_instrument=_restore_exact_sum_map(opening.fee_by_instrument),
+        accrual_by_instrument=_restore_exact_sum_map(opening.accrual_by_instrument),
+        realized_by_attribution=_restore_exact_sum_map(opening.realized_by_attribution),
+        fee_by_attribution=_restore_exact_sum_map(opening.fee_by_attribution),
+        accrual_by_attribution=_restore_exact_sum_map(opening.accrual_by_attribution),
+        realized_total=_copy_exact_sum(opening.realized_total),
+        fee_total=_copy_exact_sum(opening.fee_total),
+        accrual_total=_copy_exact_sum(opening.accrual_total),
+    )
+    for instrument_public_id, pool_keys in opening.pool_keys_by_instrument:
+        state.pool_keys_by_instrument[instrument_public_id] = set(pool_keys)
+    return state
+
+
+def _initialize_timeline_state(
+    opening: TimelineOpening | TimelineCheckpointOpening | None,
+) -> _TimelineBuildState:
+    """Return empty replay state or restore from an anchor or checkpoint opening."""
     if opening is None:
-        return state
+        return _TimelineBuildState()
+    if isinstance(opening, TimelineCheckpointOpening):
+        return _restore_timeline_state(opening)
+    state = _TimelineBuildState()
     for seed in opening.pools:
         _seed_timeline_pool(state, seed)
     state.activation_time = opening.t0
     return state
+
+
+def _opening_activation_time(
+    opening: TimelineOpening | TimelineCheckpointOpening | None,
+) -> datetime | None:
+    """Return the activation timestamp implied by any supplied opening."""
+    if isinstance(opening, TimelineOpening):
+        return opening.t0
+    if isinstance(opening, TimelineCheckpointOpening):
+        return opening.activation_time
+    return None
+
+
+def _validate_checkpoint_resume_window(
+    window: TimelineWindow,
+    opening: TimelineCheckpointOpening,
+) -> None:
+    """Require UTC window bounds strictly following the resumed checkpoint minute."""
+    if window.from_time.utcoffset() != timedelta(0) or window.to_time.utcoffset() != timedelta(0):
+        raise ValueError("checkpoint resume window requires UTC bounds")
+    if window.from_time.replace(second=0, microsecond=0) <= opening.checkpoint_minute:
+        raise ValueError("checkpoint resume requires window.from_time after checkpoint_minute")
+
+
+def _validate_checkpoint_capture_window(
+    window: TimelineWindow,
+    opening: TimelineOpening | TimelineCheckpointOpening | None,
+) -> None:
+    """Require a non-empty, post-activation, minute-aligned capture window."""
+    if window.from_time.utcoffset() != timedelta(0):
+        raise ValueError("checkpoint capture requires UTC window.from_time")
+    _validate_utc_minute(window.to_time, "checkpoint capture window.to_time")
+    if window.from_time.replace(second=0, microsecond=0) > window.to_time:
+        raise ValueError("checkpoint capture requires a non-empty minute window")
+    activation_time = _opening_activation_time(opening)
+    if activation_time is not None and window.to_time <= activation_time:
+        raise ValueError("checkpoint capture requires window.to_time after activation_time")
+
+
+def _validate_checkpoint_request(
+    window: TimelineWindow,
+    opening: TimelineOpening | TimelineCheckpointOpening | None,
+) -> None:
+    """Fail closed when checkpoint capture or resume violates mode or time invariants."""
+    is_checkpoint_opening = isinstance(opening, TimelineCheckpointOpening)
+    if (
+        window.capture_checkpoint or is_checkpoint_opening
+    ) and not window.recovery_budget_per_point:
+        raise ValueError("checkpoint capture and resume require recovery_budget_per_point")
+    if isinstance(opening, TimelineCheckpointOpening):
+        _validate_checkpoint_resume_window(window, opening)
+    if window.capture_checkpoint:
+        _validate_checkpoint_capture_window(window, opening)
 
 
 def _validate_timeline_execution_scope(
@@ -2818,9 +3047,20 @@ def _timeline_schedule(
     executions: Sequence[TimelineExecution],
     accruals: Sequence[TimelineAccrual],
     window: TimelineWindow,
+    opening: TimelineOpening | TimelineCheckpointOpening | None = None,
 ) -> _TimelineSchedule:
     """Build deterministic event, valuation-pool, and regression indexes."""
-    prepared, shadows = _prepare_executions(executions)
+    checkpoint_opening = opening if isinstance(opening, TimelineCheckpointOpening) else None
+    prepared, shadows = _prepare_executions(
+        executions,
+        initial_last_effective=(
+            None if checkpoint_opening is None else dict(checkpoint_opening.last_effective_by_pool)
+        ),
+    )
+    if checkpoint_opening is not None and any(
+        item.effective_time <= checkpoint_opening.checkpoint_minute for item in prepared
+    ):
+        raise ValueError("checkpoint resume received execution at or before checkpoint_minute")
     pool_index = _valuation_pool_index(
         state.pool_keys_by_instrument,
         prepared,
@@ -2830,11 +3070,16 @@ def _timeline_schedule(
         prepared,
         window.to_time,
     )
+    accrual_cutoff = (
+        state.activation_time
+        if checkpoint_opening is None
+        else checkpoint_opening.checkpoint_minute
+    )
     sorted_accruals = sorted(
         (
             accrual
             for accrual in accruals
-            if state.activation_time is None or accrual.accrued_at > state.activation_time
+            if accrual_cutoff is None or accrual.accrued_at > accrual_cutoff
         ),
         key=lambda item: (item.accrued_at, item.instrument_public_id),
     )
@@ -3324,7 +3569,7 @@ def _build_minute_points(
     state: _TimelineBuildState,
     evidence: _TimelineBuildEvidence,
     schedule: _TimelineSchedule,
-) -> list[PnlTimelinePoint]:
+) -> tuple[list[PnlTimelinePoint], _EventCursor]:
     """Walk the minute grid while preserving event and withholding order."""
     cursor = _EventCursor()
     minute_points: list[PnlTimelinePoint] = []
@@ -3353,7 +3598,130 @@ def _build_minute_points(
             global_reasons,
         )
         minute_points.append(_value_point(context))
-    return minute_points
+    return minute_points, cursor
+
+
+def _captured_scope_maps(
+    opening: TimelineOpening | TimelineCheckpointOpening | None,
+    applied_executions: Sequence[_PreparedExecution],
+) -> tuple[dict[str, tuple[str, str]], dict[str, str]]:
+    """Collect shard and instrument exchange scopes through the checkpoint minute."""
+    scope_by_shard: dict[str, tuple[str, str]] = {}
+    exchange_by_instrument: dict[str, str] = {}
+    if isinstance(opening, TimelineOpening):
+        for seed in opening.pools:
+            scope_by_shard[seed.shard_key] = (seed.instrument_public_id, seed.exchange)
+            exchange_by_instrument[seed.instrument_public_id] = seed.exchange
+    elif isinstance(opening, TimelineCheckpointOpening):
+        scope_by_shard.update(opening.scope_by_shard)
+        exchange_by_instrument.update(opening.exchange_by_instrument)
+    for item in applied_executions:
+        execution = item.execution
+        scope_by_shard[execution.shard_key] = (
+            execution.instrument_public_id,
+            execution.exchange,
+        )
+        exchange_by_instrument[execution.instrument_public_id] = execution.exchange
+    return scope_by_shard, exchange_by_instrument
+
+
+def _captured_last_effective(
+    opening: TimelineOpening | TimelineCheckpointOpening | None,
+    applied_executions: Sequence[_PreparedExecution],
+) -> tuple[tuple[PoolKey, datetime], ...]:
+    """Collect the monotone per-pool last effective time through the checkpoint."""
+    last_effective: dict[PoolKey, datetime] = (
+        dict(opening.last_effective_by_pool)
+        if isinstance(opening, TimelineCheckpointOpening)
+        else {}
+    )
+    for item in applied_executions:
+        pool_key = (item.execution.instrument_public_id, item.execution.shard_key)
+        previous = last_effective.get(pool_key)
+        last_effective[pool_key] = (
+            item.effective_time if previous is None else max(previous, item.effective_time)
+        )
+    return tuple((pool_key, last_effective[pool_key]) for pool_key in sorted(last_effective))
+
+
+def _sorted_instrument_exact_sums(
+    accumulators: Mapping[str, ExactSum],
+) -> tuple[tuple[str, ExactSum], ...]:
+    """Snapshot per-instrument exact sums in canonical key order."""
+    return tuple((key, _copy_exact_sum(accumulators[key])) for key in sorted(accumulators))
+
+
+def _sorted_attribution_exact_sums(
+    accumulators: Mapping[AttributionKey, ExactSum],
+) -> tuple[tuple[AttributionKey, ExactSum], ...]:
+    """Snapshot per-attribution exact sums in canonical key order."""
+    return tuple(
+        (key, _copy_exact_sum(accumulators[key]))
+        for key in _sorted_attribution_keys(set(accumulators))
+    )
+
+
+def _capture_closing_checkpoint(
+    state: _TimelineBuildState,
+    schedule: _TimelineSchedule,
+    applied_execution_count: int,
+    checkpoint_minute: datetime,
+    opening: TimelineOpening | TimelineCheckpointOpening | None,
+) -> TimelineCheckpointOpening:
+    """Snapshot carried engine state at ``checkpoint_minute`` after valuation."""
+    if state.carried_event_inputs:
+        raise ValueError("cannot capture checkpoint with non-empty carried_event_inputs")
+    applied_executions = schedule.prepared[:applied_execution_count]
+    scope_by_shard, exchange_by_instrument = _captured_scope_maps(opening, applied_executions)
+    return TimelineCheckpointOpening(
+        checkpoint_minute=checkpoint_minute,
+        activation_time=state.activation_time,
+        pools=tuple(
+            TimelineCheckpointPool(
+                instrument_public_id=pool_key[0],
+                shard_key=pool_key[1],
+                position_qty=pool.position_qty,
+                entry_price=pool.entry_price,
+            )
+            for pool_key, pool in state.pools.items()
+        ),
+        weights_by_pool=tuple(
+            (pool_key, tuple(weights.items()))
+            for pool_key, weights in state.weights_by_pool.items()
+        ),
+        seen=tuple(sorted(state.seen)),
+        attribution_seen=tuple(_sorted_attribution_keys(state.attribution_seen)),
+        basis_reasons_by_pool=tuple(
+            (pool_key, tuple(sorted(state.basis_reasons_by_pool[pool_key])))
+            for pool_key in sorted(state.basis_reasons_by_pool)
+        ),
+        untrusted_reasons_by_instrument=tuple(
+            (
+                instrument_public_id,
+                canonical_incompleteness_reasons(
+                    state.untrusted_reasons_by_instrument[instrument_public_id]
+                ),
+            )
+            for instrument_public_id in sorted(state.untrusted_reasons_by_instrument)
+        ),
+        scope_by_shard=tuple((key, scope_by_shard[key]) for key in sorted(scope_by_shard)),
+        exchange_by_instrument=tuple(
+            (key, exchange_by_instrument[key]) for key in sorted(exchange_by_instrument)
+        ),
+        pool_keys_by_instrument=tuple(
+            (key, tuple(schedule.pool_index[key])) for key in sorted(schedule.pool_index)
+        ),
+        realized_by_instrument=_sorted_instrument_exact_sums(state.realized_by_instrument),
+        fee_by_instrument=_sorted_instrument_exact_sums(state.fee_by_instrument),
+        accrual_by_instrument=_sorted_instrument_exact_sums(state.accrual_by_instrument),
+        realized_by_attribution=_sorted_attribution_exact_sums(state.realized_by_attribution),
+        fee_by_attribution=_sorted_attribution_exact_sums(state.fee_by_attribution),
+        accrual_by_attribution=_sorted_attribution_exact_sums(state.accrual_by_attribution),
+        realized_total=_copy_exact_sum(state.realized_total),
+        fee_total=_copy_exact_sum(state.fee_total),
+        accrual_total=_copy_exact_sum(state.accrual_total),
+        last_effective_by_pool=_captured_last_effective(opening, applied_executions),
+    )
 
 
 def _granularity_step(granularity: str) -> int:
@@ -3369,7 +3737,7 @@ def build_pnl_timeline(
     accruals: Sequence[TimelineAccrual],
     marks: MarkMap,
     window: TimelineWindow,
-    opening: TimelineOpening | None = None,
+    opening: TimelineOpening | TimelineCheckpointOpening | None = None,
     lineage: Mapping[str, TimelineExecutionLineage] | None = None,
     untrusted_price_reasons_by_instrument: (
         Mapping[str, Collection[PnlIncompletenessReason]] | None
@@ -3393,8 +3761,9 @@ def build_pnl_timeline(
         marks: The injected valuation-currency mark lookup keyed by instrument
             and minute.
         window: The requested from/to/granularity/valuation-currency window.
-        opening: The activation anchor seeding the replay, or ``None`` to replay
-            from empty pools. Derived opening pools are already rebased to t0.
+        opening: The activation anchor or carried checkpoint opening seeding the
+            replay, or ``None`` to replay from empty pools. Derived opening
+            pools are already rebased to t0.
         lineage: Order-keyed initiating command and signal lineage. Missing or
             ambiguous orders are intentionally absent and become unattributed.
         untrusted_price_reasons_by_instrument: Caller-stamped execution-price
@@ -3410,11 +3779,13 @@ def build_pnl_timeline(
         The built :class:`PnlTimelineResult` at the requested granularity.
 
     Raises:
-        ValueError: When ``window.granularity`` is not a supported value.
+        ValueError: When ``window.granularity`` is not a supported value, or
+            when checkpoint capture/resume invariants fail.
         PnlTimelineWorkBudgetError: When the replay chunk would exceed its shared
             faithful recovery work budget.
     """
     step = _granularity_step(window.granularity)
+    _validate_checkpoint_request(window, opening)
     evidence = _resolved_build_evidence(
         marks,
         lineage,
@@ -3424,10 +3795,22 @@ def build_pnl_timeline(
     )
     state = _initialize_timeline_state(opening)
     _validate_timeline_execution_scopes(state, executions)
-    schedule = _timeline_schedule(state, executions, accruals, window)
-    minute_points = _build_minute_points(state, evidence, schedule)
+    schedule = _timeline_schedule(state, executions, accruals, window, opening)
+    minute_points, cursor = _build_minute_points(state, evidence, schedule)
+    closing_checkpoint = (
+        _capture_closing_checkpoint(
+            state,
+            schedule,
+            cursor.execution_index,
+            window.to_time,
+            opening,
+        )
+        if window.capture_checkpoint
+        else None
+    )
     return PnlTimelineResult(
         points=tuple(_downsample(minute_points, step)),
         granularity=window.granularity,
         valuation_ccy=window.valuation_ccy,
+        closing_checkpoint=closing_checkpoint,
     )
