@@ -1,6 +1,7 @@
 """Real SQLite atomicity and race witnesses for dormant P&L correction control."""
 
 from collections.abc import AsyncIterator
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 from datetime import timedelta
@@ -1200,6 +1201,39 @@ def _repo_minute(minute: datetime, *, sum_unrepresentable: bool = False) -> Minu
     )
 
 
+def _assert_settled_rows_match_plan(
+    settled_rows: Sequence[PortfolioPnlSampleRow],
+    initial_rows: Sequence[PortfolioPnlSampleRow],
+    committed_chunks: Sequence[PnlCorrectionChunk],
+) -> None:
+    """Assert the settled M1..M3 rows are exactly the committed plans applied in order.
+
+    Args:
+        settled_rows: Rows read back with ``require_reconciled=True`` after settlement.
+        initial_rows: The originally committed M1..M3 rows.
+        committed_chunks: Every later committed chunk, in commit order.
+    """
+    expected: dict[datetime, PortfolioPnlSampleRow | None] = {
+        row["point_time"]: row for row in initial_rows
+    }
+    for chunk in committed_chunks:
+        for edit in chunk.edits:
+            expected[edit.point_time] = edit.replacement
+    settled_m2 = expected[samples._M2]
+    assert settled_m2 is not None
+    assert settled_m2["cash_usd"] != initial_rows[1]["cash_usd"]
+    provenance = {"public_id", "session_id", "sequence_id", "timestamp"}
+    expected_rows = [expected[samples._M1], settled_m2, expected[samples._M3]]
+    assert all(row is not None for row in expected_rows)
+    assert [
+        {key: value for key, value in row.items() if key not in provenance} for row in settled_rows
+    ] == [
+        {key: value for key, value in row.items() if key not in provenance}
+        for row in expected_rows
+        if row is not None
+    ]
+
+
 async def test_r1_retained_sum_unrepresentable_keeps_repair_from_and_gates_reconciled_reads(
     repository: SQLAlchemyRepository,
 ) -> None:
@@ -1209,7 +1243,9 @@ async def test_r1_retained_sum_unrepresentable_keeps_repair_from_and_gates_recon
     When: Changed evidence triggers pure instrument_sum_unrepresentable at M2, retaining M2
         and latching repair_from=M2 across repeated withholding, followed by later settlement.
     Then: M2 stays repairable, repair_from remains pinned at M2, require_reconciled=True
-        hides [M2..M3] before settlement, and exposes consistent rows after settlement.
+        hides [M2..M3] before settlement, and after settlement exposes exactly the rows
+        of the committed plans applied in order, values and drawdown included and
+        write provenance aside, with the stale 2500.0 equity at M2 replaced.
     """
     scope = samples._scope()
     query = samples._query()
@@ -1318,3 +1354,6 @@ async def test_r1_retained_sum_unrepresentable_keeps_repair_from_and_gates_recon
     settled_rows = await repository.get_portfolio_pnl_samples(published, samples._M1, samples._M3)
     assert len(settled_rows) == 3
     assert [row["point_time"] for row in settled_rows] == [samples._M1, samples._M2, samples._M3]
+    _assert_settled_rows_match_plan(
+        settled_rows, initial_rows, (planned_g2.chunk, planned_g3.chunk, planned_g4.chunk)
+    )
