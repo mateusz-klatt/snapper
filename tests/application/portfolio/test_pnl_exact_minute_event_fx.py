@@ -337,13 +337,16 @@ class _RealFxRepo(FakeRepo):
         database: SQLAlchemyRepository,
         scenario: _Scenario,
         correction: Callable[[], Awaitable[None]] | None = None,
+        *,
+        correct_after: int = 1,
     ) -> None:
         """Wrap the canned scenario and delegate FX reads to the real store.
 
         Args:
             database: Real SQLite repository answering every FX read.
             scenario: Executions, references and mark candles of the wallet.
-            correction: Optional write committed right after the first range load.
+            correction: Optional write committed right after one range load.
+            correct_after: Which range load, counted from one, the write follows.
         """
         super().__init__(
             executions=scenario.executions,
@@ -355,6 +358,7 @@ class _RealFxRepo(FakeRepo):
         self.exact_rows: list[int] = []
         self.range_rows: list[int] = []
         self._correction = correction
+        self._correct_after = correct_after
 
     async def get_pnl_fx_rate_candles_at(
         self,
@@ -382,7 +386,7 @@ class _RealFxRepo(FakeRepo):
             planes, start, end, as_of, open_intervals=open_intervals
         )
         self.range_rows.append(len(rows))
-        if self._correction is not None and len(self.range_rows) == 1:
+        if self._correction is not None and len(self.range_rows) == self._correct_after:
             await self._correction()
         return rows
 
@@ -749,6 +753,80 @@ async def test_event_read_sees_inside_mark_conflicts_and_skips_outside_marks(
     assert exact.repo.fx_exact_candidate_calls == [expected_opens]
     assert exact.repo.fx_exact_minute_calls == [([_WALUTOMAT_EUR_USD], expected_opens)]
     assert max(expected_opens) == _m(-40)
+
+
+async def _publish_late_required_row(database: SQLAlchemyRepository) -> None:
+    """Commit a Bitstamp close at the fill minute, stamped before the read horizon."""
+    async with database.session() as session:
+        late = _fx_candle("ins-eurusd-bitstamp", _m(-101), 1.3)
+        late.timestamp = _m(1)
+        session.add(late)
+        await session.commit()
+
+
+@pytest.mark.parametrize("shadow", [False, True])
+async def test_mid_read_commit_is_read_as_if_it_landed_after_the_load(
+    databases: _Databases, monkeypatch: pytest.MonkeyPatch, shadow: bool
+) -> None:
+    """A required row committed during the read is seen as a commit after the load.
+
+    Given: A fill at -100 with Walutomat closes at every minute and one Bitstamp
+    close at the unconsumed minute -110, so only dense discovery finds Bitstamp.
+    When: A Bitstamp close at the fill minute, stamped inside the horizon, commits
+    between event discovery and the event load.
+    Then: The dense load reads it and the exact load does not, and the exact result
+    equals the dense result for the same commit landing after the event load.
+    """
+    window = range(-5, 1)
+    scenario = _scenario((-100,), (), window)
+
+    def recorder(correct_after: int) -> Callable[[], Awaitable[_RealFxRepo]]:
+        """Seed a fresh store whose late commit follows the given range load."""
+
+        async def make_repo() -> _RealFxRepo:
+            """Seed the store and arm its late required-minute commit."""
+            database = await databases.create(
+                [
+                    *(
+                        _fx_candle("ins-eurusd-walutomat", _m(minute - 1), 1.15)
+                        for minute in range(-125, 2)
+                    ),
+                    _fx_candle("ins-eurusd-bitstamp", _m(-111), 1.1),
+                ]
+            )
+
+            async def publish() -> None:
+                """Commit the late required row into this replay's store."""
+                await _publish_late_required_row(database)
+
+            return _RealFxRepo(database, scenario, publish, correct_after=correct_after)
+
+        return make_repo
+
+    exact = await _replay(await recorder(1)(), window, shadow=shadow)
+    with monkeypatch.context() as patch:
+        _force_dense_event_reads(patch)
+        dense_mid_read = await _replay(await recorder(1)(), window, shadow=shadow)
+        dense_after_load = await _replay(await recorder(2)(), window, shadow=shadow)
+
+    _assert_parity(exact, dense_after_load, fresh_stores=True)
+    bitstamp: PnlFxRatePlane = ("EUR", "USD", "bitstamp")
+    assert all(bitstamp not in planes for planes, _ in exact.repo.fx_exact_minute_calls)
+    assert bitstamp in dense_mid_read.repo.fx_plane_calls[1]
+    assert dense_mid_read.repo.range_rows[1] == dense_after_load.repo.range_rows[1] + 1
+    if shadow:
+        fill = frozenset({_m(-100)})
+
+        def fill_candidates(run: _Run) -> frozenset[PnlFxRatePlane]:
+            """Return the candidate planes the shared fill-minute decision saw."""
+            return next(
+                evaluation.candidate_planes
+                for evaluation in run.evaluations
+                if evaluation.pair == _EUR_USD and evaluation.required_minutes == fill
+            )
+
+        assert bitstamp not in fill_candidates(exact)
+        assert bitstamp in fill_candidates(dense_mid_read)
 
 
 async def test_event_rows_stay_flat_as_the_chunk_moves_forward(

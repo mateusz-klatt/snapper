@@ -5162,6 +5162,14 @@ async def _load_pointwise_series_fx(repo: Repository, request: _FxRequest) -> _S
     rows at every consumed minute as the dense read without growing with the
     distance between an old event and the current chunk.
 
+    That equality covers evidence committed before the read begins. Discovery
+    and the loads are separate statements with no shared snapshot, here as in
+    the dense read, so a row stamped inside the horizon that commits mid-read
+    may or may not be seen by either. When a plane's only earlier evidence in
+    the event bounds lies at an unconsumed minute, dense discovery finds it and
+    exact discovery does not; a required row it gains mid-read is then read as
+    if it had committed after the load, a timing the dense read already admits.
+
     Args:
         repo: Repository providing bounded and exact FX plane and candle reads.
         request: Consumers and knowledge horizon of this read.
