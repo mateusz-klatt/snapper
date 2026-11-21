@@ -1997,6 +1997,8 @@ class _PointAccumulator:
     ``unrealized_allocations_by_attribution`` stores per-key allocation shares
     in allocation order for the current point only (bounded by the point's
     allocation count) and is discarded each minute once valuation finishes.
+    It is filled only when the compensated fallback is enabled, so readers that
+    can never use it, such as the public timeline, pay nothing for it.
     """
 
     point_reasons: set[PnlIncompletenessReasonEntry] = field(default_factory=set)
@@ -2359,7 +2361,8 @@ def _allocate_instrument_unrealized(
         )
         for key, amount in allocations.items():
             accumulator.unrealized_by_attribution[key] += amount
-            accumulator.unrealized_allocations_by_attribution[key].append(amount)
+            if context.compensated_unrealized_fallback:
+                accumulator.unrealized_allocations_by_attribution[key].append(amount)
             if not math.isfinite(accumulator.unrealized_by_attribution[key]):
                 accumulator.unrealized_incomplete.add(key)
                 accumulator.point_reasons.add(

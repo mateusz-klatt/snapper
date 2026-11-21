@@ -31,6 +31,7 @@ from snapper.application.portfolio.pnl_timeline import AttributionKey
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import OpeningPool
 from snapper.application.portfolio.pnl_timeline import OpeningPoolValuation
+from snapper.application.portfolio.pnl_timeline import PnlCarriedInput
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
 from snapper.application.portfolio.pnl_timeline import PnlInstrumentContribution
@@ -1258,6 +1259,48 @@ class TestCompensatedUnrealizedFallback:
         _assert_exact_attribution_sums(point_on)
         assert len(point_on.attribution) == 1
         assert point_on.attribution[0].unrealized_pnl == expected_t1
+
+    def test_allocation_lists_are_filled_only_under_the_fallback(self) -> None:
+        """Keep the per-key allocation lists empty on paths that can never use them.
+
+        Given: The ``[2.11, 0.03, -2.11]`` book and a recorder around each point
+            accumulator the engine creates,
+        When: The timeline is built with ``compensated_unrealized_fallback`` off and on,
+        Then: Every accumulator keeps empty allocation lists with the option off, while
+            the option-on run records the ordered shares the fallback re-sums.
+        """
+        values = (
+            float.fromhex("0x1.0e147ae147ae1p+1"),
+            float.fromhex("0x1.eb851eb851eb8p-6"),
+            float.fromhex("-0x1.0e147ae147ae1p+1"),
+        )
+        executions, marks = self._unrealized_book(values)
+        original = pnl_timeline._PointAccumulator
+        created: list[pnl_timeline._PointAccumulator] = []
+
+        def record(
+            *,
+            point_reasons: set[PnlIncompletenessReasonEntry],
+            carried_inputs: set[PnlCarriedInput],
+        ) -> pnl_timeline._PointAccumulator:
+            """Create a real accumulator and remember it for inspection."""
+            accumulator = original(point_reasons=point_reasons, carried_inputs=carried_inputs)
+            created.append(accumulator)
+            return accumulator
+
+        with patch.object(pnl_timeline, "_PointAccumulator", side_effect=record):
+            build_pnl_timeline(executions, (), marks, _window(0, 0))
+        assert created
+        assert all(not item.unrealized_allocations_by_attribution for item in created)
+
+        created.clear()
+        window_on = replace(_window(0, 0), compensated_unrealized_fallback=True)
+        with patch.object(pnl_timeline, "_PointAccumulator", side_effect=record):
+            build_pnl_timeline(executions, (), marks, window_on)
+        assert any(
+            list(item.unrealized_allocations_by_attribution.values()) == [list(values)]
+            for item in created
+        )
 
     def test_compensated_fallback_keeps_naive_attribution_when_it_reconciles(self) -> None:
         """Keep naive attribution buckets without consulting compensated shares.
