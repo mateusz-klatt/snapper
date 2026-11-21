@@ -111,6 +111,7 @@ _PAPER_CREDENTIAL_TYPE: Final[str] = "paper"
 _SCOPE_SKIP_MINT_IDENTITY: Final[str] = "mint_identity_executor_topology"
 _SCOPE_SKIP_NO_ANCHOR: Final[str] = "no_active_usd_anchor"
 _SCOPE_SKIP_NO_SPOT_VENUES: Final[str] = "no_spot_venues"
+_SCOPE_SKIP_PERSISTENT_FILL_GAP: Final[str] = "persistent_fill_gap_skip"
 _MINUTE: Final[timedelta] = timedelta(minutes=1)
 _CRYPTO_PLANE_LIMIT_SQLSTATES: Final[frozenset[str]] = frozenset({"57014", "55P03"})
 """PostgreSQL SQLSTATEs raised when the crypto-plane read exceeds its shared P&L budget.
@@ -269,6 +270,7 @@ class PortfolioPnlSnapshotter:
         self._failure_logged: set[tuple[str, str]] = set()
         self._self_heal_logged: dict[str, tuple[datetime, tuple[str, ...]]] = {}
         self._withheld_logged: dict[str, tuple[datetime, tuple[str, ...]]] = {}
+        self._persistent_fill_gap_skip_logged: set[tuple[str, str, str, str]] = set()
         self._fx_shadow_pinning_enabled = resolve_enabled(os.environ.get(FX_SHADOW_PINNING_ENV_VAR))
         self._fx_shadow_context: FxShadowPinContext | None = None
 
@@ -472,6 +474,11 @@ class PortfolioPnlSnapshotter:
             for wallet, limit in self._replay_chunk_limits.items()
             if wallet in current_wallets
         }
+        self._persistent_fill_gap_skip_logged = {
+            scope_key
+            for scope_key in self._persistent_fill_gap_skip_logged
+            if scope_key[0] in current_wallets
+        }
 
     async def _process_wallet(
         self,
@@ -611,7 +618,7 @@ class PortfolioPnlSnapshotter:
         if start is None:
             return None
         first_minute = await repo.get_portfolio_pnl_correction_evidence(ctx.scope, start, start)
-        return await repo.invalidate_portfolio_pnl_correction(
+        started = await repo.invalidate_portfolio_pnl_correction(
             ctx.scope,
             PnlCorrectionRequest(
                 start=start,
@@ -629,6 +636,8 @@ class PortfolioPnlSnapshotter:
             ),
             frontier,
         )
+        self._clear_fill_gap_skip_streak(ctx.scope)
+        return started
 
     async def _probe_replay(
         self,
@@ -654,8 +663,6 @@ class PortfolioPnlSnapshotter:
             or metadata.has_fill_gap is None
         ):
             raise PortfolioPnlCorrectionConflictError("P&L replay could not certify its evidence")
-        if metadata.has_fill_gap:
-            return replace(metadata, earliest_affected_minute=ctx.t0 + _MINUTE)
         return metadata
 
     async def _replay_start(
@@ -677,6 +684,11 @@ class PortfolioPnlSnapshotter:
             or frontier.expected_venues != ctx.expected_venues
         ):
             return first
+        if pending.has_fill_gap:
+            if await self._can_skip_persistent_fill_gap(repo, ctx, frontier, tip, pending):
+                self._log_persistent_fill_gap_skip(ctx, frontier)
+                return None
+            return first
         late = plan_late_fill_recompute(pending.earliest_affected_minute, frontier.tip)
         healed = await self._self_heal_start(repo, ctx, frontier.tip)
         forward = frontier.tip + _MINUTE if frontier.tip < tip else None
@@ -685,6 +697,66 @@ class PortfolioPnlSnapshotter:
         )
         start = min(candidates, default=None)
         return max(start, first) if start is not None else None
+
+    @staticmethod
+    def _scope_streak_key(scope: PortfolioPnlSampleScope) -> tuple[str, str, str, str]:
+        """Return the scope tuple identifying one persistent fill-gap pause streak."""
+        return (
+            scope.wallet_public_id,
+            scope.mode,
+            scope.valuation_ccy,
+            scope.epoch_public_id,
+        )
+
+    def _clear_fill_gap_skip_streak(self, scope: PortfolioPnlSampleScope) -> None:
+        """End a scope's persistent fill-gap pause streak once replay resumes."""
+        self._persistent_fill_gap_skip_logged.discard(self._scope_streak_key(scope))
+
+    def _log_persistent_fill_gap_skip(
+        self, ctx: _ScopeContext, frontier: PnlCorrectionFrontier
+    ) -> None:
+        """Emit one liveness log per pause streak for a persistently gapped scope."""
+        scope_key = self._scope_streak_key(ctx.scope)
+        if scope_key in self._persistent_fill_gap_skip_logged:
+            return
+        self._persistent_fill_gap_skip_logged.add(scope_key)
+        gap_age = ctx.as_of - frontier.as_of
+        logger.info(
+            "PortfolioPnlSnapshotter: wallet %s paused replay on persistent fill gap "
+            "(mode=%s ccy=%s epoch=%s frontier_tip=%s frontier_as_of=%s as_of=%s gap_age=%s)",
+            ctx.scope.wallet_public_id,
+            ctx.scope.mode,
+            ctx.scope.valuation_ccy,
+            ctx.scope.epoch_public_id,
+            frontier.tip.isoformat(),
+            frontier.as_of.isoformat(),
+            ctx.as_of.isoformat(),
+            gap_age,
+            extra={
+                "scope_skip_reason": _SCOPE_SKIP_PERSISTENT_FILL_GAP,
+                "wallet_public_id": ctx.scope.wallet_public_id,
+                "mode": ctx.scope.mode,
+                "valuation_ccy": ctx.scope.valuation_ccy,
+                "epoch_public_id": ctx.scope.epoch_public_id,
+                "frontier_tip": frontier.tip,
+                "frontier_as_of": frontier.as_of,
+                "as_of": ctx.as_of,
+                "gap_age": gap_age,
+            },
+        )
+
+    @staticmethod
+    async def _can_skip_persistent_fill_gap(
+        repo: Repository,
+        ctx: _ScopeContext,
+        frontier: PnlCorrectionFrontier,
+        tip: datetime,
+        pending: PnlSeriesReplayMetadata,
+    ) -> bool:
+        """Prove a settled gapped generation can skip re-replay without changing truth."""
+        if not _has_stationary_persistent_fill_gap(ctx, frontier, pending):
+            return False
+        return not await repo.has_active_portfolio_pnl_samples(ctx.scope, ctx.t0 + _MINUTE, tip)
 
     async def _self_heal_start(
         self, repo: Repository, ctx: _ScopeContext, last_minute: datetime
@@ -774,6 +846,7 @@ class PortfolioPnlSnapshotter:
         venues = frontier.expected_venues
         if start is None or venues is None:
             raise PortfolioPnlCorrectionConflictError("P&L replay has no certified pending window")
+        self._clear_fill_gap_skip_streak(ctx.scope)
         limit = self._replay_chunk_limit(ctx.wallet_public_id)
         end = min(start + (limit - 1) * _MINUTE, frontier.tip)
         frozen = replace(ctx, as_of=frontier.as_of, expected_venues=venues)
@@ -1053,6 +1126,37 @@ class PortfolioPnlSnapshotter:
             "audit_json": sample.audit_json,
             "watermarks_json": watermarks_json,
         }
+
+
+def _has_stationary_persistent_fill_gap(
+    ctx: _ScopeContext,
+    frontier: PnlCorrectionFrontier,
+    pending: PnlSeriesReplayMetadata,
+) -> bool:
+    """Return whether settled frontier metadata and probe evidence remain identically gapped."""
+    first = ctx.t0 + _MINUTE
+    witness = pending.fill_witness_cut
+    return (
+        frontier.next_minute is None
+        and frontier.window_start == first
+        and frontier.repair_from == first
+        and frontier.has_fill_gap is True
+        and pending.has_fill_gap is True
+        and frontier.raw_execution_watermarks is not None
+        and pending.raw_execution_watermarks is not None
+        and frontier.raw_execution_watermarks == pending.raw_execution_watermarks
+        and frontier.execution_manifest_digest is not None
+        and pending.execution_manifest_digest is not None
+        and frontier.execution_manifest_digest == pending.execution_manifest_digest
+        and frontier.expected_venues is not None
+        and frontier.expected_venues == ctx.expected_venues
+        and witness is not None
+        and frontier.venue_event_watermarks is not None
+        and frontier.venue_event_watermarks == witness["watermarks"]
+        and frontier.fill_witness_digest is not None
+        and frontier.fill_witness_digest == witness["digest"]
+        and plan_late_fill_recompute(pending.earliest_affected_minute, frontier.tip) is None
+    )
 
 
 def _detection_watermarks(metadata: PnlSeriesReplayMetadata) -> Mapping[str, int]:

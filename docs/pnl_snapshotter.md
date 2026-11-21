@@ -208,6 +208,26 @@ Price reference and display identity decisions use revisions known through
 the generation tip. A revision later in the generation can therefore
 withhold an earlier sample consistently across chunk sizes.
 
+When a settled generation spans from the first post-anchor minute with
+`has_fill_gap` enabled and `repair_from` at that first minute, a subsequent
+metadata-only admission probe finds identical frozen execution watermarks,
+execution manifest digest, spot venues, and fill-witness cut, no late fill
+reaches back through the frozen frontier tip, and no active sample rows occupy
+`[first .. tip]` across any epoch or calculation version, the snapshotter skips
+re-replay and pauses the frontier. While paused, the frontier's `tip`, `as_of`,
+`generation`, `revision`, `pending_watermarks`, `repair_from`, and
+`baseline_watermarks` stay at the settled generation's values, persisted rows
+and `audit_json` remain untouched, and `require_reconciled` reads continue to
+withhold every minute from the first post-anchor minute onward.
+
+Monitoring note: each pause streak emits one `persistent_fill_gap_skip` log
+event per scope (`scope_skip_reason="persistent_fill_gap_skip"`) carrying
+`wallet_public_id`, `mode`, `valuation_ccy`, `epoch_public_id`,
+`frontier_tip`, `frontier_as_of`, `as_of`, and `gap_age`. The streak ends only
+when replay actually resumes for that scope, and the frontier resumes a full
+replay from the anchor's first post-anchor minute through the current finalized
+tip as soon as evidence changes or the fill gap clears.
+
 ## Replay acceptance
 
 Exercise the exact candidate on an isolated local PostgreSQL database on WSL.
