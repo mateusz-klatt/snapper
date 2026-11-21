@@ -1405,3 +1405,10 @@ contracts (`MNQU6-CME` = Sep 26, etc.) and must be rotated before the
   ever reappears, recover the `repair-equity-candle-fragmentation` CLI
   and its service/repository code from commit `50c98684`
   (`ix_trades_executed_at` from migration 0007 is still in place).
+
+## Portfolio P&L minimum-activation report
+
+`snapper pnl-minimum-gate report` (and `check` / `inspect`) reads current
+`PNL_SAMPLE_CALC_VERSION` sample rows without `require_reconciled`. After a
+sample-version bump, the minimum-activation report counts as evidence only once
+the new version's correction frontier has passed the entire report window.

@@ -50,8 +50,9 @@ solely on the point's own ``MAX_RECOVERY_KEYS`` input count, and exhausting the
 chunk-shared ``_ReplayRecoveryWork`` reserve raises ``PnlTimelineWorkBudgetError``
 (triggering chunk subdivision) rather than withholding a minute.
 
-PR-1 changes only repair obligation (``unrepairable_withheld_minutes`` and
-``repair_from``), never valuation (calc version stays ``5C.5``). Under guard R1,
+PR-1, introduced under sample version ``5C.5``, changed only repair obligation
+(``unrepairable_withheld_minutes`` and ``repair_from``), never valuation (keeping
+the sample calc version at ``5C.5`` at that time). Under guard R1,
 a minute is marked unrepairable only if no active sample row survives the chunk's
 edit; a ``*_sum_unrepresentable`` minute retains an existing row through
 :func:`preserves_persisted_row` only when its ``calc_version`` matches the

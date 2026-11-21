@@ -2184,3 +2184,101 @@ class TestRound3ReviewCases:
         )
         assert captured.closing_checkpoint is None
         assert captured.closing_checkpoint_refusal == "carried_event_inputs"
+
+
+class TestCompensatedFallbackCheckpointIndependence:
+    """Prove the 5C.6 fallback never reaches the captured carried engine state."""
+
+    @staticmethod
+    def _fallback_after_cut() -> tuple[tuple[TimelineExecution, ...], MarkMap]:
+        """Build three positions that reconcile at minutes 0..1 and need the fallback after.
+
+        Returns:
+            Executions opened at minute 0 and marks whose minute-2 and minute-3
+            unrealized values are exactly ``[2.11, 0.03, -2.11]``.
+        """
+        executions = (
+            _EXEC("I1", 1, 0, "buy", 2.11, 1.0),
+            _EXEC("I2", 2, 0, "buy", 0.03, 1.0),
+            _EXEC("I3", 3, 0, "buy", 2.11, 2.0),
+        )
+        entry = {"I1": 1.0, "I2": 1.0, "I3": 2.0}
+        later = {"I1": 2.0, "I2": 2.0, "I3": 1.0}
+        marks: MarkMap = {
+            (instrument, _M(minute)): (entry if minute < 2 else later)[instrument]
+            for instrument in ("I1", "I2", "I3")
+            for minute in range(4)
+        }
+        return executions, marks
+
+    @staticmethod
+    def _window(
+        from_minute: int,
+        to_minute: int,
+        *,
+        fallback: bool,
+        capture_checkpoint: bool = False,
+    ) -> TimelineWindow:
+        """Build a per-point window with the compensated fallback switched on or off.
+
+        Args:
+            from_minute: First grid minute of the window.
+            to_minute: Last grid minute of the window.
+            fallback: Whether the compensated unrealized fallback is enabled.
+            capture_checkpoint: Whether the window captures a closing checkpoint.
+
+        Returns:
+            The configured timeline window.
+        """
+        return replace(
+            _pointwise_window(from_minute, to_minute, capture_checkpoint=capture_checkpoint),
+            compensated_unrealized_fallback=fallback,
+        )
+
+    def test_capture_is_byte_identical_and_resume_matches_anchor_with_fallback(self) -> None:
+        """Bind the fallback to calc_version alone: captured state cannot depend on it.
+
+        Given: Positions whose unrealized values need the compensated fallback only
+            after the cut at minute 1,
+        When: A checkpoint is captured at minute 1 with the fallback on and off, and
+            the fallback-on checkpoint is resumed through minute 3,
+        Then: Both captures serialize to identical bytes, the fallback really publishes
+            minutes 2..3 (they withhold with it off), and the resumed points equal a
+            fallback-on replay from the anchor bit for bit.
+        """
+        executions, marks = self._fallback_after_cut()
+        captures = [
+            build_pnl_timeline(
+                executions,
+                (),
+                marks,
+                self._window(0, 1, fallback=fallback, capture_checkpoint=True),
+            ).closing_checkpoint
+            for fallback in (False, True)
+        ]
+        off_checkpoint, on_checkpoint = captures
+        assert off_checkpoint is not None and on_checkpoint is not None
+        assert checkpoint_to_json(off_checkpoint) == checkpoint_to_json(on_checkpoint)
+
+        anchor_on = build_pnl_timeline(executions, (), marks, self._window(0, 3, fallback=True))
+        anchor_off = build_pnl_timeline(executions, (), marks, self._window(0, 3, fallback=False))
+        assert [point.valuation_status for point in anchor_on.points[2:]] == [
+            "complete",
+            "complete",
+        ]
+        assert [point.valuation_status for point in anchor_off.points[2:]] == [
+            "incomplete",
+            "incomplete",
+        ]
+
+        resumed_executions, resumed_accruals = _resume_inputs_from_checkpoint(
+            executions, executions, (), on_checkpoint
+        )
+        resumed = build_pnl_timeline(
+            resumed_executions,
+            resumed_accruals,
+            marks,
+            self._window(2, 3, fallback=True),
+            opening=on_checkpoint,
+        )
+        _assert_points_bit_identical(anchor_on.points[2:], resumed.points)
