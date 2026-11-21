@@ -23,7 +23,9 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import cast
+from uuid import NAMESPACE_URL
 from uuid import uuid4
+from uuid import uuid5
 
 import pytest
 from sqlalchemy import create_engine
@@ -74,24 +76,30 @@ from tests.data.test_pnl_fx_rate_repository import _candle as _fx_candle
 from tests.data.test_pnl_fx_rate_repository import _instrument
 from tests.data.test_pnl_fx_rate_repository import _symbol
 
+
+def _uuid(label: str) -> str:
+    """Derive the stable UUID public id that PostgreSQL requires from a fixture label."""
+    return str(uuid5(NAMESPACE_URL, f"snapper-test:exact-minute-event-fx:{label}"))
+
+
 _ORIGIN = -2000
 _EUR_USD = currency_pair_key("EUR", "USD")
 _PLN_USD = currency_pair_key("PLN", "USD")
 _GENERATED_KEYS = frozenset({"public_id", "session_id", "election_public_id"})
 _SYMBOLS: tuple[tuple[str, str, str, str], ...] = (
-    ("sym-eurusd", "EUR-USD", "EUR", "USD"),
-    ("sym-usdeur", "USD-EUR", "USD", "EUR"),
-    ("sym-usdpln", "USD-PLN", "USD", "PLN"),
-    ("sym-eurusd-alt", "EURUSD-ALT", "EUR", "USD"),
+    (_uuid("sym-eurusd"), "EUR-USD", "EUR", "USD"),
+    (_uuid("sym-usdeur"), "USD-EUR", "USD", "EUR"),
+    (_uuid("sym-usdpln"), "USD-PLN", "USD", "PLN"),
+    (_uuid("sym-eurusd-alt"), "EURUSD-ALT", "EUR", "USD"),
 )
 _INSTRUMENTS: tuple[tuple[str, str, str], ...] = (
-    ("ins-eurusd-bitstamp", "sym-eurusd", "bitstamp"),
-    ("ins-eurusd-kraken", "sym-eurusd", "kraken"),
-    ("ins-eurusd-walutomat", "sym-eurusd", "walutomat"),
-    ("ins-usdeur-kraken", "sym-usdeur", "kraken"),
-    ("ins-usdpln-walutomat", "sym-usdpln", "walutomat"),
-    ("ins-usdpln-kraken", "sym-usdpln", "kraken"),
-    ("ins-eurusd-kraken-alt", "sym-eurusd-alt", "kraken"),
+    (_uuid("ins-eurusd-bitstamp"), _uuid("sym-eurusd"), "bitstamp"),
+    (_uuid("ins-eurusd-kraken"), _uuid("sym-eurusd"), "kraken"),
+    (_uuid("ins-eurusd-walutomat"), _uuid("sym-eurusd"), "walutomat"),
+    (_uuid("ins-usdeur-kraken"), _uuid("sym-usdeur"), "kraken"),
+    (_uuid("ins-usdpln-walutomat"), _uuid("sym-usdpln"), "walutomat"),
+    (_uuid("ins-usdpln-kraken"), _uuid("sym-usdpln"), "kraken"),
+    (_uuid("ins-eurusd-kraken-alt"), _uuid("sym-eurusd-alt"), "kraken"),
 )
 _EVENT_LAYOUTS: dict[str, tuple[tuple[int, ...], tuple[int, ...]]] = {
     "sparse": ((-130, -70, -10), (-70,)),
@@ -115,13 +123,13 @@ def _kraken_alt_close(minute: int) -> float | None:
 
 
 _CLOSES: dict[str, Callable[[int], float | None]] = {
-    "ins-eurusd-bitstamp": lambda minute: 1.10 if minute % 2 == 0 else None,
-    "ins-eurusd-kraken": _kraken_close,
-    "ins-eurusd-walutomat": lambda minute: 1.15,
-    "ins-usdeur-kraken": lambda minute: 0.9,
-    "ins-usdpln-walutomat": lambda minute: None if minute % 5 == 0 else 4.0,
-    "ins-usdpln-kraken": lambda minute: 4.1,
-    "ins-eurusd-kraken-alt": _kraken_alt_close,
+    _uuid("ins-eurusd-bitstamp"): lambda minute: 1.10 if minute % 2 == 0 else None,
+    _uuid("ins-eurusd-kraken"): _kraken_close,
+    _uuid("ins-eurusd-walutomat"): lambda minute: 1.15,
+    _uuid("ins-usdeur-kraken"): lambda minute: 0.9,
+    _uuid("ins-usdpln-walutomat"): lambda minute: None if minute % 5 == 0 else 4.0,
+    _uuid("ins-usdpln-kraken"): lambda minute: 4.1,
+    _uuid("ins-eurusd-kraken-alt"): _kraken_alt_close,
 }
 
 
@@ -637,21 +645,25 @@ async def test_shadow_duplicates_and_row_cap_survive_the_exact_event_read(
     exchanges = ("bitstamp", "kraken", "walutomat")
     bulk_symbols = [
         _symbol(
-            f"sym-bulk-{index:02d}", f"EURUSD-B{index:02d}", "EUR", "USD", timestamp=_m(_ORIGIN)
+            _uuid(f"sym-bulk-{index:02d}"),
+            f"EURUSD-B{index:02d}",
+            "EUR",
+            "USD",
+            timestamp=_m(_ORIGIN),
         )
         for index in range(bulk)
     ]
     bulk_instruments = [
         _instrument(
-            f"ins-bulk-{index:02d}",
-            f"sym-bulk-{index:02d}",
+            _uuid(f"ins-bulk-{index:02d}"),
+            _uuid(f"sym-bulk-{index:02d}"),
             exchanges[index % 3],
             timestamp=_m(_ORIGIN),
         )
         for index in range(bulk)
     ]
     bulk_candles = [
-        _fx_candle(f"ins-bulk-{index:02d}", _m(event_minute - 1), 1.3 if index == 4 else 1.2)
+        _fx_candle(_uuid(f"ins-bulk-{index:02d}"), _m(event_minute - 1), 1.3 if index == 4 else 1.2)
         for index in range(bulk)
     ]
     window = range(0, 5)
@@ -703,12 +715,12 @@ async def _publish_backdated_correction(database: SQLAlchemyRepository) -> None:
         await session.execute(
             update(Candle)
             .where(
-                Candle.instrument_public_id == "ins-eurusd-walutomat",
+                Candle.instrument_public_id == _uuid("ins-eurusd-walutomat"),
                 Candle.open_at == _m(-51),
             )
             .values(known_to=_m(-30))
         )
-        replacement = _fx_candle("ins-eurusd-walutomat", _m(-51), 1.25)
+        replacement = _fx_candle(_uuid("ins-eurusd-walutomat"), _m(-51), 1.25)
         replacement.timestamp = _m(-30)
         session.add(replacement)
         await session.commit()
@@ -731,7 +743,10 @@ async def test_event_read_sees_inside_mark_conflicts_and_skips_outside_marks(
     async def make_repo() -> _RealFxRepo:
         """Seed a fresh store so each replay observes its own late correction."""
         database = await databases.create(
-            [_fx_candle("ins-eurusd-walutomat", _m(minute - 1), 1.15) for minute in range(-125, 2)]
+            [
+                _fx_candle(_uuid("ins-eurusd-walutomat"), _m(minute - 1), 1.15)
+                for minute in range(-125, 2)
+            ]
         )
 
         async def correct() -> None:
@@ -758,7 +773,7 @@ async def test_event_read_sees_inside_mark_conflicts_and_skips_outside_marks(
 async def _publish_late_required_row(database: SQLAlchemyRepository) -> None:
     """Commit a Bitstamp close at the fill minute, stamped before the read horizon."""
     async with database.session() as session:
-        late = _fx_candle("ins-eurusd-bitstamp", _m(-101), 1.3)
+        late = _fx_candle(_uuid("ins-eurusd-bitstamp"), _m(-101), 1.3)
         late.timestamp = _m(1)
         session.add(late)
         await session.commit()
@@ -788,10 +803,10 @@ async def test_mid_read_commit_is_read_as_if_it_landed_after_the_load(
             database = await databases.create(
                 [
                     *(
-                        _fx_candle("ins-eurusd-walutomat", _m(minute - 1), 1.15)
+                        _fx_candle(_uuid("ins-eurusd-walutomat"), _m(minute - 1), 1.15)
                         for minute in range(-125, 2)
                     ),
-                    _fx_candle("ins-eurusd-bitstamp", _m(-111), 1.1),
+                    _fx_candle(_uuid("ins-eurusd-bitstamp"), _m(-111), 1.1),
                 ]
             )
 
@@ -839,7 +854,8 @@ async def test_event_rows_stay_flat_as_the_chunk_moves_forward(
     Then: Exact event rows stay at three while dense event rows grow with position.
     """
     candles = [
-        _fx_candle("ins-eurusd-walutomat", _m(minute - 1), 1.15) for minute in range(-325, 251)
+        _fx_candle(_uuid("ins-eurusd-walutomat"), _m(minute - 1), 1.15)
+        for minute in range(-325, 251)
     ]
     database = await databases.create(candles)
     exact_rows: list[list[int]] = []
@@ -1010,7 +1026,9 @@ async def test_basket_keeps_its_lookback_pin_and_missing_rate_reason(
     only the unchanged range reads run.
     """
     offsets = range(1, 20)
-    candles = [_fx_candle("ins-usdpln-walutomat", _m(100 * offset - 1), 4.0) for offset in offsets]
+    candles = [
+        _fx_candle(_uuid("ins-usdpln-walutomat"), _m(100 * offset - 1), 4.0) for offset in offsets
+    ]
     database = await databases.create(candles)
     plane = ("USD", "PLN", "walutomat")
     for offset in offsets:
