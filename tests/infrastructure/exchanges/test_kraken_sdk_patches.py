@@ -66,6 +66,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _RETRY_AFTER_MIN
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _TEARDOWN_PATCH_APPLIED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _TEARDOWN_PATCH_LOGGED
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_CLOSE_TIMEOUT_S
+from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_MAX_MESSAGE_BYTES
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_INTERVAL_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_TIMEOUT_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _consume_task_result
@@ -1163,6 +1164,7 @@ class TestPhaseBPrimeShim:
             "ping_interval": 20,
             "ping_timeout": _WS_PING_TIMEOUT_S,
             "close_timeout": _WS_CLOSE_TIMEOUT_S,
+            "max_size": _WS_MAX_MESSAGE_BYTES,
         }
 
     def test_shim_injects_default_keepalive_when_absent(self) -> None:
@@ -1185,6 +1187,51 @@ class TestPhaseBPrimeShim:
             "ping_interval": _WS_PING_INTERVAL_S,
             "ping_timeout": _WS_PING_TIMEOUT_S,
             "close_timeout": _WS_CLOSE_TIMEOUT_S,
+            "max_size": _WS_MAX_MESSAGE_BYTES,
+        }
+
+    def test_shim_default_max_size_admits_frames_beyond_the_websockets_default(self) -> None:
+        """Spec — the injected inbound cap is larger than the 1 MiB library default.
+
+        Given get_egress_pool() returns None and the caller passes no ``max_size``,
+        When _ConnectShim is constructed,
+        Then original_connect receives ``max_size=_WS_MAX_MESSAGE_BYTES``, which
+        admits the 1,048,702-byte Kraken instrument snapshot that closed the
+        socket with 1009 MESSAGE_TOO_BIG under the websockets default of 2**20.
+        """
+        seen_kwargs: dict[str, Any] = {}
+
+        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+            seen_kwargs.update(kwargs)
+            return MagicMock()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim_cls("wss://ws.kraken.com/v2")
+        assert seen_kwargs["max_size"] == _WS_MAX_MESSAGE_BYTES
+        assert seen_kwargs["max_size"] > 1_048_702 > 2**20
+
+    @pytest.mark.parametrize("caller_max_size", [None, 4 * 1024 * 1024])
+    def test_shim_caller_max_size_wins(self, caller_max_size: int | None) -> None:
+        """Spec — an explicit caller ``max_size`` overrides the injected default.
+
+        Given get_egress_pool() returns None and the caller passes ``max_size``,
+        When _ConnectShim is constructed,
+        Then original_connect receives the caller's value unchanged, including
+        ``None`` for no limit, while the keepalive timeouts stay enforced.
+        """
+        seen_kwargs: dict[str, Any] = {}
+
+        def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
+            seen_kwargs.update(kwargs)
+            return MagicMock()
+
+        shim_cls = _wrap_connect_factory(fake_connect)
+        shim_cls("wss://kraken", max_size=caller_max_size)
+        assert seen_kwargs == {
+            "ping_interval": _WS_PING_INTERVAL_S,
+            "ping_timeout": _WS_PING_TIMEOUT_S,
+            "close_timeout": _WS_CLOSE_TIMEOUT_S,
+            "max_size": caller_max_size,
         }
 
     def test_shim_direct_route_injects_proxy_none(self) -> None:
@@ -1211,6 +1258,7 @@ class TestPhaseBPrimeShim:
             "ping_interval": _WS_PING_INTERVAL_S,
             "ping_timeout": _WS_PING_TIMEOUT_S,
             "close_timeout": _WS_CLOSE_TIMEOUT_S,
+            "max_size": _WS_MAX_MESSAGE_BYTES,
         }
 
     def test_shim_passes_explicit_private_traffic_class_to_pool(self) -> None:
@@ -1433,6 +1481,7 @@ class TestPhaseBPrimeShim:
             "ping_interval": _WS_PING_INTERVAL_S,
             "ping_timeout": _WS_PING_TIMEOUT_S,
             "close_timeout": _WS_CLOSE_TIMEOUT_S,
+            "max_size": _WS_MAX_MESSAGE_BYTES,
         }
 
     def test_shim_sync_construct_failure_releases_reservation(self) -> None:
@@ -2084,6 +2133,7 @@ class TestPhaseBPrimeShim:
             "ping_interval": _WS_PING_INTERVAL_S,
             "ping_timeout": _WS_PING_TIMEOUT_S,
             "close_timeout": _WS_CLOSE_TIMEOUT_S,
+            "max_size": _WS_MAX_MESSAGE_BYTES,
         }
 
     def test_shim_falls_back_to_kraken_when_no_publisher_context(self) -> None:

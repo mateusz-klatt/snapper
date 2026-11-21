@@ -514,6 +514,11 @@ action:
   with an explicit `ping_timeout`/`close_timeout` so a silently dead
   socket (a yanked link with no close frame) surfaces in tens of seconds
   rather than waiting out the app-level silence threshold.
+- **Inbound message cap.** The same handshake defaults `max_size` to 16 MiB
+  (`_WS_MAX_MESSAGE_BYTES`). The SDK passes none, and the `websockets`
+  default of 1 MiB is smaller than Kraken's spot `instrument` snapshot since
+  2026-11-21. Too small a cap closes the socket with 1009 MESSAGE_TOO_BIG and
+  makes `update-kraken-symbols` abort below its 95% verification threshold.
 - **Bounded connect.** The WebSocket connect itself (`SpotWSClient`/
   `FuturesWSClient` `start()`) is wrapped in a 20 s timeout
   (`_WS_CONNECT_TIMEOUT_S`). The vendored SDK's `start()` polls for the
