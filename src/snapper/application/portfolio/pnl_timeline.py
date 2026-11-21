@@ -3126,6 +3126,34 @@ def _validate_timeline_execution_scopes(
         _validate_timeline_execution_scope(state, execution)
 
 
+def _validate_resume_executions(
+    opening: TimelineCheckpointOpening,
+    executions: Sequence[TimelineExecution],
+    prepared: Sequence[_PreparedExecution],
+) -> None:
+    """Refuse a resume input that re-passes applied fills or omits deferred ones.
+
+    A fill applied by the checkpoint re-prepares at or before
+    ``checkpoint_minute`` and would be counted twice. A fill exported in
+    ``deferred_execution_keys`` was not yet applied, so leaving it out would
+    silently drop it together with the clamp and shadow it carries.
+
+    Args:
+        opening: The checkpoint the window resumes from.
+        executions: The executions supplied for the resumed window.
+        prepared: Those executions after clamping from the carried maxima.
+
+    Raises:
+        ValueError: When a supplied fill applies at or before the checkpoint,
+            or when a deferred fill is missing.
+    """
+    supplied = {(execution.exchange, execution.scope_sequence) for execution in executions}
+    if any(key not in supplied for key in opening.deferred_execution_keys):
+        raise ValueError("checkpoint resume is missing deferred executions")
+    if any(item.effective_time <= opening.checkpoint_minute for item in prepared):
+        raise ValueError("checkpoint resume received execution at or before checkpoint_minute")
+
+
 def _timeline_schedule(
     state: _TimelineBuildState,
     executions: Sequence[TimelineExecution],
@@ -3141,10 +3169,8 @@ def _timeline_schedule(
             None if checkpoint_opening is None else dict(checkpoint_opening.last_effective_by_pool)
         ),
     )
-    if checkpoint_opening is not None and any(
-        item.effective_time <= checkpoint_opening.checkpoint_minute for item in prepared
-    ):
-        raise ValueError("checkpoint resume received execution at or before checkpoint_minute")
+    if checkpoint_opening is not None:
+        _validate_resume_executions(checkpoint_opening, executions, prepared)
     pool_index = _valuation_pool_index(
         state.pool_keys_by_instrument,
         prepared,

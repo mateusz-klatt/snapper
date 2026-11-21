@@ -1324,6 +1324,18 @@ class TestReviewRegressionReproducers:
             for entry in resumed.points[0].incompleteness_reasons
         )
         assert resumed.points[1].valuation_status == "complete"
+        for omitted in (10, 12):
+            incomplete = tuple(
+                execution for execution in resumed_execs if execution.scope_sequence != omitted
+            )
+            with pytest.raises(ValueError, match="missing deferred executions"):
+                build_pnl_timeline(
+                    incomplete,
+                    (),
+                    marks,
+                    _pointwise_window(6, 9),
+                    opening=parsed,
+                )
 
         raw_payload = json.loads(checkpoint_to_json(checkpoint))
         for bad_keys in (
