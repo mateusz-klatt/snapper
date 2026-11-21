@@ -711,6 +711,27 @@ class NotifySidecar(RegisterableProcess):
                 sequence_id=device_seq,
             )
             return
+        if result.status == "config_error":
+            error_reason = f"config_error:{result.description}"
+            logger.error(
+                "sidecar: APNs configuration error — leaving device active"
+                " delivery_public_id={pid}, device_public_id={dev}, env={env},"
+                " apns_topic={topic}, status_code={code}, reason={reason}",
+                pid=delivery_public_id,
+                dev=device["public_id"],
+                env=device["env"],
+                topic=self._apns_topic,
+                code=result.status_code,
+                reason=result.description,
+            )
+            await self._repo.mark_delivery_failed(
+                delivery_public_id,
+                error_reason=error_reason,
+                transition_at=now,
+                session_id=sid,
+                sequence_id=seq,
+            )
+            return
         await self._schedule_retry_or_fail(
             delivery_public_id,
             attempt_number,
