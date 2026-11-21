@@ -8,6 +8,7 @@ from typing import cast
 
 import pytest
 
+from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlCorrectionChunk
 from snapper.data.pnl_correction_state import PnlCorrectionEdit
 from snapper.data.pnl_correction_state import PnlCorrectionEvidence
@@ -15,6 +16,7 @@ from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlCorrectionKey
 from snapper.data.pnl_correction_state import PnlCorrectionRequest
 from snapper.data.pnl_correction_state import PnlCorrectionSampleVersion
+from snapper.data.pnl_correction_state import PnlOpeningCheckpointCertificate
 from snapper.data.pnl_correction_state import advance_correction_frontier
 from snapper.data.pnl_correction_state import correction_watermarks
 from snapper.data.pnl_correction_state import start_correction_frontier
@@ -553,3 +555,254 @@ def test_remaining_repair_ignores_exempt_minutes_while_keeping_other_and_pending
     settled = advance_correction_frontier(kept, acknowledged)
     assert settled.repair_from is None
     assert settled.baseline_watermarks == {"kraken": 5}
+
+
+_DIGEST_64 = "a" * 64
+_DIGEST_64_ALT = "b" * 64
+
+
+def _valid_certificate(**overrides: object) -> PnlOpeningCheckpointCertificate:
+    """Build a valid opening-checkpoint certificate with optional field overrides."""
+    kwargs: dict[str, object] = {
+        "key": KEY,
+        "timeline_calc_version": "5A.16",
+        "fx_policy_version": "pnl-fiat-pointwise-v1",
+        "schema_version": 1,
+        "anchor_public_id": samples._ANCHOR_PUBLIC_ID,
+        "anchor_digest": _DIGEST_64,
+        "source_generation": 1,
+        "checkpoint_minute": samples._M3,
+        "as_of": samples._M5,
+        "cutoff_execution_watermarks": {"walutomat": 4, "kraken": 5},
+        "execution_chain_digests": {"walutomat": _DIGEST_64_ALT, "kraken": _DIGEST_64},
+        "cutoff_execution_counts": {"walutomat": 4, "kraken": 5},
+        "applied_watermarks_by_exchange": {"walutomat": 4, "kraken": 3},
+        "deferred_execution_sequences": {"kraken": [4, 5]},
+        "prefix_has_idless_executions": False,
+        "execution_manifest_digest": _DIGEST_64,
+        "prefix_annulment_digest": _DIGEST_64,
+        "accrual_prefix_fingerprint": IdAggregate(0, 0, 0, None),
+        "prefix_lineage_digest": _DIGEST_64,
+        "prefix_fill_witness_digest": _DIGEST_64,
+        "prefix_venue_event_watermarks": {"walutomat:spot": 2, "kraken:spot": 9},
+        "symbol_ref_digest": _DIGEST_64,
+        "consumed_fx_pairs": [("BTC", "USD"), ("EUR", "USD")],
+        "consumed_fx_open_ats": [samples._M1, samples._M3],
+        "event_fx_exchanges_digest": _DIGEST_64,
+        "event_fx_candles_fingerprint": IdAggregate(2, (1 << 65) + 3, 1 << 64, samples._M3),
+    }
+    kwargs.update(overrides)
+    return PnlOpeningCheckpointCertificate(**kwargs)
+
+
+def test_id_aggregate_accepts_coherent_zero_and_positive_shapes() -> None:
+    """Accept both empty-zero and large-integer positive aggregate fingerprints.
+
+    Given: Zero-count and large-sum positive ``IdAggregate`` inputs.
+    When: Each ``IdAggregate`` is constructed.
+    Then: Both validate cleanly without losing integer precision.
+    """
+    empty = IdAggregate(0, 0, 0, None)
+    assert empty == IdAggregate(count=0, id_sum=0, max_id=0, max_timestamp=None)
+    populated = IdAggregate(3, (1 << 65) + 7, 1 << 64, samples._M5)
+    assert populated.id_sum == (1 << 65) + 7
+
+
+@pytest.mark.parametrize(
+    ("args", "pattern"),
+    [
+        ((True, 0, 0, None), "integer"),
+        ((0, True, 0, None), "integer"),
+        ((0, 0, True, None), "integer"),
+        ((False, 0, 0, None), "integer"),
+        ((-1, 0, 0, None), "non-negative"),
+        ((0, -1, 0, None), "non-negative"),
+        ((0, 0, -1, None), "non-negative"),
+        ((1, 1, 1, samples._M1.replace(tzinfo=None)), "timezone-aware"),
+        ((1, 1, 1, "2026-11-20"), "datetime"),
+        ((0, 1, 0, None), "coherent"),
+        ((0, 0, 1, None), "coherent"),
+        ((0, 0, 0, samples._M1), "coherent"),
+        ((1, 0, 1, samples._M1), "coherent"),
+        ((1, 1, 0, samples._M1), "coherent"),
+        ((1, 1, 1, None), "coherent"),
+    ],
+)
+def test_id_aggregate_rejects_booleans_negatives_naive_ts_and_incoherent_tuples(
+    args: tuple[object, object, object, object],
+    pattern: str,
+) -> None:
+    """Reject malformed, boolean, negative, naive, or incoherent aggregates.
+
+    Given: Invalid ``IdAggregate`` field combinations.
+    When: ``IdAggregate`` is instantiated.
+    Then: ``ValueError`` is raised with a specific diagnostic message.
+    """
+    with pytest.raises(ValueError, match=pattern):
+        IdAggregate(*cast(tuple[int, int, int, datetime | None], args))
+
+
+def test_certificate_normalizes_mappings_and_sequences_and_isolates_caller_state() -> None:
+    """Normalize dict key orders and sequence types into isolated immutable structures.
+
+    Given: Unsorted caller dictionaries, list-valued deferred sequences and
+        open times, plus empty-cut and zero-applied boundary variants.
+    When: ``PnlOpeningCheckpointCertificate`` is constructed and caller input
+        containers are mutated afterwards.
+    Then: Mappings store sorted keys, sequences become tuples, caller mutation
+        has no effect, and the docstring documents the evidence ordering contract.
+    """
+    cutoff = {"walutomat": 4, "kraken": 5}
+    deferred_list = [4, 5]
+    deferred = {"kraken": deferred_list}
+    cert = _valid_certificate(
+        cutoff_execution_watermarks=cutoff,
+        deferred_execution_sequences=deferred,
+    )
+    cutoff["kraken"] = 99
+    deferred_list.append(1)
+    assert list(cert.cutoff_execution_watermarks) == ["kraken", "walutomat"]
+    assert list(cert.execution_chain_digests) == ["kraken", "walutomat"]
+    assert list(cert.cutoff_execution_counts) == ["kraken", "walutomat"]
+    assert list(cert.applied_watermarks_by_exchange) == ["kraken", "walutomat"]
+    assert list(cert.prefix_venue_event_watermarks) == ["kraken:spot", "walutomat:spot"]
+    assert cert.deferred_execution_sequences == {"kraken": (4, 5)}
+    assert isinstance(cert.deferred_execution_sequences["kraken"], tuple)
+    assert cert.consumed_fx_pairs == (("BTC", "USD"), ("EUR", "USD"))
+    assert cert.consumed_fx_open_ats == (samples._M1, samples._M3)
+
+    empty_cert = _valid_certificate(
+        cutoff_execution_watermarks={},
+        execution_chain_digests={},
+        cutoff_execution_counts={},
+        applied_watermarks_by_exchange={},
+        deferred_execution_sequences={},
+        consumed_fx_pairs=(),
+        consumed_fx_open_ats=(),
+    )
+    assert empty_cert.cutoff_execution_watermarks == {}
+
+    zero_applied = _valid_certificate(
+        applied_watermarks_by_exchange={},
+        deferred_execution_sequences={"kraken": ()},
+    )
+    assert zero_applied.applied_watermarks_by_exchange == {}
+
+    doc = (PnlOpeningCheckpointCertificate.__doc__ or "").lower()
+    assert "before" in doc
+    assert "resum" in doc
+    assert "as_of" in doc
+
+
+@pytest.mark.parametrize(
+    ("overrides", "pattern"),
+    [
+        ({"schema_version": 0}, "schema_version"),
+        ({"schema_version": 2}, "schema_version"),
+        ({"schema_version": True}, "schema_version"),
+        ({"source_generation": 0}, "source_generation"),
+        ({"source_generation": True}, "source_generation"),
+        ({"source_generation": False}, "source_generation"),
+        ({"prefix_has_idless_executions": 1}, "prefix_has_idless_executions"),
+        ({"key": replace(KEY, mode="shadow")}, "mode"),
+        ({"key": replace(KEY, wallet_public_id=" ")}, "key"),
+        ({"key": replace(KEY, valuation_ccy="")}, "key"),
+        ({"key": replace(KEY, epoch_public_id="")}, "key"),
+        ({"key": replace(KEY, calc_version="")}, "key"),
+        ({"timeline_calc_version": " "}, "timeline_calc_version"),
+        ({"fx_policy_version": ""}, "fx_policy_version"),
+        ({"anchor_public_id": ""}, "anchor_public_id"),
+        ({"anchor_digest": "a" * 63}, "anchor_digest"),
+        ({"anchor_digest": "A" * 64}, "anchor_digest"),
+        ({"anchor_digest": "g" * 64}, "anchor_digest"),
+        ({"execution_manifest_digest": "bad"}, "execution_manifest_digest"),
+        ({"prefix_annulment_digest": "bad"}, "prefix_annulment_digest"),
+        ({"prefix_lineage_digest": "bad"}, "prefix_lineage_digest"),
+        ({"prefix_fill_witness_digest": "bad"}, "prefix_fill_witness_digest"),
+        ({"symbol_ref_digest": "bad"}, "symbol_ref_digest"),
+        ({"event_fx_exchanges_digest": "bad"}, "event_fx_exchanges_digest"),
+        (
+            {"execution_chain_digests": {"kraken": "BAD", "walutomat": _DIGEST_64}},
+            "execution_chain_digests",
+        ),
+        ({"execution_chain_digests": {"kraken": _DIGEST_64}}, "execution_chain_digests"),
+        (
+            {
+                "execution_chain_digests": {
+                    "kraken": _DIGEST_64,
+                    "walutomat": _DIGEST_64,
+                    "coinbase": _DIGEST_64,
+                }
+            },
+            "execution_chain_digests",
+        ),
+        ({"cutoff_execution_watermarks": {"": 1}}, "watermarks"),
+        ({"prefix_venue_event_watermarks": {"kraken:spot": -1}}, "watermarks"),
+        ({"applied_watermarks_by_exchange": {"kraken": True}}, "watermarks"),
+        ({"cutoff_execution_counts": {"kraken": 5}}, "cutoff_execution_counts"),
+        (
+            {"cutoff_execution_counts": {"kraken": 5, "walutomat": 4, "coinbase": 1}},
+            "cutoff_execution_counts",
+        ),
+        ({"cutoff_execution_counts": {"kraken": True, "walutomat": 4}}, "cutoff_execution_counts"),
+        ({"cutoff_execution_counts": {"kraken": -1, "walutomat": 4}}, "cutoff_execution_counts"),
+        ({"cutoff_execution_counts": {"kraken": 6, "walutomat": 4}}, "cutoff_execution_counts"),
+        ({"applied_watermarks_by_exchange": {"coinbase": 0}}, "applied_watermarks_by_exchange"),
+        ({"applied_watermarks_by_exchange": {"kraken": 6}}, "applied_watermarks_by_exchange"),
+        ({"deferred_execution_sequences": {"coinbase": (1,)}}, "deferred_execution_sequences"),
+        ({"deferred_execution_sequences": {"kraken": (True,)}}, "deferred_execution_sequences"),
+        ({"deferred_execution_sequences": {"kraken": (0,)}}, "deferred_execution_sequences"),
+        ({"deferred_execution_sequences": {"kraken": (6,)}}, "deferred_execution_sequences"),
+        ({"deferred_execution_sequences": {"kraken": (2, 2)}}, "deferred_execution_sequences"),
+        ({"deferred_execution_sequences": {"kraken": (3, 2)}}, "deferred_execution_sequences"),
+        ({"checkpoint_minute": samples._M3.replace(tzinfo=None)}, "exact minutes"),
+        ({"checkpoint_minute": samples._M3.replace(second=5)}, "exact minutes"),
+        ({"checkpoint_minute": samples._M3.replace(microsecond=1)}, "exact minutes"),
+        ({"as_of": samples._M5.replace(tzinfo=None)}, "as_of"),
+        ({"checkpoint_minute": samples._M5, "as_of": samples._M3}, "checkpoint_minute"),
+        ({"consumed_fx_pairs": [("USD", "USD")]}, "consumed_fx_pairs"),
+        ({"consumed_fx_pairs": [("USD", "EUR")]}, "consumed_fx_pairs"),
+        ({"consumed_fx_pairs": [("", "USD")]}, "consumed_fx_pairs"),
+        ({"consumed_fx_pairs": [("EUR ", "USD")]}, "consumed_fx_pairs"),
+        (
+            {"consumed_fx_pairs": [("EUR", "USD"), ("BTC", "USD")]},
+            "consumed_fx_pairs",
+        ),
+        (
+            {"consumed_fx_pairs": [("BTC", "USD"), ("BTC", "USD")]},
+            "consumed_fx_pairs",
+        ),
+        (
+            {"consumed_fx_open_ats": [samples._M1.replace(tzinfo=None)]},
+            "exact minutes",
+        ),
+        (
+            {"consumed_fx_open_ats": [samples._M1.replace(second=15)]},
+            "exact minutes",
+        ),
+        ({"consumed_fx_open_ats": [samples._M4]}, "consumed_fx_open_ats"),
+        (
+            {"consumed_fx_open_ats": [samples._M2, samples._M1]},
+            "consumed_fx_open_ats",
+        ),
+        (
+            {"consumed_fx_open_ats": [samples._M2, samples._M2]},
+            "consumed_fx_open_ats",
+        ),
+        ({"accrual_prefix_fingerprint": (0, 0, 0, None)}, "IdAggregate"),
+        ({"event_fx_candles_fingerprint": (0, 0, 0, None)}, "IdAggregate"),
+    ],
+)
+def test_certificate_rejects_every_shape_and_invariant_violation(
+    overrides: dict[str, object],
+    pattern: str,
+) -> None:
+    """Reject every malformed digest, watermark, sequence, timestamp, and key shape.
+
+    Given: A valid ``PnlOpeningCheckpointCertificate`` baseline overridden with
+        one invalid field value.
+    When: ``PnlOpeningCheckpointCertificate`` is instantiated.
+    Then: ``ValueError`` is raised naming the violated field or invariant.
+    """
+    with pytest.raises(ValueError, match=pattern):
+        _valid_certificate(**overrides)

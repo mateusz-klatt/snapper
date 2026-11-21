@@ -2,11 +2,13 @@
 
 import pytest
 
+from snapper.application.portfolio.pnl_snapshotter_config import CHECKPOINT_MODE_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import DEFAULT_INTERVAL_SECONDS
 from snapper.application.portfolio.pnl_snapshotter_config import ENABLED_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import ENV_VARS
 from snapper.application.portfolio.pnl_snapshotter_config import FX_SHADOW_PINNING_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import INTERVAL_ENV_VAR
+from snapper.application.portfolio.pnl_snapshotter_config import resolve_checkpoint_mode
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_enabled
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_interval
 
@@ -49,9 +51,71 @@ class TestResolveEnabled:
         assert resolve_enabled(raw) is False
 
 
+class TestResolveCheckpointMode:
+    """Opening-checkpoint rollout mode parsing and fail-loud validation."""
+
+    @pytest.mark.parametrize("raw", [None, "", "   ", "off", "OFF", " Off "])
+    def test_unset_blank_or_off_resolves_to_off(self, raw: str | None) -> None:
+        """Unset, empty, whitespace, or ``off`` tokens resolve to ``off``.
+
+        Given: An unset, blank, whitespace, or case-varied ``off`` string.
+        When: ``resolve_checkpoint_mode`` parses the setting value.
+        Then: It returns ``"off"``.
+        """
+        assert resolve_checkpoint_mode(raw) == "off"
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("shadow", "shadow"),
+            ("SHADOW", "shadow"),
+            (" Shadow\t", "shadow"),
+            ("active", "active"),
+            ("ACTIVE", "active"),
+            (" active ", "active"),
+        ],
+    )
+    def test_shadow_and_active_accept_case_and_surrounding_whitespace(
+        self, raw: str, expected: str
+    ) -> None:
+        """Valid ``shadow`` and ``active`` values strip whitespace and match case-insensitively.
+
+        Given: Whitespace-padded or mixed-case ``shadow`` or ``active`` tokens.
+        When: ``resolve_checkpoint_mode`` parses the setting value.
+        Then: It returns the lowercase canonical literal ``"shadow"`` or ``"active"``.
+        """
+        assert resolve_checkpoint_mode(raw) == expected
+
+    @pytest.mark.parametrize("raw", ["on", "1", "true", "enabled", "unknown"])
+    def test_invalid_mode_raises_naming_env_var(self, raw: str) -> None:
+        """Any unrecognised token fails loud at startup and names the env var.
+
+        Given: An unrecognised checkpoint mode token.
+        When: ``resolve_checkpoint_mode`` validates it.
+        Then: It raises ``ValueError`` naming ``PNL_SNAPSHOTTER_CHECKPOINT_MODE``.
+        """
+        with pytest.raises(ValueError, match=CHECKPOINT_MODE_ENV_VAR):
+            resolve_checkpoint_mode(raw)
+
+
 class TestEnvVarsContract:
     """The exported allowlist names every snapshotter contract key."""
 
-    def test_env_vars_lists_both_keys(self) -> None:
-        """``ENV_VARS`` includes interval, snapshotting, and shadow pinning."""
-        assert frozenset({INTERVAL_ENV_VAR, ENABLED_ENV_VAR, FX_SHADOW_PINNING_ENV_VAR}) == ENV_VARS
+    def test_env_vars_lists_all_keys(self) -> None:
+        """``ENV_VARS`` includes interval, enabled, shadow pinning, and checkpoint mode.
+
+        Given: The snapshotter config module constants.
+        When: ``ENV_VARS`` is compared with the exported env-var names.
+        Then: Every snapshotter environment key is registered in ``ENV_VARS``.
+        """
+        assert (
+            frozenset(
+                {
+                    INTERVAL_ENV_VAR,
+                    ENABLED_ENV_VAR,
+                    FX_SHADOW_PINNING_ENV_VAR,
+                    CHECKPOINT_MODE_ENV_VAR,
+                }
+            )
+            == ENV_VARS
+        )
