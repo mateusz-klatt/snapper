@@ -810,6 +810,9 @@ snapper daily-partitions inspect trades
 snapper daily-partitions adopt trades --anchor 2026-07-30T00:00:00+00:00
 snapper daily-partitions ensure trades
 snapper daily-partitions detach trades --day 2026-06-01
+snapper daily-partitions analyze
+snapper daily-partitions analyze --apply --limit 200
+snapper daily-partitions analyze candles --apply
 ```
 
 `adopt` is the explicit manual path for populated tables. It requires a
@@ -817,9 +820,27 @@ UTC-midnight anchor and refuses an unsupported or drifted catalog,
 target-name collisions, or a host load above 1.5 per CPU. Add `--apply` only
 after reviewing its printed DDL plan. `ensure` maintains fourteen future
 leaves and refuses while the retained DEFAULT anomaly partition contains
-rows. `detach` enforces the seven-day ticks or thirty-day candles/trades
-horizon, uses plain bounded-lock `DETACH`, and leaves the detached table
-intact; dropping or archiving it is a separate operator action.
+rows; when `--apply` actually creates new leaves (`action: ensured`), it also
+runs best-effort post-rollover `ANALYZE` on yesterday's closed leaf and
+`ANALYZE ... ONLY` on the partitioned parent outside the `ACCESS EXCLUSIVE`
+DDL transaction (warning to `stderr` on failure while preserving exit code `0`,
+and skipping `ANALYZE` on `--dry-run` or `action: noop`). `detach` enforces
+the seven-day ticks or thirty-day candles/trades horizon, uses plain
+bounded-lock `DETACH`, and leaves the detached table intact; dropping or
+archiving it is a separate operator action.
+
+`analyze` refreshes PostgreSQL planner statistics cleanly without waiting on
+live traffic (`ANALYZE (SKIP_LOCKED)` takes `SHARE UPDATE EXCLUSIVE` with
+`lock_timeout = '2s'`, running one relation per short transaction with
+`statement_timeout = '60s'` for leaves and ordinary tables or `'300s'` for
+`ONLY` partitioned parents). It is safe to run while the application and live
+writers are running, never uses recursive parent `ANALYZE` or `VACUUM`, and
+exits `0` as a clean no-op on SQLite dev databases. By default `--dry-run`
+prints planned SQL without running it; pass `--apply` to execute. Omitting
+`table` defaults to `--stale` with `--limit 200` to sweep PostgreSQL
+relations in the current schema whose `last_analyze` and `last_autoanalyze`
+timestamps are both `NULL` (ignoring future daily leaves so crash-reset
+cumulative stats self-heal cleanly).
 
 ### `fx-proofs backfill`
 

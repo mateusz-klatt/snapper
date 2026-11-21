@@ -15,13 +15,21 @@ from typing import Final
 
 import typer
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 
 from snapper.config.settings import get_bootstrap_settings
+from snapper.data.daily_partitions import DEFAULT_STALE_ANALYZE_LIMIT
+from snapper.data.daily_partitions import AnalyzeResult
 from snapper.data.daily_partitions import DailyPartitionError
+from snapper.data.daily_partitions import LifecycleAction
 from snapper.data.daily_partitions import LifecycleResult
+from snapper.data.daily_partitions import MarketDataTable
 from snapper.data.daily_partitions import PartitionInspection
 from snapper.data.daily_partitions import adopt
+from snapper.data.daily_partitions import analyze_rollover_targets
+from snapper.data.daily_partitions import analyze_stale_relations
 from snapper.data.daily_partitions import current_utc_anchor
 from snapper.data.daily_partitions import detach
 from snapper.data.daily_partitions import ensure_future_leaves
@@ -32,6 +40,7 @@ from snapper.data.daily_partitions import parse_anchor
 _HEAVY_LOAD_PER_CPU: Final[float] = 1.5
 _TABLE_ARGUMENT_HELP: Final[str] = "ticks, candles, or trades"
 _DRY_RUN_FLAG: Final[str] = "--dry-run/--apply"
+_STALE_FLAG: Final[str] = "--stale/--no-stale"
 
 daily_partitions_app = typer.Typer(
     add_completion=False,
@@ -166,6 +175,39 @@ def _render_result(result: LifecycleResult) -> None:
         typer.echo(statement)
 
 
+def _render_list(label: str, items: tuple[str, ...]) -> None:
+    """Render one counted list section for analyze output.
+
+    Args:
+        label: Section header prefix and per-item label.
+        items: Ordered relation names or statements.
+    """
+    typer.echo(f"{label}s: {len(items)}" if label == "statement" else f"{label}: {len(items)}")
+    for item in items:
+        typer.echo(item if label == "statement" else f"  {label}: {item}")
+
+
+def _render_analyze_result(result: AnalyzeResult) -> None:
+    """Print one planner-statistics ANALYZE plan or execution summary.
+
+    Args:
+        result: Typed analyze plan or outcome.
+    """
+    if result.skipped_dialect is not None:
+        typer.echo(f"skipped: non-postgresql dialect ({result.skipped_dialect})")
+        return
+    typer.echo(f"targets: {len(result.targets)}")
+    for target in result.targets:
+        typer.echo(f"  target: {target}")
+    _render_list("statement", result.statements)
+    typer.echo(f"executed: {len(result.executed)}")
+    for relation in result.executed:
+        typer.echo(f"  executed: {relation}")
+    typer.echo(f"skipped: {len(result.skipped)}")
+    for relation in result.skipped:
+        typer.echo(f"  skipped: {relation}")
+
+
 def _fatal(error: Exception) -> None:
     """Convert an operator-facing refusal to a stable nonzero exit.
 
@@ -250,6 +292,32 @@ def adopt_command(
         _dispose_engine(engine)
 
 
+def _run_post_rollover_analyze(
+    connection: Connection,
+    table: MarketDataTable,
+    anchor: datetime,
+) -> None:
+    """Run best-effort post-rollover ANALYZE without failing an already-committed ensure.
+
+    Args:
+        connection: Clean SQLAlchemy connection after ensure commit.
+        table: Allowlisted market-data table that just rolled over.
+        anchor: Rollover UTC midnight passed to ``ensure_future_leaves``.
+    """
+    try:
+        analyze_result = analyze_rollover_targets(
+            connection,
+            table,
+            anchor,
+            dry_run=False,
+        )
+    except (DailyPartitionError, DBAPIError, ValueError, OSError) as error:
+        typer.echo(f"warning: post-rollover ANALYZE failed: {error}", err=True)
+        return
+    if analyze_result.skipped_dialect is None:
+        _render_analyze_result(analyze_result)
+
+
 @daily_partitions_app.command(name="ensure")
 def ensure_command(
     table: str = typer.Argument(..., help=_TABLE_ARGUMENT_HELP),
@@ -283,7 +351,107 @@ def ensure_command(
                 effective_anchor,
                 dry_run=dry_run,
             )
-        _render_result(result)
+            _render_result(result)
+            if not dry_run and result.action is LifecycleAction.ENSURED:
+                _run_post_rollover_analyze(connection, selected, effective_anchor)
+    except (DailyPartitionError, ValueError, OSError) as error:
+        _fatal(error)
+    finally:
+        _dispose_engine(engine)
+
+
+def _validate_analyze_inputs(
+    table: str | None,
+    stale: bool | None,
+    limit: int,
+    anchor: str | None,
+) -> tuple[MarketDataTable | None, bool, datetime | None]:
+    """Validate CLI analyze inputs before opening a database engine.
+
+    Args:
+        table: Optional allowlisted market-data table name.
+        stale: Explicit stale-sweep toggle, or ``None`` for mode default.
+        limit: Maximum stale relations per run.
+        anchor: Optional UTC midnight boundary.
+
+    Returns:
+        Validated optional table, resolved stale flag, and optional UTC anchor.
+
+    Raises:
+        ValueError: When table, stale combination, limit, or anchor is invalid.
+    """
+    selected = None if table is None else market_data_table(table)
+    run_stale = (selected is None) if stale is None else stale
+    if selected is None and not run_stale:
+        raise ValueError("specify a market-data table or enable --stale")
+    if limit < 1:
+        raise ValueError("analyze --limit must be >= 1")
+    effective_anchor = (
+        _effective_anchor(anchor) if (selected is not None or anchor is not None) else None
+    )
+    return selected, run_stale, effective_anchor
+
+
+@daily_partitions_app.command(name="analyze")
+def analyze_command(
+    table: str | None = typer.Argument(None, help=_TABLE_ARGUMENT_HELP),
+    stale: bool | None = typer.Option(
+        None,
+        _STALE_FLAG,
+        help="Sweep public relations with NULL last_analyze/last_autoanalyze timestamps.",
+    ),
+    limit: int = typer.Option(
+        DEFAULT_STALE_ANALYZE_LIMIT,
+        "--limit",
+        help="Maximum stale relations to analyze per run.",
+    ),
+    anchor: str | None = typer.Option(
+        None,
+        "--anchor",
+        help="UTC midnight as YYYY-MM-DDT00:00:00+00:00",
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        _DRY_RUN_FLAG,
+        help="Print the ANALYZE plan by default; --apply explicitly runs ANALYZE.",
+    ),
+) -> None:
+    """Plan or run non-blocking PostgreSQL ANALYZE for partitions and stale tables.
+
+    Args:
+        table: Optional allowlisted market-data table for rollover targets.
+        stale: Optional override for the stale-relation sweep.
+        limit: Maximum stale relations processed when ``stale`` is enabled.
+        anchor: Optional UTC midnight used to identify yesterday's closed leaf.
+        dry_run: Safe default; ``--apply`` is required to execute ANALYZE.
+    """
+    engine: Engine | None = None
+    try:
+        selected, run_stale, effective_anchor = _validate_analyze_inputs(
+            table,
+            stale,
+            limit,
+            anchor,
+        )
+        engine = _engine()
+        with engine.connect() as connection:
+            if selected is not None:
+                _render_analyze_result(
+                    analyze_rollover_targets(
+                        connection,
+                        selected,
+                        effective_anchor,
+                        dry_run=dry_run,
+                    )
+                )
+            if run_stale:
+                _render_analyze_result(
+                    analyze_stale_relations(
+                        connection,
+                        limit=limit,
+                        dry_run=dry_run,
+                    )
+                )
     except (DailyPartitionError, ValueError, OSError) as error:
         _fatal(error)
     finally:
