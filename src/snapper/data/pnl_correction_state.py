@@ -624,6 +624,13 @@ class IdAggregate:
                 "IdAggregate fields must be coherent: count == 0 iff id_sum == 0 "
                 "iff max_id == 0 iff max_timestamp is None"
             )
+        if self.count > 0:
+            if self.id_sum < self.count:
+                raise ValueError("IdAggregate.id_sum must be at least IdAggregate.count")
+            if self.id_sum < self.max_id or self.id_sum > self.count * self.max_id:
+                raise ValueError(
+                    "IdAggregate.id_sum must satisfy max_id <= id_sum <= count * max_id"
+                )
 
 
 def _validate_certificate_key(cert: PnlOpeningCheckpointCertificate) -> None:
@@ -654,6 +661,19 @@ def _validate_certificate_digests(cert: PnlOpeningCheckpointCertificate) -> None
         _require_sha256_digest(value, label)
 
 
+def _validate_certificate_aggregates(cert: PnlOpeningCheckpointCertificate) -> None:
+    """Validate both fingerprint aggregate types and horizon timestamp bounds."""
+    aggregates = (
+        ("accrual_prefix_fingerprint", cert.accrual_prefix_fingerprint),
+        ("event_fx_candles_fingerprint", cert.event_fx_candles_fingerprint),
+    )
+    for field_name, aggregate in aggregates:
+        if not isinstance(aggregate, IdAggregate):
+            raise ValueError(f"certificate {field_name} must be IdAggregate")
+        if aggregate.max_timestamp is not None and aggregate.max_timestamp > cert.as_of:
+            raise ValueError(f"certificate {field_name}.max_timestamp cannot exceed as_of")
+
+
 def _validate_certificate_header(cert: PnlOpeningCheckpointCertificate) -> None:
     """Validate scalar header fields, timestamps, aggregates, key, and digests."""
     schema_version = _require_non_bool_int(cert.schema_version, "certificate schema_version")
@@ -668,14 +688,13 @@ def _validate_certificate_header(cert: PnlOpeningCheckpointCertificate) -> None:
     if not isinstance(cert.prefix_has_idless_executions, bool):
         raise ValueError("certificate prefix_has_idless_executions must be a bool")
     validate_correction_minute(cert.checkpoint_minute)
+    if not isinstance(cert.as_of, datetime):
+        raise ValueError("certificate as_of must be a datetime")
     if cert.as_of.utcoffset() is None:
         raise ValueError("certificate as_of must be timezone-aware")
     if cert.checkpoint_minute > cert.as_of:
         raise ValueError("certificate checkpoint_minute cannot exceed as_of")
-    if not isinstance(cert.accrual_prefix_fingerprint, IdAggregate):
-        raise ValueError("certificate accrual_prefix_fingerprint must be IdAggregate")
-    if not isinstance(cert.event_fx_candles_fingerprint, IdAggregate):
-        raise ValueError("certificate event_fx_candles_fingerprint must be IdAggregate")
+    _validate_certificate_aggregates(cert)
     _validate_certificate_key(cert)
     _validate_certificate_digests(cert)
 
@@ -873,3 +892,38 @@ class PnlOpeningCheckpointCertificate:
         object.__setattr__(self, "prefix_venue_event_watermarks", witness_watermarks)
         object.__setattr__(self, "consumed_fx_pairs", fx_pairs)
         object.__setattr__(self, "consumed_fx_open_ats", fx_open_ats)
+
+
+@dataclass(frozen=True)
+class PnlOpeningCheckpointWrite:
+    """Certified opening checkpoint payload staged for a fenced chunk commit."""
+
+    certificate: PnlOpeningCheckpointCertificate
+    state_json: str
+
+    def __post_init__(self) -> None:
+        """Validate certificate type and non-blank serialized state payload."""
+        if not isinstance(self.certificate, PnlOpeningCheckpointCertificate):
+            raise ValueError("checkpoint write certificate must be PnlOpeningCheckpointCertificate")
+        _require_non_blank_str(self.state_json, "checkpoint write state_json")
+
+
+@dataclass(frozen=True)
+class PnlOpeningCheckpointRecord:
+    """Persisted opening checkpoint certificate, raw serialized state, and write time."""
+
+    certificate: PnlOpeningCheckpointCertificate
+    state_json: str
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        """Validate certificate, serialized state payload, and aware write timestamp."""
+        if not isinstance(self.certificate, PnlOpeningCheckpointCertificate):
+            raise ValueError(
+                "checkpoint record certificate must be PnlOpeningCheckpointCertificate"
+            )
+        _require_non_blank_str(self.state_json, "checkpoint record state_json")
+        if not isinstance(self.updated_at, datetime):
+            raise ValueError("checkpoint record updated_at must be a datetime")
+        if self.updated_at.utcoffset() is None:
+            raise ValueError("checkpoint record updated_at must be timezone-aware")

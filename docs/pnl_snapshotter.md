@@ -310,4 +310,6 @@ Migration `0071` adds the `portfolio_pnl_opening_checkpoints` sidecar table
 keyed by `(wallet_public_id, mode, valuation_ccy, epoch_public_id, calc_version)`
 without changing existing financial sample rows or altering `candles`. Leaving
 `PNL_SNAPSHOTTER_CHECKPOINT_MODE` at its default `off` preserves existing
-anchor-replay behavior.
+anchor-replay behavior. The snapshotter validates the setting at startup, but
+does not yet read or write checkpoints, so every value currently behaves as
+`off`.

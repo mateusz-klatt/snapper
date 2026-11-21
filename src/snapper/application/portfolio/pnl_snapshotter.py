@@ -69,9 +69,12 @@ from snapper.application.portfolio.pnl_snapshot_planner import SelfHealCandidate
 from snapper.application.portfolio.pnl_snapshot_planner import WithheldMinute
 from snapper.application.portfolio.pnl_snapshot_planner import plan_late_fill_recompute
 from snapper.application.portfolio.pnl_snapshot_planner import plan_self_heal_minutes
+from snapper.application.portfolio.pnl_snapshotter_config import CHECKPOINT_MODE_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import ENABLED_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import FX_SHADOW_PINNING_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import INTERVAL_ENV_VAR
+from snapper.application.portfolio.pnl_snapshotter_config import CheckpointMode
+from snapper.application.portfolio.pnl_snapshotter_config import resolve_checkpoint_mode
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_enabled
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_interval
 from snapper.application.portfolio.pnl_timeline import PnlTimelineWorkBudgetError
@@ -292,6 +295,9 @@ class PortfolioPnlSnapshotter:
         self._repair_from_lag_logged: dict[tuple[str, str, str, str], datetime] = {}
         self._fx_shadow_pinning_enabled = resolve_enabled(os.environ.get(FX_SHADOW_PINNING_ENV_VAR))
         self._fx_shadow_context: FxShadowPinContext | None = None
+        self._checkpoint_mode: CheckpointMode = resolve_checkpoint_mode(
+            os.environ.get(CHECKPOINT_MODE_ENV_VAR)
+        )
 
     @property
     def disabled(self) -> bool:
@@ -310,6 +316,15 @@ class PortfolioPnlSnapshotter:
             Seconds the loop sleeps between ticks.
         """
         return self._interval_seconds
+
+    @property
+    def checkpoint_mode(self) -> CheckpointMode:
+        """Return the validated opening-checkpoint mode resolved at startup.
+
+        Returns:
+            Configured checkpoint mode: ``"off"``, ``"shadow"``, or ``"active"``.
+        """
+        return self._checkpoint_mode
 
     async def start(self) -> None:
         """Spawn the tick loop. No-op in disabled mode."""

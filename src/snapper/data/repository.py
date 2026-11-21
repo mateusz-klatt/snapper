@@ -168,6 +168,9 @@ from snapper.application.portfolio.pnl_anchor_identity import (
     normalize_portfolio_pnl_wallet_public_id,
 )
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    checkpoint_write_refusal,
+)
 from snapper.application.portfolio.reconciliation_invariants import (
     unclassified_state_has_no_retained_evidence,
 )
@@ -279,6 +282,7 @@ from snapper.data.models import PairedExecutionHalt
 from snapper.data.models import PairedExecutionLeg
 from snapper.data.models import PortfolioDriftEpisode
 from snapper.data.models import PortfolioPnlCorrectionFrontier
+from snapper.data.models import PortfolioPnlOpeningCheckpoint
 from snapper.data.models import PortfolioPnlPoint
 from snapper.data.models import PortfolioReconciliationMethodConfig
 from snapper.data.models import PortfolioReconciliationObservation
@@ -317,6 +321,7 @@ from snapper.data.models import WalletUserReadGrant
 from snapper.data.models import is_open_ended_version
 from snapper.data.oauth_grant_revocation import revoke_oauth_grants_in_tx
 from snapper.data.pnl_correction_state import MAX_CORRECTION_CHUNK_MINUTES
+from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlCorrectionChunk
 from snapper.data.pnl_correction_state import PnlCorrectionEdit
 from snapper.data.pnl_correction_state import PnlCorrectionEvidence
@@ -324,6 +329,9 @@ from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlCorrectionKey
 from snapper.data.pnl_correction_state import PnlCorrectionRequest
 from snapper.data.pnl_correction_state import PnlCorrectionSampleVersion
+from snapper.data.pnl_correction_state import PnlOpeningCheckpointCertificate
+from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
+from snapper.data.pnl_correction_state import PnlOpeningCheckpointWrite
 from snapper.data.pnl_correction_state import PortfolioPnlCorrectionConflictError
 from snapper.data.pnl_correction_state import advance_correction_frontier
 from snapper.data.pnl_correction_state import correction_expected_venues
@@ -1676,6 +1684,28 @@ def where_active(model: type[Any], at: datetime) -> tuple[Any, Any]:
 
 _PNL_FX_MINUTE_BATCH: Final[int] = 400
 """Exact-minute batch size, kept well under the strictest driver parameter cap."""
+
+
+def _combine_id_aggregates(left: IdAggregate, right: IdAggregate) -> IdAggregate:
+    """Combine two disjoint row-identity aggregates exactly.
+
+    Args:
+        left: Aggregate of one disjoint row set.
+        right: Aggregate of another disjoint row set.
+
+    Returns:
+        The aggregate of their union.
+    """
+    if right.count == 0:
+        return left
+    if left.count == 0:
+        return right
+    return IdAggregate(
+        left.count + right.count,
+        left.id_sum + right.id_sum,
+        max(left.max_id, right.max_id),
+        max(cast(datetime, left.max_timestamp), cast(datetime, right.max_timestamp)),
+    )
 
 
 def _pnl_fx_rate_row_order(row: PnlFxRateRow) -> tuple[datetime, str, str, str, str, int]:
@@ -5863,6 +5893,7 @@ class Repository(ABC):
         scope: PortfolioPnlSampleScope,
         expected: PnlCorrectionFrontier,
         chunk: PnlCorrectionChunk,
+        checkpoint: PnlOpeningCheckpointWrite | None = None,
     ) -> PnlCorrectionFrontier:
         """Commit financial edits and continuation/baseline/peak in one CAS transaction.
 
@@ -5870,9 +5901,106 @@ class Repository(ABC):
             scope: Exact anchor-bound sample identity.
             expected: The generation and revision against which the chunk was planned.
             chunk: Bounded edits and the resulting causal peak, possibly no writes.
+            checkpoint: Optional certified opening checkpoint to upsert in the same tx.
 
         Returns:
             The committed checkpoint; any conflict rolls back the complete chunk.
+        """
+        ...
+
+    @abstractmethod
+    async def get_portfolio_pnl_opening_checkpoint(
+        self, scope: PortfolioPnlSampleScope
+    ) -> PnlOpeningCheckpointRecord | None:
+        """Read the persisted opening checkpoint for this scope and active calc version.
+
+        Args:
+            scope: Exact anchor-bound sample identity.
+
+        Returns:
+            Re-validated certificate record, serialized engine state, and timestamp,
+            or ``None`` when no checkpoint exists for the key.
+        """
+        ...
+
+    @abstractmethod
+    async def delete_portfolio_pnl_opening_checkpoint(
+        self, scope: PortfolioPnlSampleScope, expected_generation: int
+    ) -> bool:
+        """Delete a stored opening checkpoint when its stored generation matches.
+
+        Args:
+            scope: Exact anchor-bound sample identity.
+            expected_generation: Expected ``source_generation`` stored on the row.
+
+        Returns:
+            ``True`` iff the guarded row existed with matching generation and was removed.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_accrual_prefix_fingerprint(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        after_exclusive: datetime,
+        through: datetime,
+        as_of: datetime,
+    ) -> IdAggregate:
+        """Return ``(count, id_sum, max_id, max_timestamp)`` for active prefix accruals.
+
+        Args:
+            wallet_public_id: Wallet scope to fingerprint.
+            mode: Trading mode scope (``live`` or ``paper``).
+            after_exclusive: Exclusive lower ``accrued_at`` bound (anchor ``t0``).
+            through: Inclusive upper ``accrued_at`` bound (checkpoint minute ``C``).
+            as_of: Knowledge horizon passed through :func:`where_active`.
+
+        Returns:
+            Aggregate fingerprint across active rows in ``(after_exclusive, through]``.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_event_fx_candle_fingerprint(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> IdAggregate:
+        """Return ``(count, id_sum, max_id, max_timestamp)`` for consumed event-FX candles.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` FX planes of the consumed pairs.
+            open_ats: Exact 1-minute candle open timestamps to fingerprint.
+            as_of: Knowledge horizon of the replay's FX candle read.
+
+        Returns:
+            Combined aggregate over exactly the rows ``get_pnl_fx_rate_candles_at``
+            returns for the same arguments.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_execution_prefix_counts(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        watermarks: Mapping[str, int],
+    ) -> dict[str, tuple[int, int]]:
+        """Return per-exchange ``(count, max_scope_sequence)`` across ``1..watermarks[ex]``.
+
+        The count reads exactly the rows the watermarked replay prefix reads:
+        wallet, mode and sequence range only, with no knowledge horizon and no
+        ``known_to`` filter, because the replay folds executions the same way.
+
+        Args:
+            wallet_public_id: Wallet scope to count.
+            mode: Trading mode scope (``live`` or ``paper``).
+            watermarks: Per-exchange inclusive upper sequence bounds.
+
+        Returns:
+            Sorted exchange map to ``(count, max_scope_sequence or 0)``.
         """
         ...
 
@@ -19118,7 +19246,7 @@ class SQLAlchemyRepository(Repository):
         actual: PnlCorrectionFrontier | None,
         frontier: PnlCorrectionFrontier,
     ) -> None:
-        """Insert or CAS-update a checkpoint without committing the caller's session.
+        """Insert or CAS-update a checkpoint and purge any invalidated opening checkpoint.
 
         Args:
             s: The same fenced transaction as the chunk's financial edits.
@@ -19140,6 +19268,7 @@ class SQLAlchemyRepository(Repository):
                     **self._pnl_correction_values(frontier),
                 )
             )
+            await self._delete_invalidated_opening_checkpoint(s, frontier)
             return
         result = await s.execute(
             update(PortfolioPnlCorrectionFrontier)
@@ -19152,6 +19281,538 @@ class SQLAlchemyRepository(Repository):
         )
         if cast(CursorResult[tuple[object, ...]], result).rowcount != 1:
             raise PortfolioPnlCorrectionConflictError("P&L correction final checkpoint CAS lost")
+        await self._delete_invalidated_opening_checkpoint(s, frontier)
+
+    _PNL_OPENING_CHECKPOINT_PK: Final[tuple[str, ...]] = (
+        "wallet_public_id",
+        "mode",
+        "valuation_ccy",
+        "epoch_public_id",
+        "calc_version",
+    )
+
+    @staticmethod
+    def _pnl_opening_checkpoint_filters(key: PnlCorrectionKey) -> list[ColumnElement[bool]]:
+        """Build all five primary-key equality predicates for opening checkpoints.
+
+        Args:
+            key: Canonical correction identity key.
+
+        Returns:
+            SQLAlchemy filter clauses selecting at most one row by primary key.
+        """
+        model = PortfolioPnlOpeningCheckpoint
+        return [
+            model.wallet_public_id == key.wallet_public_id,
+            model.mode == key.mode,
+            model.valuation_ccy == key.valuation_ccy,
+            model.epoch_public_id == key.epoch_public_id,
+            model.calc_version == key.calc_version,
+        ]
+
+    @staticmethod
+    def _encode_pnl_checkpoint_json(value: object) -> str:
+        """Encode JSON column values canonically with sorted keys and compact separators.
+
+        Args:
+            value: JSON-serializable Python mapping or sequence.
+
+        Returns:
+            Canonical compact JSON string.
+        """
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+    @staticmethod
+    def _decode_pnl_checkpoint_json_object(payload: str, field_name: str) -> dict[str, object]:
+        """Parse a strict JSON object column while rejecting duplicate keys and constants.
+
+        Args:
+            payload: Stored JSON text from an opening-checkpoint column.
+            field_name: Column label for diagnostic errors.
+
+        Returns:
+            Validated Python dictionary.
+
+        Raises:
+            ValueError: When JSON parsing fails or the root value is not a JSON object.
+        """
+        value: object = json.loads(
+            payload,
+            object_pairs_hook=SQLAlchemyRepository._portfolio_pnl_json_object,
+            parse_constant=SQLAlchemyRepository._reject_portfolio_pnl_json_constant,
+        )
+        if not isinstance(value, dict):
+            raise ValueError(f"P&L opening checkpoint {field_name} must decode to a JSON object")
+        return value
+
+    @staticmethod
+    def _decode_pnl_checkpoint_json_list(payload: str, field_name: str) -> list[object]:
+        """Parse a strict JSON array column while rejecting duplicate nested keys.
+
+        Args:
+            payload: Stored JSON text from an opening-checkpoint array column.
+            field_name: Column label for diagnostic errors.
+
+        Returns:
+            Validated Python list.
+
+        Raises:
+            ValueError: When JSON parsing fails or the root value is not a JSON array.
+        """
+        value: object = json.loads(
+            payload,
+            object_pairs_hook=SQLAlchemyRepository._portfolio_pnl_json_object,
+            parse_constant=SQLAlchemyRepository._reject_portfolio_pnl_json_constant,
+        )
+        if not isinstance(value, list):
+            raise ValueError(f"P&L opening checkpoint {field_name} must decode to a JSON list")
+        return value
+
+    @staticmethod
+    def _decode_pnl_checkpoint_non_neg_decimal_str(raw: object, field_name: str) -> int:
+        """Decode an exact non-negative base-10 decimal integer string.
+
+        Args:
+            raw: Persisted string field representing an arbitrary-precision integer sum.
+            field_name: Column or key label for diagnostic errors.
+
+        Returns:
+            Decoded non-negative Python integer.
+
+        Raises:
+            ValueError: When ``raw`` is not a non-empty ASCII digit string.
+        """
+        if not isinstance(raw, str) or not raw or not raw.isascii() or not raw.isdigit():
+            raise ValueError(
+                f"P&L opening checkpoint {field_name} must be a non-negative decimal string"
+            )
+        return int(raw)
+
+    @staticmethod
+    def _decode_pnl_checkpoint_utc_datetime(raw: object, field_name: str) -> datetime:
+        """Decode an ISO-8601 string requiring explicit timezone awareness into UTC.
+
+        Args:
+            raw: Stored ISO datetime string.
+            field_name: Field name for error context.
+
+        Returns:
+            Timezone-aware UTC ``datetime``.
+
+        Raises:
+            ValueError: When the value is not a valid timezone-aware ISO datetime string.
+        """
+        if not isinstance(raw, str):
+            raise ValueError(f"P&L opening checkpoint {field_name} must be an ISO string")
+        parsed = datetime.fromisoformat(raw)
+        if parsed.utcoffset() is None:
+            raise ValueError(f"P&L opening checkpoint {field_name} must be timezone-aware")
+        return parsed.astimezone(UTC)
+
+    @classmethod
+    def _decode_pnl_checkpoint_str_map(cls, payload: str, field_name: str) -> dict[str, str]:
+        """Decode a JSON object mapping strings to strings.
+
+        Args:
+            payload: Stored JSON object text.
+            field_name: Column label for diagnostics.
+
+        Returns:
+            Validated string-to-string dictionary.
+
+        Raises:
+            ValueError: When any value is not a string.
+        """
+        raw = cls._decode_pnl_checkpoint_json_object(payload, field_name)
+        if any(not isinstance(value, str) for value in raw.values()):
+            raise ValueError(f"P&L opening checkpoint {field_name} values must be strings")
+        return cast(dict[str, str], raw)
+
+    @classmethod
+    def _decode_pnl_checkpoint_deferred_map(cls, payload: str) -> dict[str, list[int]]:
+        """Decode deferred execution sequences JSON into an integer list dictionary.
+
+        Args:
+            payload: Stored ``deferred_execution_sequences_json`` text.
+
+        Returns:
+            Mapping of exchange name to integer sequence lists.
+
+        Raises:
+            ValueError: When any sequence container or element is not an integer.
+        """
+        raw = cls._decode_pnl_checkpoint_json_object(payload, "deferred_execution_sequences_json")
+        for sequences in raw.values():
+            if not isinstance(sequences, list) or any(
+                isinstance(seq, bool) or not isinstance(seq, int) for seq in sequences
+            ):
+                raise ValueError(
+                    "P&L opening checkpoint deferred_execution_sequences_json values must be int lists"
+                )
+        return cast(dict[str, list[int]], raw)
+
+    @classmethod
+    def _decode_pnl_checkpoint_fx_pairs(cls, payload: str) -> list[tuple[str, str]]:
+        """Decode persisted consumed FX pairs from JSON list-of-pair-lists form.
+
+        Args:
+            payload: Stored ``consumed_fx_pairs_json`` text.
+
+        Returns:
+            List of ``(base, quote)`` string tuples.
+
+        Raises:
+            ValueError: When any item is not a 2-element list of strings.
+        """
+        raw = cls._decode_pnl_checkpoint_json_list(payload, "consumed_fx_pairs_json")
+        pairs: list[tuple[str, str]] = []
+        for item in raw:
+            if (
+                not isinstance(item, list)
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or not isinstance(item[1], str)
+            ):
+                raise ValueError(
+                    "P&L opening checkpoint consumed_fx_pairs_json entries must be 2-element string lists"
+                )
+            pairs.append((item[0], item[1]))
+        return pairs
+
+    @classmethod
+    def _decode_pnl_checkpoint_accrual_aggregate(cls, payload: str) -> IdAggregate:
+        """Decode persisted accrual prefix fingerprint JSON into a validated ``IdAggregate``.
+
+        Args:
+            payload: Stored ``accrual_prefix_fingerprint_json`` text.
+
+        Returns:
+            Reconstructed and invariant-checked ``IdAggregate``.
+
+        Raises:
+            ValueError: When keys, value types, or aggregate coherence invariants fail.
+        """
+        raw = cls._decode_pnl_checkpoint_json_object(payload, "accrual_prefix_fingerprint_json")
+        expected_keys = {"count", "id_sum", "max_id", "max_timestamp"}
+        if set(raw) != expected_keys:
+            raise ValueError(
+                "P&L opening checkpoint accrual_prefix_fingerprint_json has unexpected keys"
+            )
+        count = raw["count"]
+        max_id = raw["max_id"]
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or isinstance(max_id, bool)
+            or not isinstance(max_id, int)
+        ):
+            raise ValueError(
+                "P&L opening checkpoint accrual_prefix_fingerprint_json counts must be ints"
+            )
+        id_sum = cls._decode_pnl_checkpoint_non_neg_decimal_str(
+            raw["id_sum"],
+            "accrual_prefix_fingerprint.id_sum",
+        )
+        raw_ts = raw["max_timestamp"]
+        max_ts = (
+            None
+            if raw_ts is None
+            else cls._decode_pnl_checkpoint_utc_datetime(
+                raw_ts, "accrual_prefix_fingerprint.max_timestamp"
+            )
+        )
+        return IdAggregate(count=count, id_sum=id_sum, max_id=max_id, max_timestamp=max_ts)
+
+    @classmethod
+    def _pnl_opening_checkpoint_values(
+        cls,
+        write: PnlOpeningCheckpointWrite,
+        updated_at: datetime,
+    ) -> dict[str, object]:
+        """Serialize a validated opening-checkpoint write into ORM column values.
+
+        Args:
+            write: Certificate and serialized engine state JSON.
+            updated_at: UTC write timestamp assigned for persistence.
+
+        Returns:
+            Full column value map suitable for ``INSERT`` or ``ON CONFLICT UPDATE``.
+        """
+        cert = write.certificate
+        accrual = cert.accrual_prefix_fingerprint
+        accrual_payload = {
+            "count": accrual.count,
+            "id_sum": str(accrual.id_sum),
+            "max_id": accrual.max_id,
+            "max_timestamp": (
+                None
+                if accrual.max_timestamp is None
+                else accrual.max_timestamp.astimezone(UTC).isoformat()
+            ),
+        }
+        fx_agg = cert.event_fx_candles_fingerprint
+        return {
+            "wallet_public_id": cert.key.wallet_public_id,
+            "mode": cert.key.mode,
+            "valuation_ccy": cert.key.valuation_ccy,
+            "epoch_public_id": cert.key.epoch_public_id,
+            "calc_version": cert.key.calc_version,
+            "timeline_calc_version": cert.timeline_calc_version,
+            "fx_policy_version": cert.fx_policy_version,
+            "schema_version": cert.schema_version,
+            "source_generation": cert.source_generation,
+            "checkpoint_minute": cert.checkpoint_minute,
+            "as_of": cert.as_of,
+            "anchor_public_id": cert.anchor_public_id,
+            "anchor_digest": cert.anchor_digest,
+            "cutoff_execution_watermarks_json": cls._encode_pnl_checkpoint_json(
+                dict(cert.cutoff_execution_watermarks)
+            ),
+            "execution_chain_digests_json": cls._encode_pnl_checkpoint_json(
+                dict(cert.execution_chain_digests)
+            ),
+            "cutoff_execution_counts_json": cls._encode_pnl_checkpoint_json(
+                dict(cert.cutoff_execution_counts)
+            ),
+            "applied_watermarks_json": cls._encode_pnl_checkpoint_json(
+                dict(cert.applied_watermarks_by_exchange)
+            ),
+            "deferred_execution_sequences_json": cls._encode_pnl_checkpoint_json(
+                {k: list(v) for k, v in cert.deferred_execution_sequences.items()}
+            ),
+            "prefix_has_idless_executions": cert.prefix_has_idless_executions,
+            "execution_manifest_digest": cert.execution_manifest_digest,
+            "prefix_annulment_digest": cert.prefix_annulment_digest,
+            "accrual_prefix_fingerprint_json": cls._encode_pnl_checkpoint_json(accrual_payload),
+            "prefix_lineage_digest": cert.prefix_lineage_digest,
+            "prefix_fill_witness_digest": cert.prefix_fill_witness_digest,
+            "prefix_venue_event_watermarks_json": cls._encode_pnl_checkpoint_json(
+                dict(cert.prefix_venue_event_watermarks)
+            ),
+            "symbol_ref_digest": cert.symbol_ref_digest,
+            "consumed_fx_pairs_json": cls._encode_pnl_checkpoint_json(
+                [[base, quote] for base, quote in cert.consumed_fx_pairs]
+            ),
+            "consumed_fx_open_ats_json": cls._encode_pnl_checkpoint_json(
+                [dt.astimezone(UTC).isoformat() for dt in cert.consumed_fx_open_ats]
+            ),
+            "event_fx_exchanges_digest": cert.event_fx_exchanges_digest,
+            "event_fx_candle_count": fx_agg.count,
+            "event_fx_candle_id_sum": str(fx_agg.id_sum),
+            "event_fx_candle_max_id": fx_agg.max_id,
+            "event_fx_candle_max_ts": fx_agg.max_timestamp,
+            "state_json": write.state_json,
+            "updated_at": updated_at.astimezone(UTC),
+        }
+
+    @classmethod
+    def _opening_checkpoint_from_model(
+        cls, model: PortfolioPnlOpeningCheckpoint
+    ) -> PnlOpeningCheckpointRecord:
+        """Decode and re-validate a persisted opening checkpoint ORM row.
+
+        Args:
+            model: Loaded ORM row from ``portfolio_pnl_opening_checkpoints``.
+
+        Returns:
+            Reconstructed, validated ``PnlOpeningCheckpointRecord``.
+
+        Raises:
+            ValueError: When any column or certificate invariant fails re-validation.
+        """
+        key = PnlCorrectionKey(
+            model.wallet_public_id,
+            model.mode,
+            model.valuation_ccy,
+            model.epoch_public_id,
+            model.calc_version,
+        )
+        fx_id_sum = cls._decode_pnl_checkpoint_non_neg_decimal_str(
+            model.event_fx_candle_id_sum,
+            "event_fx_candle_id_sum",
+        )
+        open_ats_raw = cls._decode_pnl_checkpoint_json_list(
+            model.consumed_fx_open_ats_json,
+            "consumed_fx_open_ats_json",
+        )
+        certificate = PnlOpeningCheckpointCertificate(
+            key=key,
+            timeline_calc_version=model.timeline_calc_version,
+            fx_policy_version=model.fx_policy_version,
+            schema_version=model.schema_version,
+            anchor_public_id=model.anchor_public_id,
+            anchor_digest=model.anchor_digest,
+            source_generation=model.source_generation,
+            checkpoint_minute=model.checkpoint_minute,
+            as_of=model.as_of,
+            cutoff_execution_watermarks=cls._pnl_correction_watermarks(
+                model.cutoff_execution_watermarks_json
+            ),
+            execution_chain_digests=cls._decode_pnl_checkpoint_str_map(
+                model.execution_chain_digests_json,
+                "execution_chain_digests_json",
+            ),
+            cutoff_execution_counts=cls._pnl_correction_watermarks(
+                model.cutoff_execution_counts_json
+            ),
+            applied_watermarks_by_exchange=cls._pnl_correction_watermarks(
+                model.applied_watermarks_json
+            ),
+            deferred_execution_sequences=cls._decode_pnl_checkpoint_deferred_map(
+                model.deferred_execution_sequences_json
+            ),
+            prefix_has_idless_executions=model.prefix_has_idless_executions,
+            execution_manifest_digest=model.execution_manifest_digest,
+            prefix_annulment_digest=model.prefix_annulment_digest,
+            accrual_prefix_fingerprint=cls._decode_pnl_checkpoint_accrual_aggregate(
+                model.accrual_prefix_fingerprint_json
+            ),
+            prefix_lineage_digest=model.prefix_lineage_digest,
+            prefix_fill_witness_digest=model.prefix_fill_witness_digest,
+            prefix_venue_event_watermarks=cls._pnl_correction_watermarks(
+                model.prefix_venue_event_watermarks_json
+            ),
+            symbol_ref_digest=model.symbol_ref_digest,
+            consumed_fx_pairs=cls._decode_pnl_checkpoint_fx_pairs(model.consumed_fx_pairs_json),
+            consumed_fx_open_ats=[
+                cls._decode_pnl_checkpoint_utc_datetime(item, "consumed_fx_open_ats_json")
+                for item in open_ats_raw
+            ],
+            event_fx_exchanges_digest=model.event_fx_exchanges_digest,
+            event_fx_candles_fingerprint=IdAggregate(
+                count=model.event_fx_candle_count,
+                id_sum=fx_id_sum,
+                max_id=model.event_fx_candle_max_id,
+                max_timestamp=model.event_fx_candle_max_ts,
+            ),
+        )
+        return PnlOpeningCheckpointRecord(
+            certificate=certificate,
+            state_json=model.state_json,
+            updated_at=model.updated_at,
+        )
+
+    async def _delete_invalidated_opening_checkpoint(
+        self, s: AsyncSession, frontier: PnlCorrectionFrontier
+    ) -> None:
+        """Delete any persisted checkpoint covered by an open window or repair boundary.
+
+        Args:
+            s: Active fenced write session owning both frontier and checkpoint tables.
+            frontier: Newly committed frontier state for the key.
+        """
+        earliest_open = min(
+            value
+            for value in (frontier.window_start, frontier.next_minute, frontier.repair_from)
+            if value is not None
+        )
+        await s.execute(
+            delete(PortfolioPnlOpeningCheckpoint).where(
+                *self._pnl_opening_checkpoint_filters(frontier.key),
+                PortfolioPnlOpeningCheckpoint.checkpoint_minute >= earliest_open,
+            )
+        )
+
+    async def _persist_pnl_opening_checkpoint(
+        self,
+        s: AsyncSession,
+        frontier: PnlCorrectionFrontier,
+        chunk: PnlCorrectionChunk,
+        checkpoint: PnlOpeningCheckpointWrite,
+    ) -> None:
+        """Validate write eligibility inside the CAS fence and atomically upsert by PK.
+
+        Uses dialect-specific ``ON CONFLICT DO UPDATE`` inside the same fenced
+        transaction rather than a separate delete-then-insert pair so forward
+        settlement replaces any older generation's row in one atomic SQL statement.
+
+        Args:
+            s: Active fenced write session after ``_write_pnl_correction`` succeeded.
+            frontier: Committed-to-be frontier computed under the CAS fence.
+            chunk: Chunk being committed.
+            checkpoint: Staged opening-checkpoint write payload.
+
+        Raises:
+            ValueError: When ``checkpoint_write_refusal`` rejects writing.
+        """
+        refusal = checkpoint_write_refusal(frontier, chunk, checkpoint.certificate)
+        if refusal is not None:
+            raise ValueError(f"Refusing opening checkpoint write: {refusal}")
+        values = self._pnl_opening_checkpoint_values(checkpoint, datetime.now(UTC))
+        insert_fn = (
+            pg_insert(PortfolioPnlOpeningCheckpoint)
+            if self.dialect_name == "postgresql"
+            else sqlite_insert(PortfolioPnlOpeningCheckpoint)
+        )
+        stmt = insert_fn.values(**values).on_conflict_do_update(
+            index_elements=list(self._PNL_OPENING_CHECKPOINT_PK),
+            set_={
+                column: value
+                for column, value in values.items()
+                if column not in self._PNL_OPENING_CHECKPOINT_PK
+            },
+        )
+        await s.execute(stmt)
+
+    async def get_portfolio_pnl_opening_checkpoint(
+        self, scope: PortfolioPnlSampleScope
+    ) -> PnlOpeningCheckpointRecord | None:
+        """Read the persisted opening checkpoint for the exact normalized scope and version.
+
+        Args:
+            scope: Exact anchor-bound sample scope.
+
+        Returns:
+            Re-validated ``PnlOpeningCheckpointRecord`` or ``None`` if absent.
+        """
+        canonical = self._normalize_portfolio_pnl_sample_scope(scope)
+        async with self.session() as s:
+            if self.dialect_name == "postgresql":
+                await self._bound_pnl_correction_transaction(s)
+            model = (
+                (
+                    await s.execute(
+                        select(PortfolioPnlOpeningCheckpoint).where(
+                            *self._pnl_opening_checkpoint_filters(
+                                self._pnl_correction_key(canonical)
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .one_or_none()
+            )
+            return None if model is None else self._opening_checkpoint_from_model(model)
+
+    async def delete_portfolio_pnl_opening_checkpoint(
+        self, scope: PortfolioPnlSampleScope, expected_generation: int
+    ) -> bool:
+        """Delete a stored checkpoint only inside the writer fence when generation matches.
+
+        Args:
+            scope: Exact anchor-bound sample identity.
+            expected_generation: Expected ``source_generation`` stored on the row.
+
+        Returns:
+            ``True`` when the matching generation row was deleted, else ``False``.
+
+        Raises:
+            ValueError: When ``expected_generation`` is not a plain integer.
+        """
+        if isinstance(expected_generation, bool) or not isinstance(expected_generation, int):
+            raise ValueError("expected_generation must be an integer")
+        canonical = self._normalize_portfolio_pnl_sample_scope(scope)
+        key = self._pnl_correction_key(canonical)
+        async with self.session() as s:
+            await self._begin_portfolio_pnl_sample_write_transaction(s, canonical, bounded=True)
+            result = await s.execute(
+                delete(PortfolioPnlOpeningCheckpoint).where(
+                    *self._pnl_opening_checkpoint_filters(key),
+                    PortfolioPnlOpeningCheckpoint.source_generation == expected_generation,
+                )
+            )
+            await s.commit()
+            return cast(CursorResult[tuple[object, ...]], result).rowcount == 1
 
     async def get_portfolio_pnl_correction_frontier(
         self, scope: PortfolioPnlSampleScope
@@ -19296,19 +19957,22 @@ class SQLAlchemyRepository(Repository):
         scope: PortfolioPnlSampleScope,
         expected: PnlCorrectionFrontier,
         chunk: PnlCorrectionChunk,
+        checkpoint: PnlOpeningCheckpointWrite | None = None,
     ) -> PnlCorrectionFrontier:
-        """Commit all chunk edits and continuation under the same generation fence.
+        """Commit all chunk edits, continuation, and optional checkpoint in one transaction.
 
         Args:
             scope: Exact anchor-bound sample identity.
             expected: The checkpoint against which the caller planned this chunk.
             chunk: Bounded financial mutations and explicit resulting causal peak.
+            checkpoint: Optional opening checkpoint staged after the frontier CAS.
 
         Returns:
             Committed continuation; a zero-write plan advances it just as explicitly.
 
         Raises:
             PortfolioPnlCorrectionConflictError: On a stale generation or row CAS.
+            ValueError: When a staged checkpoint fails ``checkpoint_write_refusal``.
         """
         canonical = self._normalize_portfolio_pnl_sample_scope(scope)
         key = self._pnl_correction_key(canonical)
@@ -19352,6 +20016,8 @@ class SQLAlchemyRepository(Repository):
                     "P&L correction resulting causal peak disagrees"
                 )
             await self._write_pnl_correction(s, actual, frontier)
+            if checkpoint is not None:
+                await self._persist_pnl_opening_checkpoint(s, frontier, chunk, checkpoint)
             await s.commit()
             return frontier
 
@@ -22777,6 +23443,206 @@ class SQLAlchemyRepository(Repository):
                 for al in result.scalars().all()
             ]
 
+    @staticmethod
+    def _id_aggregate_from_row(
+        row_count: int,
+        row_sum: object,
+        row_max_id: int | None,
+        row_max_ts: datetime | None,
+    ) -> IdAggregate:
+        """Build an exact ``IdAggregate`` from SQL ``(count, sum, max_id, max_ts)``.
+
+        Args:
+            row_count: SQL ``COUNT(id)`` value.
+            row_sum: SQL ``SUM(id)`` exact integer or PostgreSQL numeric Decimal.
+            row_max_id: SQL ``MAX(id)`` value or ``None`` when empty.
+            row_max_ts: SQL ``MAX(timestamp)`` value or ``None`` when empty.
+
+        Returns:
+            Normalized ``IdAggregate`` carrying exact integer sum precision.
+        """
+        if not row_count:
+            return IdAggregate(0, 0, 0, None)
+        return IdAggregate(
+            count=int(row_count),
+            id_sum=int(cast(int, row_sum)),
+            max_id=int(cast(int, row_max_id)),
+            max_timestamp=row_max_ts,
+        )
+
+    async def get_pnl_accrual_prefix_fingerprint(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        after_exclusive: datetime,
+        through: datetime,
+        as_of: datetime,
+    ) -> IdAggregate:
+        """Aggregate active accrual prefix rows for checkpoint certificate verification.
+
+        Relies on four storage properties to detect every prefix change:
+        ids are monotone and never reused on PostgreSQL (SQLite ``INTEGER PRIMARY
+        KEY`` without ``AUTOINCREMENT`` can reuse ``max + 1`` after a physical delete,
+        affecting dev and test only); application code never physically deletes
+        active rows (retirement updates ``known_to``); SQLite ``SUM()`` raises
+        an integer-overflow ``OperationalError`` beyond ``2**63 - 1`` so overflows
+        fail closed; PostgreSQL ``SUM(bigint)`` returns ``numeric`` and remains exact.
+
+        Args:
+            wallet_public_id: Wallet scope to fingerprint.
+            mode: Trading mode scope (``live`` or ``paper``).
+            after_exclusive: Exclusive lower ``accrued_at`` bound (anchor ``t0``).
+            through: Inclusive upper ``accrued_at`` bound (checkpoint minute ``C``).
+            as_of: Knowledge horizon passed through :func:`where_active`.
+
+        Returns:
+            Aggregate fingerprint over active accruals in ``(after_exclusive, through]``.
+        """
+        stmt = select(
+            func.count(AccrualLedger.id),
+            func.sum(AccrualLedger.id),
+            func.max(AccrualLedger.id),
+            func.max(AccrualLedger.timestamp),
+        ).where(
+            AccrualLedger.wallet_public_id == wallet_public_id,
+            AccrualLedger.mode == mode,
+            AccrualLedger.accrued_at > after_exclusive,
+            AccrualLedger.accrued_at <= through,
+            *where_active(AccrualLedger, as_of),
+        )
+        async with self.session() as s:
+            count, id_sum, max_id, max_ts = (await s.execute(stmt)).one()
+        return self._id_aggregate_from_row(count, id_sum, max_id, max_ts)
+
+    async def get_pnl_event_fx_candle_fingerprint(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> IdAggregate:
+        """Aggregate exactly the FX candle rows the replay reads for these planes and opens.
+
+        The aggregate runs over :meth:`_scope_pnl_fx_rate_candles`, the same joins,
+        symbol-proof filters and temporal predicates as
+        :meth:`get_pnl_fx_rate_candles_at`, batched the same way. It therefore covers
+        the replay's rows with their multiplicity, including any change of metadata
+        or proof that alters which candles a plane exposes.
+
+        Detecting every change relies on these storage properties: ids are
+        monotone and never reused on PostgreSQL (SQLite ``INTEGER PRIMARY KEY``
+        without ``AUTOINCREMENT`` can reuse ``max + 1`` after a physical delete,
+        affecting dev and test only); application code never physically deletes
+        active rows (retirement updates ``known_to``); SQLite ``SUM()`` raises on
+        integer overflow, so it fails closed; PostgreSQL ``SUM(bigint)`` returns
+        exact ``numeric``, and batches combine in arbitrary-precision Python ints.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` FX planes of the consumed pairs.
+            open_ats: Exact 1-minute candle open timestamps to fingerprint.
+            as_of: Knowledge horizon of the replay's FX candle read.
+
+        Returns:
+            Exact combined aggregate over all batches, or zeros without querying if empty.
+        """
+        if not planes or not open_ats:
+            return IdAggregate(0, 0, 0, None)
+        wanted = sorted(set(open_ats))
+        total = IdAggregate(0, 0, 0, None)
+        for index in range(0, len(wanted), _PNL_FX_MINUTE_BATCH):
+            batch = wanted[index : index + _PNL_FX_MINUTE_BATCH]
+            total = _combine_id_aggregates(
+                total, await self._pnl_fx_rate_candle_aggregate(planes, as_of, batch)
+            )
+        return total
+
+    async def _pnl_fx_rate_candle_aggregate(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        as_of: datetime,
+        batch: Sequence[datetime],
+    ) -> IdAggregate:
+        """Aggregate one batch of opens over the shared FX candle scope.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` FX planes.
+            as_of: Knowledge horizon of the replay's FX candle read.
+            batch: Exact candle opens of this batch.
+
+        Returns:
+            The batch's ``(count, id_sum, max_id, max_timestamp)``.
+        """
+        stmt = self._scope_pnl_fx_rate_candles(
+            select(
+                func.count(Candle.id),
+                func.sum(Candle.id),
+                func.max(Candle.id),
+                func.max(Candle.timestamp),
+            ),
+            planes,
+            as_of,
+            Candle.open_at.in_(list(batch)),
+        )
+        async with self.session() as s:
+            if self.dialect_name == "postgresql":
+                await s.execute(text("SET LOCAL jit = off"))
+            count, id_sum, max_id, max_ts = (await s.execute(stmt)).one()
+        return self._id_aggregate_from_row(count, id_sum, max_id, max_ts)
+
+    async def get_pnl_execution_prefix_counts(
+        self,
+        wallet_public_id: str,
+        mode: str,
+        watermarks: Mapping[str, int],
+    ) -> dict[str, tuple[int, int]]:
+        """Return per-exchange ``(count, max_scope_sequence)`` over ``1..watermarks[ex]``.
+
+        Uses exactly the predicates of :meth:`_read_pnl_timeline_execution_prefix`:
+        wallet, mode and the per-exchange sequence range. Like that read, it applies
+        no knowledge horizon and no ``known_to`` filter. A later commit receives a
+        sequence above the captured watermark, and a closed in-range row stays
+        counted, so the count sees exactly the rows the replay folds.
+
+        Args:
+            wallet_public_id: Wallet scope to verify.
+            mode: Trading mode scope (``live`` or ``paper``).
+            watermarks: Per-exchange inclusive upper sequence bounds.
+
+        Returns:
+            Sorted exchange dictionary mapping each exchange to ``(count, max_seq)``.
+        """
+        normalized = correction_watermarks(watermarks)
+        if not normalized:
+            return {}
+        counts = dict.fromkeys(normalized, (0, 0))
+        positive = {exchange: wm for exchange, wm in normalized.items() if wm > 0}
+        if not positive:
+            return counts
+        scope_bounds = [
+            and_(
+                Execution.exchange == exchange,
+                Execution.scope_sequence >= 1,
+                Execution.scope_sequence <= watermark,
+            )
+            for exchange, watermark in positive.items()
+        ]
+        stmt = (
+            select(
+                Execution.exchange,
+                func.count(Execution.id),
+                func.max(Execution.scope_sequence),
+            )
+            .where(
+                Execution.wallet_public_id == wallet_public_id,
+                Execution.mode == mode,
+                or_(*scope_bounds),
+            )
+            .group_by(Execution.exchange)
+        )
+        async with self.session() as s:
+            for exchange, row_count, max_seq in (await s.execute(stmt)).all():
+                counts[exchange] = (int(row_count), int(max_seq or 0))
+        return counts
+
     async def get_instrument_symbol_refs(
         self,
         instrument_public_ids: Sequence[str],
@@ -23201,6 +24067,90 @@ class SQLAlchemyRepository(Repository):
         rows.sort(key=_pnl_fx_rate_row_order)
         return rows
 
+    def _scope_pnl_fx_rate_candles[*RowT](
+        self,
+        stmt: Select[*RowT],
+        planes: Sequence[PnlFxRatePlane],
+        as_of: datetime,
+        minute_filter: ColumnElement[bool],
+    ) -> Select[*RowT]:
+        """Apply the shared FX-plane candle joins and filters to one projection.
+
+        Both the replay's FX candle read and the checkpoint's candle fingerprint
+        project from this one scope, so the fingerprint covers exactly the rows,
+        with the same multiplicity, that the replay folds.
+
+        Materialize candidate instrument identities across all metadata versions
+        using only the requested currency legs and exchange. Every instrument
+        satisfying the author-time joins must occur in this broader set; no time
+        bands or symbol proof filters narrow it. PostgreSQL receives one UUID
+        array so its (instrument_public_id, open_at) index can bound the candle
+        scan; SQLite uses an IN subquery.
+
+        Args:
+            stmt: Projection to scope, selecting only candle, instrument or symbol columns.
+            planes: Pinned ``(base, quote, exchange)`` planes to load.
+            as_of: Snapshot time threading the temporal predicates.
+            minute_filter: Predicate selecting the candle opens to include.
+
+        Returns:
+            The projection joined and filtered to the planes' proven candles.
+        """
+        candidate_instruments = (
+            select(Instrument.public_id)
+            .select_from(Instrument)
+            .join(Symbol, Instrument.symbol_public_id == Symbol.public_id)
+            .where(
+                tuple_(Symbol.base, Symbol.quote, Instrument.exchange).in_(
+                    list(dict.fromkeys(planes))
+                )
+            )
+            .distinct()
+            .correlate(None)
+            .cte("pnl_fx_load_candidate_instruments")
+            .prefix_with("MATERIALIZED", dialect="postgresql")
+        )
+        candidate_filter: ColumnElement[bool] = Candle.instrument_public_id.in_(
+            select(candidate_instruments.c.public_id)
+        )
+        if self.dialect_name == "postgresql":
+            instrument_ids = (
+                select(func.array_agg(candidate_instruments.c.public_id))
+                .scalar_subquery()
+                .cast(ARRAY(Instrument.public_id.type))
+            )
+            candidate_filter = Candle.instrument_public_id == any_(instrument_ids)
+        return (
+            stmt.select_from(Candle)
+            .join(
+                Instrument,
+                and_(
+                    Candle.instrument_public_id == Instrument.public_id,
+                    Instrument.timestamp <= Candle.timestamp,
+                    Instrument.known_to > Candle.timestamp,
+                ),
+            )
+            .join(
+                Symbol,
+                and_(
+                    Instrument.symbol_public_id == Symbol.public_id,
+                    Symbol.timestamp <= Candle.timestamp,
+                    Symbol.known_to > Candle.timestamp,
+                ),
+            )
+            .where(
+                candidate_filter,
+                tuple_(Symbol.base, Symbol.quote, Instrument.exchange).in_(
+                    list(dict.fromkeys(planes))
+                ),
+                *_pnl_fx_symbol_proof_filters(as_of),
+                Candle.timeframe == "1m",
+                minute_filter,
+                Candle.complete.is_(True),
+                *where_active(Candle, as_of),
+            )
+        )
+
     async def _pnl_fx_rate_candles(
         self,
         planes: Sequence[PnlFxRatePlane],
@@ -23233,76 +24183,29 @@ class SQLAlchemyRepository(Repository):
         Returns:
             Unsorted rows for the caller to order.
         """
-        candidate_instruments = (
-            select(Instrument.public_id)
-            .select_from(Instrument)
-            .join(Symbol, Instrument.symbol_public_id == Symbol.public_id)
-            .where(
-                tuple_(Symbol.base, Symbol.quote, Instrument.exchange).in_(
-                    list(dict.fromkeys(planes))
-                )
-            )
-            .distinct()
-            .correlate(None)
-            .cte("pnl_fx_load_candidate_instruments")
-            .prefix_with("MATERIALIZED", dialect="postgresql")
-        )
-        candidate_filter: ColumnElement[bool] = Candle.instrument_public_id.in_(
-            select(candidate_instruments.c.public_id)
-        )
-        if self.dialect_name == "postgresql":
-            instrument_ids = (
-                select(func.array_agg(candidate_instruments.c.public_id))
-                .scalar_subquery()
-                .cast(ARRAY(Instrument.public_id.type))
-            )
-            candidate_filter = Candle.instrument_public_id == any_(instrument_ids)
         async with self.session() as s:
             if self.dialect_name == "postgresql":
                 await s.execute(text("SET LOCAL jit = off"))
             result = await s.execute(
-                select(
-                    Symbol.base,
-                    Symbol.quote,
-                    Instrument.exchange,
-                    Candle.open_at,
-                    Candle.close,
-                    Symbol.native_symbol,
-                    Instrument.public_id,
-                    Candle.id,
-                    Candle.public_id,
-                    Candle.session_id,
-                    Candle.sequence_id,
-                    Candle.timestamp,
-                    Candle.known_to,
-                )
-                .select_from(Candle)
-                .join(
-                    Instrument,
-                    and_(
-                        Candle.instrument_public_id == Instrument.public_id,
-                        Instrument.timestamp <= Candle.timestamp,
-                        Instrument.known_to > Candle.timestamp,
+                self._scope_pnl_fx_rate_candles(
+                    select(
+                        Symbol.base,
+                        Symbol.quote,
+                        Instrument.exchange,
+                        Candle.open_at,
+                        Candle.close,
+                        Symbol.native_symbol,
+                        Instrument.public_id,
+                        Candle.id,
+                        Candle.public_id,
+                        Candle.session_id,
+                        Candle.sequence_id,
+                        Candle.timestamp,
+                        Candle.known_to,
                     ),
-                )
-                .join(
-                    Symbol,
-                    and_(
-                        Instrument.symbol_public_id == Symbol.public_id,
-                        Symbol.timestamp <= Candle.timestamp,
-                        Symbol.known_to > Candle.timestamp,
-                    ),
-                )
-                .where(
-                    candidate_filter,
-                    tuple_(Symbol.base, Symbol.quote, Instrument.exchange).in_(
-                        list(dict.fromkeys(planes))
-                    ),
-                    *_pnl_fx_symbol_proof_filters(as_of),
-                    Candle.timeframe == "1m",
+                    planes,
+                    as_of,
                     minute_filter,
-                    Candle.complete.is_(True),
-                    *where_active(Candle, as_of),
                 )
             )
             rows: list[PnlFxRateRow] = [

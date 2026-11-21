@@ -1,6 +1,7 @@
 """Financial continuation invariants independent of sample presence or a process lifetime."""
 
 from dataclasses import replace
+from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -17,6 +18,8 @@ from snapper.data.pnl_correction_state import PnlCorrectionKey
 from snapper.data.pnl_correction_state import PnlCorrectionRequest
 from snapper.data.pnl_correction_state import PnlCorrectionSampleVersion
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointCertificate
+from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
+from snapper.data.pnl_correction_state import PnlOpeningCheckpointWrite
 from snapper.data.pnl_correction_state import advance_correction_frontier
 from snapper.data.pnl_correction_state import correction_watermarks
 from snapper.data.pnl_correction_state import start_correction_frontier
@@ -589,7 +592,7 @@ def _valid_certificate(**overrides: object) -> PnlOpeningCheckpointCertificate:
         "consumed_fx_pairs": [("BTC", "USD"), ("EUR", "USD")],
         "consumed_fx_open_ats": [samples._M1, samples._M3],
         "event_fx_exchanges_digest": _DIGEST_64,
-        "event_fx_candles_fingerprint": IdAggregate(2, (1 << 65) + 3, 1 << 64, samples._M3),
+        "event_fx_candles_fingerprint": IdAggregate(3, (1 << 65) + 3, 1 << 64, samples._M3),
     }
     kwargs.update(overrides)
     return PnlOpeningCheckpointCertificate(**kwargs)
@@ -598,12 +601,15 @@ def _valid_certificate(**overrides: object) -> PnlOpeningCheckpointCertificate:
 def test_id_aggregate_accepts_coherent_zero_and_positive_shapes() -> None:
     """Accept both empty-zero and large-integer positive aggregate fingerprints.
 
-    Given: Zero-count and large-sum positive ``IdAggregate`` inputs.
+    Given: Zero-count, boundary-tight positive, and large-sum ``IdAggregate`` inputs.
     When: Each ``IdAggregate`` is constructed.
-    Then: Both validate cleanly without losing integer precision.
+    Then: All validate cleanly without losing integer precision.
     """
     empty = IdAggregate(0, 0, 0, None)
     assert empty == IdAggregate(count=0, id_sum=0, max_id=0, max_timestamp=None)
+    assert IdAggregate(1, 1, 1, samples._M1).id_sum == 1
+    assert IdAggregate(2, 10, 5, samples._M1).id_sum == 10
+    assert IdAggregate(3, 5, 5, samples._M1).id_sum == 5
     populated = IdAggregate(3, (1 << 65) + 7, 1 << 64, samples._M5)
     assert populated.id_sum == (1 << 65) + 7
 
@@ -626,6 +632,10 @@ def test_id_aggregate_accepts_coherent_zero_and_positive_shapes() -> None:
         ((1, 0, 1, samples._M1), "coherent"),
         ((1, 1, 0, samples._M1), "coherent"),
         ((1, 1, 1, None), "coherent"),
+        ((3, 2, 2, samples._M1), "count"),
+        ((2, 4, 5, samples._M1), "max_id"),
+        ((2, 11, 5, samples._M1), "max_id"),
+        ((2, (1 << 65) + 3, 1 << 64, samples._M1), "max_id"),
     ],
 )
 def test_id_aggregate_rejects_booleans_negatives_naive_ts_and_incoherent_tuples(
@@ -758,8 +768,26 @@ def test_certificate_normalizes_mappings_and_sequences_and_isolates_caller_state
         ({"checkpoint_minute": samples._M3.replace(tzinfo=None)}, "exact minutes"),
         ({"checkpoint_minute": samples._M3.replace(second=5)}, "exact minutes"),
         ({"checkpoint_minute": samples._M3.replace(microsecond=1)}, "exact minutes"),
+        ({"as_of": "2026-11-20"}, "as_of"),
+        ({"as_of": date(2026, 11, 20)}, "as_of"),
         ({"as_of": samples._M5.replace(tzinfo=None)}, "as_of"),
         ({"checkpoint_minute": samples._M5, "as_of": samples._M3}, "checkpoint_minute"),
+        (
+            {
+                "accrual_prefix_fingerprint": IdAggregate(
+                    1, 1, 1, samples._M5 + timedelta(minutes=1)
+                )
+            },
+            "accrual_prefix_fingerprint",
+        ),
+        (
+            {
+                "event_fx_candles_fingerprint": IdAggregate(
+                    1, 1, 1, samples._M5 + timedelta(seconds=1)
+                )
+            },
+            "event_fx_candles_fingerprint",
+        ),
         ({"consumed_fx_pairs": [("USD", "USD")]}, "consumed_fx_pairs"),
         ({"consumed_fx_pairs": [("USD", "EUR")]}, "consumed_fx_pairs"),
         ({"consumed_fx_pairs": [("", "USD")]}, "consumed_fx_pairs"),
@@ -806,3 +834,70 @@ def test_certificate_rejects_every_shape_and_invariant_violation(
     """
     with pytest.raises(ValueError, match=pattern):
         _valid_certificate(**overrides)
+
+
+def test_certificate_accepts_aggregate_max_timestamp_equal_to_as_of() -> None:
+    """Allow both aggregates' ``max_timestamp`` to match ``as_of`` inclusive.
+
+    Given: Accrual and event-FX aggregates whose ``max_timestamp`` equals ``as_of``.
+    When: ``PnlOpeningCheckpointCertificate`` is instantiated.
+    Then: Construction succeeds and preserves both aggregates unchanged.
+    """
+    at_as_of = IdAggregate(1, 7, 7, samples._M5)
+    cert = _valid_certificate(
+        accrual_prefix_fingerprint=at_as_of,
+        event_fx_candles_fingerprint=at_as_of,
+    )
+    assert cert.accrual_prefix_fingerprint == at_as_of
+    assert cert.event_fx_candles_fingerprint == at_as_of
+
+
+def test_opening_checkpoint_write_and_record_are_frozen_and_validated() -> None:
+    """Enforce frozen immutability and field validation on write and read payloads.
+
+    Given: A valid certificate, state payload, and UTC update timestamp.
+    When: ``PnlOpeningCheckpointWrite`` and ``PnlOpeningCheckpointRecord`` are
+        constructed, mutated, or given invalid fields.
+    Then: Valid payloads freeze their fields and invalid inputs raise ``ValueError``.
+    """
+    cert = _valid_certificate()
+    write = PnlOpeningCheckpointWrite(certificate=cert, state_json='{"v":1}')
+    record = PnlOpeningCheckpointRecord(
+        certificate=cert,
+        state_json='{"v":1}',
+        updated_at=samples._M5,
+    )
+    assert write.certificate == cert
+    assert record.updated_at == samples._M5
+    attr = "state_json"
+    with pytest.raises(AttributeError):
+        setattr(write, attr, '{"v":2}')
+    with pytest.raises(AttributeError):
+        setattr(record, attr, '{"v":2}')
+    with pytest.raises(ValueError, match="certificate"):
+        PnlOpeningCheckpointWrite(
+            certificate=cast(PnlOpeningCheckpointCertificate, "bad"),
+            state_json='{"v":1}',
+        )
+    with pytest.raises(ValueError, match="state_json"):
+        PnlOpeningCheckpointWrite(certificate=cert, state_json="")
+    with pytest.raises(ValueError, match="certificate"):
+        PnlOpeningCheckpointRecord(
+            certificate=cast(PnlOpeningCheckpointCertificate, "bad"),
+            state_json='{"v":1}',
+            updated_at=samples._M5,
+        )
+    with pytest.raises(ValueError, match="state_json"):
+        PnlOpeningCheckpointRecord(certificate=cert, state_json="", updated_at=samples._M5)
+    with pytest.raises(ValueError, match="updated_at"):
+        PnlOpeningCheckpointRecord(
+            certificate=cert,
+            state_json='{"v":1}',
+            updated_at=samples._M5.replace(tzinfo=None),
+        )
+    with pytest.raises(ValueError, match="updated_at"):
+        PnlOpeningCheckpointRecord(
+            certificate=cert,
+            state_json='{"v":1}',
+            updated_at=cast(datetime, "2026-11-20"),
+        )
