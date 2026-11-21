@@ -2,8 +2,7 @@
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import TypedDict
-from typing import Unpack
+from typing import Literal
 
 import pytest
 
@@ -18,13 +17,6 @@ from tests.application.portfolio import test_pnl_timeline_service as fixtures
 _POLICY = PnlSeriesReadPolicy(allow_anchor_creation=False)
 
 
-class _AtWatermarksOptions(TypedDict, total=False):
-    """Typed optional keyword arguments for watermarked execution-prefix cuts."""
-
-    fill_witness_cut: PnlTimelineFillWitnessCut | None
-    capture_fill_witness_cut: bool
-
-
 class _FixedCutRepo(fixtures.FakeRepo):
     """Serve already-certified rows from the generation's original cut."""
 
@@ -34,16 +26,12 @@ class _FixedCutRepo(fixtures.FakeRepo):
         mode: str,
         watermarks: Mapping[str, int],
         as_of: datetime,
-        **options: Unpack[_AtWatermarksOptions],
+        *,
+        fill_witness_cut: PnlTimelineFillWitnessCut | Literal["capture"] | None = None,
     ) -> PnlTimelineExecutionPrefix:
         """Refuse a test call asking to change the captured coordinates."""
-        fill_witness_cut = options.get("fill_witness_cut")
-        capture_fill_witness_cut = options.get("capture_fill_witness_cut", False)
-        if capture_fill_witness_cut and fill_witness_cut is not None:
-            raise ValueError("capture_fill_witness_cut cannot be combined with fill_witness_cut")
         assert (wallet_public_id, mode) == (fixtures._W1, "live")
         assert fill_witness_cut is None
-        assert not capture_fill_witness_cut
         prefix = self._execution_prefix_at(as_of)
         assert prefix["watermarks"] == watermarks
         return prefix

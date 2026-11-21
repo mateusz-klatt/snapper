@@ -3442,17 +3442,15 @@ async def test_empty_scope_returns_an_empty_frozen_bundle(
 async def test_prefix_at_watermarks_capture_fill_witness_cut(
     repository: SQLAlchemyRepository,
 ) -> None:
-    """Capture fill-witness cuts at frozen watermarks and reject conflicting cut arguments.
+    """Capture or revalidate fill-witness cuts through one explicit argument.
 
     Given: One witnessed execution row in the repository.
-    When: ``get_pnl_timeline_execution_prefix_at_watermarks`` runs with
-        ``capture_fill_witness_cut=False``, with ``capture_fill_witness_cut=True``,
-        and with both ``capture_fill_witness_cut=True`` and a non-``None``
-        ``fill_witness_cut``.
-    Then: Omitting or setting the flag to ``False`` omits ``fill_witness_cut`` as
-        before, ``True`` emits the exact cut computed by
-        ``_pnl_timeline_fill_witness_cut``, and combining both flags raises
-        ``ValueError``.
+    When: ``get_pnl_timeline_execution_prefix_at_watermarks`` runs with the
+        default, an explicit ``None``, ``fill_witness_cut="capture"``, and then
+        the captured cut.
+    Then: The first two calls preserve the existing result, ``"capture"`` emits
+        the exact cut computed by ``_pnl_timeline_fill_witness_cut``, and the
+        final call revalidates against that cut.
     """
     async with repository.session() as session:
         session.add_all(
@@ -3469,13 +3467,13 @@ async def test_prefix_at_watermarks_capture_fill_witness_cut(
         _WALLET, "live", {"kraken": 1}, _AS_OF
     )
     unchanged_explicit = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
-        _WALLET, "live", {"kraken": 1}, _AS_OF, capture_fill_witness_cut=False
+        _WALLET, "live", {"kraken": 1}, _AS_OF, fill_witness_cut=None
     )
     assert "fill_witness_cut" not in unchanged_default
     assert unchanged_explicit == unchanged_default
 
     captured = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
-        _WALLET, "live", {"kraken": 1}, _AS_OF, capture_fill_witness_cut=True
+        _WALLET, "live", {"kraken": 1}, _AS_OF, fill_witness_cut="capture"
     )
     async with repository.session() as session:
         fill_rows = list((await session.execute(select(VenueEvent))).scalars().all())
@@ -3490,13 +3488,3 @@ async def test_prefix_at_watermarks_capture_fill_witness_cut(
         _WALLET, "live", {"kraken": 1}, _AS_OF, fill_witness_cut=expected_cut
     )
     assert replayed == captured
-
-    with pytest.raises(ValueError, match="capture_fill_witness_cut"):
-        await repository.get_pnl_timeline_execution_prefix_at_watermarks(
-            _WALLET,
-            "live",
-            {"kraken": 1},
-            _AS_OF,
-            fill_witness_cut=expected_cut,
-            capture_fill_witness_cut=True,
-        )

@@ -12,8 +12,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any
-from typing import TypedDict
-from typing import Unpack
+from typing import Literal
 from typing import cast
 from uuid import UUID
 
@@ -159,13 +158,6 @@ def _row(
     }
 
 
-class _AtWatermarksOptions(TypedDict, total=False):
-    """Typed optional keyword arguments for watermarked execution-prefix cuts."""
-
-    fill_witness_cut: PnlTimelineFillWitnessCut | None
-    capture_fill_witness_cut: bool
-
-
 class _DiscoveryRepository:
     """Repository probe exposing competing planes and one lost instrument."""
 
@@ -178,14 +170,11 @@ class _DiscoveryRepository:
         mode: str,
         watermarks: dict[str, int],
         as_of: datetime,
-        **options: Unpack[_AtWatermarksOptions],
+        *,
+        fill_witness_cut: PnlTimelineFillWitnessCut | Literal["capture"] | None = None,
     ) -> PnlTimelineExecutionPrefix:
         """Return the exact supplied cut and record its knowledge horizon."""
-        fill_witness_cut = options.get("fill_witness_cut")
-        capture_fill_witness_cut = options.get("capture_fill_witness_cut", False)
-        if capture_fill_witness_cut and fill_witness_cut is not None:
-            raise ValueError("capture_fill_witness_cut cannot be combined with fill_witness_cut")
-        del wallet_public_id, mode, fill_witness_cut, capture_fill_witness_cut
+        del wallet_public_id, mode, fill_witness_cut
         self.horizons.append(as_of)
         return {
             "watermarks": watermarks,

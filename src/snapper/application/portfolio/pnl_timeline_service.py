@@ -3109,6 +3109,37 @@ def _add_accrual_fx_requirement(
     )
 
 
+def _replay_event_fx_state(
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    accrual_rows: Sequence[PnlTimelineAccrualRow],
+    context: _EventFxContext,
+    opening: TimelineOpening | None = None,
+) -> _EventFxReplayState:
+    """Replay event evidence and expose every final carried state field.
+
+    Args:
+        execution_rows: Trusted scope executions replayed by the kernel.
+        accrual_rows: Scope accruals, whose amount carries ``amount_asset``.
+        context: Immutable denomination evidence used by execution FX replay.
+        opening: Rebased per-shard quantities active before the suffix.
+
+    Returns:
+        The complete mutable event replay state after all prefix rows.
+    """
+    state = _EventFxReplayState(
+        requirements={},
+        last_effective={},
+        position_qty=_opening_pool_quantities(opening),
+        basis_unknown=set(),
+        untrusted_at={},
+    )
+    for row in execution_rows:
+        _add_execution_fx_requirements(state, context, row)
+    for accrual in accrual_rows:
+        _add_accrual_fx_requirement(state, context.valuation_ccy, accrual)
+    return state
+
+
 def _event_fx_minutes(
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
     accrual_rows: Sequence[PnlTimelineAccrualRow],
@@ -3137,23 +3168,12 @@ def _event_fx_minutes(
     Returns:
         Exact required minutes grouped by instrument and unordered currency pair.
     """
-    state = _EventFxReplayState(
-        requirements={},
-        last_effective={},
-        position_qty=_opening_pool_quantities(opening),
-        basis_unknown=set(),
-        untrusted_at={},
-    )
     context = _EventFxContext(
         base_by_instrument=base_by_instrument,
         quote_by_instrument=quote_by_instrument,
         valuation_ccy=valuation_ccy,
     )
-    for row in execution_rows:
-        _add_execution_fx_requirements(state, context, row)
-    for accrual in accrual_rows:
-        _add_accrual_fx_requirement(state, valuation_ccy, accrual)
-    return state.requirements
+    return _replay_event_fx_state(execution_rows, accrual_rows, context, opening).requirements
 
 
 type _EffectiveMarkEvent = tuple[datetime, str, int, str, float, bool]
@@ -3300,6 +3320,23 @@ def _eligible_mark_minutes(
     window: _MarkFxWindow,
 ) -> set[datetime]:
     """Replay one instrument and return the exact minutes needing mark FX."""
+    return _eligible_mark_minutes_and_state(
+        instrument_public_id,
+        candles,
+        events,
+        opening_quantities,
+        window,
+    )[0]
+
+
+def _eligible_mark_minutes_and_state(
+    instrument_public_id: str,
+    candles: Sequence[PnlTimelineCandleRow],
+    events: Sequence[_EffectiveMarkEvent],
+    opening_quantities: Mapping[_PoolKey, float],
+    window: _MarkFxWindow,
+) -> tuple[set[datetime], _MarkReplayState]:
+    """Replay one instrument and expose its minutes and complete final state."""
     state = _MarkReplayState(
         event_index=0,
         pool_quantities={
@@ -3315,7 +3352,7 @@ def _eligible_mark_minutes(
         _advance_mark_replay(state, events, mark_minute)
         if _mark_minute_is_eligible(candle, mark_minute, state, window):
             minutes.add(mark_minute)
-    return minutes
+    return minutes, state
 
 
 def _mark_fx_minutes(

@@ -24,9 +24,13 @@ class PnlEngineOptions:
     request_all_conversion_minutes: bool
 
 
+PNL_ENGINE_OPTIONS_OFF: Final[PnlEngineOptions] = PnlEngineOptions(False, False, False)
+"""Explicit options for every non-pointwise read: public and exact series, anchor, and backfill."""
+
+
 _ENGINE_OPTIONS_BY_CALC_VERSION: Final[Mapping[str, PnlEngineOptions]] = MappingProxyType(
     {
-        "5C.5": PnlEngineOptions(False, False, False),
+        "5C.5": PNL_ENGINE_OPTIONS_OFF,
     }
 )
 """Registered calculation-version engine option profiles."""

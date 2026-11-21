@@ -1,0 +1,539 @@
+"""Tests for the strict versioned P&L opening-checkpoint state envelope."""
+
+import json
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
+from typing import cast
+
+import pytest
+
+from snapper.application.portfolio.pnl_opening_checkpoint import PnlOpeningCheckpointState
+from snapper.application.portfolio.pnl_opening_checkpoint import checkpoint_to_payload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlCheckpointStateBundle
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlEventFxCandlePlanePayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlFxRateSourcePayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlIdAggregatePayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_from_json
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_to_json
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import event_walk_state_from_replay
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import event_walk_state_to_replay
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import mark_walk_state_from_replay
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import mark_walk_state_to_replay
+from snapper.application.portfolio.pnl_timeline import TimelineWindow
+from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
+from snapper.application.portfolio.pnl_timeline_service import PnlFxRateSource
+from snapper.application.portfolio.pnl_timeline_service import _effective_mark_events
+from snapper.application.portfolio.pnl_timeline_service import _eligible_mark_minutes
+from snapper.application.portfolio.pnl_timeline_service import _eligible_mark_minutes_and_state
+from snapper.application.portfolio.pnl_timeline_service import _event_fx_minutes
+from snapper.application.portfolio.pnl_timeline_service import _EventFxContext
+from snapper.application.portfolio.pnl_timeline_service import _EventFxReplayState
+from snapper.application.portfolio.pnl_timeline_service import _MarkFxWindow
+from snapper.application.portfolio.pnl_timeline_service import _MarkReplayState
+from snapper.application.portfolio.pnl_timeline_service import _replay_event_fx_state
+from snapper.data.repository_types import PnlTimelineAccrualRow
+from snapper.data.repository_types import PnlTimelineCandleRow
+from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
+from tests.application.portfolio import test_pnl_opening_checkpoint as checkpoint_fixtures
+
+_BASE = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+_INSTRUMENT = "I1"
+_POOL = (_INSTRUMENT, "shard-I1")
+
+
+def _m(minute: int) -> datetime:
+    """Return one UTC fixture minute.
+
+    Args:
+        minute: Minute offset from the fixture base.
+
+    Returns:
+        The corresponding aware UTC datetime.
+    """
+    return _BASE + timedelta(minutes=minute)
+
+
+def _execution(
+    minute: int,
+    sequence: int,
+    *,
+    side: str = "buy",
+    price: float = 100.0,
+    instrument: str = _INSTRUMENT,
+) -> PnlTimelineOpeningExecutionRow:
+    """Build one replay execution with durable pool and lineage identities.
+
+    Args:
+        minute: Event timestamp offset.
+        sequence: Exchange-local scope sequence.
+        side: Executed order side.
+        price: Execution price, with zero representing invalid evidence.
+        instrument: Instrument public identifier.
+
+    Returns:
+        A complete service-layer opening execution row.
+    """
+    return {
+        "public_id": f"execution-{sequence}",
+        "instrument_public_id": instrument,
+        "exchange": "kraken",
+        "scope_sequence": sequence,
+        "order_public_id": f"order-{sequence}",
+        "side": side,
+        "status": "filled",
+        "size": 1.0,
+        "price": price,
+        "fee": 0.0,
+        "fee_asset": "EUR",
+        "executed_at": _m(minute),
+        "timestamp": _m(minute),
+        "exec_id": f"fill-{sequence}",
+        "trade_id": None,
+        "client_order_id": f"client-{sequence}",
+        "shard_key": f"shard-{instrument}",
+    }
+
+
+def _accrual() -> PnlTimelineAccrualRow:
+    """Build one accrual processed after the instrument's invalidation.
+
+    Returns:
+        A complete foreign-currency accrual row for the replay walk.
+    """
+    return {
+        "instrument_public_id": _INSTRUMENT,
+        "exchange": "kraken",
+        "mode": "live",
+        "accrual_type": "funding",
+        "accrued_at": _m(7),
+        "amount": 2.0,
+        "amount_asset": "EUR",
+    }
+
+
+def _candle(minute: int, instrument: str = _INSTRUMENT) -> PnlTimelineCandleRow:
+    """Build one positive finalized mark candle.
+
+    Args:
+        minute: Candle opening minute offset.
+        instrument: Instrument public identifier.
+
+    Returns:
+        A candle row consumed at the following minute.
+    """
+    return {"instrument_public_id": instrument, "open_at": _m(minute), "close": 101.0}
+
+
+def _engine_state() -> PnlOpeningCheckpointState:
+    """Capture a fully populated engine state through the existing codec.
+
+    Returns:
+        The existing strict opening-checkpoint payload model.
+    """
+    opening, executions, accruals, marks, lineage = checkpoint_fixtures._multi_instrument_fixture()
+    result = build_pnl_timeline(
+        executions,
+        accruals,
+        marks,
+        TimelineWindow(
+            from_time=checkpoint_fixtures._M(0),
+            to_time=checkpoint_fixtures._M(5),
+            granularity="1m",
+            valuation_ccy="USD",
+            recovery_budget_per_point=True,
+            capture_checkpoint=True,
+        ),
+        opening=opening,
+        lineage=lineage,
+    )
+    assert result.closing_checkpoint is not None
+    return checkpoint_to_payload(result.closing_checkpoint)
+
+
+def _real_walk_states() -> tuple[
+    _EventFxReplayState,
+    dict[str, _MarkReplayState],
+    tuple[tuple[datetime, datetime], ...],
+]:
+    """Run real event and mark internals over a regression-crossing constellation.
+
+    Returns:
+        The final event state, per-instrument mark states, and global shadows.
+    """
+    rows = (
+        _execution(5, 1),
+        _execution(4, 2, price=0.0),
+        _execution(6, 3, side="sell", price=0.0),
+        _execution(2, 4, instrument="I2"),
+    )
+    context = _EventFxContext(
+        base_by_instrument={_INSTRUMENT: "BTC", "I2": "ETH"},
+        quote_by_instrument={_INSTRUMENT: "EUR", "I2": "EUR"},
+        valuation_ccy="USD",
+    )
+    accruals = (_accrual(),)
+    event_state = _replay_event_fx_state(rows, accruals, context)
+    event_requirements = _event_fx_minutes(
+        rows,
+        accruals,
+        context.base_by_instrument,
+        context.quote_by_instrument,
+        context.valuation_ccy,
+    )
+    assert event_requirements == event_state.requirements
+    effective_events, shadows = _effective_mark_events(
+        rows,
+        context.base_by_instrument,
+        context.quote_by_instrument,
+    )
+    assert len(shadows) == 1
+    boundary = _m(4) + timedelta(seconds=30)
+    assert shadows[0][0] < boundary < shadows[0][1]
+    candles = tuple(_candle(minute) for minute in range(3, 8))
+    window = _MarkFxWindow(grid_start=_m(0), to_time=_m(8), regression_shadows=shadows)
+    opening_quantities = {("I2", "shard-I2"): 1.0}
+    minutes, mark_state = _eligible_mark_minutes_and_state(
+        _INSTRUMENT,
+        candles,
+        tuple(sorted(effective_events[_INSTRUMENT])),
+        opening_quantities,
+        window,
+    )
+    assert minutes == _eligible_mark_minutes(
+        _INSTRUMENT,
+        candles,
+        tuple(sorted(effective_events[_INSTRUMENT])),
+        opening_quantities,
+        window,
+    )
+    second_candles = tuple(_candle(minute, "I2") for minute in range(3, 8))
+    second_minutes, second_state = _eligible_mark_minutes_and_state(
+        "I2",
+        second_candles,
+        tuple(sorted(effective_events["I2"])),
+        opening_quantities,
+        window,
+    )
+    assert second_minutes
+    return event_state, {_INSTRUMENT: mark_state, "I2": second_state}, tuple(shadows)
+
+
+def _rate_source_payload() -> PnlFxRateSourcePayload:
+    """Build one canonical serialized FX rate source.
+
+    Returns:
+        A strict payload containing every ``PnlFxRateSource`` field.
+    """
+    source = PnlFxRateSource(
+        source_currency="EUR",
+        valuation_currency="USD",
+        base_currency="EUR",
+        quote_currency="USD",
+        exchange="kraken",
+    )
+    return PnlFxRateSourcePayload(
+        source_currency=source.source_currency,
+        valuation_currency=source.valuation_currency,
+        base_currency=source.base_currency,
+        quote_currency=source.quote_currency,
+        exchange=source.exchange,
+    )
+
+
+def _candle_plane_payload() -> PnlEventFxCandlePlanePayload:
+    """Build one populated per-plane exact candle aggregate.
+
+    Returns:
+        A strict plane entry with an exact decimal identity sum.
+    """
+    return PnlEventFxCandlePlanePayload(
+        base="EUR",
+        quote="USD",
+        exchange="kraken",
+        aggregate=PnlIdAggregatePayload(
+            count=2,
+            id_sum="3",
+            max_id=2,
+            max_timestamp=_m(5),
+        ),
+    )
+
+
+def _populated_bundle() -> PnlCheckpointStateBundle:
+    """Build an envelope populated from real replay and engine states.
+
+    Returns:
+        A fully populated strict checkpoint state bundle.
+    """
+    event_state, mark_states, shadows = _real_walk_states()
+    return PnlCheckpointStateBundle(
+        bundle_version=1,
+        engine_state=_engine_state(),
+        price_ref_spans_by_instrument={
+            "I2": (_m(1), _m(5)),
+            _INSTRUMENT: (_m(0), _m(6)),
+        },
+        display_activity_spans_by_instrument={_INSTRUMENT: (_m(2), _m(6))},
+        rate_sources_prefix=(_rate_source_payload(),),
+        prefix_lineage_order_ids=("order-1", "order-2"),
+        event_walk_state=event_walk_state_from_replay(event_state),
+        mark_walk_state=mark_walk_state_from_replay(mark_states, shadows),
+        event_fx_candles_by_plane=(_candle_plane_payload(),),
+    )
+
+
+def _json_object(raw: str) -> dict[str, object]:
+    """Decode canonical bundle JSON into a mutable top-level object.
+
+    Args:
+        raw: Serialized bundle JSON.
+
+    Returns:
+        The decoded top-level JSON object.
+    """
+    return cast(dict[str, object], json.loads(raw))
+
+
+def _nested_object(parent: dict[str, object], key: str) -> dict[str, object]:
+    """Return one nested JSON object with a concrete mutable type.
+
+    Args:
+        parent: Parent JSON object.
+        key: Nested object field name.
+
+    Returns:
+        The selected nested JSON object.
+    """
+    return cast(dict[str, object], parent[key])
+
+
+def test_fully_populated_bundle_json_round_trip_is_bit_identical() -> None:
+    """Preserve every populated envelope field through canonical JSON.
+
+    Given: A bundle with real engine, event-walk, mark-walk, span, and plane state.
+    When: It is encoded, decoded, and encoded again.
+    Then: The model is equal and both JSON strings are bit-identical.
+    """
+    bundle = _populated_bundle()
+    encoded = bundle_to_json(bundle)
+    decoded = bundle_from_json(encoded)
+    assert decoded == bundle
+    assert bundle_to_json(decoded) == encoded
+
+
+def test_canonical_encoding_is_stable_under_input_permutation() -> None:
+    """Canonicalize map order and replay-state insertion order.
+
+    Given: Two equivalent bundles whose input dictionaries have opposite order.
+    When: Both bundles are encoded.
+    Then: Their canonical JSON strings are identical.
+    """
+    first = _populated_bundle()
+    event_state, _, _ = _real_walk_states()
+    event_state.requirements = dict(reversed(tuple(event_state.requirements.items())))
+    event_state.last_effective = dict(reversed(tuple(event_state.last_effective.items())))
+    event_state.position_qty = dict(reversed(tuple(event_state.position_qty.items())))
+    event_state.untrusted_at = dict(reversed(tuple(event_state.untrusted_at.items())))
+    for instrument_public_id, pair_requirements in tuple(event_state.requirements.items()):
+        event_state.requirements[instrument_public_id] = dict(
+            reversed(tuple(pair_requirements.items()))
+        )
+    second = first.model_copy(
+        update={
+            "price_ref_spans_by_instrument": dict(
+                reversed(tuple(first.price_ref_spans_by_instrument.items()))
+            ),
+            "event_walk_state": event_walk_state_from_replay(event_state),
+        }
+    )
+    assert bundle_to_json(second) == bundle_to_json(first)
+
+
+def test_walk_state_converters_round_trip_real_states_through_json() -> None:
+    """Restore equal real replay dataclasses without using engine state.
+
+    Given: Real final event and mark states with a boundary-crossing regression shadow.
+    When: Their payload models make a JSON round trip and convert back.
+    Then: Every carried dataclass field and every shadow compares equal.
+    """
+    event_state, mark_states, shadows = _real_walk_states()
+    decoded = bundle_from_json(bundle_to_json(_populated_bundle()))
+    assert event_walk_state_to_replay(decoded.event_walk_state) == event_state
+    assert mark_walk_state_to_replay(decoded.mark_walk_state) == (mark_states, shadows)
+    assert event_state.position_qty
+    assert event_state.basis_unknown
+    assert event_state.untrusted_at
+    assert mark_states[_INSTRUMENT].event_index == 3
+    assert not mark_states[_INSTRUMENT].mark_eligible
+
+
+def test_empty_collections_round_trip() -> None:
+    """Support an empty prefix without manufacturing map entries.
+
+    Given: Empty walk states, spans, lineage, rate sources, and candle planes.
+    When: The empty bundle makes a JSON round trip.
+    Then: Every collection remains empty and canonical encoding is stable.
+    """
+    event_state = _EventFxReplayState(
+        requirements={},
+        last_effective={},
+        position_qty={},
+        basis_unknown=set(),
+        untrusted_at={},
+    )
+    bundle = PnlCheckpointStateBundle(
+        bundle_version=1,
+        engine_state=_engine_state(),
+        price_ref_spans_by_instrument={},
+        display_activity_spans_by_instrument={},
+        rate_sources_prefix=(),
+        prefix_lineage_order_ids=(),
+        event_walk_state=event_walk_state_from_replay(event_state),
+        mark_walk_state=mark_walk_state_from_replay({}, ()),
+        event_fx_candles_by_plane=(),
+    )
+    encoded = bundle_to_json(bundle)
+    decoded = bundle_from_json(encoded)
+    assert decoded == bundle
+    assert bundle_to_json(decoded) == encoded
+    assert decoded.event_walk_state.requirements == ()
+    assert decoded.mark_walk_state.instruments == ()
+
+
+def test_rejects_extra_field() -> None:
+    """Reject unknown envelope fields.
+
+    Given: Otherwise valid bundle JSON with an additional top-level member.
+    When: Strict decoding runs.
+    Then: ``ValueError`` is raised.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    payload["unexpected"] = True
+    with pytest.raises(ValueError, match="unexpected"):
+        bundle_from_json(json.dumps(payload))
+
+
+def test_rejects_wrong_bundle_version() -> None:
+    """Reject unsupported envelope versions.
+
+    Given: Otherwise valid bundle JSON with ``bundle_version`` set to two.
+    When: Strict decoding runs.
+    Then: ``ValueError`` is raised.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    payload["bundle_version"] = 2
+    with pytest.raises(ValueError, match="bundle_version"):
+        bundle_from_json(json.dumps(payload))
+
+
+def test_rejects_bool_as_int() -> None:
+    """Reject booleans in exact integer aggregate fields.
+
+    Given: Otherwise valid JSON whose candle aggregate count is ``true``.
+    When: Strict decoding runs.
+    Then: ``ValueError`` is raised instead of coercing the boolean to one.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    planes = cast(list[object], payload["event_fx_candles_by_plane"])
+    plane = cast(dict[str, object], planes[0])
+    aggregate = _nested_object(plane, "aggregate")
+    aggregate["count"] = True
+    with pytest.raises(ValueError, match="count"):
+        bundle_from_json(json.dumps(payload))
+
+
+def test_rejects_noncanonical_hex_float() -> None:
+    """Reject a hexadecimal float with noncanonical spelling.
+
+    Given: A carried pool quantity with uppercase hexadecimal markers.
+    When: Strict decoding runs.
+    Then: ``ValueError`` requires canonical ``float.hex()`` output.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    event_state = _nested_object(payload, "event_walk_state")
+    quantities = cast(list[object], event_state["position_qty"])
+    quantity = cast(dict[str, object], quantities[0])
+    quantity["position_qty"] = "0X1.0P+0"
+    with pytest.raises(ValueError, match="canonical"):
+        bundle_from_json(json.dumps(payload))
+
+
+def test_rejects_naive_datetime() -> None:
+    """Reject timestamps without an explicit UTC offset.
+
+    Given: A price-reference span whose minimum lacks its UTC suffix.
+    When: Strict decoding runs.
+    Then: ``ValueError`` identifies the datetime validation failure.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    spans = _nested_object(payload, "price_ref_spans_by_instrument")
+    span = cast(list[object], spans[_INSTRUMENT])
+    span[0] = _m(0).replace(tzinfo=None).isoformat()
+    with pytest.raises(ValueError, match="datetime"):
+        bundle_from_json(json.dumps(payload))
+
+
+def test_rejects_duplicate_json_keys() -> None:
+    """Reject duplicate keys instead of silently keeping the last value.
+
+    Given: Canonical bundle JSON with a second top-level ``bundle_version`` key.
+    When: The duplicate-aware JSON parser runs.
+    Then: ``ValueError`` names the duplicate key.
+    """
+    encoded = bundle_to_json(_populated_bundle())
+    duplicated = encoded.replace(
+        '"bundle_version":1',
+        '"bundle_version":1,"bundle_version":1',
+        1,
+    )
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        bundle_from_json(duplicated)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_rejects_nonfinite_json_constants(constant: str) -> None:
+    """Reject non-standard nonfinite JSON constants.
+
+    Given: A JSON document containing one nonfinite constant.
+    When: The strict JSON parser runs.
+    Then: ``ValueError`` names the invalid constant.
+
+    Args:
+        constant: Non-standard numeric constant to plant.
+    """
+    with pytest.raises(ValueError, match="non-finite"):
+        bundle_from_json(f'{{"bundle_version":{constant}}}')
+
+
+@pytest.mark.parametrize("malformed", ["03", "not-a-number"])
+def test_rejects_malformed_id_sum(malformed: str) -> None:
+    """Reject noncanonical exact decimal identity sums.
+
+    Given: A candle aggregate whose ``id_sum`` is malformed or noncanonical.
+    When: Strict decoding runs.
+    Then: ``ValueError`` requires a canonical decimal integer string.
+
+    Args:
+        malformed: Invalid exact decimal identity sum to plant.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    planes = cast(list[object], payload["event_fx_candles_by_plane"])
+    plane = cast(dict[str, object], planes[0])
+    aggregate = _nested_object(plane, "aggregate")
+    aggregate["id_sum"] = malformed
+    with pytest.raises(ValueError, match="canonical decimal"):
+        bundle_from_json(json.dumps(payload))
+
+
+def test_rejects_unsorted_lineage_order_ids() -> None:
+    """Require sorted unique prefix lineage identifiers.
+
+    Given: Otherwise valid JSON with lineage identifiers in descending order.
+    When: Strict decoding runs.
+    Then: ``ValueError`` rejects the noncanonical tuple.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    payload["prefix_lineage_order_ids"] = ["order-2", "order-1"]
+    with pytest.raises(ValueError, match="sorted and unique"):
+        bundle_from_json(json.dumps(payload))

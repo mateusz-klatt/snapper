@@ -5461,10 +5461,9 @@ class Repository(ABC):
         watermarks: Mapping[str, int],
         as_of: datetime,
         *,
-        fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
-        capture_fill_witness_cut: bool = False,
+        fill_witness_cut: PnlTimelineFillWitnessCut | Literal["capture"] | None = None,
     ) -> PnlTimelineExecutionPrefix:
-        """Prove supplied execution bounds and any exact fill candidate cut."""
+        """Prove supplied execution bounds and capture or revalidate fill candidates."""
         ...
 
     @abstractmethod
@@ -22902,12 +22901,9 @@ class SQLAlchemyRepository(Repository):
         watermarks: Mapping[str, int],
         as_of: datetime,
         *,
-        fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
-        capture_fill_witness_cut: bool = False,
+        fill_witness_cut: PnlTimelineFillWitnessCut | Literal["capture"] | None = None,
     ) -> PnlTimelineExecutionPrefix:
         """Certify a persisted cut while refusing to capture any newer execution."""
-        if capture_fill_witness_cut and fill_witness_cut is not None:
-            raise ValueError("capture_fill_witness_cut cannot be combined with fill_witness_cut")
         normalized = dict(sorted(watermarks.items()))
         if any(not exchange or watermark < 0 for exchange, watermark in normalized.items()):
             raise ValueError("execution watermark map is invalid")
@@ -22919,8 +22915,8 @@ class SQLAlchemyRepository(Repository):
                 mode,
                 _PnlTimelineExecutionCut(
                     normalized,
-                    capture_fill_witness_cut=capture_fill_witness_cut,
-                    fill_witness_cut=fill_witness_cut,
+                    capture_fill_witness_cut=fill_witness_cut == "capture",
+                    fill_witness_cut=(None if fill_witness_cut == "capture" else fill_witness_cut),
                 ),
                 _resolved_knowledge_horizon(as_of),
             )

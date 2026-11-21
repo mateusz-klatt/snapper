@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from snapper.application.portfolio import pnl_engine_options
+from snapper.application.portfolio.pnl_engine_options import PNL_ENGINE_OPTIONS_OFF
 from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
 from snapper.application.portfolio.pnl_engine_options import pnl_engine_options_for
 
@@ -102,14 +103,40 @@ def _find_engine_options_violations(source: str) -> list[str]:
     return scanner.violations
 
 
+def _find_private_table_references(source: str) -> list[str]:
+    """Find every reference to the private options table or its accessor.
+
+    Args:
+        source: Python source text to parse and inspect.
+
+    Returns:
+        Human-readable reference descriptions with line numbers.
+    """
+    private_names = {"_engine_options_table", "_ENGINE_OPTIONS_BY_CALC_VERSION"}
+    violations: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Name) and node.id in private_names:
+            violations.append(f"line {node.lineno}: private table reference {node.id}")
+        elif isinstance(node, ast.Attribute) and node.attr in private_names:
+            violations.append(f"line {node.lineno}: private table attribute {node.attr}")
+        elif isinstance(node, ast.ImportFrom) and node.module == _OPTIONS_MODULE:
+            violations.extend(
+                f"line {node.lineno}: private table import {alias.name}"
+                for alias in node.names
+                if alias.name in private_names
+            )
+    return violations
+
+
 def test_pnl_engine_options_for_5c5_returns_expected_flags() -> None:
     """Resolve the registered ``"5C.5"`` calculation version with capture disabled.
 
-    Given: The single-producer calculation-version options resolver.
+    Given: The explicit all-off options value for non-pointwise reads.
     When: ``pnl_engine_options_for("5C.5")`` is called.
-    Then: It returns ``PnlEngineOptions(False, False, False)``.
+    Then: It returns the shared ``PNL_ENGINE_OPTIONS_OFF`` instance.
     """
     options = pnl_engine_options_for("5C.5")
+    assert options is PNL_ENGINE_OPTIONS_OFF
     assert options == PnlEngineOptions(
         capture_permitted=False,
         compensated_unrealized_fallback=False,
@@ -169,7 +196,7 @@ def test_ast_guard_forbids_direct_construction_outside_resolver() -> None:
     """Ensure every ``src/`` file respects ``pnl_engine_options.py`` as single producer.
 
     Given: Every Python source file under ``src/`` except ``pnl_engine_options.py``.
-    When: The AST guard scans each file for ``PnlEngineOptions(`` or ``_engine_options_table(``.
+    When: The AST guard scans for direct construction and private table references.
     Then: Zero violations are found across the entire source tree.
     """
     assert _RESOLVER_PATH.is_file()
@@ -177,7 +204,11 @@ def test_ast_guard_forbids_direct_construction_outside_resolver() -> None:
     for py_file in sorted(_SRC_ROOT.rglob("*.py")):
         if py_file == _RESOLVER_PATH:
             continue
-        found = _find_engine_options_violations(py_file.read_text(encoding="utf-8"))
+        source = py_file.read_text(encoding="utf-8")
+        found = [
+            *_find_engine_options_violations(source),
+            *_find_private_table_references(source),
+        ]
         if found:
             violations[str(py_file.relative_to(_REPO_ROOT))] = found
     assert violations == {}
@@ -218,7 +249,12 @@ def rogue() -> None:
     third = OptsAlias(False, False, True)
     fourth = table_alias()
     fifth = pnl_engine_options._engine_options_table()
+    sixth = pnl_engine_options._ENGINE_OPTIONS_BY_CALC_VERSION
     return None
 """
     violations = _find_engine_options_violations(planted)
     assert len(violations) == 5
+    references = _find_private_table_references(planted)
+    assert len(references) == 3
+    assert any("_ENGINE_OPTIONS_BY_CALC_VERSION" in item for item in references)
+    assert any("_engine_options_table" in item for item in references)
