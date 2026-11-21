@@ -25,6 +25,7 @@ from snapper.core.types import AssetTypeEnum
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import InstrumentKindEnum
 from snapper.core.types import RelationshipTypeEnum
+from snapper.data.instrument_spec_observation_spans import latest_spec_observation_at
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import Symbol
@@ -889,7 +890,12 @@ class UnderlyingUpdater:
 
     @staticmethod
     def _base_fallback_spec(existing: InstrumentSpecRow | None) -> InstrumentSpecInput:
-        """Build the baseline spec payload from the existing instrument spec."""
+        """Build the baseline spec payload from the existing instrument spec.
+
+        Carries forward ``latest_spec_observation_at(existing)`` rather than raw
+        ``spec_observed_at`` so a fallback-minted version inherits the latest
+        observation recorded on the prior version's observation spans.
+        """
         if existing is None:
             return InstrumentSpecInput()
         return InstrumentSpecInput(
@@ -907,7 +913,7 @@ class UnderlyingUpdater:
             quantity_unit=existing["quantity_unit"],
             spec_source=existing["spec_source"],
             spec_version=existing["spec_version"],
-            spec_observed_at=existing["spec_observed_at"],
+            spec_observed_at=latest_spec_observation_at(existing),
             unit_certified=existing["unit_certified"],
             expiry_at=existing["expiry_at"],
             instrument_kind=existing["instrument_kind"],

@@ -41893,8 +41893,11 @@ class DatabaseRepository:
 
         On PostgreSQL, acquires ``pg_advisory_xact_lock`` keyed by the
         ``symbol_updater`` domain and exchange identifier, holding it until
-        transaction commit or rollback. On SQLite, upgrades the transaction
-        with ``BEGIN IMMEDIATE`` when no transaction is already active.
+        transaction commit or rollback. On SQLite, issues ``BEGIN IMMEDIATE``
+        only when no transaction is already open on the underlying connection
+        (``not driver_connection.in_transaction``), so an already-open deferred
+        transaction is not serialized; this caveat affects local SQLite
+        development and tests only.
 
         Args:
             session: Caller-owned synchronous SQLAlchemy session.

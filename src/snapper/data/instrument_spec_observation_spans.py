@@ -25,6 +25,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
 
+from snapper.data.models import InstrumentSpec
 from snapper.data.models import InstrumentSpecObservationSpan
 from snapper.data.repository_types import InstrumentSpecObservationSpanRow
 from snapper.data.repository_types import InstrumentSpecRow
@@ -135,29 +136,26 @@ def matching_observation_spans(
 ) -> tuple[InstrumentSpecObservationSpanRow, ...]:
     """Filter spans to those belonging to one exact instrument spec version row.
 
+    Fails closed (returns an empty tuple) when ``identity`` lacks either
+    ``spec_public_id`` or ``spec_timestamp``, preventing spans from another
+    version row from vouching for an under-identified row.
+
     Args:
         spans: Candidate span snapshots.
-        identity: Expected instrument and optional version-row key.
+        identity: Expected instrument and exact version-row key.
 
     Returns:
         Tuple of spans whose version identity matches ``identity``.
     """
-    matched: list[InstrumentSpecObservationSpanRow] = []
-    for span in spans:
-        if span["instrument_public_id"] != identity.instrument_public_id:
-            continue
-        if (
-            identity.spec_public_id is not None
-            and span["spec_public_id"] != identity.spec_public_id
-        ):
-            continue
-        if (
-            identity.spec_timestamp is not None
-            and span["spec_timestamp"] != identity.spec_timestamp
-        ):
-            continue
-        matched.append(span)
-    return tuple(matched)
+    if identity.spec_public_id is None or identity.spec_timestamp is None:
+        return ()
+    return tuple(
+        span
+        for span in spans
+        if span["instrument_public_id"] == identity.instrument_public_id
+        and span["spec_public_id"] == identity.spec_public_id
+        and span["spec_timestamp"] == identity.spec_timestamp
+    )
 
 
 def select_vouching_observation_span(
@@ -202,6 +200,48 @@ def _spec_identity(spec: InstrumentSpecRow) -> SpecVersionIdentity:
     )
 
 
+def is_observation_fresh_for_version(
+    spans: Sequence[InstrumentSpecObservationSpanRow] | None,
+    identity: SpecVersionIdentity,
+    fallback_observed_at: datetime | None,
+    as_of: datetime,
+    freshness: timedelta = SPEC_OBSERVATION_FRESHNESS,
+) -> bool:
+    """Evaluate freshness for one spec version row using spans with fallback.
+
+    When ``spans`` is present and non-empty, only spans matching ``identity``
+    may vouch for ``as_of`` (failing closed if ``identity`` is incomplete).
+    When no spans exist (rows minted before migration 0072, rollback, or
+    synthetic fixtures), falls back to ``fallback_observed_at`` requiring
+    ``timedelta(0) <= as_of - fallback_observed_at < freshness``. That
+    fallback is sound because before migration 0072 every updater run minted a
+    new ``instrument_specs`` version row (making ``spec_observed_at`` that
+    row's sole real observation), whereas after 0072 every revise writes a
+    span.
+
+    Args:
+        spans: Candidate observation spans loaded for the version row.
+        identity: Exact version-row identity ``(instrument_public_id,
+            spec_public_id, spec_timestamp)``.
+        fallback_observed_at: Version row's ``spec_observed_at`` for spanless
+            historical rows.
+        as_of: Aware evaluation instant.
+        freshness: Freshness window length (default 12 hours).
+
+    Returns:
+        Whether an observation of this spec version exists in
+        ``(as_of - freshness, as_of]``.
+    """
+    if not _is_aware(as_of):
+        return False
+    if spans:
+        matched = matching_observation_spans(spans, identity)
+        return select_vouching_observation_span(matched, as_of, freshness) is not None
+    if not _is_aware(fallback_observed_at):
+        return False
+    return timedelta(0) <= as_of - fallback_observed_at < freshness
+
+
 def is_spec_observation_fresh(
     spec: InstrumentSpecRow,
     as_of: datetime,
@@ -209,10 +249,9 @@ def is_spec_observation_fresh(
 ) -> bool:
     """Evaluate freshness for an InstrumentSpecRow using spans with fallback.
 
-    When ``observation_spans`` is present and non-empty, only spans belonging
-    to this exact version row may vouch for ``as_of``. When no span exists
-    (such as pre-backfill rows, rollback, or synthetic fixtures), falls back to
-    ``spec["spec_observed_at"]``.
+    Delegates to :func:`is_observation_fresh_for_version`, using matching spans
+    when present and falling back to ``spec["spec_observed_at"]`` when no span
+    exists.
 
     Args:
         spec: Active specification row at ``as_of``.
@@ -220,18 +259,16 @@ def is_spec_observation_fresh(
         freshness: Freshness window length (default 12 hours).
 
     Returns:
-        Whether an observation of this spec version exists in ``(as_of - freshness, as_of]``.
+        Whether an observation of this spec version exists in
+        ``(as_of - freshness, as_of]``.
     """
-    if not _is_aware(as_of):
-        return False
-    spans = spec.get("observation_spans")
-    if spans:
-        matched = matching_observation_spans(spans, _spec_identity(spec))
-        return select_vouching_observation_span(matched, as_of, freshness) is not None
-    observed = spec["spec_observed_at"]
-    if not _is_aware(observed):
-        return False
-    return timedelta(0) <= as_of - observed < freshness
+    return is_observation_fresh_for_version(
+        spec.get("observation_spans"),
+        _spec_identity(spec),
+        spec["spec_observed_at"],
+        as_of,
+        freshness,
+    )
 
 
 def latest_spec_observation_at(spec: InstrumentSpecRow) -> datetime | None:
@@ -252,6 +289,43 @@ def latest_spec_observation_at(spec: InstrumentSpecRow) -> datetime | None:
         if matched:
             return max(span["last_observed_at"] for span in matched)
     return spec["spec_observed_at"]
+
+
+def latest_instrument_spec_observation_at_sync(
+    session: SyncSession,
+    spec: InstrumentSpec,
+) -> datetime | None:
+    """Return the latest observation time for a persisted ORM spec version row.
+
+    Queries the latest observation span for ``(spec.instrument_public_id,
+    spec.public_id, spec.timestamp)`` inside the caller's sync session and
+    falls back to ``spec.spec_observed_at`` when no span exists.
+
+    Args:
+        session: Caller-owned synchronous SQLAlchemy session.
+        spec: Active persisted ``InstrumentSpec`` ORM version row.
+
+    Returns:
+        Latest known observation instant for ``spec``, or ``None``.
+    """
+    if spec.spec_observed_at is None:
+        return None
+    latest_observed = session.execute(
+        select(InstrumentSpecObservationSpan.last_observed_at)
+        .where(
+            InstrumentSpecObservationSpan.instrument_public_id == spec.instrument_public_id,
+            InstrumentSpecObservationSpan.spec_public_id == spec.public_id,
+            InstrumentSpecObservationSpan.spec_timestamp == spec.timestamp,
+        )
+        .order_by(
+            InstrumentSpecObservationSpan.last_observed_at.desc(),
+            InstrumentSpecObservationSpan.id.desc(),
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    if _is_aware(latest_observed):
+        return latest_observed
+    return spec.spec_observed_at
 
 
 def _latest_span_statement(

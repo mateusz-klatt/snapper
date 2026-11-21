@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
 from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSymbolUpdaterService
@@ -316,6 +317,16 @@ class TestServiceMethods:
         assert params["force"] is False
 
 
+def _mock_sync_session() -> MagicMock:
+    """Create a MagicMock conforming to SQLAlchemy Session for unit tests."""
+    mock_session = MagicMock(spec=Session)
+    mock_session.execute.return_value.scalar_one_or_none.return_value = None
+    mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
+        KNOWN_TO_MAX
+    )
+    return mock_session
+
+
 class TestUpdateDatabase:
     """Tests for _update_database method."""
 
@@ -329,16 +340,13 @@ class TestUpdateDatabase:
         """
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
-        mock_session = MagicMock()
-        mock_session.execute.return_value.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
-            KNOWN_TO_MAX
-        )
+        mock_session = _mock_sync_session()
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
 
         with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
             patch.object(updater, "_upsert_symbol", return_value="pub-id-1"),
             patch.object(updater, "_upsert_alias", return_value="created"),
             patch.object(updater, "_upsert_capability", return_value="created"),
@@ -369,16 +377,15 @@ class TestUpdateDatabase:
         """
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
-        mock_session = MagicMock()
-        mock_session.execute.return_value.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
-            KNOWN_TO_MAX
-        )
+        mock_session = _mock_sync_session()
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
 
-        with patch.object(updater, "_reconcile_capabilities", return_value=0):
+        with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
+            patch.object(updater, "_reconcile_capabilities", return_value=0),
+        ):
             await updater._update_database([{"invalid": "data"}])
             mock_session.commit.assert_called_once()
 
@@ -392,16 +399,15 @@ class TestUpdateDatabase:
         """
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
-        mock_session = MagicMock()
-        mock_session.execute.return_value.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
-            KNOWN_TO_MAX
-        )
+        mock_session = _mock_sync_session()
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
 
-        with patch.object(updater, "_reconcile_capabilities", return_value=0):
+        with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
+            patch.object(updater, "_reconcile_capabilities", return_value=0),
+        ):
             symbols = [
                 {
                     "symbol": "UNKNOWN_PROD",
@@ -453,16 +459,13 @@ class TestUpdateDatabase:
         """
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
-        mock_session = MagicMock()
-        mock_session.execute.return_value.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
-            KNOWN_TO_MAX
-        )
+        mock_session = _mock_sync_session()
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
 
         with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
             patch.object(updater, "_upsert_symbol", return_value="pub-id-1"),
             patch.object(updater, "_upsert_alias", return_value="created") as mock_alias,
             patch.object(updater, "_upsert_capability", return_value="created"),
@@ -497,16 +500,13 @@ class TestUpdateDatabase:
         """
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
-        mock_session = MagicMock()
-        mock_session.execute.return_value.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
-            KNOWN_TO_MAX
-        )
+        mock_session = _mock_sync_session()
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
 
         with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
             patch.object(updater, "_upsert_symbol", return_value="pub-id-rr"),
             patch.object(updater, "_upsert_alias", return_value="created") as mock_alias,
             patch.object(updater, "_upsert_capability", return_value="created"),
@@ -540,16 +540,13 @@ class TestUpdateDatabase:
         """
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
-        mock_session = MagicMock()
-        mock_session.execute.return_value.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
-            KNOWN_TO_MAX
-        )
+        mock_session = _mock_sync_session()
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
 
         with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
             patch.object(updater, "_upsert_symbol", return_value="pub-id-1"),
             patch.object(updater, "_upsert_alias", return_value="created"),
             patch.object(updater, "_upsert_capability", return_value="created"),
@@ -585,16 +582,13 @@ class TestUpdateDatabase:
         """
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
-        mock_session = MagicMock()
-        mock_session.execute.return_value.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
-            KNOWN_TO_MAX
-        )
+        mock_session = _mock_sync_session()
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
 
         with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
             patch.object(updater, "_upsert_symbol", return_value="pub-id-1"),
             patch.object(updater, "_upsert_alias", return_value="created"),
             patch.object(updater, "_upsert_capability", return_value="created"),
@@ -631,16 +625,13 @@ class TestUpdateDatabase:
         """
         updater = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6)
         mock_repo = MagicMock()
-        mock_session = MagicMock()
-        mock_session.execute.return_value.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
-            KNOWN_TO_MAX
-        )
+        mock_session = _mock_sync_session()
         mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=mock_session)
         mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
         updater.repository = mock_repo
 
         with (
+            patch.object(DatabaseRepository, "acquire_symbol_updater_lock_sync"),
             patch.object(updater, "_upsert_symbol", return_value="pub-id-1"),
             patch.object(updater, "_upsert_alias", return_value="created"),
             patch.object(updater, "_upsert_capability", return_value="created"),

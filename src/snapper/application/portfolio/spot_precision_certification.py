@@ -724,4 +724,8 @@ def is_spot_instrument_precision_certified(
         return False
     if source_kind == "documentary_instrument_spec":
         return check_documentary_instrument_precision_value(spec)
-    return is_spec_observation_fresh(spec, evaluated_at, freshness=SPOT_PRECISION_MAX_AGE)
+    return source_kind == "kraken_instrument_spec" and is_spec_observation_fresh(
+        spec,
+        evaluated_at,
+        freshness=SPOT_PRECISION_MAX_AGE,
+    )

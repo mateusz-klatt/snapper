@@ -44,10 +44,8 @@ from snapper.data.execution_unit_snapshot_store import _bind_submission
 from snapper.data.execution_unit_snapshot_store import _submission_knowledge_time
 from snapper.data.execution_unit_snapshot_store import _verify_catalog
 from snapper.data.execution_unit_snapshot_store import durable_command_material
-from snapper.data.instrument_spec_observation_spans import SPEC_OBSERVATION_FRESHNESS
 from snapper.data.instrument_spec_observation_spans import SpecVersionIdentity
-from snapper.data.instrument_spec_observation_spans import matching_observation_spans
-from snapper.data.instrument_spec_observation_spans import select_vouching_observation_span
+from snapper.data.instrument_spec_observation_spans import is_observation_fresh_for_version
 from snapper.data.models import ExecutionUnitSnapshot
 from snapper.data.models import SubmissionUnitAdmission
 from snapper.data.models import TradeCommand
@@ -303,19 +301,18 @@ def _derivative_catalog_fresh(
     catalog_observed_at: datetime,
     interpreted_at: datetime,
 ) -> bool:
-    """Require a matching observation span or fallback first observation under 12 hours old."""
-    if observation.observation_spans:
-        spec = observation.spec
-        matched = matching_observation_spans(
-            observation.observation_spans,
-            SpecVersionIdentity(
-                instrument_public_id=spec.instrument_public_id,
-                spec_public_id=spec.public_id,
-                spec_timestamp=spec.timestamp,
-            ),
-        )
-        return select_vouching_observation_span(matched, interpreted_at) is not None
-    return interpreted_at - catalog_observed_at < SPEC_OBSERVATION_FRESHNESS
+    """Require a matching observation span or non-future fallback observation under 12 hours old."""
+    spec = observation.spec
+    return is_observation_fresh_for_version(
+        observation.observation_spans,
+        SpecVersionIdentity(
+            instrument_public_id=spec.instrument_public_id,
+            spec_public_id=spec.public_id,
+            spec_timestamp=spec.timestamp,
+        ),
+        catalog_observed_at,
+        interpreted_at,
+    )
 
 
 def _verify_current_catalog_admission(

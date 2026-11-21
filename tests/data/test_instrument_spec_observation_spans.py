@@ -43,16 +43,25 @@ from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSym
 from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterService
 from snapper.application.updaters.symbols.types import InstrumentMetadataInput
 from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
+from snapper.application.updaters.underlying_updater import UnderlyingUpdater
+from snapper.application.updaters.underlying_updater import _MatchResult
 from snapper.config.settings import AppSettings
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import ExchangeEnum
+from snapper.core.types import InstrumentKindEnum
+from snapper.core.types import RelationshipTypeEnum
 from snapper.data.execution_unit_admission_store import _derivative_catalog_fresh
+from snapper.data.execution_unit_catalog import UnitCatalogLookup
 from snapper.data.execution_unit_catalog import UnitCatalogObservation
+from snapper.data.execution_unit_catalog import load_unit_catalog
 from snapper.data.instrument_spec_observation_spans import SPEC_OBSERVATION_FRESHNESS
 from snapper.data.instrument_spec_observation_spans import SpecObservationSpanTarget
 from snapper.data.instrument_spec_observation_spans import SpecVersionIdentity
 from snapper.data.instrument_spec_observation_spans import decide_observation_span_write
 from snapper.data.instrument_spec_observation_spans import is_spec_observation_fresh
+from snapper.data.instrument_spec_observation_spans import (
+    latest_instrument_spec_observation_at_sync,
+)
 from snapper.data.instrument_spec_observation_spans import latest_spec_observation_at
 from snapper.data.instrument_spec_observation_spans import load_instrument_spec_observation_spans
 from snapper.data.instrument_spec_observation_spans import matching_observation_spans
@@ -274,6 +283,20 @@ class TestPureObservationSpanLogic:
         assert select_vouching_observation_span(matched, _at(16, -1)) == own_2
         assert select_vouching_observation_span(matched, _at(16)) is None
         assert select_vouching_observation_span(matched, _at(0, -1)) is None
+        assert (
+            matching_observation_spans(
+                (own_1, own_2),
+                SpecVersionIdentity("inst-1", None, _T0),
+            )
+            == ()
+        )
+        assert (
+            matching_observation_spans(
+                (own_1, own_2),
+                SpecVersionIdentity("inst-1", "spec-1", None),
+            )
+            == ()
+        )
 
     def test_freshness_and_latest_observation_with_spans_and_fallback(self) -> None:
         """Evaluate freshness from matching spans, falling back only when no spans exist."""
@@ -289,6 +312,15 @@ class TestPureObservationSpanLogic:
         assert is_spec_observation_fresh(spec, _at(52)) is False
         assert is_spec_observation_fresh(spec, datetime(2026, 11, 21, 5, 0)) is False
         assert latest_spec_observation_at(spec) == _at(40)
+
+        under_identified = _spec_row(_at(0), spans=(old_span,))
+        under_identified.pop("spec_public_id", None)
+        assert is_spec_observation_fresh(under_identified, _at(1)) is False
+        assert latest_spec_observation_at(under_identified) == _at(0)
+
+        missing_ts = _spec_row(_at(0), spans=(old_span,))
+        missing_ts.pop("spec_timestamp", None)
+        assert is_spec_observation_fresh(missing_ts, _at(1)) is False
 
         foreign_version_span = _span(
             _at(0),
@@ -357,6 +389,11 @@ class TestPureObservationSpanLogic:
             (_span(_at(0), _at(12)),),
         )
         assert _derivative_catalog_fresh(expired_obs, _at(0), _at(24)) is False
+
+        fallback_obs = UnitCatalogObservation(instrument_orm, symbol_orm, spec_orm, ())
+        assert _derivative_catalog_fresh(fallback_obs, _at(10), _at(21)) is True
+        assert _derivative_catalog_fresh(fallback_obs, _at(10), _at(22)) is False
+        assert _derivative_catalog_fresh(fallback_obs, _at(10), _at(9)) is False
 
         foreign_obs = UnitCatalogObservation(
             instrument_orm,
@@ -754,6 +791,212 @@ class TestPersistedSpansAndRevisions:
         finally:
             await repo.engine.dispose()
 
+    async def test_underlying_updater_yaml_fallback_carries_latest_span_observation(
+        self, tmp_path: Path
+    ) -> None:
+        """YAML fallback carries forward the latest span observation so R2 stays fresh.
+
+        Given: Version R1 first observed at ``now - 13h`` with its span extended
+            to ``now - 1h`` and ``instrument_kind=None``.
+        When: ``UnderlyingUpdater`` applies a YAML fallback minting version R2.
+        Then: R2 records ``spec_observed_at == now - 1h`` and is fresh at ``now``.
+        """
+        db_url = f"sqlite+aiosqlite:///{tmp_path / 'yaml-carry.db'}"
+        repo = SQLAlchemyRepository(db_url)
+        await repo.create_all()
+        now = _at(13)
+        first_obs = _at(0)
+        latest_obs = _at(12)
+        sess_id = str(uuid4())
+        try:
+            yaml_inst = str(uuid4())
+            r1_input = InstrumentSpecInput(
+                **{
+                    **_spec_input(
+                        first_obs,
+                        spec_source="kraken:catalog",
+                        spec_version="v1:yaml",
+                    ).__dict__,
+                    "instrument_kind": None,
+                }
+            )
+            r1_id = await repo.revise_instrument_spec(yaml_inst, sess_id, 1, first_obs, r1_input)
+            r1_ext_id = await repo.revise_instrument_spec(
+                yaml_inst,
+                sess_id,
+                2,
+                latest_obs,
+                InstrumentSpecInput(**{**r1_input.__dict__, "spec_observed_at": latest_obs}),
+            )
+            assert r1_ext_id == r1_id
+
+            yaml_updater = UnderlyingUpdater(db_url=db_url)
+            yaml_updater._repo = repo
+            desired = {
+                yaml_inst: _MatchResult(
+                    underlying_ticker="BTC",
+                    relationship_type=RelationshipTypeEnum.EXACT,
+                    contract_family=None,
+                    instrument_type=InstrumentKindEnum.PERPETUAL,
+                    expiry_override=None,
+                )
+            }
+            assert await yaml_updater._apply_yaml_spec_fallbacks(desired, sess_id, now) == 1
+            r2 = await repo.get_instrument_spec(yaml_inst, now)
+            assert r2 is not None
+            assert r2["instrument_kind"] == "perpetual"
+            assert r2["spec_observed_at"] == latest_obs
+            assert latest_spec_observation_at(r2) == latest_obs
+            assert is_spec_observation_fresh(r2, now) is True
+            assert is_effective_unit_certified(r2, now) is True
+        finally:
+            await repo.engine.dispose()
+
+    async def test_symbol_updater_preserved_metadata_carries_latest_span_observation(
+        self, tmp_path: Path
+    ) -> None:
+        """Preserved-metadata sync revisions carry forward the latest span observation.
+
+        Given: Version R1 first observed at ``now - 13h`` with its span extended
+            to ``now - 1h``, plus null-observation and spanless rows.
+        When: ``SymbolUpdaterService._revise_instrument_spec`` updates funding
+            fields with default ``metadata=PRESERVE_EXISTING``.
+        Then: Minted R2 carries ``now - 1h`` and stays fresh at ``now``, while
+            null and spanless rows resolve cleanly via ``latest_instrument_spec_observation_at_sync``.
+        """
+        db_file = tmp_path / "sync-carry.db"
+        async_repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_file}")
+        sync_repo = DatabaseRepository(f"sqlite:///{db_file}")
+        await async_repo.create_all()
+        now = _at(13)
+        first_obs = _at(0)
+        latest_obs = _at(12)
+        sess_id = str(uuid4())
+        try:
+            sync_inst = str(uuid4())
+            with sync_repo.get_session() as session:
+                assert (
+                    DatabaseRepository.revise_instrument_spec_sync(
+                        session, sync_inst, sess_id, 10, first_obs, _spec_input(first_obs)
+                    )
+                    == "created"
+                )
+                assert (
+                    DatabaseRepository.revise_instrument_spec_sync(
+                        session, sync_inst, sess_id, 11, latest_obs, _spec_input(latest_obs)
+                    )
+                    == "unchanged"
+                )
+                SymbolUpdaterService._revise_instrument_spec(
+                    session,
+                    sync_inst,
+                    now,
+                    session_id=sess_id,
+                    sequence_id=12,
+                    instrument_kind="perpetual",
+                    funding_type="perpetual_funding",
+                    funding_frequency_hours=1,
+                )
+                session.commit()
+
+                null_inst = str(uuid4())
+                DatabaseRepository.revise_instrument_spec_sync(
+                    session, null_inst, sess_id, 13, first_obs, _spec_input(None)
+                )
+                null_orm = DatabaseRepository.get_instrument_spec_sync(session, null_inst, now)
+                assert null_orm is not None
+                assert latest_instrument_spec_observation_at_sync(session, null_orm) is None
+
+                spanless_inst = str(uuid4())
+                spanless_orm = InstrumentSpec(
+                    instrument_public_id=spanless_inst,
+                    timestamp=first_obs,
+                    known_to=KNOWN_TO_MAX,
+                    spec_source=FUTURES_SPEC_SOURCE,
+                    spec_version="s2a-v4:spanless",
+                    spec_observed_at=first_obs,
+                    unit_certified=False,
+                    session_id=sess_id,
+                    sequence_id=14,
+                )
+                session.add(spanless_orm)
+                session.flush()
+                assert (
+                    latest_instrument_spec_observation_at_sync(session, spanless_orm) == first_obs
+                )
+
+            r2_sync = await async_repo.get_instrument_spec(sync_inst, now)
+            assert r2_sync is not None
+            assert r2_sync["funding_type"] == "perpetual_funding"
+            assert r2_sync["spec_observed_at"] == latest_obs
+            assert latest_spec_observation_at(r2_sync) == latest_obs
+            assert is_spec_observation_fresh(r2_sync, now) is True
+            assert is_effective_unit_certified(r2_sync, now) is True
+        finally:
+            await async_repo.engine.dispose()
+            sync_repo.engine.dispose()
+
+    async def test_load_unit_catalog_past_as_of_uses_historical_version_spans(
+        self, tmp_path: Path
+    ) -> None:
+        """Past-``as_of`` catalog load binds spans of the historical version active at ``as_of``."""
+        db_url = f"sqlite+aiosqlite:///{tmp_path / 'past-asof.db'}"
+        repo = SQLAlchemyRepository(db_url)
+        await repo.create_all()
+        sess_id = str(uuid4())
+        try:
+            async with repo.session() as session:
+                sym = Symbol(
+                    native_symbol="BTC-USD-PERP",
+                    base="BTC",
+                    quote="USD",
+                    asset_type=AssetTypeEnum.CRYPTO,
+                    created_at=_at(0),
+                    timestamp=_at(0),
+                    known_to=KNOWN_TO_MAX,
+                    session_id=sess_id,
+                    sequence_id=1,
+                )
+                session.add(sym)
+                await session.flush()
+                inst = Instrument(
+                    symbol_public_id=sym.public_id,
+                    exchange=ExchangeEnum.KRAKEN_FUTURES,
+                    timestamp=_at(0),
+                    known_to=KNOWN_TO_MAX,
+                    session_id=sess_id,
+                    sequence_id=2,
+                )
+                session.add(inst)
+                await session.flush()
+                inst_id = inst.public_id
+                await session.commit()
+
+            await repo.revise_instrument_spec(inst_id, sess_id, 3, _at(0), _spec_input(_at(0)))
+            await repo.revise_instrument_spec(inst_id, sess_id, 4, _at(10), _spec_input(_at(10)))
+            await repo.revise_instrument_spec(inst_id, sess_id, 5, _at(20), _spec_input(_at(20)))
+            await repo.revise_instrument_spec(
+                inst_id,
+                sess_id,
+                6,
+                _at(35),
+                _spec_input(_at(35), tick_size=0.05, spec_version="s2a-v4:digest-2"),
+            )
+
+            lookup = UnitCatalogLookup(
+                exchange=ExchangeEnum.KRAKEN_FUTURES,
+                native_symbol="BTC-USD-PERP",
+            )
+            async with repo.session() as session:
+                past_fresh = await load_unit_catalog(session, lookup, _at(25))
+                past_stale = await load_unit_catalog(session, lookup, _at(33))
+            assert past_fresh.spec.tick_size == 0.01
+            assert _derivative_catalog_fresh(past_fresh, _at(0), _at(25)) is True
+            assert past_stale.spec.tick_size == 0.01
+            assert _derivative_catalog_fresh(past_stale, _at(0), _at(33)) is False
+        finally:
+            await repo.engine.dispose()
+
 
 @dataclass(frozen=True)
 class _RaceConfig:
@@ -936,6 +1179,11 @@ class TestSymbolUpdaterLocksAndConcurrency:
                 session.commit()
         finally:
             repo.engine.dispose()
+
+        updater = KrakenSymbolUpdaterService()
+        updater.repository = MagicMock()
+        with pytest.raises(TypeError, match="SyncSession"):
+            updater._enter_locked_update(MagicMock(), _at(0))
 
     async def test_all_five_updaters_skip_when_lock_recheck_declines(self, tmp_path: Path) -> None:
         """Each concrete updater exits early without committing when locked re-check returns False."""

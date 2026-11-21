@@ -32,6 +32,9 @@ from snapper.config.settings import get_settings_with_service
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
 from snapper.core.types import UpsertResult
+from snapper.data.instrument_spec_observation_spans import (
+    latest_instrument_spec_observation_at_sync,
+)
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import Setting
@@ -499,6 +502,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
     @staticmethod
     def _preserved_instrument_metadata(
         existing: InstrumentSpec | None,
+        observed_at: datetime | None | _Preserve = PRESERVE_EXISTING,
     ) -> InstrumentMetadataInput:
         """Project the existing atomic metadata block without refreshing it."""
         if existing is None:
@@ -525,6 +529,9 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             quantity_unit = "base_asset"
         elif existing.quantity_unit == "contract_count":
             quantity_unit = "contract_count"
+        resolved_observed_at = (
+            existing.spec_observed_at if isinstance(observed_at, _Preserve) else observed_at
+        )
         return InstrumentMetadataInput(
             tick_size=existing.tick_size,
             lot_size=existing.lot_size,
@@ -549,7 +556,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             settlement_currency=existing.settlement_currency,
             spec_source=existing.spec_source,
             spec_version=existing.spec_version,
-            spec_observed_at=existing.spec_observed_at,
+            spec_observed_at=resolved_observed_at,
             unit_certified=existing.unit_certified,
         )
 
@@ -624,13 +631,28 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
     @staticmethod
     def _resolve_instrument_metadata(
+        session: Any,
         existing: InstrumentSpec | None,
         metadata: InstrumentMetadataInput | _Preserve,
         instrument_public_id: str,
     ) -> InstrumentMetadataInput:
-        """Carry forward or atomically normalize venue metadata."""
+        """Carry forward or atomically normalize venue metadata.
+
+        When preserving existing metadata, resolves the latest span observation
+        time for ``existing`` so a newly minted version row (e.g. from funding
+        or expiry updates) remains fresh rather than regressing to the prior
+        version's first observation time.
+        """
         if isinstance(metadata, _Preserve):
-            return SymbolUpdaterService._preserved_instrument_metadata(existing)
+            observed_at: datetime | None | _Preserve = (
+                latest_instrument_spec_observation_at_sync(session, existing)
+                if existing is not None
+                else PRESERVE_EXISTING
+            )
+            return SymbolUpdaterService._preserved_instrument_metadata(
+                existing,
+                observed_at=observed_at,
+            )
         return SymbolUpdaterService._replacement_instrument_metadata(
             metadata,
             instrument_public_id,
@@ -705,6 +727,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             max_funding_rate,
         )
         resolved_metadata = SymbolUpdaterService._resolve_instrument_metadata(
+            session,
             existing,
             metadata,
             instrument_public_id,
@@ -1087,10 +1110,16 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             True when the update should proceed, False when a concurrent run
             already satisfied the threshold while waiting on the lock.
+
+        Raises:
+            TypeError: If ``session`` is not a SQLAlchemy ``SyncSession``.
         """
         assert self.repository is not None
-        if isinstance(session, SyncSession):
-            DatabaseRepository.acquire_symbol_updater_lock_sync(session, self._lock_exchange())
+        if not isinstance(session, SyncSession):
+            raise TypeError(
+                f"Symbol updater lock requires a SyncSession, got {type(session).__name__}"
+            )
+        DatabaseRepository.acquire_symbol_updater_lock_sync(session, self._lock_exchange())
         if self._in_managed_run and not self._should_update_in_session(session, now):
             self._last_update_skipped = True
             logger.info(
