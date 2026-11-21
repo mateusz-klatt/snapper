@@ -18,7 +18,6 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,11 +26,7 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
 from snapper.data.models import Candle
 from snapper.data.models import Execution
-from snapper.data.models import Instrument
-from snapper.data.models import PortfolioPnlCorrectionFrontier
-from snapper.data.models import PortfolioPnlOpeningCheckpoint
 from snapper.data.models import PortfolioPnlPoint
-from snapper.data.models import Symbol
 from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlCorrectionChunk
 from snapper.data.pnl_correction_state import PnlCorrectionEvidence
@@ -335,31 +330,6 @@ def _pg_certificate(frontier: PnlCorrectionFrontier) -> PnlOpeningCheckpointCert
     )
 
 
-async def _cleanup_pg_scope(repo: SQLAlchemyRepository, wallet: str) -> None:
-    """Delete isolated rows written for ``wallet`` on PostgreSQL teardown.
-
-    Args:
-        repo: Connected live PostgreSQL repository.
-        wallet: Per-test random wallet public id.
-    """
-    async with repo.session() as session:
-        await session.execute(
-            delete(PortfolioPnlOpeningCheckpoint).where(
-                PortfolioPnlOpeningCheckpoint.wallet_public_id == wallet
-            )
-        )
-        await session.execute(
-            delete(PortfolioPnlCorrectionFrontier).where(
-                PortfolioPnlCorrectionFrontier.wallet_public_id == wallet
-            )
-        )
-        await session.execute(
-            delete(PortfolioPnlPoint).where(PortfolioPnlPoint.wallet_public_id == wallet)
-        )
-        await session.execute(delete(AccrualLedger).where(AccrualLedger.wallet_public_id == wallet))
-        await session.commit()
-
-
 class TestOpeningCheckpointPgContract:
     """Opt-in live PostgreSQL persistence, concurrency, and bigint sum contracts."""
 
@@ -376,39 +346,36 @@ class TestOpeningCheckpointPgContract:
         m1 = scope.anchor_point_time + timedelta(minutes=1)
         m3 = scope.anchor_point_time + timedelta(minutes=3)
         m5 = scope.anchor_point_time + timedelta(minutes=5)
-        try:
-            async with pg_repository.session() as session:
-                session.add(anchor)
-                await session.commit()
-            req = PnlCorrectionRequest(
-                start=m1,
-                tip=m3,
-                as_of=m5,
-                baseline_watermarks={"kraken": 2},
-                pending_watermarks={"kraken": 2},
-                prior_peak=None,
-                raw_execution_watermarks={"kraken": 2},
-                execution_manifest_digest=_PG_DIGEST_A,
-                has_fill_gap=False,
-                expected_venues=frozenset({"kraken"}),
-                venue_event_watermarks={"kraken:spot": 4},
-                fill_witness_digest=_PG_DIGEST_B,
-            )
-            started = await pg_repository.invalidate_portfolio_pnl_correction(scope, req, None)
-            chunk = PnlCorrectionChunk(m3, (), None, PnlCorrectionEvidence(key, m1, m3, (), None))
-            write = PnlOpeningCheckpointWrite(
-                _pg_certificate(advance_correction_frontier(started, chunk)),
-                '{"pg":true}',
-            )
-            await pg_repository.commit_portfolio_pnl_correction_chunk(
-                scope, started, chunk, checkpoint=write
-            )
-            record = await pg_repository.get_portfolio_pnl_opening_checkpoint(scope)
-            assert record is not None
-            assert record.certificate == write.certificate
-            assert record.state_json == '{"pg":true}'
-        finally:
-            await _cleanup_pg_scope(pg_repository, scope.wallet_public_id)
+        async with pg_repository.session() as session:
+            session.add(anchor)
+            await session.commit()
+        req = PnlCorrectionRequest(
+            start=m1,
+            tip=m3,
+            as_of=m5,
+            baseline_watermarks={"kraken": 2},
+            pending_watermarks={"kraken": 2},
+            prior_peak=None,
+            raw_execution_watermarks={"kraken": 2},
+            execution_manifest_digest=_PG_DIGEST_A,
+            has_fill_gap=False,
+            expected_venues=frozenset({"kraken"}),
+            venue_event_watermarks={"kraken:spot": 4},
+            fill_witness_digest=_PG_DIGEST_B,
+        )
+        started = await pg_repository.invalidate_portfolio_pnl_correction(scope, req, None)
+        chunk = PnlCorrectionChunk(m3, (), None, PnlCorrectionEvidence(key, m1, m3, (), None))
+        write = PnlOpeningCheckpointWrite(
+            _pg_certificate(advance_correction_frontier(started, chunk)),
+            '{"pg":true}',
+        )
+        await pg_repository.commit_portfolio_pnl_correction_chunk(
+            scope, started, chunk, checkpoint=write
+        )
+        record = await pg_repository.get_portfolio_pnl_opening_checkpoint(scope)
+        assert record is not None
+        assert record.certificate == write.certificate
+        assert record.state_json == '{"pg":true}'
 
     async def test_pg_lost_cas_writes_neither_frontier_nor_checkpoint(
         self, pg_repository: SQLAlchemyRepository
@@ -424,39 +391,36 @@ class TestOpeningCheckpointPgContract:
         m1 = scope.anchor_point_time + timedelta(minutes=1)
         m3 = scope.anchor_point_time + timedelta(minutes=3)
         m5 = scope.anchor_point_time + timedelta(minutes=5)
-        try:
-            async with pg_repository.session() as session:
-                session.add(anchor)
-                await session.commit()
-            req = PnlCorrectionRequest(
-                start=m1,
-                tip=m3,
-                as_of=m5,
-                baseline_watermarks={"kraken": 2},
-                pending_watermarks={"kraken": 2},
-                prior_peak=None,
-                raw_execution_watermarks={"kraken": 2},
-                execution_manifest_digest=_PG_DIGEST_A,
-                has_fill_gap=False,
-                expected_venues=frozenset({"kraken"}),
-                venue_event_watermarks={"kraken:spot": 4},
-                fill_witness_digest=_PG_DIGEST_B,
+        async with pg_repository.session() as session:
+            session.add(anchor)
+            await session.commit()
+        req = PnlCorrectionRequest(
+            start=m1,
+            tip=m3,
+            as_of=m5,
+            baseline_watermarks={"kraken": 2},
+            pending_watermarks={"kraken": 2},
+            prior_peak=None,
+            raw_execution_watermarks={"kraken": 2},
+            execution_manifest_digest=_PG_DIGEST_A,
+            has_fill_gap=False,
+            expected_venues=frozenset({"kraken"}),
+            venue_event_watermarks={"kraken:spot": 4},
+            fill_witness_digest=_PG_DIGEST_B,
+        )
+        started = await pg_repository.invalidate_portfolio_pnl_correction(scope, req, None)
+        stale = replace(started, revision=0)
+        chunk = PnlCorrectionChunk(m3, (), None, PnlCorrectionEvidence(key, m1, m3, (), None))
+        write = PnlOpeningCheckpointWrite(
+            _pg_certificate(advance_correction_frontier(started, chunk)),
+            '{"pg":true}',
+        )
+        with pytest.raises(PortfolioPnlCorrectionConflictError):
+            await pg_repository.commit_portfolio_pnl_correction_chunk(
+                scope, stale, chunk, checkpoint=write
             )
-            started = await pg_repository.invalidate_portfolio_pnl_correction(scope, req, None)
-            stale = replace(started, revision=0)
-            chunk = PnlCorrectionChunk(m3, (), None, PnlCorrectionEvidence(key, m1, m3, (), None))
-            write = PnlOpeningCheckpointWrite(
-                _pg_certificate(advance_correction_frontier(started, chunk)),
-                '{"pg":true}',
-            )
-            with pytest.raises(PortfolioPnlCorrectionConflictError):
-                await pg_repository.commit_portfolio_pnl_correction_chunk(
-                    scope, stale, chunk, checkpoint=write
-                )
-            assert await pg_repository.get_portfolio_pnl_correction_frontier(scope) == started
-            assert await pg_repository.get_portfolio_pnl_opening_checkpoint(scope) is None
-        finally:
-            await _cleanup_pg_scope(pg_repository, scope.wallet_public_id)
+        assert await pg_repository.get_portfolio_pnl_correction_frontier(scope) == started
+        assert await pg_repository.get_portfolio_pnl_opening_checkpoint(scope) is None
 
     async def test_pg_rewind_deletes_and_forward_generation_keeps_checkpoint(
         self, pg_repository: SQLAlchemyRepository
@@ -472,52 +436,51 @@ class TestOpeningCheckpointPgContract:
         m3 = scope.anchor_point_time + timedelta(minutes=3)
         m4 = scope.anchor_point_time + timedelta(minutes=4)
         m5 = scope.anchor_point_time + timedelta(minutes=5)
-        try:
-            async with pg_repository.session() as session:
-                session.add(anchor)
-                await session.commit()
-            req_g1 = PnlCorrectionRequest(
-                start=m1,
-                tip=m3,
-                as_of=m5,
-                baseline_watermarks={"kraken": 2},
-                pending_watermarks={"kraken": 2},
-                prior_peak=None,
-                raw_execution_watermarks={"kraken": 2},
-                execution_manifest_digest=_PG_DIGEST_A,
-                has_fill_gap=False,
-                expected_venues=frozenset({"kraken"}),
-                venue_event_watermarks={"kraken:spot": 4},
-                fill_witness_digest=_PG_DIGEST_B,
-            )
-            g1 = await pg_repository.invalidate_portfolio_pnl_correction(scope, req_g1, None)
-            chunk = PnlCorrectionChunk(m3, (), None, PnlCorrectionEvidence(key, m1, m3, (), None))
-            write = PnlOpeningCheckpointWrite(
-                _pg_certificate(advance_correction_frontier(g1, chunk)),
-                '{"pg":1}',
-            )
-            settled = await pg_repository.commit_portfolio_pnl_correction_chunk(
-                scope, g1, chunk, checkpoint=write
-            )
-            g2 = await pg_repository.invalidate_portfolio_pnl_correction(
-                scope, replace(req_g1, start=m4, tip=m5), settled
-            )
-            assert await pg_repository.get_portfolio_pnl_opening_checkpoint(scope) is not None
-            await pg_repository.invalidate_portfolio_pnl_correction(
-                scope, replace(req_g1, start=m3, tip=m5), g2
-            )
-            assert await pg_repository.get_portfolio_pnl_opening_checkpoint(scope) is None
-        finally:
-            await _cleanup_pg_scope(pg_repository, scope.wallet_public_id)
+        async with pg_repository.session() as session:
+            session.add(anchor)
+            await session.commit()
+        req_g1 = PnlCorrectionRequest(
+            start=m1,
+            tip=m3,
+            as_of=m5,
+            baseline_watermarks={"kraken": 2},
+            pending_watermarks={"kraken": 2},
+            prior_peak=None,
+            raw_execution_watermarks={"kraken": 2},
+            execution_manifest_digest=_PG_DIGEST_A,
+            has_fill_gap=False,
+            expected_venues=frozenset({"kraken"}),
+            venue_event_watermarks={"kraken:spot": 4},
+            fill_witness_digest=_PG_DIGEST_B,
+        )
+        g1 = await pg_repository.invalidate_portfolio_pnl_correction(scope, req_g1, None)
+        chunk = PnlCorrectionChunk(m3, (), None, PnlCorrectionEvidence(key, m1, m3, (), None))
+        write = PnlOpeningCheckpointWrite(
+            _pg_certificate(advance_correction_frontier(g1, chunk)),
+            '{"pg":1}',
+        )
+        settled = await pg_repository.commit_portfolio_pnl_correction_chunk(
+            scope, g1, chunk, checkpoint=write
+        )
+        g2 = await pg_repository.invalidate_portfolio_pnl_correction(
+            scope, replace(req_g1, start=m4, tip=m5), settled
+        )
+        assert await pg_repository.get_portfolio_pnl_opening_checkpoint(scope) is not None
+        await pg_repository.invalidate_portfolio_pnl_correction(
+            scope, replace(req_g1, start=m3, tip=m5), g2
+        )
+        assert await pg_repository.get_portfolio_pnl_opening_checkpoint(scope) is None
 
     async def test_pg_aggregate_reads_match_python_recomputation(
         self, pg_repository: SQLAlchemyRepository
     ) -> None:
         """Verify accrual, event-FX candle, and execution prefix aggregates on PG.
 
-        Given: Active and out-of-window accruals, candles, and executions on PostgreSQL.
+        Given: An accrual, a candle on a proven FX plane, and an execution on PostgreSQL,
+            followed by a later appended accrual and execution in the same prefix.
         When: All three repository aggregate reads execute at ``as_of``.
-        Then: Every aggregate matches independent Python recomputation.
+        Then: Every aggregate matches independent recomputation, and each appended
+            event changes its fingerprint, the only way production can change it.
         """
         scope, anchor, _ = _pg_scope()
         t0 = scope.anchor_point_time
@@ -528,86 +491,124 @@ class TestOpeningCheckpointPgContract:
         sym_id = str(uuid4())
         fx_exchange = f"pgfx{fx_inst[:8]}"
         fx_plane: PnlFxRatePlane = ("EUR", "USD", fx_exchange)
-        try:
-            fx_symbol = _fx_symbol(sym_id, f"EUR-USD-{fx_inst[:8]}", "EUR", "USD", timestamp=t0)
-            fx_instrument = _fx_instrument(fx_inst, sym_id, fx_exchange, timestamp=t0)
-            accrual = AccrualLedger(
-                instrument_public_id=fx_inst,
-                wallet_public_id=scope.wallet_public_id,
-                operator_public_id=None,
-                mode="live",
-                accrual_type="funding",
-                accrued_at=m2,
-                amount=2.5,
-                amount_asset="USD",
-                rate=0.0001,
-                notional=1000.0,
-                position_quantity_at_accrual=1.0,
-                exchange="kraken",
-                timestamp=m1,
-                known_to=KNOWN_TO_MAX,
-                session_id=_PG_SESSION,
-                sequence_id=1,
-            )
-            candle = _fx_candle(fx_inst, m2, 1.2)
-            candle.timestamp = m1
-            candle.session_id = _PG_SESSION
-            execution = Execution(
-                public_id=str(uuid4()),
-                order_public_id=str(uuid4()),
-                wallet_public_id=scope.wallet_public_id,
-                operator_public_id=None,
-                exchange="kraken",
-                mode="live",
-                scope_sequence=1,
-                exec_id=f"pg-exec-{scope.wallet_public_id[:8]}",
-                trade_id=None,
-                side="buy",
-                status="filled",
-                price=10.0,
-                size=1.0,
-                fee=0.0,
-                fee_asset="USD",
-                liquidity_role="taker",
-                session_id=_PG_SESSION,
-                sequence_id=1,
-                timestamp=m1,
-                executed_at=m1,
-                known_to=KNOWN_TO_MAX,
-            )
-            async with pg_repository.session() as session:
-                session.add_all([anchor, accrual, fx_symbol, fx_instrument, candle, execution])
-                await session.commit()
-            accrual_fp = await pg_repository.get_pnl_accrual_prefix_fingerprint(
-                scope.wallet_public_id, "live", t0, m2, m5
-            )
-            assert accrual_fp == IdAggregate(1, accrual.id, accrual.id, m1)
-            candle_fp = await pg_repository.get_pnl_event_fx_candle_fingerprint(
-                [fx_plane], [m2], m5
-            )
-            replay_rows = await pg_repository.get_pnl_fx_rate_candles_at([fx_plane], [m2], m5)
-            assert len(replay_rows) == 1
-            assert candle_fp == IdAggregate(
-                1,
-                replay_rows[0]["candle_id"],
-                replay_rows[0]["candle_id"],
-                replay_rows[0]["candle_timestamp"],
-            )
-            assert candle_fp == IdAggregate(1, candle.id, candle.id, m1)
-            exec_counts = await pg_repository.get_pnl_execution_prefix_counts(
-                scope.wallet_public_id, "live", {"kraken": 2}
-            )
-            assert exec_counts == {"kraken": (1, 1)}
-        finally:
-            async with pg_repository.session() as session:
-                await session.execute(delete(Candle).where(Candle.instrument_public_id == fx_inst))
-                await session.execute(delete(Instrument).where(Instrument.public_id == fx_inst))
-                await session.execute(delete(Symbol).where(Symbol.public_id == sym_id))
-                await session.execute(
-                    delete(Execution).where(Execution.wallet_public_id == scope.wallet_public_id)
-                )
-                await session.commit()
-            await _cleanup_pg_scope(pg_repository, scope.wallet_public_id)
+        fx_symbol = _fx_symbol(sym_id, f"EUR-USD-{fx_inst[:8]}", "EUR", "USD", timestamp=t0)
+        fx_instrument = _fx_instrument(fx_inst, sym_id, fx_exchange, timestamp=t0)
+        accrual = AccrualLedger(
+            instrument_public_id=fx_inst,
+            wallet_public_id=scope.wallet_public_id,
+            operator_public_id=None,
+            mode="live",
+            accrual_type="funding",
+            accrued_at=m2,
+            amount=2.5,
+            amount_asset="USD",
+            rate=0.0001,
+            notional=1000.0,
+            position_quantity_at_accrual=1.0,
+            exchange="kraken",
+            timestamp=m1,
+            known_to=KNOWN_TO_MAX,
+            session_id=_PG_SESSION,
+            sequence_id=1,
+        )
+        candle = _fx_candle(fx_inst, m2, 1.2)
+        candle.timestamp = m1
+        candle.session_id = _PG_SESSION
+        execution = Execution(
+            public_id=str(uuid4()),
+            order_public_id=str(uuid4()),
+            wallet_public_id=scope.wallet_public_id,
+            operator_public_id=None,
+            exchange="kraken",
+            mode="live",
+            scope_sequence=1,
+            exec_id=f"pg-exec-{scope.wallet_public_id[:8]}",
+            trade_id=None,
+            side="buy",
+            status="filled",
+            price=10.0,
+            size=1.0,
+            fee=0.0,
+            fee_asset="USD",
+            liquidity_role="taker",
+            session_id=_PG_SESSION,
+            sequence_id=1,
+            timestamp=m1,
+            executed_at=m1,
+            known_to=KNOWN_TO_MAX,
+        )
+        async with pg_repository.session() as session:
+            session.add_all([anchor, accrual, fx_symbol, fx_instrument, candle, execution])
+            await session.commit()
+        accrual_fp = await pg_repository.get_pnl_accrual_prefix_fingerprint(
+            scope.wallet_public_id, "live", t0, m2, m5
+        )
+        assert accrual_fp == IdAggregate(1, accrual.id, accrual.id, m1)
+        candle_fp = await pg_repository.get_pnl_event_fx_candle_fingerprint([fx_plane], [m2], m5)
+        replay_rows = await pg_repository.get_pnl_fx_rate_candles_at([fx_plane], [m2], m5)
+        assert len(replay_rows) == 1
+        assert candle_fp == IdAggregate(
+            1,
+            replay_rows[0]["candle_id"],
+            replay_rows[0]["candle_id"],
+            replay_rows[0]["candle_timestamp"],
+        )
+        assert candle_fp == IdAggregate(1, candle.id, candle.id, m1)
+        exec_counts = await pg_repository.get_pnl_execution_prefix_counts(
+            scope.wallet_public_id, "live", {"kraken": 2}
+        )
+        assert exec_counts == {"kraken": (1, 1)}
+
+        later_accrual = AccrualLedger(
+            instrument_public_id=fx_inst,
+            wallet_public_id=scope.wallet_public_id,
+            operator_public_id=None,
+            mode="live",
+            accrual_type="funding",
+            accrued_at=m1,
+            amount=1.0,
+            amount_asset="USD",
+            rate=0.0001,
+            notional=1000.0,
+            position_quantity_at_accrual=1.0,
+            exchange="kraken",
+            timestamp=m2,
+            known_to=KNOWN_TO_MAX,
+            session_id=_PG_SESSION,
+            sequence_id=2,
+        )
+        later_execution = Execution(
+            public_id=str(uuid4()),
+            order_public_id=str(uuid4()),
+            wallet_public_id=scope.wallet_public_id,
+            operator_public_id=None,
+            exchange="kraken",
+            mode="live",
+            scope_sequence=2,
+            exec_id=f"pg-exec-2-{scope.wallet_public_id[:8]}",
+            trade_id=None,
+            side="sell",
+            status="filled",
+            price=10.0,
+            size=1.0,
+            fee=0.0,
+            fee_asset="USD",
+            liquidity_role="taker",
+            session_id=_PG_SESSION,
+            sequence_id=2,
+            timestamp=m2,
+            executed_at=m2,
+            known_to=KNOWN_TO_MAX,
+        )
+        async with pg_repository.session() as session:
+            session.add_all([later_accrual, later_execution])
+            await session.commit()
+        assert await pg_repository.get_pnl_accrual_prefix_fingerprint(
+            scope.wallet_public_id, "live", t0, m2, m5
+        ) == IdAggregate(2, accrual.id + later_accrual.id, later_accrual.id, m2)
+        assert await pg_repository.get_pnl_execution_prefix_counts(
+            scope.wallet_public_id, "live", {"kraken": 2}
+        ) == {"kraken": (2, 2)}
 
     async def test_pg_event_fx_id_sum_above_2_pow_63_stays_exact(
         self, pg_repository: SQLAlchemyRepository
@@ -637,24 +638,17 @@ class TestOpeningCheckpointPgContract:
             row.session_id = _PG_SESSION
             row.sequence_id = idx
             candles.append(row)
-        try:
-            async with pg_repository.session() as session:
-                session.add_all([fx_symbol, fx_instrument, *candles])
-                await session.commit()
-            agg = await pg_repository.get_pnl_event_fx_candle_fingerprint([fx_plane], opens, now)
-            replay_rows = await pg_repository.get_pnl_fx_rate_candles_at([fx_plane], opens, now)
-            assert len(replay_rows) == 3
-            assert agg == IdAggregate(
-                len(replay_rows),
-                sum(row["candle_id"] for row in replay_rows),
-                max(row["candle_id"] for row in replay_rows),
-                max(row["candle_timestamp"] for row in replay_rows),
-            )
-            assert agg == IdAggregate(3, sum(large_ids), max(large_ids), max(opens))
-            assert agg.id_sum > (1 << 63)
-        finally:
-            async with pg_repository.session() as session:
-                await session.execute(delete(Candle).where(Candle.instrument_public_id == fx_inst))
-                await session.execute(delete(Instrument).where(Instrument.public_id == fx_inst))
-                await session.execute(delete(Symbol).where(Symbol.public_id == sym_id))
-                await session.commit()
+        async with pg_repository.session() as session:
+            session.add_all([fx_symbol, fx_instrument, *candles])
+            await session.commit()
+        agg = await pg_repository.get_pnl_event_fx_candle_fingerprint([fx_plane], opens, now)
+        replay_rows = await pg_repository.get_pnl_fx_rate_candles_at([fx_plane], opens, now)
+        assert len(replay_rows) == 3
+        assert agg == IdAggregate(
+            len(replay_rows),
+            sum(row["candle_id"] for row in replay_rows),
+            max(row["candle_id"] for row in replay_rows),
+            max(row["candle_timestamp"] for row in replay_rows),
+        )
+        assert agg == IdAggregate(3, sum(large_ids), max(large_ids), max(opens))
+        assert agg.id_sum > (1 << 63)
