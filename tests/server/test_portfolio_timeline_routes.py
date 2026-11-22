@@ -1547,6 +1547,7 @@ def test_point_payload_discloses_carried_inputs_and_their_largest_age() -> None:
     )
     assert payload.valuation_status == "complete"
     assert payload.max_carry_age_minutes == 9
+    assert payload.total_rounding_adjusted is None
     assert [
         (item.role, item.age_minutes, item.source_plane) for item in payload.carried_inputs
     ] == [

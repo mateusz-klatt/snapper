@@ -188,6 +188,8 @@ class PnlTimelinePointData(StrictBody):
     and ``absorber_deviation_ulps`` report the maximum absolute ULP deviations
     across adjusted families at the point, and ``instrument_absorber_id`` or
     ``attribution_absorber_key`` names the single absorber chosen per dimension.
+    ``total_rounding_adjusted`` is ``True`` on adjusted points and omitted
+    (``None``) otherwise, so existing clients see no new required field.
     """
 
     point_time: datetime
@@ -206,7 +208,7 @@ class PnlTimelinePointData(StrictBody):
     attribution: list[PnlAttributionContributionData]
     carried_inputs: list[PnlCarriedInputData] = Field(default_factory=list)
     max_carry_age_minutes: int | None = None
-    total_rounding_adjusted: bool = False
+    total_rounding_adjusted: bool | None = None
     total_deviation_ulps: float | None = None
     absorber_deviation_ulps: float | None = None
     instrument_absorber_id: str | None = None

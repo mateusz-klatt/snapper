@@ -412,7 +412,7 @@ def _point_payload(
             for item in point.carried_inputs
         ],
         max_carry_age_minutes=point.max_carry_age_minutes,
-        total_rounding_adjusted=point.total_rounding_adjusted,
+        total_rounding_adjusted=True if point.total_rounding_adjusted else None,
         total_deviation_ulps=point.total_deviation_ulps,
         absorber_deviation_ulps=point.absorber_deviation_ulps,
         instrument_absorber_id=point.instrument_absorber_id,
