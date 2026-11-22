@@ -47,6 +47,8 @@ class AdjustedFlowProjection[InstrumentKeyT: Hashable, AttributionKeyT: Hashable
         absorber_deviation_ulps: Magnitude of ``absorber - exact_bucket`` in ``u``.
         absorber_key: Key of the single absorber bucket in the finer dimension.
         absorber_dimension: Dimension owning ``absorber_key``.
+        total_deviation_units: Exact ``|total - exact_total|`` on the ``2**-1074``
+            grid, used to compare deviations across families without float ties.
     """
 
     total: float
@@ -56,6 +58,7 @@ class AdjustedFlowProjection[InstrumentKeyT: Hashable, AttributionKeyT: Hashable
     absorber_deviation_ulps: float
     absorber_key: InstrumentKeyT | AttributionKeyT
     absorber_dimension: AbsorberDimension
+    total_deviation_units: int = 0
 
 
 def _valid_dimension[KeyT: Hashable](
@@ -360,6 +363,7 @@ def adjust_flow_family[InstrumentKeyT: Hashable, AttributionKeyT: Hashable](
             absorber_deviation_ulps=absorber_dev,
             absorber_key=inst_absorber,
             absorber_dimension="instrument",
+            total_deviation_units=abs(exact_units_of(total) - total_units),
         )
     solved_attr = _solve_ordered(total_units, instruments, attributions)
     if solved_attr is None:
@@ -373,4 +377,5 @@ def adjust_flow_family[InstrumentKeyT: Hashable, AttributionKeyT: Hashable](
         absorber_deviation_ulps=absorber_dev,
         absorber_key=attr_absorber,
         absorber_dimension="attribution",
+        total_deviation_units=abs(exact_units_of(total) - total_units),
     )

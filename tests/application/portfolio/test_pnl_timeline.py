@@ -28,6 +28,7 @@ from snapper.application.portfolio.exact_sum import ExactSum
 from snapper.application.portfolio.exact_sum import exact_units_of
 from snapper.application.portfolio.exact_sum import faithful_roundings
 from snapper.application.portfolio.exact_sum import project_units
+from snapper.application.portfolio.pnl_adjusted_total import AdjustedFlowProjection
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulRecoveryBudget
 from snapper.application.portfolio.pnl_timeline import AttributionKey
 from snapper.application.portfolio.pnl_timeline import MarkMap
@@ -4106,3 +4107,43 @@ class TestAdjustedTotalFallback:
         assert isinstance(legacy, tuple)
         assert len(legacy) == 3
         assert legacy[0].total == 0.0
+
+
+def test_disclosure_reports_the_family_with_the_largest_exact_deviation() -> None:
+    """Pick the reported absorber by exact deviation units, not float quotients.
+
+    Given: Two adjusted families whose float ``total_deviation_ulps`` tie while
+        their exact deviation units differ, the larger one second.
+    When: The point disclosure is aggregated.
+    Then: The absorber identity comes from the family with the larger exact
+        deviation, and the earlier family wins a genuine exact tie.
+    """
+    first = AdjustedFlowProjection[str, AttributionKey](
+        total=0.0,
+        instruments={},
+        attributions={},
+        total_deviation_ulps=2.0,
+        absorber_deviation_ulps=1.0,
+        absorber_key="I0",
+        absorber_dimension="instrument",
+        total_deviation_units=10,
+    )
+    second = AdjustedFlowProjection[str, AttributionKey](
+        total=0.0,
+        instruments={},
+        attributions={},
+        total_deviation_ulps=2.0,
+        absorber_deviation_ulps=3.0,
+        absorber_key=("manual", None),
+        absorber_dimension="attribution",
+        total_deviation_units=11,
+    )
+    disclosure = pnl_timeline._disclosure_from_adjustments([first, second])
+    assert disclosure.attribution_absorber_key == ("manual", None)
+    assert disclosure.instrument_absorber_id is None
+    assert disclosure.absorber_deviation_ulps == 3.0
+    tied = pnl_timeline._disclosure_from_adjustments(
+        [first, replace(second, total_deviation_units=10)]
+    )
+    assert tied.instrument_absorber_id == "I0"
+    assert tied.attribution_absorber_key is None

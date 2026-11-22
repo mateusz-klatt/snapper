@@ -2208,7 +2208,7 @@ def _disclosure_from_adjustments(
     """Aggregate per-family ``(a″)`` adjustments into one point disclosure."""
     if not adjustments:
         return _FlowAdjustmentDisclosure()
-    reported = max(adjustments, key=lambda item: item.total_deviation_ulps)
+    reported = max(adjustments, key=lambda item: item.total_deviation_units)
     return _FlowAdjustmentDisclosure(
         total_rounding_adjusted=True,
         total_deviation_ulps=reported.total_deviation_ulps,
