@@ -25,6 +25,19 @@ A degradation episode pages once when it opens and, while it persists, at
 most once per this interval. The in-memory gate is cheap; the per-user
 ``alert_events`` lookup with the stable episode key enforces the same bound
 across a sidecar restart that wipes the in-memory state."""
+
+_EPISODE_CLOSE_HEALTHY_STREAK = 3
+"""Consecutive HEALTHY heartbeats required before a paged episode closes.
+
+Mirrors the three-WARNING open gate, so one HEALTHY blip in a flapping
+component does not end the episode."""
+
+_REOPEN_FLOOR_SECONDS = 3600
+"""Minimum spacing between pages for one instance even across a recovery.
+
+A closed episode may page again sooner than the 24 h reminder, but never
+within an hour of the previous page, so oscillation cannot page more often
+than the former hourly cap."""
 _PERMISSION_FOR_FAN_OUT = "read:system_status"
 
 
@@ -44,9 +57,10 @@ class CriticalSystemErrorRule(AlertRule):
     Deduplication is per degradation episode: ``dedup_key`` =
     ``f"sys_error.{component}.{name}"``. A chronic WARNING pages once and
     then at most once per ``_EPISODE_REMINDER_SECONDS`` (24 h), instead of
-    every hour. A HEALTHY heartbeat after a page closes the episode in
-    memory, so a later degradation pages again at once; after a restart,
-    with that memory gone, the 24 h bound from ``alert_events`` applies.
+    every hour. Three consecutive HEALTHY heartbeats after a page close the
+    episode in memory, so a later degradation pages again, though never
+    within an hour of the previous page; after a restart, with that memory
+    gone, the 24 h bound from ``alert_events`` applies.
 
     Fan-out: one ``AlertEventInsertRow`` per active user whose role
     grants ``Permission.READ_SYSTEM_STATUS`` (per
@@ -65,16 +79,26 @@ class CriticalSystemErrorRule(AlertRule):
         self._rolling_window: dict[tuple[str, str], list[tuple[datetime, str]]] = {}
         self._last_fired: dict[tuple[str, str], datetime] = {}
         self._episode_closed_at: dict[tuple[str, str], datetime] = {}
+        self._healthy_streak: dict[tuple[str, str], int] = {}
 
     def _close_episode(self, state_key: tuple[str, str], now: datetime) -> None:
         """Reset the rolling window and close a paged episode on HEALTHY.
+
+        The episode closes only after ``_EPISODE_CLOSE_HEALTHY_STREAK``
+        consecutive HEALTHY heartbeats following a page.
 
         Args:
             state_key: ``(component, name)`` identity of the instance.
             now: Timestamp of the HEALTHY heartbeat.
         """
         self._rolling_window.pop(state_key, None)
-        if self._last_fired.pop(state_key, None) is not None:
+        streak = self._healthy_streak.get(state_key, 0) + 1
+        self._healthy_streak[state_key] = streak
+        last_fired = self._last_fired.get(state_key)
+        if last_fired is None or streak < _EPISODE_CLOSE_HEALTHY_STREAK:
+            return
+        closed_at = self._episode_closed_at.get(state_key)
+        if closed_at is None or closed_at < last_fired:
             self._episode_closed_at[state_key] = now
 
     def _episode_since(self, state_key: tuple[str, str], now: datetime) -> datetime:
@@ -85,13 +109,29 @@ class CriticalSystemErrorRule(AlertRule):
             now: Timestamp of the heartbeat that opened the gate.
 
         Returns:
-            ``now - 24 h``, or the later in-memory episode close time.
+            ``now - 24 h`` while the episode is open; after a close, the later
+            of that and ``min(closed_at, now - 1 h)``, so a recovery reopens
+            paging but never within the hourly floor.
         """
-        since = now - timedelta(seconds=_EPISODE_REMINDER_SECONDS)
+        reminder_since = now - timedelta(seconds=_EPISODE_REMINDER_SECONDS)
+        if not self._episode_closed(state_key):
+            return reminder_since
+        closed_at = self._episode_closed_at[state_key]
+        floor_since = now - timedelta(seconds=_REOPEN_FLOOR_SECONDS)
+        return max(reminder_since, min(closed_at, floor_since))
+
+    def _episode_closed(self, state_key: tuple[str, str]) -> bool:
+        """Return whether the instance's last page was followed by a close.
+
+        Args:
+            state_key: ``(component, name)`` identity of the instance.
+
+        Returns:
+            True when an in-memory close is newer than the last page.
+        """
+        last_fired = self._last_fired.get(state_key)
         closed_at = self._episode_closed_at.get(state_key)
-        if closed_at is not None and closed_at > since:
-            return closed_at
-        return since
+        return last_fired is not None and closed_at is not None and closed_at > last_fired
 
     async def evaluate(
         self,
@@ -140,6 +180,7 @@ class CriticalSystemErrorRule(AlertRule):
         if data.status == HealthStatusEnum.HEALTHY:
             self._close_episode(state_key, now)
             return []
+        self._healthy_streak.pop(state_key, None)
         window = self._rolling_window.setdefault(state_key, [])
         cutoff = now - timedelta(seconds=_ROLLING_WINDOW_SECONDS)
         window[:] = [(t, s) for t, s in window if t >= cutoff]
@@ -150,9 +191,10 @@ class CriticalSystemErrorRule(AlertRule):
         if not all(s != HealthStatusEnum.HEALTHY for _, s in recent):
             return []
         last_fired = self._last_fired.get(state_key)
-        if last_fired is not None and (now - last_fired) < timedelta(
-            seconds=_EPISODE_REMINDER_SECONDS
-        ):
+        spacing = (
+            _REOPEN_FLOOR_SECONDS if self._episode_closed(state_key) else _EPISODE_REMINDER_SECONDS
+        )
+        if last_fired is not None and (now - last_fired) < timedelta(seconds=spacing):
             return []
         dedup_key = f"sys_error.{component}.{name}"
         since = self._episode_since(state_key, now)
