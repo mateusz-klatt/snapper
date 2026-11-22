@@ -13,7 +13,6 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
-from loguru import logger
 from sqlalchemy import func
 from sqlalchemy import select
 
@@ -4105,7 +4104,7 @@ class TestStrandedCancelMultiChild:
             return_value={"cid-a": "plan-multi", "cid-b": "plan-multi"}
         )
         mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
-        mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
+        mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
         mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
@@ -4133,11 +4132,7 @@ def _stranded_repo(target_status: str | None, ended_at: datetime | None) -> Asyn
     repo.get_plan_public_ids_for_client_order_ids = AsyncMock(return_value={"cid-1": "plan-strand"})
     repo.has_pending_cancel_command = AsyncMock(return_value=False)
     repo.get_active_create_command_by_client_order_id = AsyncMock(
-        return_value=(
-            None
-            if target_status is None
-            else {"status": target_status, "exchange_order_id": "ex-1"}
-        )
+        return_value=None if target_status is None else {"status": target_status}
     )
     repo.get_latest_venue_event_received_at = AsyncMock(return_value=ended_at)
     repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
@@ -4370,39 +4365,31 @@ class TestStrandedCancelNeverPlacedTarget:
     """Startup recovery settles cancels whose target never reached the venue."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("target_status", ["dispatched", "pending", "sent"])
     @patch("snapper.application.plans.service.get_settings")
     @patch("snapper.application.plans.service.get_repository")
-    async def test_empty_exchange_id_settles_locally_with_one_log(
-        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    async def test_in_flight_create_with_empty_id_still_reemits(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock, target_status: str
     ) -> None:
-        """Settle an empty-id target without emitting a venue cancel.
+        """Keep the venue-cancel path for creates whose acknowledgement may be in flight.
 
-        Given a stranded cancel whose child has no exchange order id,
-        When startup recovery inspects the child,
-        Then it settles the plan locally, emits no cancel, and logs one reason code.
+        Given a dispatched, pending, or sent create with no exchange order id,
+        When startup recovery inspects the stranded cancel,
+        Then it re-emits the cancel and does not settle the plan locally.
         """
-        repo = AsyncMock()
-        repo.get_plan_public_ids_for_client_order_ids = AsyncMock(
-            return_value={"cid-1": "plan-strand"}
+        repo = _stranded_repo(target_status, None)
+        repo.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value={"status": target_status, "exchange_order_id": None}
         )
-        repo.has_pending_cancel_command = AsyncMock(return_value=False)
         repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
-        repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
         repo.update_execution_plan_status = AsyncMock(return_value=2)
         mock_repo_fn.return_value = repo
         service = PlanExecutorService()
-        messages: list[str] = []
-        sink_id = logger.add(messages.append, format="{message}", level="INFO")
-        try:
-            await service._reemit_stranded_cancel(_stranded_plan())
-        finally:
-            logger.remove(sink_id)
 
-        repo.insert_trade_command.assert_not_awaited()
-        repo.update_execution_plan_status.assert_awaited_once()
-        assert repo.update_execution_plan_status.await_args.kwargs["new_status"] == "cancelled"
-        assert len(messages) == 1
-        assert "reason_code=stranded_cancel_missing_exchange_order_id" in messages[0]
+        await service._reemit_stranded_cancel(_stranded_plan())
+
+        repo.insert_trade_command.assert_awaited_once()
+        repo.update_execution_plan_status.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
@@ -4417,15 +4404,25 @@ class TestStrandedCancelNeverPlacedTarget:
         Then it settles the plan as failed and emits no cancel.
         """
         repo = _stranded_repo("failed", None)
+        repo.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value={"status": "failed", "exchange_order_id": None}
+        )
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
         repo.update_execution_plan_status = AsyncMock(return_value=2)
         mock_repo_fn.return_value = repo
         service = PlanExecutorService()
+        plan = _stranded_plan()
+        plan["last_error"] = "order_interlock_blocked"
 
-        await service._reemit_stranded_cancel(_stranded_plan())
+        await service._reemit_stranded_cancel(plan)
 
         repo.insert_trade_command.assert_not_awaited()
         repo.update_execution_plan_status.assert_awaited_once()
         assert repo.update_execution_plan_status.await_args.kwargs["new_status"] == "failed"
+        assert (
+            repo.update_execution_plan_status.await_args.kwargs["last_error"]
+            == "order_interlock_blocked"
+        )
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
