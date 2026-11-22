@@ -468,12 +468,10 @@ def _checkpoint_ineligible(
 
 
 def _initial_fallback(
-    record: PnlOpeningCheckpointRecord | None,
+    record: PnlOpeningCheckpointRecord,
     eligibility: PnlCheckpointResumeEligibility,
 ) -> PnlCheckpointFallback | None:
-    """Return absent, ineligible, version, or fill-gap fallback before decoding."""
-    if record is None:
-        return _fallback("checkpoint_absent")
+    """Return ineligible, version, or fill-gap fallback before decoding."""
     if _checkpoint_ineligible(record, eligibility):
         return _fallback("checkpoint_ineligible")
     if _version_mismatch(record.certificate, eligibility):
@@ -580,11 +578,12 @@ async def verify_checkpoint_for_resume(
     Returns:
         Verified decoded resume state or a stable fallback with delete policy.
     """
+    if record is None:
+        return _fallback("checkpoint_absent")
     try:
         initial = _initial_fallback(record, eligibility)
         if initial is not None:
             return initial
-        assert record is not None
         return await _verify_checkpoint_domains(
             repo,
             record,
