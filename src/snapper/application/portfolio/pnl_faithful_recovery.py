@@ -197,3 +197,17 @@ class FaithfulFlowRecovery[InstrumentKeyT: Hashable, AttributionKeyT: Hashable]:
         self._previous_input = request
         self._previous_projection = projection
         return projection
+
+    def completed_refusal(
+        self, request: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT]
+    ) -> bool:
+        """Report whether ``request`` completed recovery with an impossible result.
+
+        Args:
+            request: Complete ordered exact inputs most recently evaluated.
+
+        Returns:
+            ``True`` only when the exact input completed full faithful search or
+            reused a completed refusal, never on budget or structural aborts.
+        """
+        return self._previous_input == request and self._previous_projection is None

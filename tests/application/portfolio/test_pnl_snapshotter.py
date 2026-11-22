@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 from typing import cast
 from uuid import UUID
@@ -3063,3 +3064,27 @@ class TestWithheldMinuteAlarm:
             await snap._tick_once()
         assert repo.recorded
         assert repo.frontier().baseline_watermarks == {"kraken": 7}
+
+    @pytest.mark.asyncio
+    async def test_snapshotter_keeps_public_read_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Verify the snapshotter never opts into the public-read ``(a″)`` fallback.
+
+        Given: A snapshotter instance and a spy replacing ``build_wallet_pnl_series``.
+        When: ``_series`` evaluates a chunk window.
+        Then: The forwarded ``PnlSeriesReadPolicy`` keeps ``public_read is False``.
+        """
+        spy = mock.AsyncMock(return_value=_series(_minute(1), _minute(3), metadata=_meta()))
+        monkeypatch.setattr(pnl_snapshotter, "build_wallet_pnl_series", spy)
+        repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        snap = _snapshotter(repo, _minute(3))
+        ctx = SimpleNamespace(wallet_public_id=_WALLET, as_of=_minute(5))
+        await snap._series(
+            cast(Repository, repo),
+            cast(pnl_snapshotter._ScopeContext, ctx),
+            ChunkWindow(_minute(1), _minute(3)),
+            PnlSeriesReplayOptions(),
+        )
+        assert spy.await_args is not None
+        assert spy.await_args.kwargs["policy"].public_read is False

@@ -62,7 +62,7 @@ def _eligibility(request: PnlCheckpointCaptureRequest) -> PnlCheckpointResumeEli
     return PnlCheckpointResumeEligibility(
         mode="active",
         calc_version=request.calc_version,
-        timeline_calc_version="5A.16",
+        timeline_calc_version="5A.18",
         fx_policy_version="pnl-fiat-pointwise-v1",
         expected_anchor_public_id=request.anchor_public_id,
         expected_anchor_digest=request.anchor_digest,

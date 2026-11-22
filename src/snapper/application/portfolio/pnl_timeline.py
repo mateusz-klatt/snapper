@@ -161,6 +161,8 @@ from snapper.application.portfolio.exact_sum import ExactSum
 from snapper.application.portfolio.exact_sum import exact_units_of
 from snapper.application.portfolio.exact_sum import faithful_roundings
 from snapper.application.portfolio.exact_sum import project_units
+from snapper.application.portfolio.pnl_adjusted_total import AdjustedFlowProjection
+from snapper.application.portfolio.pnl_adjusted_total import adjust_flow_family
 from snapper.application.portfolio.pnl_faithful_recovery import MAX_RECOVERY_KEY_VISITS
 from snapper.application.portfolio.pnl_faithful_recovery import MAX_RECOVERY_KEYS
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowInput
@@ -790,6 +792,9 @@ class TimelineWindow:
         compensated_unrealized_fallback: Fall back to compensated unrealized
             totals and attribution buckets when naive instrument reconciliation
             fails; set by the service only for pointwise 5C.6 snapshotter samples.
+        public_read: Enable the ``5A.18`` ``(a″)`` adjusted-total fallback for
+            public API reads after every faithful flow-recovery pass completes
+            without a projection.
     """
 
     from_time: datetime
@@ -799,6 +804,7 @@ class TimelineWindow:
     recovery_budget_per_point: bool = False
     capture_checkpoint: bool = False
     compensated_unrealized_fallback: bool = False
+    public_read: bool = False
 
 
 @dataclass(frozen=True)
@@ -918,6 +924,16 @@ class PnlTimelinePoint:
             minute, one per instrument and role. A ``complete`` point with entries
             is complete with carried inputs; the status enum stays closed so
             existing clients keep plotting it as a value.
+        total_rounding_adjusted: Whether at least one flow family at this point
+            published under the ``(a″)`` adjusted-total fallback.
+        total_deviation_ulps: Maximum ``|published - exact| / u`` across adjusted
+            flow families at this point, or ``None`` when unadjusted.
+        absorber_deviation_ulps: Maximum ``|absorber - exact| / u`` across
+            adjusted flow families at this point, or ``None`` when unadjusted.
+        instrument_absorber_id: Instrument key of the chosen absorber when an
+            adjusted family placed the absorber in the instrument dimension.
+        attribution_absorber_key: Composite attribution key of the chosen absorber
+            when an adjusted family placed the absorber in attribution.
     """
 
     point_time: datetime
@@ -931,6 +947,11 @@ class PnlTimelinePoint:
     per_instrument: tuple[PnlInstrumentContribution, ...]
     attribution: tuple[PnlAttributionContribution, ...]
     carried_inputs: tuple[PnlCarriedInput, ...] = ()
+    total_rounding_adjusted: bool = False
+    total_deviation_ulps: float | None = None
+    absorber_deviation_ulps: float | None = None
+    instrument_absorber_id: str | None = None
+    attribution_absorber_key: AttributionKey | None = None
 
     def __post_init__(self) -> None:
         """Enforce reason/status equivalence and canonical input ordering."""
@@ -1954,6 +1975,18 @@ class _PointValuationContext:
     carried_event_inputs: Collection[PnlCarriedInput]
     widen_unrealized_absorber: bool = False
     compensated_unrealized_fallback: bool = False
+    public_read: bool = False
+
+
+@dataclass(frozen=True)
+class _FlowAdjustmentDisclosure:
+    """Point-level summary of flow families published under the ``(a″)`` fallback."""
+
+    total_rounding_adjusted: bool = False
+    total_deviation_ulps: float | None = None
+    absorber_deviation_ulps: float | None = None
+    instrument_absorber_id: str | None = None
+    attribution_absorber_key: AttributionKey | None = None
 
 
 @dataclass(frozen=True)
@@ -1974,6 +2007,7 @@ class _PointPreparation:
     fee: _PublishedFlowFamily
     accrual: _PublishedFlowFamily
     attribution_keys: Sequence[AttributionKey]
+    flow_adjustment: _FlowAdjustmentDisclosure = field(default_factory=_FlowAdjustmentDisclosure)
 
 
 @dataclass(frozen=True)
@@ -2117,6 +2151,31 @@ def _ordered_exact_units[KeyT: Hashable](
     )
 
 
+def _recover_flow_family_outcome(
+    exact: _ExactCumulatives,
+    instrument_keys: Sequence[str],
+    attribution_keys: Sequence[AttributionKey],
+    recovery: _FlowRecovery,
+) -> tuple[_PublishedFlowFamily | None, bool]:
+    """Try faithful recovery and report whether an exhaustive search completed."""
+    if len(instrument_keys) + len(attribution_keys) > MAX_RECOVERY_KEYS:
+        return None, False
+    request = FaithfulFlowInput(
+        exact.total.exact_units(),
+        _ordered_exact_units(exact.by_instrument, instrument_keys),
+        _ordered_exact_units(exact.by_attribution, attribution_keys),
+    )
+    projection = recovery.recover(request)
+    if projection is not None:
+        return (
+            _PublishedFlowFamily(
+                projection.total, dict(projection.instruments), dict(projection.attributions)
+            ),
+            True,
+        )
+    return None, recovery.completed_refusal(request)
+
+
 def _recover_flow_family(
     exact: _ExactCumulatives,
     instrument_keys: Sequence[str],
@@ -2124,19 +2183,113 @@ def _recover_flow_family(
     recovery: _FlowRecovery,
 ) -> _PublishedFlowFamily | None:
     """Try faithful recovery only after the complete historical family search."""
-    if len(instrument_keys) + len(attribution_keys) > MAX_RECOVERY_KEYS:
-        return None
-    request = FaithfulFlowInput(
+    projection, _ = _recover_flow_family_outcome(exact, instrument_keys, attribution_keys, recovery)
+    return projection
+
+
+def _adjust_flow_family(
+    exact: _ExactCumulatives,
+    instrument_keys: Sequence[str],
+    attribution_keys: Sequence[AttributionKey],
+) -> AdjustedFlowProjection[str, AttributionKey] | None:
+    """Run the ``(a″)`` adjusted-total fallback over one exact flow family."""
+    return adjust_flow_family(
         exact.total.exact_units(),
         _ordered_exact_units(exact.by_instrument, instrument_keys),
         _ordered_exact_units(exact.by_attribution, attribution_keys),
     )
-    projection = recovery.recover(request)
-    if projection is None:
-        return None
-    return _PublishedFlowFamily(
-        projection.total, dict(projection.instruments), dict(projection.attributions)
+
+
+def _disclosure_from_adjustments(
+    adjustments: Sequence[AdjustedFlowProjection[str, AttributionKey]],
+) -> _FlowAdjustmentDisclosure:
+    """Aggregate per-family ``(a″)`` adjustments into one point disclosure."""
+    if not adjustments:
+        return _FlowAdjustmentDisclosure()
+    reported = max(adjustments, key=lambda item: item.total_deviation_ulps)
+    return _FlowAdjustmentDisclosure(
+        total_rounding_adjusted=True,
+        total_deviation_ulps=reported.total_deviation_ulps,
+        absorber_deviation_ulps=max(item.absorber_deviation_ulps for item in adjustments),
+        instrument_absorber_id=(
+            cast(str, reported.absorber_key)
+            if reported.absorber_dimension == "instrument"
+            else None
+        ),
+        attribution_absorber_key=(
+            cast(AttributionKey, reported.absorber_key)
+            if reported.absorber_dimension == "attribution"
+            else None
+        ),
     )
+
+
+def _resolve_unrepresentable_family(
+    exact: _ExactCumulatives,
+    keys: tuple[Sequence[str], Sequence[AttributionKey]],
+    recovery: _FlowRecovery,
+    *,
+    public_read: bool,
+) -> tuple[_PublishedFlowFamily, AdjustedFlowProjection[str, AttributionKey] | None] | None:
+    """Try faithful recovery, then public-read ``(a″)`` only on completed refusal."""
+    instrument_keys, attribution_keys = keys
+    recovered, completed = _recover_flow_family_outcome(
+        exact, instrument_keys, attribution_keys, recovery
+    )
+    if recovered is not None:
+        return recovered, None
+    if not public_read or not completed:
+        return None
+    adjusted = _adjust_flow_family(exact, instrument_keys, attribution_keys)
+    if adjusted is None:
+        return None
+    return (
+        _PublishedFlowFamily(adjusted.total, adjusted.instruments, adjusted.attributions),
+        adjusted,
+    )
+
+
+def _published_point_flows_outcome(
+    cumulatives: _PointCumulatives,
+    instrument_keys: Sequence[str],
+    attribution_keys: Sequence[AttributionKey],
+    *,
+    public_read: bool = False,
+) -> (
+    tuple[
+        _PublishedFlowFamily,
+        _PublishedFlowFamily,
+        _PublishedFlowFamily,
+        _FlowAdjustmentDisclosure,
+    ]
+    | PnlIncompletenessReason
+):
+    """Choose representable projections for all three families plus disclosure, or refuse."""
+    families: list[_PublishedFlowFamily] = []
+    adjustments: list[AdjustedFlowProjection[str, AttributionKey]] = []
+    for index, exact in enumerate(
+        (cumulatives.realized_exact, cumulatives.fee_exact, cumulatives.accrual_exact)
+    ):
+        family = _published_flow_family(exact, instrument_keys, attribution_keys)
+        if isinstance(family, str):
+            if family not in (
+                "instrument_sum_unrepresentable",
+                "attribution_sum_unrepresentable",
+            ):
+                return family
+            fallback = _resolve_unrepresentable_family(
+                exact,
+                (instrument_keys, attribution_keys),
+                cumulatives.flow_recoveries[index],
+                public_read=public_read,
+            )
+            if fallback is None:
+                return family
+            family, adjustment = fallback
+            if adjustment is not None:
+                adjustments.append(adjustment)
+        families.append(family)
+    return families[0], families[1], families[2], _disclosure_from_adjustments(adjustments)
 
 
 def _published_point_flows(
@@ -2161,22 +2314,10 @@ def _published_point_flows(
         The three chosen projections in ``(realized, fee, accrual)`` order, or
         the first family's exact withhold reason.
     """
-    families: list[_PublishedFlowFamily] = []
-    for index, exact in enumerate(
-        (cumulatives.realized_exact, cumulatives.fee_exact, cumulatives.accrual_exact)
-    ):
-        family = _published_flow_family(exact, instrument_keys, attribution_keys)
-        if isinstance(family, str):
-            if family not in ("instrument_sum_unrepresentable", "attribution_sum_unrepresentable"):
-                return family
-            recovered = _recover_flow_family(
-                exact, instrument_keys, attribution_keys, cumulatives.flow_recoveries[index]
-            )
-            if recovered is None:
-                return family
-            family = recovered
-        families.append(family)
-    return families[0], families[1], families[2]
+    outcome = _published_point_flows_outcome(cumulatives, instrument_keys, attribution_keys)
+    if isinstance(outcome, str):
+        return outcome
+    return outcome[0], outcome[1], outcome[2]
 
 
 def _point_attribution_keys(context: _PointValuationContext) -> list[AttributionKey]:
@@ -2250,7 +2391,12 @@ def _prepare_point_valuation(
                 )
             },
         )
-    published = _published_point_flows(context.cumulatives, context.seen, attribution_keys)
+    published = _published_point_flows_outcome(
+        context.cumulatives,
+        context.seen,
+        attribution_keys,
+        public_read=context.public_read,
+    )
     if isinstance(published, str):
         return _context_untrusted_point(
             context,
@@ -2262,13 +2408,14 @@ def _prepare_point_valuation(
                 )
             },
         )
-    realized, fee, accrual = published
+    realized, fee, accrual, flow_adjustment = published
     return _PointPreparation(
         instrument_untrusted_reasons=instrument_reasons,
         realized=realized,
         fee=fee,
         accrual=accrual,
         attribution_keys=attribution_keys,
+        flow_adjustment=flow_adjustment,
     )
 
 
@@ -2867,6 +3014,7 @@ def _mark_incomplete_point(
     attribution: tuple[PnlAttributionContribution, ...],
 ) -> PnlTimelinePoint:
     """Build a mark-incomplete point while preserving trusted cumulatives."""
+    adjustment = preparation.flow_adjustment
     return PnlTimelinePoint(
         point_time=point_time,
         realized_pnl=preparation.realized.total,
@@ -2879,6 +3027,11 @@ def _mark_incomplete_point(
         per_instrument=tuple(accumulator.contributions),
         attribution=attribution,
         carried_inputs=canonical_carried_inputs(accumulator.carried_inputs),
+        total_rounding_adjusted=adjustment.total_rounding_adjusted,
+        total_deviation_ulps=adjustment.total_deviation_ulps,
+        absorber_deviation_ulps=adjustment.absorber_deviation_ulps,
+        instrument_absorber_id=adjustment.instrument_absorber_id,
+        attribution_absorber_key=adjustment.attribution_absorber_key,
     )
 
 
@@ -2919,6 +3072,7 @@ def _finalize_valued_point(
         )
     if accumulator.point_reasons:
         return _mark_incomplete_point(preparation, point_time, accumulator, attribution)
+    adjustment = preparation.flow_adjustment
     return PnlTimelinePoint(
         point_time=point_time,
         realized_pnl=preparation.realized.total,
@@ -2931,6 +3085,11 @@ def _finalize_valued_point(
         per_instrument=tuple(accumulator.contributions),
         attribution=attribution,
         carried_inputs=canonical_carried_inputs(accumulator.carried_inputs),
+        total_rounding_adjusted=adjustment.total_rounding_adjusted,
+        total_deviation_ulps=adjustment.total_deviation_ulps,
+        absorber_deviation_ulps=adjustment.absorber_deviation_ulps,
+        instrument_absorber_id=adjustment.instrument_absorber_id,
+        attribution_absorber_key=adjustment.attribution_absorber_key,
     )
 
 
@@ -3055,6 +3214,7 @@ class _TimelineBuildEvidence:
     widen_unrealized_absorber: bool
     replay_recovery_work: _ReplayRecoveryWork | None
     compensated_unrealized_fallback: bool = False
+    public_read: bool = False
 
 
 @dataclass
@@ -3163,6 +3323,7 @@ def _resolved_build_evidence(
             else None
         ),
         compensated_unrealized_fallback=window.compensated_unrealized_fallback,
+        public_read=window.public_read,
     )
 
 
@@ -3914,6 +4075,7 @@ def _point_valuation_context(
         carried_event_inputs=state.carried_event_inputs,
         widen_unrealized_absorber=evidence.widen_unrealized_absorber,
         compensated_unrealized_fallback=evidence.compensated_unrealized_fallback,
+        public_read=evidence.public_read,
     )
 
 

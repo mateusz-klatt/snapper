@@ -124,6 +124,13 @@ class PnlInstrumentContributionData(StrictBody):
     unrealized_pnl: float | None
 
 
+class PnlAttributionKeyData(StrictBody):
+    """Composite origin and strategy identity of an attribution absorber."""
+
+    origin: PnlAttributionOrigin
+    strategy_name: str | None
+
+
 class PnlAttributionContributionData(StrictBody):
     """One composite origin/strategy contribution to a series point.
 
@@ -174,6 +181,13 @@ class PnlTimelinePointData(StrictBody):
     the one at the bucket's endpoint minute (endpoint-selection); these stocks
     are never summed or averaged across a bucket. The 5A P&L fields above are
     unaffected by the overlay and always come from the live recompute.
+
+    ``total_rounding_adjusted`` and its companion fields disclose when a public
+    read fell back to an adjusted flow total (``5A.18``) after all faithful
+    flow-recovery passes completed without a solution: ``total_deviation_ulps``
+    and ``absorber_deviation_ulps`` report the maximum absolute ULP deviations
+    across adjusted families at the point, and ``instrument_absorber_id`` or
+    ``attribution_absorber_key`` names the single absorber chosen per dimension.
     """
 
     point_time: datetime
@@ -192,6 +206,11 @@ class PnlTimelinePointData(StrictBody):
     attribution: list[PnlAttributionContributionData]
     carried_inputs: list[PnlCarriedInputData] = Field(default_factory=list)
     max_carry_age_minutes: int | None = None
+    total_rounding_adjusted: bool = False
+    total_deviation_ulps: float | None = None
+    absorber_deviation_ulps: float | None = None
+    instrument_absorber_id: str | None = None
+    attribution_absorber_key: PnlAttributionKeyData | None = None
 
     @model_validator(mode="after")
     def _require_consistent_incompleteness(self) -> Self:

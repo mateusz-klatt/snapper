@@ -373,3 +373,36 @@ def test_maximum_key_and_branch_counts_remain_bounded_and_reusable() -> None:
     assert budget.remaining_key_visits == 0
     assert recovery.recover(inputs) is projection
     assert budget.remaining_key_visits == 0
+
+
+def test_completed_refusal_distinguishes_exhaustive_failure_from_aborts() -> None:
+    """Report completed refusal only after an exhaustive search returned ``None``.
+
+    Given: Completed impossible, completed success, budget-aborted, branch-capped,
+        and key-capped inputs.
+    When: ``completed_refusal`` is queried after ``recover``.
+    Then: Only the exhaustive impossible input (and its cached replay) returns ``True``.
+    """
+    impossible = _class_i()
+    full_recovery = FaithfulFlowRecovery[str, str](FaithfulRecoveryBudget())
+    assert full_recovery.recover(impossible) is None
+    assert full_recovery.completed_refusal(impossible) is True
+    assert full_recovery.recover(replace(impossible)) is None
+    assert full_recovery.completed_refusal(impossible) is True
+
+    success_recovery = FaithfulFlowRecovery[str, str](FaithfulRecoveryBudget())
+    assert success_recovery.recover(_class_w()) is not None
+    assert success_recovery.completed_refusal(_class_w()) is False
+
+    aborted_recovery = FaithfulFlowRecovery[str, str](FaithfulRecoveryBudget(0))
+    assert aborted_recovery.recover(impossible) is None
+    assert aborted_recovery.completed_refusal(impossible) is False
+
+    units = exact_units_of(1.0) + 1
+    branch_capped = FaithfulFlowInput(
+        13 * units,
+        tuple((f"i-{idx}", units) for idx in range(13)),
+        (("a0", 13 * units),),
+    )
+    assert full_recovery.recover(branch_capped) is None
+    assert full_recovery.completed_refusal(branch_capped) is False
