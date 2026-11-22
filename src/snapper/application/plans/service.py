@@ -56,6 +56,7 @@ from snapper.data.repository_types import ExecutionPlanDecisionOutboxInsertRow
 from snapper.data.repository_types import ExecutionPlanDecisionOutboxRow
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import TradeCommandInsertRow
+from snapper.data.repository_types import TradeCommandRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
@@ -92,6 +93,27 @@ def _decision_outbox_backoff_seconds(attempt_number: int) -> float:
     exp = max(attempt_number - 1, 0)
     scaled: float = _DECISION_OUTBOX_BACKOFF_BASE_S * (2**exp)
     return min(scaled, _DECISION_OUTBOX_BACKOFF_CAP_S)
+
+
+def _stranded_cancel_target_never_placed(
+    exchange_order_id: str | None, create_status: str | None
+) -> bool:
+    """Return whether durable child state proves no venue cancel is needed.
+
+    Args:
+        exchange_order_id: Venue-assigned id from the child's active order, if any.
+        create_status: Active create or submit command status, when available.
+
+    Returns:
+        True for a terminally failed create, or an empty venue id without
+        an accepted or partially filled create proving venue placement.
+    """
+    if create_status == TradeCommandStatusEnum.FAILED:
+        return True
+    return not exchange_order_id and create_status not in (
+        TradeCommandStatusEnum.ACCEPTED,
+        TradeCommandStatusEnum.PARTIALLY_FILLED,
+    )
 
 
 @register_process(
@@ -561,6 +583,8 @@ class PlanExecutorService(RegisterableProcess):
             - Skipped if a non-terminal cancel command already exists
               for this child id, so this is idempotent across restarts
               while the plan is still ``cancel_requested``.
+            - Settled locally without a venue command when the child has
+              no exchange order id or its create command terminally failed.
 
         Args:
             plan: Recovered plan row in ``cancel_requested`` status.
@@ -718,8 +742,8 @@ class PlanExecutorService(RegisterableProcess):
         Item G2b: a child whose create or submit command ended
         ``cancelled``, ``filled`` or ``expired`` with venue evidence (the
         same rule the reconciliation loop retires cancels on) gets no new
-        cancel. Every other child is re-emitted as before, including a
-        ``rejected`` or ``failed`` one, which can still change. A raising
+        cancel. Other children retain their existing behavior; a separate
+        guard locally settles empty-id and terminally failed targets. A raising
         lookup also suppresses the re-emit and is logged as an error.
 
         Args:
@@ -758,6 +782,96 @@ class PlanExecutorService(RegisterableProcess):
             target["status"],
         )
         return True
+
+    async def _stranded_cancel_create_command(
+        self, plan: ExecutionPlanRow, child_client_order_id: str
+    ) -> TradeCommandRow | None:
+        """Read the child create command when the repository exposes it.
+
+        Args:
+            plan: Recovered plan row in ``cancel_requested`` status.
+            child_client_order_id: Child order whose create outcome is read.
+
+        Returns:
+            The active create or submit command, or None when unavailable.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return None
+        try:
+            return await self.repository.get_active_create_command_by_client_order_id(
+                child_client_order_id, plan["exchange"]
+            )
+        except Exception as exc:
+            logger.error(
+                "Stranded cancel create command lookup failed for plan {} child {}: {}",
+                plan["public_id"],
+                child_client_order_id,
+                exc,
+            )
+            return None
+
+    async def _settle_never_placed_stranded_cancel(
+        self,
+        plan: ExecutionPlanRow,
+        child_client_order_id: str,
+        create_status: str | None,
+        now: datetime,
+    ) -> None:
+        """Close a stranded plan locally when its child needs no venue cancel.
+
+        Args:
+            plan: Recovered plan row in ``cancel_requested`` status.
+            child_client_order_id: Child order that was never placed.
+            create_status: Active create or submit command status, when available.
+            now: Timestamp for the terminal plan transition.
+        """
+        create_failed = create_status == TradeCommandStatusEnum.FAILED
+        reason_code = (
+            "stranded_cancel_create_failed"
+            if create_failed
+            else "stranded_cancel_missing_exchange_order_id"
+        )
+        new_status = (
+            ExecutionPlanStatusEnum.FAILED if create_failed else ExecutionPlanStatusEnum.CANCELLED
+        )
+        try:
+            transition_id = await self.repository.update_execution_plan_status(
+                public_id=plan["public_id"],
+                new_status=new_status,
+                bus_time=now,
+                session_id=self.tracker.session_id,
+                sequence_id=self.tracker.next_sequence("plan_status"),
+                last_error=reason_code if create_failed else None,
+                completed_at=now,
+                last_evaluated_at=now,
+            )
+        except Exception as exc:
+            logger.warning(
+                "PlanExecutorService: stranded cancel local settlement failed for plan {} "
+                "child {} reason_code={}: {}",
+                plan["public_id"],
+                child_client_order_id,
+                reason_code,
+                exc,
+            )
+            return
+        if transition_id is None:
+            logger.warning(
+                "PlanExecutorService: stranded cancel local settlement found no active plan {} "
+                "child {} reason_code={}",
+                plan["public_id"],
+                child_client_order_id,
+                reason_code,
+            )
+            return
+        self._unregister_plan(plan["public_id"])
+        logger.info(
+            "PlanExecutorService: settled stranded cancel locally for plan {} child {} "
+            "reason_code={}",
+            plan["public_id"],
+            child_client_order_id,
+            reason_code,
+        )
 
     async def _reemit_single_stranded_cancel(
         self,
@@ -817,6 +931,19 @@ class PlanExecutorService(RegisterableProcess):
         except Exception as exc:
             logger.error("Stranded cancel venue lookup failed for {}: {}", plan["public_id"], exc)
             exchange_order_id = None
+        else:
+            create_command = await self._stranded_cancel_create_command(plan, child_client_order_id)
+            create_status = None if create_command is None else create_command["status"]
+            command_exchange_order_id = (
+                None if create_command is None else create_command["exchange_order_id"]
+            )
+            if _stranded_cancel_target_never_placed(
+                exchange_order_id or command_exchange_order_id, create_status
+            ):
+                await self._settle_never_placed_stranded_cancel(
+                    plan, child_client_order_id, create_status, now
+                )
+                return
         session_id = self.tracker.session_id
         sequence_id = self.tracker.next_sequence("plan_stranded_cancels")
         row: dict[str, Any] = {
