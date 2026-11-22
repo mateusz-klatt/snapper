@@ -20689,8 +20689,6 @@ class SQLAlchemyRepository(Repository):
                     ),
                 )
             )
-        if not bounds:
-            return []
         result = await s.execute(
             select(Execution, Order, Instrument)
             .outerjoin(
@@ -22505,8 +22503,9 @@ class SQLAlchemyRepository(Repository):
             Exact set of ``(exchange, scope_sequence)`` coordinates required for the suffix.
 
         Raises:
-            ValueError: When any watermark is negative, any exchange name is blank,
-                or any deferred sequence lies outside ``1..generation``.
+            ValueError: When any watermark is negative or boolean, any exchange
+                name is blank, or any deferred sequence is boolean or lies
+                outside ``1..generation``.
             ExecutionChainError: When any generation watermark regresses below its cutoff.
         """
         expected: set[tuple[str, int]] = set()
@@ -22518,7 +22517,13 @@ class SQLAlchemyRepository(Repository):
         for exchange in exchanges:
             cutoff = request.cutoff_watermarks.get(exchange, 0)
             generation = request.generation_watermarks.get(exchange, 0)
-            if not exchange or cutoff < 0 or generation < 0:
+            if (
+                not exchange
+                or isinstance(cutoff, bool)
+                or isinstance(generation, bool)
+                or cutoff < 0
+                or generation < 0
+            ):
                 raise ValueError("execution suffix watermark map is invalid")
             if generation < cutoff:
                 raise ExecutionChainError(
@@ -22529,7 +22534,7 @@ class SQLAlchemyRepository(Repository):
             for sequence in range(cutoff + 1, generation + 1):
                 expected.add((exchange, sequence))
             for deferred in request.deferred_execution_sequences.get(exchange, ()):
-                if deferred < 1 or deferred > generation:
+                if isinstance(deferred, bool) or deferred < 1 or deferred > generation:
                     raise ValueError("deferred execution sequence lies outside 1..generation")
                 expected.add((exchange, deferred))
         return expected

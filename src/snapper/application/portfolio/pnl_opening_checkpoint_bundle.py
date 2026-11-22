@@ -143,6 +143,14 @@ class PnlEventFxRequirementPayload(BaseModel):
     pair: tuple[NonEmptyStr, NonEmptyStr]
     minutes: tuple[UtcDateTime, ...]
 
+    @field_validator("pair")
+    @classmethod
+    def _validate_pair(cls, value: tuple[str, str]) -> tuple[str, str]:
+        """Require lexically ordered distinct currency legs."""
+        if value[0] >= value[1]:
+            raise ValueError("checkpoint event_walk_state pair must satisfy pair[0] < pair[1]")
+        return value
+
     @field_validator("minutes")
     @classmethod
     def _validate_minutes(cls, value: tuple[datetime, ...]) -> tuple[datetime, ...]:

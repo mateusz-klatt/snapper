@@ -4171,3 +4171,103 @@ async def test_execution_suffix_rejects_negative_watermarks_and_out_of_range_def
     )
     with pytest.raises(ValueError, match=pattern):
         await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+
+
+async def test_execution_suffix_skips_quiet_exchange_and_returns_active_exchange_rows(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Skip an exchange with no suffix or deferred rows while returning another's suffix.
+
+    Given: Two exchanges where ``coinbase`` has cutoff equal to generation and no
+        deferred sequences while ``kraken`` has a new suffix execution 2.
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` reads both exchanges.
+    Then: ``coinbase`` contributes no rows and ``kraken`` sequence 2 is returned.
+
+    Args:
+        repository: Isolated SQLite repository.
+    """
+    coinbase_instrument = _instrument(
+        exchange="coinbase",
+        public_id="00000000-0000-7000-8000-000000000b99",
+    )
+    coinbase_order = _order(
+        public_id="00000000-0000-7000-8000-000000000c99",
+        instrument_public_id="00000000-0000-7000-8000-000000000b99",
+        client_order_id="client-coinbase",
+    )
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _instrument(),
+                _order(),
+                coinbase_instrument,
+                coinbase_order,
+                _execution("coinbase", 1, order_public_id="00000000-0000-7000-8000-000000000c99"),
+                _execution("kraken", 1),
+                _execution("kraken", 2),
+                _fill_event(
+                    "client-coinbase",
+                    "coinbase.BTC-USD.live.s1",
+                    exchange="coinbase",
+                    sequence_id=1,
+                ),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=1),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=2),
+            ]
+        )
+        await session.commit()
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"coinbase": 1, "kraken": 1},
+        generation_watermarks={"coinbase": 1, "kraken": 2},
+        deferred_execution_sequences={},
+        as_of=_AS_OF,
+    )
+    suffix = await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+    assert [(row["exchange"], row["scope_sequence"]) for row in suffix["executions"]] == [
+        ("kraken", 2)
+    ]
+    assert suffix["annulments"] == []
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "generation", "deferred", "pattern"),
+    [
+        ({"kraken": True}, {"kraken": 1}, {}, "watermark"),
+        ({"kraken": 0}, {"kraken": True}, {}, "watermark"),
+        ({"kraken": False}, {"kraken": 1}, {}, "watermark"),
+        ({"kraken": 1}, {"kraken": 2}, {"kraken": (True,)}, "deferred"),
+    ],
+)
+async def test_execution_suffix_rejects_bool_watermarks_and_deferred(
+    repository: SQLAlchemyRepository,
+    cutoff: dict[str, int],
+    generation: dict[str, int],
+    deferred: dict[str, tuple[int, ...]],
+    pattern: str,
+) -> None:
+    """Reject boolean cutoff, generation, or deferred sequence values.
+
+    Given: A direct caller passing ``bool`` values inside cutoff watermarks,
+        generation watermarks, or deferred execution sequences.
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` validates bounds.
+    Then: It raises ``ValueError`` instead of coercing booleans to 0 or 1.
+
+    Args:
+        repository: Isolated SQLite repository.
+        cutoff: Cutoff watermark map under test.
+        generation: Generation watermark map under test.
+        deferred: Deferred sequence map under test.
+        pattern: Substring expected in the raised ``ValueError``.
+    """
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks=cutoff,
+        generation_watermarks=generation,
+        deferred_execution_sequences=deferred,
+        as_of=_AS_OF,
+    )
+    with pytest.raises(ValueError, match=pattern):
+        await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)

@@ -757,3 +757,25 @@ def test_rejects_inverted_activity_spans(span_field: str) -> None:
     spans[_INSTRUMENT] = [_m(6).isoformat(), _m(2).isoformat()]
     with pytest.raises(ValueError, match="span"):
         bundle_from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("pair", [["USD", "EUR"], ["EUR", "EUR"]])
+def test_rejects_unordered_or_equal_event_fx_pair(pair: list[str]) -> None:
+    """Reject non-canonical event-FX currency pairs where pair[0] >= pair[1].
+
+    Given: A serialized bundle whose event-FX requirement pair is reversed or equal.
+    When: ``bundle_from_json`` validates the document.
+    Then: ``ValueError`` rejects the non-canonical pair.
+
+    Args:
+        pair: Non-canonical two-leg currency pair to plant.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    event_walk = _nested_object(payload, "event_walk_state")
+    instruments = cast(list[object], event_walk["requirements"])
+    first = cast(dict[str, object], instruments[0])
+    pairs = cast(list[object], first["requirements"])
+    pair_entry = cast(dict[str, object], pairs[0])
+    pair_entry["pair"] = pair
+    with pytest.raises(ValueError, match="pair"):
+        bundle_from_json(json.dumps(payload))
