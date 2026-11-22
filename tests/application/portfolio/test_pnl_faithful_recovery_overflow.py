@@ -30,6 +30,7 @@ from snapper.application.portfolio.pnl_faithful_recovery import _BoundedDimensio
 from snapper.application.portfolio.pnl_faithful_recovery import exceeds_branch_limit
 from snapper.application.portfolio.pnl_timeline import AttributionKey
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
+from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
 from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
@@ -1222,7 +1223,7 @@ def test_repeated_cancelling_minutes_bound_dfs_node_work(
     )
     for _ in range(1441):
         assert recovery.recover_overflow(cancelling) is None
-    assert node_calls <= 2 * (MAX_OVERFLOW_NODES + MAX_RECOVERY_KEYS)
+    assert MAX_OVERFLOW_NODES <= node_calls <= 2 * (MAX_OVERFLOW_NODES + MAX_RECOVERY_KEYS)
 
     node_calls = 0
     alt_a = cancelling
@@ -1232,30 +1233,20 @@ def test_repeated_cancelling_minutes_bound_dfs_node_work(
     )
     for index in range(1441):
         assert alt_recovery.recover_overflow(alt_a if index % 2 == 0 else alt_b) is None
-    assert node_calls <= MAX_RECOVERY_KEY_VISITS
+    assert 0 < node_calls <= MAX_RECOVERY_KEY_VISITS
 
     node_calls = 0
     window_start = _T0 + timedelta(minutes=1)
     window_end = _T0 + timedelta(minutes=1441)
-    timeline_execs = tuple(
-        TimelineExecution(
-            instrument_public_id=key,
-            shard_key=f"sh-{key}",
-            exchange="kraken",
-            scope_sequence=seq,
-            event_time=window_start,
-            side="buy",
-            size=0.0,
-            position_delta=0.0,
-            price=10.0,
-            fee=-project_units(units),
-            fee_asset="USD",
-            order_public_id="order-manual",
+    timeline_execs_list: list[TimelineExecution] = []
+    seq = 1
+    for key, units in cancelling.instruments:
+        timeline_execs_list.extend(
+            _split_unit_executions(key, units, seq, window_start, "order-manual")
         )
-        for seq, (key, units) in enumerate(cancelling.instruments, start=1)
-    )
+        seq += 2
     timeline_result = build_pnl_timeline(
-        timeline_execs,
+        timeline_execs_list,
         (),
         {},
         TimelineWindow(
@@ -1267,4 +1258,96 @@ def test_repeated_cancelling_minutes_bound_dfs_node_work(
         ),
     )
     assert len(timeline_result.points) == 1441
-    assert node_calls <= 2 * (MAX_OVERFLOW_NODES + MAX_RECOVERY_KEYS)
+    assert MAX_OVERFLOW_NODES <= node_calls <= 2 * (MAX_OVERFLOW_NODES + MAX_RECOVERY_KEYS)
+
+
+def _accrual_split(
+    instrument: str,
+    units: int,
+    accrued_at: datetime,
+) -> tuple[TimelineAccrual, ...]:
+    """Represent ``units`` exact accrual_pnl units using two float accrual terms."""
+    nearest = project_units(units)
+    residual = project_units(units - exact_units_of(nearest))
+    return (
+        TimelineAccrual(instrument, accrued_at, -nearest),
+        TimelineAccrual(instrument, accrued_at, -residual),
+    )
+
+
+def test_overflow_rescue_never_exposes_later_family_legacy_starvation() -> None:
+    """Keep downstream families unlocked by overflow isolated from the legacy budget.
+
+    Given: Relabelled USD 13-attribution fees and 12-choice overflowing accruals on minutes 1-2,
+        followed by reversing both and adding Class W accruals on minute 3,
+    When: Building the 3-minute USD timeline with overflow disabled versus enabled,
+    Then: Minute 3 publishes ``accrual_pnl == 20.00000000000002`` identically under both paths.
+    """
+    pln_execs, pln_lineage, _, _, _ = _thirteen_attribution_inputs("PLN")
+    t1 = _T0 + timedelta(minutes=1)
+    t2 = _T0 + timedelta(minutes=2)
+    t3 = _T0 + timedelta(minutes=3)
+
+    executions: list[TimelineExecution] = [
+        replace(item, fee_asset="USD", event_time=t1) for item in pln_execs
+    ]
+    next_seq = len(executions) + 1
+    for item in pln_execs:
+        executions.append(
+            replace(item, fee_asset="USD", fee=-item.fee, event_time=t3, scope_sequence=next_seq)
+        )
+        next_seq += 1
+
+    accruals: list[TimelineAccrual] = [
+        TimelineAccrual("A0", t1, -1e308),
+        TimelineAccrual("A1", t1, -1e308),
+        TimelineAccrual("A2", t1, 1e308),
+    ]
+    for index in range(12):
+        instrument = f"Z{index:02d}"
+        accruals.append(TimelineAccrual(instrument, t1, -1.0))
+        accruals.append(TimelineAccrual(instrument, t1, -5e-324))
+    accruals.append(TimelineAccrual("Z00", t2, -5e-324))
+
+    accruals.extend(
+        (
+            TimelineAccrual("A0", t3, 1e308),
+            TimelineAccrual("A1", t3, 1e308),
+            TimelineAccrual("A2", t3, -1e308),
+            TimelineAccrual("Z00", t3, 5e-324),
+        )
+    )
+    for index in range(12):
+        instrument = f"Z{index:02d}"
+        accruals.append(TimelineAccrual(instrument, t3, 1.0))
+        accruals.append(TimelineAccrual(instrument, t3, 5e-324))
+
+    class_w = _class_w()
+    for index, (_, units) in enumerate(class_w.instruments):
+        accruals.extend(_accrual_split(f"W{index}", units, t3))
+
+    master_result = build_pnl_timeline(
+        executions,
+        accruals,
+        {},
+        TimelineWindow(t1, t3, "1m", "USD"),
+        lineage=pln_lineage,
+    )
+    assert [entry.reason for entry in master_result.points[0].incompleteness_reasons] == [
+        "attribution_sum_unrepresentable"
+    ]
+    assert [entry.reason for entry in master_result.points[1].incompleteness_reasons] == [
+        "attribution_sum_unrepresentable"
+    ]
+    assert master_result.points[2].valuation_status == "complete"
+    assert master_result.points[2].accrual_pnl == 20.00000000000002
+
+    overflow_result = build_pnl_timeline(
+        executions,
+        accruals,
+        {},
+        TimelineWindow(t1, t3, "1m", "USD", faithful_overflow_recovery=True),
+        lineage=pln_lineage,
+    )
+    assert overflow_result.points[2].valuation_status == "complete"
+    assert overflow_result.points[2].accrual_pnl == 20.00000000000002

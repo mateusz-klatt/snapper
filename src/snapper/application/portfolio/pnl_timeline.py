@@ -2109,6 +2109,39 @@ def _ordered_exact_units[KeyT: Hashable](
     )
 
 
+def _recover_flow_family_outcome(
+    exact: _ExactCumulatives,
+    instrument_keys: Sequence[str],
+    attribution_keys: Sequence[AttributionKey],
+    recovery: _FlowRecovery,
+    *,
+    overflow_mode: Literal["disabled", "on_branch_cap", "forced"] = "disabled",
+) -> tuple[_PublishedFlowFamily | None, bool]:
+    """Try faithful recovery and report whether the overflow path was invoked."""
+    if len(instrument_keys) + len(attribution_keys) > MAX_RECOVERY_KEYS:
+        return None, False
+    request = FaithfulFlowInput(
+        exact.total.exact_units(),
+        _ordered_exact_units(exact.by_instrument, instrument_keys),
+        _ordered_exact_units(exact.by_attribution, attribution_keys),
+    )
+    use_overflow = overflow_mode == "forced" or (
+        overflow_mode == "on_branch_cap"
+        and (
+            exceeds_branch_limit(request.instruments) or exceeds_branch_limit(request.attributions)
+        )
+    )
+    projection = recovery.recover_overflow(request) if use_overflow else recovery.recover(request)
+    if projection is None:
+        return None, use_overflow
+    return (
+        _PublishedFlowFamily(
+            projection.total, dict(projection.instruments), dict(projection.attributions)
+        ),
+        use_overflow,
+    )
+
+
 def _recover_flow_family(
     exact: _ExactCumulatives,
     instrument_keys: Sequence[str],
@@ -2118,24 +2151,13 @@ def _recover_flow_family(
     faithful_overflow_recovery: bool = False,
 ) -> _PublishedFlowFamily | None:
     """Try faithful recovery only after the complete historical family search."""
-    if len(instrument_keys) + len(attribution_keys) > MAX_RECOVERY_KEYS:
-        return None
-    request = FaithfulFlowInput(
-        exact.total.exact_units(),
-        _ordered_exact_units(exact.by_instrument, instrument_keys),
-        _ordered_exact_units(exact.by_attribution, attribution_keys),
-    )
-    if faithful_overflow_recovery and (
-        exceeds_branch_limit(request.instruments) or exceeds_branch_limit(request.attributions)
-    ):
-        projection = recovery.recover_overflow(request)
-    else:
-        projection = recovery.recover(request)
-    if projection is None:
-        return None
-    return _PublishedFlowFamily(
-        projection.total, dict(projection.instruments), dict(projection.attributions)
-    )
+    return _recover_flow_family_outcome(
+        exact,
+        instrument_keys,
+        attribution_keys,
+        recovery,
+        overflow_mode="on_branch_cap" if faithful_overflow_recovery else "disabled",
+    )[0]
 
 
 def _published_point_flows(
@@ -2152,6 +2174,9 @@ def _published_point_flows(
     Every historical total/widen pass runs before bounded faithful recovery.
     An interrupted recovery retains the historical reason and cannot publish
     or cache a partially recovered family. Conservation failures never recover.
+    Once an earlier family at a point invokes overflow recovery, every later
+    recovery at that same point runs against the isolated overflow allowance and
+    cache so master's legacy recovery allowance is never starved.
 
     Args:
         cumulatives: The point's cumulative snapshot with exact families.
@@ -2164,6 +2189,9 @@ def _published_point_flows(
         The three chosen projections in ``(realized, fee, accrual)`` order, or
         the first family's exact withhold reason.
     """
+    overflow_mode: Literal["disabled", "on_branch_cap", "forced"] = (
+        "on_branch_cap" if faithful_overflow_recovery else "disabled"
+    )
     families: list[_PublishedFlowFamily] = []
     for index, exact in enumerate(
         (cumulatives.realized_exact, cumulatives.fee_exact, cumulatives.accrual_exact)
@@ -2172,15 +2200,17 @@ def _published_point_flows(
         if isinstance(family, str):
             if family not in ("instrument_sum_unrepresentable", "attribution_sum_unrepresentable"):
                 return family
-            recovered = _recover_flow_family(
+            recovered, used_overflow = _recover_flow_family_outcome(
                 exact,
                 instrument_keys,
                 attribution_keys,
                 cumulatives.flow_recoveries[index],
-                faithful_overflow_recovery=faithful_overflow_recovery,
+                overflow_mode=overflow_mode,
             )
             if recovered is None:
                 return family
+            if used_overflow:
+                overflow_mode = "forced"
             family = recovered
         families.append(family)
     return families[0], families[1], families[2]

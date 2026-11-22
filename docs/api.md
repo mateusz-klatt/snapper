@@ -1690,12 +1690,19 @@ Exact and zero buckets are fixed. Recovery admits at most 64 keys across both
 dimensions; dimensions with up to 12 binary choices consider at most 4096
 tuples per faithful aggregate, and dimensions exceeding 12 binary choices use a
 bounded branch-and-bound overflow search (at most 512 leaf evaluations and
-8192 search nodes per faithful aggregate). All raw minutes and all three
-families share at most 262144
-candidate-key visits per build. Completed results, including refusals, reuse
-only the last immutable exact-unit/key-order signature per family. A resource
-abort retains the historical incompleteness reason and is not cached as a
-mathematical impossibility. Existing successfully published flow bits remain
+8192 search nodes per faithful aggregate). Two isolated allowances govern work
+across all raw minutes and all three families per build: a legacy allowance of
+at most 262144 candidate-key visits for non-overflow recovery, and a separate
+overflow allowance of at most 262144 units covering overflow dimensions (where
+each dimension base/leaf scan charges its key count and each expanded DFS node
+charges 1 unit) as well as any downstream family at the same minute that only
+becomes reachable after an earlier overflow success. Each family maintains
+separate per-family reuse entries for legacy recovery (last completed immutable
+exact-unit/key-order signature) and overflow recovery (last completed overflow
+signature plus last deterministic step/node-cap signature), so overflow never
+starves or pollutes legacy recovery. A budget abort retains the historical
+incompleteness reason and stays nonterminal (never cached as a mathematical
+impossibility or deterministic cap). Existing successfully published flow bits remain
 unchanged. The version identifies the response contract; consumers requiring
 fresh validation must inspect a fresh response and its version.
 
