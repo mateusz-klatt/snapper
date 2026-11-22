@@ -423,4 +423,8 @@ Exit codes:
     writable-role refusal, `timeout`, `interrupted`, or configuration/DB error.
 - `3`: `RESULT: REFUSED <reason>` — closed checkpoint or frontier refusal (for
     example `frontier_has_fill_gap`, `capture_fill_gap`, or
-    `checkpoint_verify_fallback:...`).
+    `checkpoint_verify_fallback:...`), `caps_exceeded:<kind>` from the
+    pre-run counts, or `cut_moved`. `cut_moved` is a post-load re-check: the
+    capture prefix is already read when it runs, so the overshoot beyond the
+    pre-run count is bounded only by the executions ingested during the probe,
+    within the statement timeout and the memory caps.

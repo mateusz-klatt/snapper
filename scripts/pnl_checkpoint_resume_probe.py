@@ -1049,7 +1049,23 @@ async def _enforce_captured_cut_within_caps(
     capture_prefix: PnlTimelineExecutionPrefix,
     max_executions: int,
 ) -> None:
-    """Refuse with ``cut_moved`` if fresh capture watermarks/witnesses exceed execution caps."""
+    """Refuse with ``cut_moved`` if fresh capture watermarks/witnesses exceed execution caps.
+
+    This is a post-load re-check: the capture prefix has already materialised
+    its executions up to the fresh cut, so it stops the capture replay but not
+    that first load. The overshoot beyond the pre-check COUNT is bounded by the
+    executions ingested while the probe runs, under the statement timeout and
+    the RSS and address-space caps.
+
+    Args:
+        repo: Read-only repository bound to the probe engine.
+        scope: Sample scope whose prefix was captured.
+        capture_prefix: Execution prefix read at the capture horizon.
+        max_executions: Configured execution cap.
+
+    Raises:
+        CheckpointResumeProbeError: When the captured cut exceeds the caps.
+    """
     witness = capture_prefix.get("fill_witness_cut")
     assert witness is not None
     captured_counts = await repo.get_pnl_execution_prefix_counts(
