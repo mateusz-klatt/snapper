@@ -7357,20 +7357,24 @@ def _series_engine_options(options: PnlSeriesReplayOptions) -> PnlEngineOptions:
 
 def _activate_checkpoint_capture(
     options: PnlSeriesReplayOptions,
+    policy: PnlSeriesReadPolicy,
     to_time: datetime,
 ) -> PnlCheckpointCaptureRequest | None:
     """Activate and return the optional capture request.
 
     Args:
-        options: Replay options carrying the optional capture request.
+        options: Replay options carrying the optional capture request and FX policy.
+        policy: Series read policy controlling carry valuation.
         to_time: Requested checkpoint minute C.
 
     Returns:
-        The activated request, or ``None`` when capture was not requested.
+        The activated or refused request, or ``None`` when capture was not requested.
     """
     request = options.checkpoint_capture
     if request is not None:
         request.activate(to_time, options.replay_generation_tip)
+        if not options.pointwise_exact_fx or policy.carry_valuation:
+            request.refuse_read_policy()
     return request
 
 
@@ -7673,7 +7677,7 @@ async def build_wallet_pnl_series(
     with pnl_read_phase("series_anchor"):
         _validate_frozen_replay_policy(options, policy, to_time, as_of)
         engine_options = _series_engine_options(options)
-        capture_request = _activate_checkpoint_capture(options, to_time)
+        capture_request = _activate_checkpoint_capture(options, policy, to_time)
         wallet_public_id = normalize_portfolio_pnl_wallet_public_id(wallet_public_id)
         _enforce_total_work_budget(from_time, to_time, 0)
         anchor_load = await _load_or_create_anchor(
