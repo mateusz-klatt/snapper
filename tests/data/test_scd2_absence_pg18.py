@@ -114,7 +114,9 @@ async def pg_repos() -> AsyncIterator[tuple[SQLAlchemyRepository, DatabaseReposi
         if created:
             async with maintenance.engine.connect() as conn:
                 admin = await conn.execution_options(isolation_level="AUTOCOMMIT")
-                await admin.exec_driver_sql(f'DROP DATABASE IF EXISTS "{database_name}"')
+                await admin.exec_driver_sql(
+                    f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)'
+                )
         await maintenance.engine.dispose()
 
 
@@ -331,21 +333,21 @@ async def _run_pg18_clock_skew_subphase(
     async_repo: SQLAlchemyRepository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exercise cold-start clock skew clamping under a concurrent PG18 flush barrier."""
+    """Exercise cold-start clock skew clamping deterministically on PG18."""
     skew_key = f"pg-skew-{uuid4().hex}"
-    skew_pid = str(uuid4())
-    skew_barrier = asyncio.Barrier(2)
-    skew_passed: set[int] = set()
+    new_flushed = asyncio.Event()
+    old_blocked = False
     original_flush = AsyncSession.flush
 
     async def _skew_flush(session: AsyncSession) -> None:
-        session_key = id(session)
-        if session_key not in skew_passed and any(
-            isinstance(obj, Setting) and obj.key == skew_key for obj in session.new
-        ):
-            skew_passed.add(session_key)
-            await skew_barrier.wait()
+        nonlocal old_blocked
+        pending = [obj for obj in session.new if isinstance(obj, Setting) and obj.key == skew_key]
+        if pending and pending[0].value == "old" and not old_blocked:
+            old_blocked = True
+            await asyncio.wait_for(new_flushed.wait(), timeout=_WAIT_TIMEOUT_S)
         await original_flush(session)
+        if pending and pending[0].value == "new":
+            new_flushed.set()
 
     monkeypatch.setattr(AsyncSession, "flush", _skew_flush)
 
@@ -358,8 +360,7 @@ async def _run_pg18_clock_skew_subphase(
                     model=Setting,
                     match_filters=[Setting.key == skew_key],
                     bus_time=bus_time,
-                    decide=lambda existing: {
-                        "public_id": skew_pid if existing is None else existing.public_id,
+                    decide=lambda _existing: {
                         "key": skew_key,
                         "value": tag,
                         "category": "race",
@@ -370,6 +371,8 @@ async def _run_pg18_clock_skew_subphase(
                     },
                 ),
             )
+            if tag == "new":
+                await _wait_for_blocked_lock(async_repo, "settings")
             await session.commit()
             assert outcome.row is not None
             return outcome.outcome, outcome.row.timestamp, outcome.row.public_id
@@ -378,9 +381,10 @@ async def _run_pg18_clock_skew_subphase(
         asyncio.gather(_skew_writer("new", _T2, 1), _skew_writer("old", _T1, 2)),
         timeout=_WAIT_TIMEOUT_S,
     )
-    assert sorted((res_new[0], res_old[0])) == ["created", "updated"]
-    assert res_new[1] == _T2 and res_old[1] == _T2
-    assert res_new[2] == skew_pid and res_old[2] == skew_pid
+    monkeypatch.undo()
+    assert res_new[:2] == ("created", _T2)
+    assert res_old[:2] == ("updated", _T2)
+    assert res_new[2] == res_old[2]
 
 
 def _install_async_flush_barrier(
@@ -614,6 +618,7 @@ async def test_pg18_race_symbol_alias_and_secondary_unique_index(
     outcomes = await asyncio.wait_for(
         asyncio.gather(_alias_worker("a"), _alias_worker("b")), timeout=_WAIT_TIMEOUT_S
     )
+    monkeypatch.undo()
     assert sorted(outcomes) == ["created", "unchanged"]
     await _assert_single_active(
         async_repo,
@@ -1006,21 +1011,21 @@ async def test_pg18_race_market_snapshot_mixed_shape_deadlock_free(
                 [
                     {**_snapshot_row(cold_a, 10, 30.0), "timestamp": _T1},
                     {**_snapshot_row(cold_b, 11, 40.0), "timestamp": _T1},
-                    {**_snapshot_row(cold_b, 12, 41.0), "timestamp": _T2},
+                    {**_snapshot_row(cold_b, 12, 41.0), "timestamp": _T1},
                 ]
             ),
             async_repo.upsert_market_snapshots(
                 [
-                    {**_snapshot_row(cold_b, 20, 42.0), "timestamp": _T1 + timedelta(seconds=1)},
-                    {**_snapshot_row(cold_a, 21, 32.0), "timestamp": _T1 + timedelta(seconds=1)},
-                    {**_snapshot_row(cold_a, 22, 33.0), "timestamp": _T2 + timedelta(seconds=1)},
+                    {**_snapshot_row(cold_b, 20, 42.0), "timestamp": _T1},
+                    {**_snapshot_row(cold_a, 21, 32.0), "timestamp": _T1},
+                    {**_snapshot_row(cold_a, 22, 33.0), "timestamp": _T1},
                 ]
             ),
         ),
         timeout=_WAIT_TIMEOUT_S,
     )
-    assert cold_counts == [3, 3]
     monkeypatch.undo()
+    assert cold_counts == [3, 3]
 
     warm_counts = await asyncio.wait_for(
         asyncio.gather(
@@ -1033,19 +1038,79 @@ async def test_pg18_race_market_snapshot_mixed_shape_deadlock_free(
             ),
             async_repo.upsert_market_snapshots(
                 [
-                    {**_snapshot_row(warm_b, 40, 23.0), "timestamp": _T2},
-                    {**_snapshot_row(warm_a, 41, 13.0), "timestamp": _T2},
-                    {**_snapshot_row(warm_a, 42, 14.0), "timestamp": _T2 + timedelta(seconds=5)},
+                    {**_snapshot_row(warm_b, 40, 23.0), "timestamp": _T1 + timedelta(seconds=1)},
+                    {**_snapshot_row(warm_a, 41, 13.0), "timestamp": _T1 + timedelta(seconds=1)},
+                    {**_snapshot_row(warm_a, 42, 14.0), "timestamp": _T2 + timedelta(seconds=1)},
+                ]
+            ),
+            return_exceptions=True,
+        ),
+        timeout=_WAIT_TIMEOUT_S,
+    )
+    assert any(res == 3 for res in warm_counts)
+    for res in warm_counts:
+        assert res == 3 or isinstance(res, TemporalVersionConflictError)
+    for ipid in (cold_a, cold_b, warm_a, warm_b):
+        await _assert_single_active(
+            async_repo, MarketSnapshot, MarketSnapshot.instrument_public_id == ipid
+        )
+
+
+@pytest.mark.asyncio
+async def test_pg18_race_market_snapshot_mixed_shape_skewed_chunk_size(
+    pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mixed batches remain deadlock-free with chunk_size=1 and skewed active timestamps."""
+    async_repo, _ = pg_repos
+    _, inst_1 = await _seed_symbol_instrument_pg(async_repo, f"SNPSK1-{uuid4().hex[:6]}-USD")
+    _, inst_2 = await _seed_symbol_instrument_pg(async_repo, f"SNPSK2-{uuid4().hex[:6]}-USD")
+    skew_a, skew_b = sorted((inst_1, inst_2))
+    assert (
+        await async_repo.upsert_market_snapshots(
+            [
+                {**_snapshot_row(skew_a, 1, 10.0), "timestamp": _T2},
+                {**_snapshot_row(skew_b, 2, 20.0), "timestamp": _T0},
+            ]
+        )
+        == 2
+    )
+
+    monkeypatch.setattr("snapper.data.repository._SNAPSHOT_LOOKUP_CHUNK_SIZE", 1)
+    start_barrier = asyncio.Barrier(2)
+
+    async def _run_batch(batch: list[MarketSnapshotUpsertRow]) -> int:
+        await start_barrier.wait()
+        return await async_repo.upsert_market_snapshots(batch)
+
+    counts = await asyncio.wait_for(
+        asyncio.gather(
+            _run_batch(
+                [
+                    {**_snapshot_row(skew_a, 3, 11.0), "timestamp": _T1},
+                    {**_snapshot_row(skew_b, 4, 21.0), "timestamp": _T1},
+                    {**_snapshot_row(skew_b, 5, 22.0), "timestamp": _T1},
+                ]
+            ),
+            _run_batch(
+                [
+                    {**_snapshot_row(skew_b, 6, 23.0), "timestamp": _T1},
+                    {**_snapshot_row(skew_a, 7, 12.0), "timestamp": _T1},
+                    {**_snapshot_row(skew_a, 8, 13.0), "timestamp": _T1},
                 ]
             ),
         ),
         timeout=_WAIT_TIMEOUT_S,
     )
-    assert warm_counts == [3, 3]
-    for ipid in (cold_a, cold_b, warm_a, warm_b):
-        await _assert_single_active(
-            async_repo, MarketSnapshot, MarketSnapshot.instrument_public_id == ipid
-        )
+    assert counts == [3, 3]
+    active_a = await _assert_single_active(
+        async_repo, MarketSnapshot, MarketSnapshot.instrument_public_id == skew_a
+    )
+    active_b = await _assert_single_active(
+        async_repo, MarketSnapshot, MarketSnapshot.instrument_public_id == skew_b
+    )
+    assert active_a[0].timestamp == _T2
+    assert active_b[0].timestamp == _T1
 
 
 @pytest.mark.asyncio
@@ -1499,57 +1564,56 @@ async def test_pg18_race_spot_asset_precision_evidence(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sync and async precision writers merge both planes under one active row on PG18."""
+    """Sync and async precision writers merge both planes under advisory lock and SAVEPOINT retry."""
     async_repo, sync_repo = pg_repos
     asset = f"A{uuid4().hex[:5]}"
-    _install_mixed_flush_barrier(
-        monkeypatch, SpotAssetPrecisionEvidence, asyncio.get_running_loop()
-    )
 
-    async def _async_ev() -> None:
-        await async_repo.upsert_spot_asset_precision_evidence(
-            SpotAssetPrecisionEvidenceUpsertRow(
-                exchange="walutomat",
-                asset=asset,
-                balance_decimals=2,
-                balance_source="bal",
-                balance_version="v1",
-                balance_observed_at=_T1,
-                fee_decimals=None,
-                fee_source=None,
-                fee_version=None,
-                fee_observed_at=None,
-                session_id=_session_uuid("prec-a"),
-                sequence_id=1,
-                timestamp=_T1,
-            )
+    def _balance_row(key_asset: str) -> SpotAssetPrecisionEvidenceUpsertRow:
+        return SpotAssetPrecisionEvidenceUpsertRow(
+            exchange="walutomat",
+            asset=key_asset,
+            balance_decimals=2,
+            balance_source="bal",
+            balance_version="v1",
+            balance_observed_at=_T1,
+            fee_decimals=None,
+            fee_source=None,
+            fee_version=None,
+            fee_observed_at=None,
+            session_id=_session_uuid("prec-a"),
+            sequence_id=1,
+            timestamp=_T1,
         )
 
-    def _sync_ev() -> None:
+    def _fee_row(key_asset: str) -> SpotAssetPrecisionEvidenceUpsertRow:
+        return SpotAssetPrecisionEvidenceUpsertRow(
+            exchange="walutomat",
+            asset=key_asset,
+            balance_decimals=None,
+            balance_source=None,
+            balance_version=None,
+            balance_observed_at=None,
+            fee_decimals=4,
+            fee_source="fee",
+            fee_version="v2",
+            fee_observed_at=_T1,
+            session_id=_session_uuid("prec-s"),
+            sequence_id=2,
+            timestamp=_T1,
+        )
+
+    def _sync_ev(key_asset: str) -> None:
         with sync_repo.get_session() as session:
             begin_scd2_write_sync(session)
-            sync_repo.upsert_spot_asset_precision_evidence_sync(
-                session,
-                SpotAssetPrecisionEvidenceUpsertRow(
-                    exchange="walutomat",
-                    asset=asset,
-                    balance_decimals=None,
-                    balance_source=None,
-                    balance_version=None,
-                    balance_observed_at=None,
-                    fee_decimals=4,
-                    fee_source="fee",
-                    fee_version="v2",
-                    fee_observed_at=_T1,
-                    session_id=_session_uuid("prec-s"),
-                    sequence_id=2,
-                    timestamp=_T1,
-                ),
-            )
+            sync_repo.upsert_spot_asset_precision_evidence_sync(session, _fee_row(key_asset))
             session.commit()
 
     await asyncio.wait_for(
-        asyncio.gather(_async_ev(), asyncio.to_thread(_sync_ev)), timeout=_WAIT_TIMEOUT_S
+        asyncio.gather(
+            async_repo.upsert_spot_asset_precision_evidence(_balance_row(asset)),
+            asyncio.to_thread(_sync_ev, asset),
+        ),
+        timeout=_WAIT_TIMEOUT_S,
     )
     active = await _assert_single_active(
         async_repo,
@@ -1559,6 +1623,41 @@ async def test_pg18_race_spot_asset_precision_evidence(
     )
     assert active[0].balance_decimals == 2
     assert active[0].fee_decimals == 4
+
+    retry_asset = f"R{uuid4().hex[:5]}"
+
+    async def _noop_async_lock(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        async_repo,
+        "_acquire_spot_asset_precision_evidence_advisory_lock",
+        _noop_async_lock,
+    )
+    monkeypatch.setattr(
+        DatabaseRepository,
+        "_acquire_spot_asset_precision_evidence_advisory_lock_sync",
+        staticmethod(lambda *_args, **_kwargs: None),
+    )
+    _install_mixed_flush_barrier(
+        monkeypatch, SpotAssetPrecisionEvidence, asyncio.get_running_loop()
+    )
+    await asyncio.wait_for(
+        asyncio.gather(
+            async_repo.upsert_spot_asset_precision_evidence(_balance_row(retry_asset)),
+            asyncio.to_thread(_sync_ev, retry_asset),
+        ),
+        timeout=_WAIT_TIMEOUT_S,
+    )
+    monkeypatch.undo()
+    retry_active = await _assert_single_active(
+        async_repo,
+        SpotAssetPrecisionEvidence,
+        SpotAssetPrecisionEvidence.exchange == "walutomat",
+        SpotAssetPrecisionEvidence.asset == retry_asset,
+    )
+    assert retry_active[0].balance_decimals == 2
+    assert retry_active[0].fee_decimals == 4
 
 
 @pytest.mark.asyncio
@@ -1770,14 +1869,14 @@ async def test_pg18_race_instrument_underlying_mapping(
         return await async_repo.upsert_instrument_underlying_mapping(
             instrument_public_id=inst_pid,
             underlying_public_id=underlying_pid,
-            relationship_type="spot",
+            relationship_type="exact",
             session_id=_session_uuid(f"um-{seq}"),
             sequence_id=seq,
             timestamp=_T1,
         )
 
     outcomes = await asyncio.wait_for(asyncio.gather(_map(1), _map(2)), timeout=_WAIT_TIMEOUT_S)
-    assert sorted(outcomes) == ["created", "updated"]
+    assert sorted(outcomes) == ["created", "unchanged"]
     await _assert_single_active(
         async_repo,
         InstrumentUnderlyingMapping,

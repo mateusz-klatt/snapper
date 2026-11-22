@@ -4973,9 +4973,12 @@ class Repository(ABC):
 
         Looks up the active Instrument by public_id as of *timestamp*.
         Compares payload (symbol_public_id, exchange) against the active
-        version.  Returns existing id when identical (no-op).  When
+        version. Returns existing id when identical (no-op). When
         different, closes the old version and inserts a new one with
-        the same public_id.
+        the same public_id. Opens its own database session and acquires
+        ``SYMBOL_UPDATER_LOCK_IDENTITY`` on PostgreSQL, so callers must
+        not invoke this while another session already holds that catalog
+        advisory lock or it will self-deadlock.
 
         Raises ValueError when no active version exists for the given
         instrument_public_id, or when the target business key is
@@ -5614,6 +5617,18 @@ class Repository(ABC):
         Each row must contain instrument_public_id plus market data fields.
         Closes the active snapshot for the same instrument and inserts a
         new version, preserving public_id across updates.
+
+        Args:
+            rows: Snapshot payloads to persist cleanly in deterministic order.
+
+        Returns:
+            Number of persisted snapshot versions.
+
+        Raises:
+            TemporalVersionConflictError: If an incoming snapshot ``timestamp``
+                falls strictly inside an already-closed historical version
+                interval (including when a concurrent writer closes that
+                interval with a newer timestamp first).
         """
         ...
 
@@ -12799,12 +12814,15 @@ class SQLAlchemyRepository(Repository):
     ) -> int:
         """SCD2 close+insert for instrument business attributes.
 
-        Acquires the shared catalog updater advisory lock on PostgreSQL before
-        locking both the target active instrument and any active occupant of the
-        destination business key in deterministic ``Instrument.id`` order,
-        enforces Contract A update-only checks (including lock-wake misses and
-        closed or clock-skewed rows), carries ``requires_ai_review`` verbatim,
-        and clears ``source_exchange`` unless the destination exchange is paper.
+        Opens its own session and acquires ``SYMBOL_UPDATER_LOCK_IDENTITY`` on
+        PostgreSQL before locking both the target active instrument and any
+        active occupant of the destination business key in deterministic
+        ``Instrument.id`` order. Callers must not invoke this method while
+        their own session already holds the catalog advisory lock, or it will
+        self-deadlock. Enforces Contract A update-only checks (including
+        lock-wake misses and closed or clock-skewed rows), carries
+        ``requires_ai_review`` verbatim, and clears ``source_exchange`` unless
+        the destination exchange is paper.
         """
         async with self.session() as s:
             await begin_scd2_write(s)
@@ -15886,22 +15904,9 @@ class SQLAlchemyRepository(Repository):
         sequential_rows: list[MarketSnapshotUpsertRow],
         existing_by_key: dict[_SnapshotNaturalKey, MarketSnapshot],
     ) -> int:
-        """Execute bulk and/or sequential snapshot writes after all keys are locked."""
+        """Execute bulk snapshot writes for unique batches or globally sorted per-row writes."""
         if not sequential_rows:
             return await self._upsert_unique_snapshot_rows(session, unique_rows, existing_by_key)
-        all_unique_warm = all(
-            self._snapshot_natural_key(row) in existing_by_key for row in unique_rows
-        )
-        if all_unique_warm and unique_rows:
-            count = await self._upsert_unique_snapshot_rows(session, unique_rows, existing_by_key)
-            ordered_sequential = sorted(
-                sequential_rows,
-                key=lambda r: (r["instrument_public_id"], r["timestamp"]),
-            )
-            for r in ordered_sequential:
-                await self._upsert_snapshot_row(session, r)
-                count += 1
-            return count
         ordered_all = sorted(
             staged_rows,
             key=lambda r: (r["instrument_public_id"], r["timestamp"]),
@@ -15918,9 +15923,24 @@ class SQLAlchemyRepository(Repository):
         One active row per instrument_public_id. Closes the existing active
         snapshot and inserts a new version with the same public_id.
 
-        Acquires row locks across ALL natural keys in one sorted phase before
-        executing bulk and sequential writes so mixed-shape batches cannot
-        deadlock, and defers caller dict metadata copybacks until after commit.
+        Unique-key batches pre-lock and bulk-upsert in deterministic key order;
+        batches containing duplicate keys skip the bulk pre-lookup/two-phase
+        path completely and process all rows in one globally sorted
+        ``(instrument_public_id, timestamp)`` order so chunk boundaries or
+        skewed active timestamps can never induce out-of-order locks. Defers
+        caller dict metadata copybacks until after commit.
+
+        Args:
+            rows: Snapshot payloads to persist cleanly in deterministic order.
+
+        Returns:
+            Number of persisted snapshot versions.
+
+        Raises:
+            TemporalVersionConflictError: If an incoming snapshot ``timestamp``
+                falls strictly inside an already-closed historical version
+                interval (including when a concurrent writer closes that
+                interval with a newer timestamp first).
         """
         if not rows:
             return 0
@@ -15928,8 +15948,12 @@ class SQLAlchemyRepository(Repository):
         staged_rows = [staged_row for _, staged_row in staged_pairs]
         async with self.session() as s:
             await begin_scd2_write(s)
-            existing_by_key = await self._load_existing_snapshots_for_rows(s, staged_rows)
             unique_rows, sequential_rows = self._split_snapshot_rows_by_duplicate_key(staged_rows)
+            existing_by_key = (
+                {}
+                if sequential_rows
+                else await self._load_existing_snapshots_for_rows(s, unique_rows)
+            )
             count = await self._execute_snapshot_write_phases(
                 s,
                 staged_rows,

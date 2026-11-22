@@ -2283,10 +2283,10 @@ def _snapshot_statement_events(
 
 
 @pytest.mark.asyncio
-async def test_upsert_market_snapshots_mixed_shape_locks_all_keys_before_writes(
+async def test_upsert_market_snapshots_mixed_shape_uses_ordered_all_path(
     file_async_repo: tuple[SQLAlchemyRepository, Path],
 ) -> None:
-    """Mixed-shape batches lock ALL keys in sorted order before bulk or sequential writes."""
+    """Mixed-shape batches skip bulk two-phase optimization and use ordered_all per-row writes."""
     repo, _ = file_async_repo
     inst_a, inst_b = await _seed_sorted_instruments(repo)
     assert (
@@ -2300,35 +2300,39 @@ async def test_upsert_market_snapshots_mixed_shape_locks_all_keys_before_writes(
     )
 
     recorded = _snapshot_statement_events(repo.engine.sync_engine)
-    mixed_b_first: list[MarketSnapshotUpsertRow] = [
-        {**_snapshot_row(inst_b, 3, 21.0), "timestamp": _T1},
-        {**_snapshot_row(inst_a, 4, 11.0), "timestamp": _T1},
-        {**_snapshot_row(inst_a, 5, 12.0), "timestamp": _T2},
-    ]
-    assert await repo.upsert_market_snapshots(mixed_b_first) == 3
-
-    first_stmt, first_params = recorded[0]
-    upper_first = first_stmt.upper()
-    assert upper_first.startswith("SELECT ")
-    assert (
-        "ORDER BY MARKET_SNAPSHOTS.INSTRUMENT_PUBLIC_ID ASC, MARKET_SNAPSHOTS.ID ASC" in upper_first
-    )
-    assert isinstance(first_params, tuple)
-    assert first_params[:2] == (inst_a, inst_b)
-    first_write_idx = next(
-        idx
-        for idx, (sql, _p) in enumerate(recorded)
-        if sql.upper().startswith(("UPDATE ", "INSERT "))
-    )
-    assert first_write_idx > 0
-
-    recorded.clear()
-    cold_a, cold_b = await _seed_sorted_instruments(repo, "ORD2-USD")
-    fallback_order: list[tuple[str, datetime]] = []
+    warm_order: list[tuple[str, datetime]] = []
     original_row_upsert = repo._upsert_snapshot_row
 
-    async def _track_order(session: AsyncSession, row: MarketSnapshotUpsertRow) -> None:
-        fallback_order.append((row["instrument_public_id"], row["timestamp"]))
+    async def _track_warm_order(session: AsyncSession, row: MarketSnapshotUpsertRow) -> None:
+        warm_order.append((row["instrument_public_id"], row["timestamp"]))
+        await original_row_upsert(session, row)
+
+    mixed_warm_b_first: list[MarketSnapshotUpsertRow] = [
+        {**_snapshot_row(inst_b, 3, 21.0), "timestamp": _T1},
+        {**_snapshot_row(inst_a, 4, 12.0), "timestamp": _T2},
+        {**_snapshot_row(inst_a, 5, 11.0), "timestamp": _T1},
+    ]
+    with (
+        patch.object(repo, "_load_existing_snapshots_for_rows", new_callable=AsyncMock) as spy_load,
+        patch.object(repo, "_upsert_unique_snapshot_rows", new_callable=AsyncMock) as spy_bulk,
+        patch.object(repo, "_upsert_snapshot_row", new=_track_warm_order),
+    ):
+        assert await repo.upsert_market_snapshots(mixed_warm_b_first) == 3
+
+    spy_load.assert_not_awaited()
+    spy_bulk.assert_not_awaited()
+    assert warm_order == [(inst_a, _T1), (inst_a, _T2), (inst_b, _T1)]
+    assert any(
+        isinstance(params, tuple) and inst_a in params and inst_b not in params
+        for sql, params in recorded
+        if sql.upper().startswith("SELECT ")
+    )
+
+    cold_a, cold_b = await _seed_sorted_instruments(repo, "ORD2-USD")
+    cold_order: list[tuple[str, datetime]] = []
+
+    async def _track_cold_order(session: AsyncSession, row: MarketSnapshotUpsertRow) -> None:
+        cold_order.append((row["instrument_public_id"], row["timestamp"]))
         await original_row_upsert(session, row)
 
     cold_mixed: list[MarketSnapshotUpsertRow] = [
@@ -2336,9 +2340,9 @@ async def test_upsert_market_snapshots_mixed_shape_locks_all_keys_before_writes(
         {**_snapshot_row(cold_a, 7, 40.0), "timestamp": _T2},
         {**_snapshot_row(cold_a, 8, 39.0), "timestamp": _T1},
     ]
-    with patch.object(repo, "_upsert_snapshot_row", new=_track_order):
+    with patch.object(repo, "_upsert_snapshot_row", new=_track_cold_order):
         assert await repo.upsert_market_snapshots(cold_mixed) == 3
-    assert fallback_order == [(cold_a, _T1), (cold_a, _T2), (cold_b, _T1)]
+    assert cold_order == [(cold_a, _T1), (cold_a, _T2), (cold_b, _T1)]
 
 
 @pytest.mark.asyncio
