@@ -2,8 +2,8 @@
 
 Covers pure span-coalescing decisions, exact set-equality property tests over
 monotonic and out-of-order observation streams, sync/async repository revision
-paths, valuation and reconciliation bundle span loading, per-exchange updater
-locks, concurrent updater races on SQLite, and opt-in PostgreSQL witness checks.
+paths, valuation and reconciliation bundle span loading, the catalog-wide updater
+lock, concurrent updater races on SQLite, and opt-in PostgreSQL witness checks.
 """
 
 import asyncio
@@ -73,6 +73,7 @@ from snapper.data.models import InstrumentSpecObservationSpan
 from snapper.data.models import Position
 from snapper.data.models import Setting
 from snapper.data.models import Symbol
+from snapper.data.repository import SYMBOL_UPDATER_LOCK_IDENTITY
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
@@ -1011,7 +1012,7 @@ class _RaceConfig:
 
 
 class _RaceUpdater(SymbolUpdaterService[ExchangeClientBase]):
-    """Concrete updater used to verify per-exchange lock serialization and re-check."""
+    """Concrete updater used to verify catalog-wide lock serialization and re-check."""
 
     def __init__(self, config: _RaceConfig) -> None:
         super().__init__(update_threshold_hours=6, force=config.force)
@@ -1130,10 +1131,15 @@ def _run_race_pair(
 
 
 class TestSymbolUpdaterLocksAndConcurrency:
-    """Per-exchange lock dialect contracts, early skip paths, and SQLite concurrency."""
+    """Catalog-wide lock dialect contracts, early skip paths, and SQLite concurrency."""
 
-    def test_lock_exchange_keys_are_distinct_for_all_updaters(self) -> None:
-        """Every registered symbol updater maps to its own distinct lock key."""
+    def test_all_updaters_share_single_advisory_lock_identity_on_postgres(self) -> None:
+        """Verify every registered symbol updater acquires the same shared catalog lock.
+
+        Given: All five concrete symbol updaters configured with mocked PostgreSQL SyncSessions,
+        When: Each updater enters its locked update section,
+        Then: Every updater executes pg_advisory_xact_lock with the same catalog-wide identity.
+        """
         updaters: tuple[_ConcreteUpdater, ...] = (
             KrakenSymbolUpdaterService(),
             KrakenFuturesSymbolUpdaterService(),
@@ -1141,41 +1147,80 @@ class TestSymbolUpdaterLocksAndConcurrency:
             WalutomatSymbolUpdaterService(update_threshold_hours=6),
             PolygonSymbolUpdaterService(),
         )
-        assert [updater._lock_exchange() for updater in updaters] == [
-            "kraken",
-            "kraken_futures",
-            "kraken_equities",
-            "walutomat",
-            "polygon",
-        ]
+        observed_params: list[dict[str, str]] = []
+        now = _at(0)
+        for updater in updaters:
+            updater.repository = MagicMock()
+            pg_session = MagicMock(spec=SyncSession)
+            pg_session.get_bind.return_value.dialect.name = "postgresql"
+            assert updater._enter_locked_update(pg_session, now) is True
+            sql = str(pg_session.execute.call_args.args[0])
+            params = pg_session.execute.call_args.args[1]
+            assert "pg_advisory_xact_lock(hashtext(:identity))" in sql
+            observed_params.append(params)
+        assert SYMBOL_UPDATER_LOCK_IDENTITY == "symbol_updater\x1fcatalog"
+        assert all(
+            params == {"identity": "symbol_updater\x1fcatalog"} for params in observed_params
+        )
+
+    async def test_two_exchanges_map_to_same_postgres_advisory_identity_before_catalog_access(
+        self,
+    ) -> None:
+        """Verify distinct exchange updaters serialize on one shared PostgreSQL lock key.
+
+        Given: Kraken and Polygon symbol updaters with mocked PostgreSQL SyncSessions,
+        When: Both run _update_database,
+        Then: Both acquire pg_advisory_xact_lock first with the same bound identity parameter.
+        """
+        kraken_updater = KrakenSymbolUpdaterService()
+        polygon_updater = PolygonSymbolUpdaterService()
+        bound_identities: list[dict[str, str]] = []
+        for updater in (kraken_updater, polygon_updater):
+            pg_session = MagicMock(spec=SyncSession)
+            pg_session.get_bind.return_value.dialect.name = "postgresql"
+            mock_repo = MagicMock()
+            mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=pg_session)
+            mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
+            updater.repository = mock_repo
+            await updater._update_database([])
+            first_call = pg_session.execute.call_args_list[0]
+            assert "pg_advisory_xact_lock(hashtext(:identity))" in str(first_call.args[0])
+            bound_identities.append(first_call.args[1])
+        assert bound_identities[0] == bound_identities[1]
+        assert bound_identities[0] == {"identity": "symbol_updater\x1fcatalog"}
 
     def test_acquire_symbol_updater_lock_sync_dialects_and_guards(self, tmp_path: Path) -> None:
-        """Exercise PostgreSQL SQL, SQLite BEGIN IMMEDIATE, TypeError, and unsupported dialect."""
+        """Exercise PostgreSQL SQL, SQLite BEGIN IMMEDIATE, TypeError, and unsupported dialect.
+
+        Given: Mocked PostgreSQL, invalid SQLite, unsupported dialect, and real SQLite sessions,
+        When: acquire_symbol_updater_lock_sync and _enter_locked_update are invoked,
+        Then: PostgreSQL binds the shared catalog identity, SQLite begins immediate, and invalid inputs fail.
+        """
         pg_session = MagicMock(spec=SyncSession)
         pg_session.get_bind.return_value.dialect.name = "postgresql"
-        DatabaseRepository.acquire_symbol_updater_lock_sync(pg_session, "kraken_futures")
+        DatabaseRepository.acquire_symbol_updater_lock_sync(pg_session)
         sql = str(pg_session.execute.call_args.args[0])
         params = pg_session.execute.call_args.args[1]
         assert "pg_advisory_xact_lock(hashtext(:identity))" in sql
-        assert params == {"identity": "symbol_updater\x1fkraken_futures"}
+        assert params == {"identity": "symbol_updater\x1fcatalog"}
 
         bad_sqlite = MagicMock(spec=SyncSession)
         bad_sqlite.get_bind.return_value.dialect.name = "sqlite"
         bad_sqlite.connection.return_value.connection.driver_connection = object()
         with pytest.raises(TypeError, match="sqlite3 connection"):
-            DatabaseRepository.acquire_symbol_updater_lock_sync(bad_sqlite, "kraken")
+            DatabaseRepository.acquire_symbol_updater_lock_sync(bad_sqlite)
 
         unsupported = MagicMock(spec=SyncSession)
         unsupported.get_bind.return_value.dialect.name = "mysql"
         with pytest.raises(NotImplementedError, match="mysql"):
-            DatabaseRepository.acquire_symbol_updater_lock_sync(unsupported, "kraken")
+            DatabaseRepository.acquire_symbol_updater_lock_sync(unsupported)
 
         repo = DatabaseRepository(f"sqlite:///{tmp_path / 'lock.db'}")
         repo.create_all()
         try:
             with repo.get_session() as session:
-                DatabaseRepository.acquire_symbol_updater_lock_sync(session, "kraken")
-                DatabaseRepository.acquire_symbol_updater_lock_sync(session, "kraken")
+                DatabaseRepository.acquire_symbol_updater_lock_sync(session)
+                DatabaseRepository.acquire_symbol_updater_lock_sync(session)
                 session.commit()
         finally:
             repo.engine.dispose()
@@ -1336,7 +1381,6 @@ async def pg_repos() -> AsyncIterator[tuple[SQLAlchemyRepository, DatabaseReposi
 def _run_pg_lock_race(
     sync_repo: DatabaseRepository,
     race_inst: str,
-    exchange_key: str,
     times: tuple[datetime, datetime],
 ) -> tuple[dict[str, str], list[Exception]]:
     """Run two PostgreSQL threads competing on ``pg_advisory_xact_lock``."""
@@ -1349,7 +1393,7 @@ def _run_pg_lock_race(
     def _holder() -> None:
         try:
             with sync_repo.get_session() as session:
-                DatabaseRepository.acquire_symbol_updater_lock_sync(session, exchange_key)
+                DatabaseRepository.acquire_symbol_updater_lock_sync(session)
                 locked_event.set()
                 if not release_event.wait(timeout=5.0):
                     raise TimeoutError("Timed out waiting for release_event in _holder")
@@ -1363,7 +1407,7 @@ def _run_pg_lock_race(
     def _waiter() -> None:
         try:
             with sync_repo.get_session() as session:
-                DatabaseRepository.acquire_symbol_updater_lock_sync(session, exchange_key)
+                DatabaseRepository.acquire_symbol_updater_lock_sync(session)
                 results["waiter"] = DatabaseRepository.revise_instrument_spec_sync(
                     session, race_inst, str(uuid4()), 2, t2, _spec_input(t2)
                 )
@@ -1413,7 +1457,6 @@ class TestPostgresObservationSpansAndConcurrency:
         results, errors = _run_pg_lock_race(
             sync_repo,
             race_inst,
-            f"pg_race_{race_inst[:8]}",
             (_at(1), _at(2)),
         )
         assert errors == []

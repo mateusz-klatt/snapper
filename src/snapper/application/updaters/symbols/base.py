@@ -96,14 +96,6 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._last_update_skipped = False
         self._last_update_committed_timestamp = False
 
-    def _lock_exchange(self) -> str:
-        """Return the canonical per-exchange advisory-lock key for this updater.
-
-        Returns:
-            Exchange identifier derived from the updater's setting key.
-        """
-        return self._get_setting_key().removesuffix("_symbols_last_update")
-
     @abstractmethod
     def _create_exchange_client(self) -> T:
         """Create and return the exchange client instance.
@@ -1101,7 +1093,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         )
 
     def _enter_locked_update(self, session: Any, now: datetime) -> bool:
-        """Acquire the per-exchange transaction lock and re-check managed eligibility.
+        """Acquire the catalog-wide transaction lock and re-check managed eligibility.
 
         Args:
             session: Caller-owned synchronous database session.
@@ -1119,11 +1111,12 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             raise TypeError(
                 f"Symbol updater lock requires a SyncSession, got {type(session).__name__}"
             )
-        DatabaseRepository.acquire_symbol_updater_lock_sync(session, self._lock_exchange())
+        DatabaseRepository.acquire_symbol_updater_lock_sync(session)
         if self._in_managed_run and not self._should_update_in_session(session, now):
             self._last_update_skipped = True
+            updater_exchange = self._get_setting_key().removesuffix("_symbols_last_update")
             logger.info(
-                f"Skipping {self._lock_exchange()} update after lock acquisition: "
+                f"Skipping {updater_exchange} update after catalog lock acquisition: "
                 "a concurrent run already completed within threshold"
             )
             return False
@@ -1182,7 +1175,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 finally:
                     self._in_managed_run = False
                 if self._last_update_skipped:
-                    logger.info("Skipping update after per-exchange lock re-check")
+                    logger.info("Skipping update after catalog lock re-check")
                     return
                 await self.broadcast_cache_invalidation()
                 if not self._last_update_committed_timestamp:

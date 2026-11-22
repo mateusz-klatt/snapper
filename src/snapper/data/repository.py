@@ -580,8 +580,10 @@ __all__ = [
     "where_active",
     "where_active_now",
     "ENV_VARS",
+    "SYMBOL_UPDATER_LOCK_IDENTITY",
 ]
 
+SYMBOL_UPDATER_LOCK_IDENTITY: Final[str] = "symbol_updater\x1fcatalog"
 _DB_POOL_SIZE_ENV: Final[str] = "DB_POOL_SIZE"
 _DB_MAX_OVERFLOW_ENV: Final[str] = "DB_MAX_OVERFLOW"
 ENV_VARS: Final[frozenset[str]] = frozenset({_DB_POOL_SIZE_ENV, _DB_MAX_OVERFLOW_ENV})
@@ -42350,23 +42352,24 @@ class DatabaseRepository:
         ).scalar_one_or_none()
 
     @staticmethod
-    def acquire_symbol_updater_lock_sync(
-        session: SyncSession,
-        exchange: str,
-    ) -> None:
-        """Acquire the per-exchange transaction-scoped lock for a symbol updater.
+    def acquire_symbol_updater_lock_sync(session: SyncSession) -> None:
+        """Acquire the catalog-wide transaction-scoped lock for symbol updaters.
 
-        On PostgreSQL, acquires ``pg_advisory_xact_lock`` keyed by the
-        ``symbol_updater`` domain and exchange identifier, holding it until
-        transaction commit or rollback. On SQLite, issues ``BEGIN IMMEDIATE``
-        only when no transaction is already open on the underlying connection
+        All exchange symbol updaters serialize on the single shared catalog
+        advisory lock so overlapping runs touching shared global ``Symbol``
+        rows cannot take ``FOR UPDATE`` row locks in conflicting orders and
+        deadlock.
+
+        On PostgreSQL, acquires ``pg_advisory_xact_lock`` keyed by
+        ``SYMBOL_UPDATER_LOCK_IDENTITY``, holding it until transaction commit
+        or rollback. On SQLite, issues ``BEGIN IMMEDIATE`` only when no
+        transaction is already open on the underlying connection
         (``not driver_connection.in_transaction``), so an already-open deferred
         transaction is not serialized; this caveat affects local SQLite
         development and tests only.
 
         Args:
             session: Caller-owned synchronous SQLAlchemy session.
-            exchange: Canonical exchange updater lock key.
 
         Raises:
             TypeError: If a SQLite session does not expose a ``sqlite3.Connection``.
@@ -42376,7 +42379,7 @@ class DatabaseRepository:
         if dialect == "postgresql":
             session.execute(
                 text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
-                {"identity": f"symbol_updater\x1f{exchange}"},
+                {"identity": SYMBOL_UPDATER_LOCK_IDENTITY},
             )
             return
         if dialect == "sqlite":
