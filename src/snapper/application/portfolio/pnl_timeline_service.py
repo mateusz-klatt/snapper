@@ -184,6 +184,7 @@ from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
 from snapper.application.portfolio.pnl_timeline import canonical_carried_inputs
 from snapper.application.portfolio.pnl_timeline import canonical_incompleteness_reasons
 from snapper.application.portfolio.pnl_timeline import derive_timeline_opening
+from snapper.core.numeric import is_exact_zero
 from snapper.core.numeric import is_positive_finite
 from snapper.data.fx_conversion_carry import MAX_CARRIED_MINUTES
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointWrite
@@ -891,13 +892,13 @@ def _validated_anchor_raw_unrealized(row: PortfolioPnlAnchorRow) -> float:
         or row["calc_version"] != PNL_ANCHOR_CALC_VERSION
         or row["valuation_status"] != "complete"
         or type(row["realized_pnl"]) is not float
-        or not _is_exact_zero(row["realized_pnl"])
+        or not is_exact_zero(row["realized_pnl"])
         or type(row["fee_pnl"]) is not float
-        or not _is_exact_zero(row["fee_pnl"])
+        or not is_exact_zero(row["fee_pnl"])
         or type(row["accrual_pnl"]) is not float
-        or not _is_exact_zero(row["accrual_pnl"])
+        or not is_exact_zero(row["accrual_pnl"])
         or type(row["external_flow_adjustment"]) is not float
-        or not _is_exact_zero(row["external_flow_adjustment"])
+        or not is_exact_zero(row["external_flow_adjustment"])
         or row["cash_usd"] is not None
         or row["position_value_usd"] is not None
         or row["drawdown"] is not None
@@ -1815,11 +1816,6 @@ def _rate_minute(moment: datetime) -> datetime:
     return moment.replace(second=0, microsecond=0)
 
 
-def _is_exact_zero(value: float) -> bool:
-    """Return whether a floating-point value is exactly positive or negative zero."""
-    return math.isclose(value, 0.0, rel_tol=0.0, abs_tol=0.0)
-
-
 def build_fx_rates(rows: Sequence[PnlFxRateRow]) -> FxRateMap:
     """Fold FX candle rows into the plane-qualified minute rate map.
 
@@ -2086,7 +2082,7 @@ def _to_timeline_execution(
     fee_incompleteness_reason: PnlIncompletenessReason | None = (
         "fx_conversion_unproven"
         if math.isfinite(row["fee"])
-        and not _is_exact_zero(row["fee"])
+        and not is_exact_zero(row["fee"])
         and row["fee_asset"] != valuation_ccy
         and converted_fee is None
         else None
@@ -2252,7 +2248,7 @@ def _to_timeline_accrual(
     incompleteness_reason: PnlIncompletenessReason | None = (
         "fx_conversion_unproven"
         if math.isfinite(row["amount"])
-        and not _is_exact_zero(row["amount"])
+        and not is_exact_zero(row["amount"])
         and row["amount_asset"] != valuation_ccy
         and converted is None
         else None
@@ -3159,7 +3155,7 @@ def _add_execution_fx_requirements(
     quote_currency = context.quote_by_instrument.get(instrument_public_id)
     if (
         quote_currency is not None
-        and not _is_exact_zero(signed_size)
+        and not is_exact_zero(signed_size)
         and price_is_known_valid
         and pool_key not in state.basis_unknown
     ):
@@ -3170,7 +3166,7 @@ def _add_execution_fx_requirements(
             context.valuation_ccy,
             minute,
         )
-    if not _is_exact_zero(row["fee"]):
+    if not is_exact_zero(row["fee"]):
         _add_fx_minute(
             state.requirements,
             instrument_public_id,
@@ -3193,7 +3189,7 @@ def _add_accrual_fx_requirement(
     accrual: PnlTimelineAccrualRow,
 ) -> None:
     """Add one publishable nonzero accrual's exact conversion minute."""
-    if _is_exact_zero(accrual["amount"]):
+    if is_exact_zero(accrual["amount"]):
         return
     invalid_at = state.untrusted_at.get(accrual["instrument_public_id"])
     if invalid_at is not None and accrual["accrued_at"] >= invalid_at:

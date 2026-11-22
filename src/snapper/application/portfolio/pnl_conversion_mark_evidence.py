@@ -8,6 +8,7 @@ from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_fx_replay_state import _FxInstrumentRequirements
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
+from snapper.core.numeric import is_exact_zero
 from snapper.core.numeric import is_positive_finite
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
@@ -58,7 +59,7 @@ def _execution_with_conversion_mark_evidence(
     rate_minute = row["timestamp"].replace(second=0, microsecond=0)
     fee_uses_mark = (
         math.isfinite(row["fee"])
-        and row["fee"] != 0.0
+        and not is_exact_zero(row["fee"])
         and row["fee_asset"] != valuation_ccy
         and _event_conversion_uses_mark_evidence(
             requirements,
@@ -105,7 +106,7 @@ def _accrual_with_conversion_mark_evidence(
     """
     uses_mark = (
         math.isfinite(row["amount"])
-        and row["amount"] != 0.0
+        and not is_exact_zero(row["amount"])
         and row["amount_asset"] != valuation_ccy
         and _event_conversion_uses_mark_evidence(
             requirements,
