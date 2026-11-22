@@ -445,7 +445,9 @@ def _permit_capture(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda: {
             _CAPTURE_VERSION: pnl_engine_options.PnlEngineOptions(True, False, False),
             fixtures.PNL_SAMPLE_CALC_VERSION: pnl_engine_options.PnlEngineOptions(
-                True, True, True
+                True,
+                True,
+                True,
             ),
         },
     )
@@ -722,19 +724,32 @@ async def test_envelope_encode_value_error_becomes_capture_refusal(
     assert result.checkpoint_capture_refusal == "capture_value_error"
 
 
-async def test_engine_conversion_refusal_becomes_capture_refusal(
+async def test_pre_5c6_conversion_minute_gap_becomes_capture_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Propagate the engine's mark-evidence refusal without raising.
+    """Preserve the pre-5C.6 conversion-minute gap as a capture refusal.
 
-    Given: Mark evidence supplies a conversion absent from event requirements.
+    Given: A capture-enabled test profile with both valuation flags disabled, and mark
+        evidence supplying a conversion absent from the mocked event requirements.
     When: The engine refuses its closing checkpoint.
     Then: The service returns no write with ``conversion_uses_mark_evidence``.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
     """
-    _permit_capture(monkeypatch)
+    capture_only = pnl_engine_options.PnlEngineOptions(
+        capture_permitted=True,
+        compensated_unrealized_fallback=False,
+        request_all_conversion_minutes=False,
+    )
+    monkeypatch.setattr(
+        pnl_engine_options,
+        "_engine_options_table",
+        lambda: {
+            _CAPTURE_VERSION: capture_only,
+            fixtures.PNL_SAMPLE_CALC_VERSION: capture_only,
+        },
+    )
     monkeypatch.setattr(
         "snapper.application.portfolio.pnl_timeline_service._event_fx_minutes",
         Mock(return_value={}),
@@ -742,6 +757,32 @@ async def test_engine_conversion_refusal_becomes_capture_refusal(
     result = await _build(_CaptureRepo(), _request())
     assert result.checkpoint_write is None
     assert result.checkpoint_capture_refusal == "conversion_uses_mark_evidence"
+
+
+async def test_5c6_conversion_minutes_close_capture_refusal_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Close the pre-5C.6 conversion-minute capture gap under the real 5C.6 profile.
+
+    Given: The unpatched 5C.6 resolver and the same conversion fixture with empty mocked
+        causal event requirements.
+    When: The pointwise conversion-population pass requests the previously omitted minute.
+    Then: The service produces a checkpoint write without a capture refusal.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    assert fixtures.PNL_SAMPLE_CALC_VERSION == "5C.6"
+    monkeypatch.setattr(
+        "snapper.application.portfolio.pnl_timeline_service._event_fx_minutes",
+        Mock(return_value={}),
+    )
+    result = await _build(
+        _CaptureRepo(),
+        _request(fixtures.PNL_SAMPLE_CALC_VERSION),
+    )
+    assert result.checkpoint_write is not None
+    assert result.checkpoint_capture_refusal is None
 
 
 async def test_global_withhold_becomes_capture_refusal(

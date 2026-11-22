@@ -124,6 +124,7 @@ from snapper.application.portfolio.pnl_conversion_mark_evidence import (
     _execution_with_conversion_mark_evidence,
 )
 from snapper.application.portfolio.pnl_engine_options import PNL_ENGINE_OPTIONS_OFF
+from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
 from snapper.application.portfolio.pnl_engine_options import pnl_engine_options_for
 from snapper.application.portfolio.pnl_fx_diagnostics import PnlFxFailure
 from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_conversion_scope
@@ -3316,7 +3317,7 @@ def _conversion_fx_minutes(
     for row in execution_rows:
         instrument_public_id = row["instrument_public_id"]
         minute = _rate_minute(row["timestamp"])
-        if math.isfinite(row["fee"]) and not _is_exact_zero(row["fee"]):
+        if math.isfinite(row["fee"]) and not is_exact_zero(row["fee"]):
             _add_fx_minute(
                 requirements,
                 instrument_public_id,
@@ -3334,7 +3335,7 @@ def _conversion_fx_minutes(
                 minute,
             )
     for accrual in accrual_rows:
-        if math.isfinite(accrual["amount"]) and not _is_exact_zero(accrual["amount"]):
+        if math.isfinite(accrual["amount"]) and not is_exact_zero(accrual["amount"]):
             _add_fx_minute(
                 requirements,
                 accrual["instrument_public_id"],
@@ -7335,6 +7336,25 @@ async def _resolve_equity_overlay(
     return _convert_equity_overlay(result, request.valuation_ccy, rates, venues)
 
 
+def _series_engine_options(options: PnlSeriesReplayOptions) -> PnlEngineOptions:
+    """Select engine options using the snapshotter-only resolver binding rule.
+
+    Only the snapshotter's pointwise read consults the calculation-version resolver.
+    Every other read receives the explicit all-False ``PNL_ENGINE_OPTIONS_OFF`` constant.
+
+    Args:
+        options: Replay options identifying the snapshotter's pointwise read.
+
+    Returns:
+        The resolved pointwise profile or the shared all-off profile.
+    """
+    return (
+        pnl_engine_options_for(_PNL_SAMPLE_CALC_VERSION)
+        if options.pointwise_exact_fx
+        else PNL_ENGINE_OPTIONS_OFF
+    )
+
+
 def _activate_checkpoint_capture(
     options: PnlSeriesReplayOptions,
     to_time: datetime,
@@ -7652,11 +7672,7 @@ async def build_wallet_pnl_series(
     """
     with pnl_read_phase("series_anchor"):
         _validate_frozen_replay_policy(options, policy, to_time, as_of)
-        engine_options = (
-            pnl_engine_options_for(_PNL_SAMPLE_CALC_VERSION)
-            if options.pointwise_exact_fx
-            else PNL_ENGINE_OPTIONS_OFF
-        )
+        engine_options = _series_engine_options(options)
         capture_request = _activate_checkpoint_capture(options, to_time)
         wallet_public_id = normalize_portfolio_pnl_wallet_public_id(wallet_public_id)
         _enforce_total_work_budget(from_time, to_time, 0)
@@ -7782,12 +7798,6 @@ async def build_wallet_pnl_series(
             ),
         )
         display_identities = _instrument_display_identities(display_activity_spans, refs)
-        fx_context = _EventFxContext(
-            base_by_instrument=base_by_instrument,
-            quote_by_instrument=quote_by_instrument,
-            valuation_ccy=valuation_ccy,
-            request_all_conversion_minutes=engine_options.request_all_conversion_minutes,
-        )
         (
             mark_requirements,
             event_requirements,
@@ -7801,7 +7811,14 @@ async def build_wallet_pnl_series(
                 mark_request=_MarkCarryRequest(
                     candles=mark_candles,
                     execution_rows=replay.loaded_execution_rows,
-                    fx_context=fx_context,
+                    fx_context=_EventFxContext(
+                        base_by_instrument=base_by_instrument,
+                        quote_by_instrument=quote_by_instrument,
+                        valuation_ccy=valuation_ccy,
+                        request_all_conversion_minutes=(
+                            engine_options.request_all_conversion_minutes
+                        ),
+                    ),
                     base_by_instrument=base_by_instrument,
                     quote_by_instrument=quote_by_instrument,
                     refs=trusted_refs,
