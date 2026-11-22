@@ -352,6 +352,8 @@ def test_postgres_shaped_statement_allowlist_and_duration_parsing() -> None:
         "SET LOCAL jit = off",
         "SET LOCAL jit = on",
         "SET LOCAL statement_timeout = '30000ms'",
+        "SET LOCAL statement_timeout = '20s'",
+        "SET LOCAL statement_timeout = 20000",
         "SET LOCAL statement_timeout = 15000",
         "SET LOCAL lock_timeout = '1s'",
         "SET LOCAL lock_timeout = 1000",
@@ -359,7 +361,7 @@ def test_postgres_shaped_statement_allowlist_and_duration_parsing() -> None:
         "RELEASE SAVEPOINT sa_savepoint_1",
         "ROLLBACK TO SAVEPOINT sa_savepoint_1",
         "PRAGMA busy_timeout = 1000",
-        "SELECT id, close FROM candles WHERE label = 'FOR UPDATE'",
+        "SELECT id, close FROM candles WHERE label = 'FOR UPDATE; DELETE'",
     )
     for statement in postgres_read_statements:
         probe._assert_read_only_sql(statement)
@@ -388,6 +390,53 @@ def test_postgres_shaped_statement_allowlist_and_duration_parsing() -> None:
     assert probe._parse_pg_duration_ms("1min 30s") == 90_000
     assert probe._parse_pg_duration_ms("") is None
     assert probe._parse_pg_duration_ms("off") is None
+
+
+def test_local_timeout_allowlist_enforces_positive_caps() -> None:
+    """Enforce bounded ``0 < value <= cap`` parsing on original ``SET LOCAL`` timeout values.
+
+    Given: Valid and unbounded or over-cap ``SET LOCAL statement_timeout`` and ``lock_timeout``
+        values (0, '0', '1h', 0ms, 20000, '20s', 31000, plus lock and custom-cap overrides).
+    When: Checked by ``_assert_read_only_sql`` under default and custom timeout caps.
+    Then: Values within bounds pass while zero, unsupported units, or cap-exceeding values
+        refuse with ``write_or_unbounded_sql``.
+    """
+    for allowed in (
+        "SET LOCAL statement_timeout = 20000",
+        "SET LOCAL statement_timeout = '20s'",
+        "SET LOCAL statement_timeout = '20000'",
+        "SET LOCAL statement_timeout = '30000ms'",
+        "SET LOCAL lock_timeout = 500",
+        "SET LOCAL lock_timeout = '500ms'",
+        "SET LOCAL lock_timeout = '1s'",
+        "SET LOCAL lock_timeout = 1000",
+    ):
+        probe._assert_read_only_sql(allowed)
+
+    for unbounded_or_over_cap in (
+        "SET LOCAL statement_timeout = 0",
+        "SET LOCAL statement_timeout = '0'",
+        "SET LOCAL statement_timeout = '1h'",
+        "SET LOCAL statement_timeout = 0ms",
+        "SET LOCAL statement_timeout = 31000",
+        "SET LOCAL statement_timeout = '1min'",
+        "SET LOCAL statement_timeout = DEFAULT",
+        "SET LOCAL statement_timeout",
+        "SET LOCAL lock_timeout = 0",
+        "SET LOCAL lock_timeout = '0'",
+        "SET LOCAL lock_timeout = '1h'",
+        "SET LOCAL lock_timeout = 0ms",
+        "SET LOCAL lock_timeout = 1001",
+        "SET LOCAL lock_timeout = '2s'",
+    ):
+        with pytest.raises(probe.CheckpointResumeProbeError, match="write_or_unbounded_sql"):
+            probe._assert_read_only_sql(unbounded_or_over_cap)
+
+    with pytest.raises(probe.CheckpointResumeProbeError, match="write_or_unbounded_sql"):
+        probe._assert_read_only_sql(
+            "SET LOCAL statement_timeout = 20000", statement_timeout_ms=15_000
+        )
+    probe._assert_read_only_sql("SET LOCAL statement_timeout = 31000", statement_timeout_ms=40_000)
 
 
 def test_read_only_sql_dialect_and_orm_guards_reject_every_mutation() -> None:
@@ -496,11 +545,15 @@ async def test_sqlite_preflight_and_runtime_guards_refuse_mutations(
             await probe._preflight_read_only(repo, PnlSeriesReadPolicy(allow_anchor_creation=False))
         async with repo.session() as warmup:
             await warmup.execute(text("SELECT 1"))
-        with probe._read_only_guards(repo):
+        with probe._read_only_guards(repo, statement_timeout_ms=15_000):
             async with repo.session() as session:
                 assert (await session.execute(text("PRAGMA query_only"))).scalar_one() == 1
                 with pytest.raises(probe.CheckpointResumeProbeError, match="write_sql_refused"):
                     await session.execute(text("DELETE FROM symbols"))
+                with pytest.raises(
+                    probe.CheckpointResumeProbeError, match="write_or_unbounded_sql"
+                ):
+                    await session.execute(text("SET LOCAL statement_timeout = '20s'"))
             with pytest.raises(probe.CheckpointResumeProbeError, match="write_commit_detected"):
                 async with repo.session() as session:
                     session.add(prefix._symbol())

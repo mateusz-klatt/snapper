@@ -26,9 +26,11 @@ from datetime import timedelta
 from typing import Final
 from typing import Protocol
 from typing import cast
+from weakref import WeakKeyDictionary
 
 from sqlalchemy import event
 from sqlalchemy import text
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -74,7 +76,21 @@ LOCK_TIMEOUT_MS: Final[int] = 1_000
 DEFAULT_MAX_RUNTIME_SECONDS: Final[float] = 120.0
 _SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*[\s\S]*?\*/")
 _SQL_STRING_RE = re.compile(r"'(?:''|[^'])*'")
+_LIT_TOKEN_RE = re.compile(r"'__LIT_(\d+)__'")
 _FOR_LOCK_RE = re.compile(r"\bFOR\s+(?:(?:NO\s+KEY\s+)?UPDATE|(?:KEY\s+)?SHARE)\b")
+_LOCAL_TIMEOUT_STMT_RE = re.compile(
+    r"^SET\s+LOCAL\s+(STATEMENT_TIMEOUT|LOCK_TIMEOUT)\b(?:\s*(?:=|TO)\s*(.*))?$",
+    re.IGNORECASE,
+)
+_LOCAL_TIMEOUT_VAL_RE = re.compile(
+    r"^(?:(\d+)|'(\d+)\s*(ms|s|min)?')$",
+    re.IGNORECASE,
+)
+_LOCAL_TIMEOUT_UNITS: Final[dict[str, int]] = {
+    "ms": 1,
+    "s": 1_000,
+    "min": 60_000,
+}
 _PG_DURATION_TOKEN_RE = re.compile(r"(?:(\d+)\s*(ms|s|min|h))\s*")
 _PG_UNIT_MS: Final[dict[str, int]] = {
     "ms": 1,
@@ -160,6 +176,23 @@ class _DbapiConnectionProtocol(Protocol):
         ...
 
 
+class _CursorExecuteHook(Protocol):
+    """Typed callable signature registered on ``before_cursor_execute``."""
+
+    def __call__(
+        self,
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        *_rest: object,
+    ) -> None:
+        """Validate ``statement`` before DBAPI execution."""
+        ...
+
+
+_CURSOR_GUARDS: WeakKeyDictionary[Engine, _CursorExecuteHook] = WeakKeyDictionary()
+
+
 @dataclass(frozen=True)
 class CheckpointResumeProbeConfig:
     """Operator parameters selecting one wallet/scope window and repository URL."""
@@ -240,13 +273,13 @@ def _is_read_only_pragma(normalized: str) -> bool:
 
 
 def _is_read_only_set(normalized: str) -> bool:
-    """Return whether a PostgreSQL ``SET`` statement pins read-only or allowed read settings.
+    """Return whether a non-timeout PostgreSQL ``SET`` statement is read-only.
 
     Args:
         normalized: Whitespace-collapsed uppercase SQL fragment starting with ``SET``.
 
     Returns:
-        ``True`` only for read-only characteristics, isolation, local JIT, or timeout settings.
+        ``True`` only for read-only characteristics, isolation, or local JIT settings.
     """
     if "READ WRITE" in normalized:
         return False
@@ -258,25 +291,88 @@ def _is_read_only_set(normalized: str) -> bool:
         normalized,
     ):
         return True
-    if re.fullmatch(r"SET LOCAL JIT\s*(?:=|TO)\s*(?:ON|OFF|TRUE|FALSE|'')", normalized):
-        return True
     return (
-        re.fullmatch(
-            r"SET LOCAL (?:STATEMENT_TIMEOUT|LOCK_TIMEOUT)\s*(?:=|TO)\s*(?:''|\d+(?:MS|S)?)",
-            normalized,
-        )
-        is not None
+        re.fullmatch(r"SET LOCAL JIT\s*(?:=|TO)\s*(?:ON|OFF|TRUE|FALSE|'')", normalized) is not None
     )
 
 
-def _assert_fragment_read_only(fragment: str) -> None:
-    """Reject any SQL fragment capable of mutating or row-locking database state.
+def _parse_local_timeout_ms(raw_value: str) -> int | None:
+    """Parse an unquoted ms integer or quoted ms/s/min timeout value into ms.
 
     Args:
-        fragment: Comment- and literal-stripped SQL fragment without semicolons.
+        raw_value: Original unmasked right-hand side of a ``SET LOCAL`` timeout statement.
+
+    Returns:
+        Positive or zero milliseconds when syntax matches valid units, else ``None``.
+    """
+    match = _LOCAL_TIMEOUT_VAL_RE.fullmatch(raw_value.strip())
+    if match is None:
+        return None
+    if match.group(1) is not None:
+        return int(match.group(1))
+    multiplier = _LOCAL_TIMEOUT_UNITS[(match.group(3) or "ms").lower()]
+    return int(match.group(2)) * multiplier
+
+
+def _unstash_literals(fragment: str, literals: Sequence[str]) -> str:
+    """Restore original single-quoted string literals inside one SQL fragment.
+
+    Args:
+        fragment: Literal-masked SQL fragment.
+        literals: Ordered table of captured raw single-quoted SQL literals.
+
+    Returns:
+        Comment-free SQL fragment with original string literal contents restored.
+    """
+    return _LIT_TOKEN_RE.sub(
+        lambda match: literals[int(match.group(1))],
+        fragment.strip(),
+    )
+
+
+def _assert_read_only_set(
+    masked_fragment: str,
+    literals: Sequence[str],
+    statement_timeout_ms: int,
+) -> None:
+    """Validate ``SET`` fragments while strictly capping ``SET LOCAL`` timeouts.
+
+    Args:
+        masked_fragment: Comment-free SQL fragment with string literals replaced by placeholders.
+        literals: Captured original single-quoted SQL literals indexed by placeholder.
+        statement_timeout_ms: Probe configured statement-timeout ceiling in milliseconds.
 
     Raises:
-        CheckpointResumeProbeError: When the fragment is not strictly read-only.
+        CheckpointResumeProbeError: When timeout bounds fail or ``SET`` mutates session state.
+    """
+    raw_fragment = " ".join(_unstash_literals(masked_fragment, literals).split())
+    local_timeout = _LOCAL_TIMEOUT_STMT_RE.fullmatch(raw_fragment)
+    if local_timeout is not None:
+        setting = local_timeout.group(1).lower()
+        cap_ms = statement_timeout_ms if setting == "statement_timeout" else LOCK_TIMEOUT_MS
+        parsed_ms = _parse_local_timeout_ms(local_timeout.group(2) or "")
+        if parsed_ms is None or parsed_ms <= 0 or parsed_ms > cap_ms:
+            raise CheckpointResumeProbeError(f"write_or_unbounded_sql:SET_LOCAL_{setting}")
+        return
+    normalized = " ".join(masked_fragment.split()).upper()
+    if not _is_read_only_set(normalized):
+        raise CheckpointResumeProbeError("write_sql_refused:SET")
+
+
+def _assert_fragment_read_only(
+    fragment: str,
+    literals: Sequence[str],
+    statement_timeout_ms: int,
+) -> None:
+    """Reject any SQL fragment capable of mutating, locking, or unbounding database state.
+
+    Args:
+        fragment: Comment- and literal-masked SQL fragment without semicolons.
+        literals: Captured original single-quoted SQL literals indexed by placeholder.
+        statement_timeout_ms: Probe configured statement-timeout ceiling in milliseconds.
+
+    Raises:
+        CheckpointResumeProbeError: When the fragment violates read-only or timeout invariants.
     """
     normalized = " ".join(fragment.split()).upper()
     tokens = re.findall(r"[A-Z_]+", normalized)
@@ -293,21 +389,33 @@ def _assert_fragment_read_only(fragment: str) -> None:
         return
     if verb == "PRAGMA" and _is_read_only_pragma(normalized):
         return
-    if verb == "SET" and _is_read_only_set(normalized):
+    if verb == "SET":
+        _assert_read_only_set(fragment, literals, statement_timeout_ms)
         return
     raise CheckpointResumeProbeError(f"write_sql_refused:{verb}")
 
 
-def _assert_read_only_sql(statement: str) -> None:
-    """Validate every semicolon-delimited statement in ``statement`` is read-only.
+def _assert_read_only_sql(
+    statement: str,
+    statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
+) -> None:
+    """Validate every semicolon-delimited statement in ``statement`` is strictly bounded read-only.
 
     Args:
         statement: Raw SQL string submitted to SQLAlchemy cursor execution.
+        statement_timeout_ms: Probe configured statement-timeout ceiling in milliseconds.
     """
+    literals: list[str] = []
+
+    def _stash_literal(match: re.Match[str]) -> str:
+        """Stash one single-quoted SQL literal cleanly for safe statement splitting."""
+        literals.append(match.group(0))
+        return f"'__LIT_{len(literals) - 1}__'"
+
     comment_free = _SQL_COMMENT_RE.sub(" ", statement)
-    cleaned = _SQL_STRING_RE.sub("''", comment_free)
-    for fragment in cleaned.split(";"):
-        _assert_fragment_read_only(fragment)
+    masked = _SQL_STRING_RE.sub(_stash_literal, comment_free)
+    for fragment in masked.split(";"):
+        _assert_fragment_read_only(fragment, literals, statement_timeout_ms)
 
 
 def _parse_pg_duration_ms(raw: str) -> int | None:
@@ -362,23 +470,6 @@ def _enforce_connection_read_only(
         cursor.close()
 
 
-def _on_before_cursor_execute(
-    _conn: object,
-    _cursor: object,
-    statement: str,
-    *_rest: object,
-) -> None:
-    """Refuse non-read-only SQL before cursor execution reaches the driver.
-
-    Args:
-        _conn: SQLAlchemy connection (unused).
-        _cursor: DBAPI cursor (unused).
-        statement: SQL statement text about to execute.
-        *_rest: Remaining SQLAlchemy listener positional arguments.
-    """
-    _assert_read_only_sql(statement)
-
-
 def _guard_session_write(session: object, *_args: object) -> None:
     """Refuse ORM flushes or commits whenever any pending mutations are staged.
 
@@ -428,9 +519,19 @@ def _read_only_guards(
         """Re-assert DBAPI read-only mode and timeout bounds on pooled checkout."""
         _enforce_connection_read_only(dbapi_connection, dialect_name, statement_timeout_ms)
 
+    def _on_cursor_execute(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        *_rest: object,
+    ) -> None:
+        """Refuse non-read-only or unbounded SQL before execution reaches the driver."""
+        _assert_read_only_sql(statement, statement_timeout_ms)
+
     event.listen(sync_engine, "connect", _on_connect)
     event.listen(sync_engine, "checkout", _on_checkout)
-    event.listen(sync_engine, "before_cursor_execute", _on_before_cursor_execute)
+    event.listen(sync_engine, "before_cursor_execute", _on_cursor_execute)
+    _CURSOR_GUARDS[sync_engine] = _on_cursor_execute
     event.listen(Session, "before_flush", _guard_session_write)
     event.listen(Session, "before_commit", _guard_session_write)
     try:
@@ -438,7 +539,8 @@ def _read_only_guards(
     finally:
         event.remove(Session, "before_commit", _guard_session_write)
         event.remove(Session, "before_flush", _guard_session_write)
-        event.remove(sync_engine, "before_cursor_execute", _on_before_cursor_execute)
+        _CURSOR_GUARDS.pop(sync_engine, None)
+        event.remove(sync_engine, "before_cursor_execute", _on_cursor_execute)
         event.remove(sync_engine, "checkout", _on_checkout)
         event.remove(sync_engine, "connect", _on_connect)
 
@@ -499,8 +601,10 @@ async def _preflight_read_only(
     """
     _require(not policy.allow_anchor_creation, "write_policy_allow_anchor_creation")
     sync_engine = repo.engine.sync_engine
+    cursor_hook = _CURSOR_GUARDS.get(sync_engine)
     _require(
-        event.contains(sync_engine, "before_cursor_execute", _on_before_cursor_execute)
+        cursor_hook is not None
+        and event.contains(sync_engine, "before_cursor_execute", cursor_hook)
         and event.contains(Session, "before_commit", _guard_session_write),
         "read_only_guard_missing",
     )
