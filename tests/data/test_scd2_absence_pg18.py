@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session as SyncSession
 
+from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import Instrument
@@ -43,6 +44,7 @@ from snapper.data.models import User
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
 from snapper.data.models import Wallet
+from snapper.data.repository import SYMBOL_UPDATER_LOCK_IDENTITY
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import Scd2UpsertSpec
@@ -974,6 +976,79 @@ async def test_pg18_race_market_snapshot_bulk(
 
 
 @pytest.mark.asyncio
+async def test_pg18_race_market_snapshot_mixed_shape_deadlock_free(
+    pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent mixed-shape ``[A,B,B]`` vs ``[B,A,A]`` batches never 40P01 deadlock."""
+    async_repo, _ = pg_repos
+    _, warm_1 = await _seed_symbol_instrument_pg(async_repo, f"SNPW1-{uuid4().hex[:6]}-USD")
+    _, warm_2 = await _seed_symbol_instrument_pg(async_repo, f"SNPW2-{uuid4().hex[:6]}-USD")
+    warm_a, warm_b = sorted((warm_1, warm_2))
+    assert (
+        await async_repo.upsert_market_snapshots(
+            [
+                {**_snapshot_row(warm_a, 1, 10.0), "timestamp": _T0},
+                {**_snapshot_row(warm_b, 2, 20.0), "timestamp": _T0},
+            ]
+        )
+        == 2
+    )
+
+    _, cold_1 = await _seed_symbol_instrument_pg(async_repo, f"SNPC1-{uuid4().hex[:6]}-USD")
+    _, cold_2 = await _seed_symbol_instrument_pg(async_repo, f"SNPC2-{uuid4().hex[:6]}-USD")
+    cold_a, cold_b = sorted((cold_1, cold_2))
+
+    _install_async_flush_barrier(monkeypatch, MarketSnapshot)
+    cold_counts = await asyncio.wait_for(
+        asyncio.gather(
+            async_repo.upsert_market_snapshots(
+                [
+                    {**_snapshot_row(cold_a, 10, 30.0), "timestamp": _T1},
+                    {**_snapshot_row(cold_b, 11, 40.0), "timestamp": _T1},
+                    {**_snapshot_row(cold_b, 12, 41.0), "timestamp": _T2},
+                ]
+            ),
+            async_repo.upsert_market_snapshots(
+                [
+                    {**_snapshot_row(cold_b, 20, 42.0), "timestamp": _T1 + timedelta(seconds=1)},
+                    {**_snapshot_row(cold_a, 21, 32.0), "timestamp": _T1 + timedelta(seconds=1)},
+                    {**_snapshot_row(cold_a, 22, 33.0), "timestamp": _T2 + timedelta(seconds=1)},
+                ]
+            ),
+        ),
+        timeout=_WAIT_TIMEOUT_S,
+    )
+    assert cold_counts == [3, 3]
+    monkeypatch.undo()
+
+    warm_counts = await asyncio.wait_for(
+        asyncio.gather(
+            async_repo.upsert_market_snapshots(
+                [
+                    {**_snapshot_row(warm_a, 30, 11.0), "timestamp": _T1},
+                    {**_snapshot_row(warm_b, 31, 21.0), "timestamp": _T1},
+                    {**_snapshot_row(warm_b, 32, 22.0), "timestamp": _T2},
+                ]
+            ),
+            async_repo.upsert_market_snapshots(
+                [
+                    {**_snapshot_row(warm_b, 40, 23.0), "timestamp": _T2},
+                    {**_snapshot_row(warm_a, 41, 13.0), "timestamp": _T2},
+                    {**_snapshot_row(warm_a, 42, 14.0), "timestamp": _T2 + timedelta(seconds=5)},
+                ]
+            ),
+        ),
+        timeout=_WAIT_TIMEOUT_S,
+    )
+    assert warm_counts == [3, 3]
+    for ipid in (cold_a, cold_b, warm_a, warm_b):
+        await _assert_single_active(
+            async_repo, MarketSnapshot, MarketSnapshot.instrument_public_id == ipid
+        )
+
+
+@pytest.mark.asyncio
 async def test_pg18_race_instrument(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
     monkeypatch: pytest.MonkeyPatch,
@@ -1104,6 +1179,102 @@ async def test_pg18_revise_instrument_lock_wake_and_reciprocal_rekey(
         timeout=_WAIT_TIMEOUT_S,
     )
     assert any(isinstance(res, ValueError) for res in results)
+
+
+def _wait_for_advisory_wait_sync(sync_repo: DatabaseRepository) -> None:
+    """Poll ``pg_locks`` synchronously until a backend waits on an advisory lock."""
+    deadline = threading.Event()
+    elapsed = 0.0
+    query = text(
+        "SELECT count(*) "
+        "FROM pg_stat_activity a "
+        "JOIN pg_locks l ON l.pid = a.pid "
+        "WHERE a.datname = current_database() "
+        "AND a.pid <> pg_backend_pid() "
+        "AND l.locktype = 'advisory' "
+        "AND NOT l.granted"
+    )
+    while elapsed < _WAIT_TIMEOUT_S:
+        with sync_repo.get_session() as probe:
+            blocked = int(probe.execute(query).scalar_one())
+            if blocked > 0:
+                return
+        deadline.wait(0.01)
+        elapsed += 0.01
+    raise TimeoutError(
+        "Timed out waiting for advisory lock contention on SYMBOL_UPDATER_LOCK_IDENTITY"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pg18_revise_instrument_serializes_with_symbol_updater_advisory_lock(
+    pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+) -> None:
+    """``revise_instrument`` serializes with symbol updaters via the shared catalog advisory lock."""
+    async_repo, sync_repo = pg_repos
+    sym_1, inst_1 = await _seed_symbol_instrument_pg(async_repo, f"UPD1-{uuid4().hex[:6]}-USD")
+    sym_2, inst_2 = await _seed_symbol_instrument_pg(async_repo, f"UPD2-{uuid4().hex[:6]}-USD")
+    sym_3 = str(uuid4())
+    async with async_repo.session() as session:
+        session.add(
+            Symbol(
+                public_id=sym_3,
+                native_symbol=f"UPD3-{uuid4().hex[:6]}-USD",
+                base="UPD3",
+                quote="USD",
+                asset_type="crypto",
+                created_at=_T0,
+                timestamp=_T0,
+                session_id=_session_uuid("sym3"),
+                sequence_id=1,
+            )
+        )
+        await session.commit()
+
+    assert SYMBOL_UPDATER_LOCK_IDENTITY
+    updater_locked = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _run_catalog_updater() -> str:
+        with sync_repo.get_session() as session:
+            DatabaseRepository.acquire_symbol_updater_lock_sync(session)
+            session.execute(
+                select(Instrument)
+                .where(Instrument.public_id == inst_2, Instrument.known_to == KNOWN_TO_MAX)
+                .with_for_update()
+            ).scalar_one()
+            loop.call_soon_threadsafe(updater_locked.set)
+            _wait_for_advisory_wait_sync(sync_repo)
+            ensured_pid = SymbolUpdaterService._ensure_instrument_identity(
+                session,
+                sym_1,
+                "kraken",
+                _T1,
+                _session_uuid("updater-sync"),
+                1,
+            )
+            session.commit()
+            return ensured_pid
+
+    async def _run_rekey() -> int:
+        await asyncio.wait_for(updater_locked.wait(), timeout=_WAIT_TIMEOUT_S)
+        return await async_repo.revise_instrument(
+            inst_1,
+            sym_3,
+            "kraken",
+            _session_uuid("rekey-async"),
+            2,
+            _T2,
+        )
+
+    ensured_pid, revised_id = await asyncio.wait_for(
+        asyncio.gather(asyncio.to_thread(_run_catalog_updater), _run_rekey()),
+        timeout=_WAIT_TIMEOUT_S,
+    )
+    assert ensured_pid == inst_1
+    assert revised_id > 0
+    active = await _assert_single_active(async_repo, Instrument, Instrument.public_id == inst_1)
+    assert active[0].symbol_public_id == sym_3
 
 
 @pytest.mark.asyncio

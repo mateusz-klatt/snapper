@@ -879,6 +879,10 @@ class TestPersistedSpansAndRevisions:
                         spec_version="v1:yaml",
                     ).__dict__,
                     "instrument_kind": None,
+                    "native_order_quantity_unit": "contract_count",
+                    "contract_payoff_model": "inverse",
+                    "contract_value_currency": "USD",
+                    "settlement_currency": "BTC",
                 }
             )
             r1_id = await repo.revise_instrument_spec(yaml_inst, seed_sess, 1, t0, r1_input)
@@ -935,6 +939,10 @@ class TestPersistedSpansAndRevisions:
             assert r2["spec_observed_at"] == t2
             assert latest_spec_observation_at(r2) == t2
             assert is_spec_observation_fresh(r2, now) is True
+            assert r2.get("native_order_quantity_unit") == "contract_count"
+            assert r2.get("contract_payoff_model") == "inverse"
+            assert r2.get("contract_value_currency") == "USD"
+            assert r2.get("settlement_currency") == "BTC"
         finally:
             await repo.engine.dispose()
 

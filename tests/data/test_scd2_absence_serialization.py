@@ -5,6 +5,7 @@ import json
 import sqlite3
 from collections.abc import AsyncIterator
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -2005,12 +2006,15 @@ async def test_pg18_fixture_helpers_produce_valid_uuids_and_schemas(
         await session.rollback()
 
 
-async def _seed_sorted_instruments(repo: SQLAlchemyRepository) -> tuple[str, str]:
+async def _seed_sorted_instruments(
+    repo: SQLAlchemyRepository,
+    native_symbol: str = "ORD-USD",
+) -> tuple[str, str]:
     """Seed one symbol and two instruments, returning (inst_lo, inst_hi) sorted lexicographically."""
     async with repo.session() as session:
         await begin_scd2_write(session)
         sym = Symbol(
-            native_symbol="ORD-USD",
+            native_symbol=native_symbol,
             base="ORD",
             quote="USD",
             asset_type="crypto",
@@ -2255,3 +2259,226 @@ async def test_registry_syncer_sync_existing_process_ignores_deleted_key_and_rec
             )
         ).scalar_one_or_none()
         assert deleted_active is None
+
+
+def _snapshot_statement_events(
+    engine: Engine,
+) -> list[tuple[str, object]]:
+    """Attach a listener recording SQL statements touching ``market_snapshots``."""
+    recorded: list[tuple[str, object]] = []
+
+    def _on_execute(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if "market_snapshots" in statement.lower():
+            recorded.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", _on_execute)
+    return recorded
+
+
+@pytest.mark.asyncio
+async def test_upsert_market_snapshots_mixed_shape_locks_all_keys_before_writes(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+) -> None:
+    """Mixed-shape batches lock ALL keys in sorted order before bulk or sequential writes."""
+    repo, _ = file_async_repo
+    inst_a, inst_b = await _seed_sorted_instruments(repo)
+    assert (
+        await repo.upsert_market_snapshots(
+            [
+                {**_snapshot_row(inst_a, 1, 10.0), "timestamp": _T0, "known_to": KNOWN_TO_MAX},
+                {**_snapshot_row(inst_b, 2, 20.0), "timestamp": _T0, "known_to": KNOWN_TO_MAX},
+            ]
+        )
+        == 2
+    )
+
+    recorded = _snapshot_statement_events(repo.engine.sync_engine)
+    mixed_b_first: list[MarketSnapshotUpsertRow] = [
+        {**_snapshot_row(inst_b, 3, 21.0), "timestamp": _T1},
+        {**_snapshot_row(inst_a, 4, 11.0), "timestamp": _T1},
+        {**_snapshot_row(inst_a, 5, 12.0), "timestamp": _T2},
+    ]
+    assert await repo.upsert_market_snapshots(mixed_b_first) == 3
+
+    first_stmt, first_params = recorded[0]
+    upper_first = first_stmt.upper()
+    assert upper_first.startswith("SELECT ")
+    assert (
+        "ORDER BY MARKET_SNAPSHOTS.INSTRUMENT_PUBLIC_ID ASC, MARKET_SNAPSHOTS.ID ASC" in upper_first
+    )
+    assert isinstance(first_params, tuple)
+    assert first_params[:2] == (inst_a, inst_b)
+    first_write_idx = next(
+        idx
+        for idx, (sql, _p) in enumerate(recorded)
+        if sql.upper().startswith(("UPDATE ", "INSERT "))
+    )
+    assert first_write_idx > 0
+
+    recorded.clear()
+    cold_a, cold_b = await _seed_sorted_instruments(repo, "ORD2-USD")
+    fallback_order: list[tuple[str, datetime]] = []
+    original_row_upsert = repo._upsert_snapshot_row
+
+    async def _track_order(session: AsyncSession, row: MarketSnapshotUpsertRow) -> None:
+        fallback_order.append((row["instrument_public_id"], row["timestamp"]))
+        await original_row_upsert(session, row)
+
+    cold_mixed: list[MarketSnapshotUpsertRow] = [
+        {**_snapshot_row(cold_b, 6, 30.0), "timestamp": _T1},
+        {**_snapshot_row(cold_a, 7, 40.0), "timestamp": _T2},
+        {**_snapshot_row(cold_a, 8, 39.0), "timestamp": _T1},
+    ]
+    with patch.object(repo, "_upsert_snapshot_row", new=_track_order):
+        assert await repo.upsert_market_snapshots(cold_mixed) == 3
+    assert fallback_order == [(cold_a, _T1), (cold_a, _T2), (cold_b, _T1)]
+
+
+@pytest.mark.asyncio
+async def test_revise_instrument_acquires_catalog_advisory_lock_before_row_locks(
+    tmp_path: Path,
+) -> None:
+    """PostgreSQL ``revise_instrument`` acquires the catalog advisory lock before row locks."""
+    pg_lock_only = _make_mock_pg_async_session(in_tx=False)
+    await SQLAlchemyRepository.acquire_symbol_updater_lock(pg_lock_only)
+    assert [str(c.args[0]) for c in pg_lock_only.execute.await_args_list] == [
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+        "SELECT pg_advisory_xact_lock(hashtext(:identity))",
+    ]
+    assert pg_lock_only.execute.await_args_list[1].args[1] == {
+        "identity": SYMBOL_UPDATER_LOCK_IDENTITY
+    }
+
+    sqlite_only = MagicMock(spec=AsyncSession)
+    sqlite_only.info = {}
+    sqlite_only.get_bind.return_value = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+    sqlite_only.execute = AsyncMock()
+    await SQLAlchemyRepository.acquire_symbol_updater_lock(sqlite_only)
+    assert sqlite_only.execute.await_count == 0
+
+    unsupported = MagicMock(spec=AsyncSession)
+    unsupported.get_bind.return_value = SimpleNamespace(dialect=SimpleNamespace(name="mysql"))
+    with pytest.raises(NotImplementedError, match="mysql"):
+        await SQLAlchemyRepository.acquire_symbol_updater_lock(unsupported)
+
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'rekey-advisory.db'}")
+    try:
+        executed: list[tuple[str, object]] = []
+        active_inst = Instrument(
+            id=7,
+            public_id="inst-1",
+            symbol_public_id="sym-1",
+            exchange="kraken",
+            requires_ai_review=False,
+            source_exchange=None,
+            timestamp=_T0,
+            known_to=KNOWN_TO_MAX,
+            session_id="seed",
+            sequence_id=1,
+        )
+        pg_session = _make_mock_pg_async_session(in_tx=False)
+
+        async def _capture_execute(stmt: object, params: object = None) -> MagicMock:
+            executed.append((str(stmt), params))
+            return MagicMock(scalars=MagicMock(return_value=MagicMock(all=lambda: [active_inst])))
+
+        pg_session.execute = AsyncMock(side_effect=_capture_execute)
+
+        @asynccontextmanager
+        async def _pg_ctx() -> AsyncIterator[AsyncSession]:
+            yield pg_session
+
+        with patch.object(repo, "session", new=_pg_ctx):
+            result_id = await repo.revise_instrument("inst-1", "sym-1", "kraken", "sess-1", 1, _T1)
+        assert result_id == 7
+        assert executed[0][0] == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+        assert executed[1] == (
+            "SELECT pg_advisory_xact_lock(hashtext(:identity))",
+            {"identity": SYMBOL_UPDATER_LOCK_IDENTITY},
+        )
+        assert "FROM instruments" in executed[2][0]
+        assert "ORDER BY instruments.id ASC" in executed[2][0]
+    finally:
+        await repo.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_upsert_market_snapshots_defers_caller_dict_mutation_until_commit(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Later-row failure leaves earlier caller snapshot dicts completely unmutated."""
+    repo, _ = file_async_repo
+    inst_lo, inst_hi = await _seed_sorted_instruments(repo)
+    existing_pid_lo = str(uuid4())
+    seed_ok = await repo.upsert_market_snapshots(
+        [
+            {
+                **_snapshot_row(inst_lo, 1, 10.0),
+                "public_id": existing_pid_lo,
+                "timestamp": _T0,
+                "known_to": KNOWN_TO_MAX,
+            },
+            {
+                **_snapshot_row(inst_hi, 2, 20.0),
+                "timestamp": _T0,
+                "known_to": _T1,
+            },
+            {
+                **_snapshot_row(inst_hi, 3, 21.0),
+                "timestamp": _T1,
+                "known_to": KNOWN_TO_MAX,
+            },
+        ]
+    )
+    assert seed_ok == 3
+
+    row_lo_first = _snapshot_row(inst_lo, 4, 11.0)
+    row_lo_first.pop("public_id")
+    row_lo_first.pop("known_to")
+    row_lo_first["timestamp"] = _T1
+
+    orig_pid_lo2 = str(uuid4())
+    row_lo_second: MarketSnapshotUpsertRow = {
+        **_snapshot_row(inst_lo, 5, 12.0),
+        "public_id": orig_pid_lo2,
+        "timestamp": _T2,
+        "known_to": KNOWN_TO_MAX,
+    }
+    row_hi_closed_bad: MarketSnapshotUpsertRow = {
+        **_snapshot_row(inst_hi, 6, 22.0),
+        "timestamp": _T0,
+        "known_to": KNOWN_TO_MAX,
+    }
+
+    with pytest.raises(TemporalVersionConflictError):
+        await repo.upsert_market_snapshots([row_lo_first, row_lo_second, row_hi_closed_bad])
+
+    assert "public_id" not in row_lo_first
+    assert "known_to" not in row_lo_first
+    assert row_lo_first["timestamp"] == _T1
+    assert row_lo_second["public_id"] == orig_pid_lo2
+    assert row_lo_second["timestamp"] == _T2
+
+    row_commit_fail = _snapshot_row(inst_lo, 7, 13.0)
+    row_commit_fail.pop("public_id")
+    row_commit_fail.pop("known_to")
+    row_commit_fail["timestamp"] = _T1
+    original_commit = AsyncSession.commit
+
+    async def _fail_commit(_session: AsyncSession) -> None:
+        raise RuntimeError("injected post-flush commit error")
+
+    monkeypatch.setattr(AsyncSession, "commit", _fail_commit)
+    with pytest.raises(RuntimeError, match="injected post-flush commit error"):
+        await repo.upsert_market_snapshots([row_commit_fail])
+    monkeypatch.setattr(AsyncSession, "commit", original_commit)
+    assert "public_id" not in row_commit_fail
+    assert "known_to" not in row_commit_fail
