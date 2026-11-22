@@ -38,6 +38,7 @@ from snapper.data.models import PortfolioPnlPoint
 from snapper.data.models import Symbol
 from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlCorrectionChunk
+from snapper.data.pnl_correction_state import PnlCorrectionEdit
 from snapper.data.pnl_correction_state import PnlCorrectionEvidence
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlCorrectionKey
@@ -1314,6 +1315,60 @@ async def test_257_deferred_tail_refusal_drops_checkpoint_and_still_commits_fron
     )
     assert settled.next_minute is None
     assert await repository.get_portfolio_pnl_opening_checkpoint(samples._scope()) is None
+
+
+async def test_checkpoint_upsert_failure_rolls_back_savepoint_only_and_commits_samples(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Roll back only the SAVEPOINT when checkpoint upsert fails so samples and frontier commit.
+
+    Given: A settling generation with one edited sample row and a staged checkpoint write
+        whose ``_upsert_pnl_opening_checkpoint`` raises ``RuntimeError``.
+    When: ``commit_portfolio_pnl_correction_chunk`` commits the chunk.
+    Then: The sample edit and advanced frontier commit, no checkpoint row is stored,
+        and ``consume_last_pnl_checkpoint_write_refusal()`` returns ``"capture_upsert_failed"``.
+
+    Args:
+        repository: Isolated file-backed SQLite repository fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    started = await repository.invalidate_portfolio_pnl_correction(
+        samples._scope(),
+        _request(start=samples._M1, tip=samples._M2, as_of=samples._M5),
+        None,
+    )
+    row = samples._complete_sample(samples._M1, timestamp=samples._M5)
+    chunk = replace(
+        _empty_chunk(started, samples._M2),
+        edits=(PnlCorrectionEdit(samples._M1, None, row),),
+        prior_peak=1250.0,
+    )
+    planned_after = advance_correction_frontier(started, chunk)
+    write = PnlOpeningCheckpointWrite(_certificate_for(planned_after), '{"state":1}')
+
+    async def boom(s: object, checkpoint: object) -> None:
+        """Fail inside the savepoint after sample edits have been flushed."""
+        del s, checkpoint
+        raise RuntimeError("synthetic upsert failure")
+
+    monkeypatch.setattr(repository, "_upsert_pnl_opening_checkpoint", boom)
+    committed = await repository.commit_portfolio_pnl_correction_chunk(
+        samples._scope(),
+        started,
+        chunk,
+        checkpoint=write,
+    )
+    assert committed == planned_after
+    assert repository.consume_last_pnl_checkpoint_write_refusal() == "capture_upsert_failed"
+    assert await repository.get_portfolio_pnl_opening_checkpoint(samples._scope()) is None
+    observed = await repository.get_portfolio_pnl_correction_evidence(
+        samples._scope(),
+        samples._M1,
+        samples._M2,
+    )
+    assert len(observed.versions) == 1
+    assert observed.versions[0].row["realized_pnl"] == 12.5
 
 
 async def test_accrual_prefix_fingerprint_matches_python_across_lifecycle_and_overflow(

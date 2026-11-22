@@ -18,6 +18,7 @@ from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlChe
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
     PnlCheckpointResumeEligibility,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_verifier import service_resume_fallback
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
     verify_checkpoint_for_resume,
 )
@@ -72,7 +73,7 @@ def _eligibility(request: PnlCheckpointCaptureRequest) -> PnlCheckpointResumeEli
         from_time=fixtures._m(6),
         frontier_tip=fixtures._m(8),
         has_fill_gap=False,
-        has_late_execution=False,
+        expected_execution_manifest_digest=request.execution_manifest_digest,
     )
 
 
@@ -239,10 +240,10 @@ def _cases() -> tuple[_FallbackCase, ...]:
             repository_value={},
         ),
         _FallbackCase(
-            "checkpoint_late_execution",
+            "checkpoint_execution_manifest_changed",
             True,
-            eligibility_field="has_late_execution",
-            eligibility_value=True,
+            eligibility_field="expected_execution_manifest_digest",
+            eligibility_value="f" * 64,
         ),
     )
 
@@ -574,6 +575,99 @@ async def test_legacy_bundle_version_1_payload_fails_closed_as_corrupt(
         _eligibility(request),
     )
     assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
+
+
+async def test_verifier_refuses_manifest_and_prefix_assignment_drift_against_live_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify frozen manifest and effective prefix assignments against live prefix reads.
+
+    Given: A valid captured checkpoint at C mutated along (1) suffix annulment changing
+        live generation manifest while keeping 1..W_C prefix annulments identical,
+        and (2) applied_watermarks_by_exchange disagreeing with live prefix executions.
+    When: ``verify_checkpoint_for_resume`` verifies against live repository evidence.
+    Then: Both refuse with closed delete-required fallback codes rather than resuming.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    suffix_annulment = fixtures._applied_annulment(scope_sequence=99)
+    repo._applied_annulments = [suffix_annulment]
+    manifest_outcome = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert manifest_outcome == PnlCheckpointFallback(
+        "checkpoint_execution_manifest_changed",
+        delete_required=True,
+    )
+
+    clean_record, clean_request, clean_repo = await _valid_capture(monkeypatch)
+    bad_applied = replace(
+        clean_record,
+        certificate=replace(
+            clean_record.certificate,
+            applied_watermarks_by_exchange={"kraken": 0},
+        ),
+    )
+    assignment_outcome = await verify_checkpoint_for_resume(
+        clean_repo,
+        bad_applied,
+        _scope(clean_request),
+        _RESUMING_AS_OF,
+        _eligibility(clean_request),
+    )
+    assert assignment_outcome == PnlCheckpointFallback(
+        "checkpoint_prefix_assignments_changed",
+        delete_required=True,
+    )
+
+
+async def test_verifier_converts_unexpected_error_and_exposes_single_late_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Convert unexpected verify exceptions to closed refusals and avoid duplicate late flag.
+
+    Given: A verification repository call raising RuntimeError.
+    When: ``verify_checkpoint_for_resume`` runs, and ``PnlCheckpointResumeEligibility`` is inspected.
+    Then: Verification returns ``checkpoint_verify_error`` with ``delete_required=False``,
+        ``has_late_execution`` is absent from eligibility, and ``service_resume_fallback``
+        resolves closed service reasons uniformly.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    monkeypatch.setattr(
+        repo,
+        "get_pnl_execution_prefix_counts",
+        AsyncMock(side_effect=RuntimeError("db timeout")),
+    )
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert outcome == PnlCheckpointFallback("checkpoint_verify_error", delete_required=False)
+    assert not hasattr(PnlCheckpointResumeEligibility, "has_late_execution")
+    assert service_resume_fallback("checkpoint_late_execution") == PnlCheckpointFallback(
+        "checkpoint_late_execution",
+        delete_required=True,
+    )
+    assert service_resume_fallback("checkpoint_ineligible") == PnlCheckpointFallback(
+        "checkpoint_ineligible",
+        delete_required=False,
+    )
+    assert service_resume_fallback("unknown_code") == PnlCheckpointFallback(
+        "checkpoint_payload_corrupt",
+        delete_required=True,
+    )
 
 
 async def test_mutated_execution_chain_tip_returns_fallback_with_delete(

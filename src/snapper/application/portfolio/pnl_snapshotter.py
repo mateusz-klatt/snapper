@@ -33,6 +33,7 @@ explicit operator flip). Read directly from ``os.environ.get(...)``.
 
 import asyncio
 import contextlib
+import itertools
 import json
 import logging
 import os
@@ -51,6 +52,7 @@ from uuid import uuid7
 
 from sqlalchemy.exc import DBAPIError
 
+from snapper.application.portfolio import pnl_snapshotter_checkpoint as checkpoint_dispatch
 from snapper.application.portfolio.basket_valuation import CryptoUsdCandle
 from snapper.application.portfolio.basket_valuation import PositionInventoryEntry
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
@@ -60,12 +62,17 @@ from snapper.application.portfolio.pnl_correction_planner import PlannedPnlCorre
 from snapper.application.portfolio.pnl_correction_planner import PnlCorrectionPlanInputs
 from snapper.application.portfolio.pnl_correction_planner import plan_correction_chunk
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import PnlCheckpointCaptureRequest
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    PnlCheckpointWriteRefusalError,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     CHECKPOINT_SUMMARY_EVERY_TICKS,
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     advance_checkpoint_summary_tick,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_wallet_alias
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import prune_checkpoint_metrics
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     record_checkpoint_capture_committed,
 )
@@ -80,6 +87,9 @@ from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     record_checkpoint_shadow_mismatch,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
+    record_checkpoint_shadow_skipped,
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointResume
 from snapper.application.portfolio.pnl_snapshot_planner import FINALIZATION_LAG
@@ -99,7 +109,14 @@ from snapper.application.portfolio.pnl_snapshotter_checkpoint import delete_chec
 from snapper.application.portfolio.pnl_snapshotter_checkpoint import handle_resume_fallback
 from snapper.application.portfolio.pnl_snapshotter_checkpoint import prepare_checkpoint_resume
 from snapper.application.portfolio.pnl_snapshotter_checkpoint_shadow import (
-    compare_checkpoint_shadow,
+    PnlCheckpointShadowMismatch,
+)
+from snapper.application.portfolio.pnl_snapshotter_checkpoint_shadow import PnlCheckpointShadowSide
+from snapper.application.portfolio.pnl_snapshotter_checkpoint_shadow import (
+    PnlCheckpointShadowWindow,
+)
+from snapper.application.portfolio.pnl_snapshotter_checkpoint_shadow import (
+    compare_checkpoint_shadow_sides,
 )
 from snapper.application.portfolio.pnl_snapshotter_config import CHECKPOINT_MODE_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import ENABLED_ENV_VAR
@@ -126,6 +143,7 @@ from snapper.core.json_types import JsonValue
 from snapper.data.pnl_correction_state import MAX_CORRECTION_CHUNK_MINUTES
 from snapper.data.pnl_correction_state import PnlCorrectionEvidence
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
+from snapper.data.pnl_correction_state import PnlCorrectionKey
 from snapper.data.pnl_correction_state import PnlCorrectionRequest
 from snapper.data.pnl_correction_state import PortfolioPnlCorrectionConflictError
 from snapper.data.repository import PortfolioPnlSampleQuery
@@ -298,6 +316,16 @@ class _CheckpointDispatchRequest:
     resume: PnlCheckpointResume | None
 
 
+@dataclass(frozen=True)
+class _ChunkPlanRequest:
+    """Bundled inputs for planning one physical correction chunk."""
+
+    repo: Repository
+    ctx: _ScopeContext
+    result: PnlWalletSeriesResult
+    physical_evidence: PnlCorrectionEvidence
+
+
 class PortfolioPnlSnapshotter:
     """Async Phase-5B equity/drawdown sample writer with disabled-mode support."""
 
@@ -353,6 +381,7 @@ class PortfolioPnlSnapshotter:
         self._configured_checkpoint_mode: CheckpointMode = checkpoint_resolution.configured
         self._checkpoint_mode: CheckpointMode = checkpoint_resolution.effective
         self._checkpoint_summary_ticks: int = 0
+        self._tick_recaptures: int = 0
 
     @property
     def disabled(self) -> bool:
@@ -464,6 +493,7 @@ class PortfolioPnlSnapshotter:
 
     async def _tick_valuation(self, repo: Repository, as_of: datetime) -> None:
         """Run one tick's valuation and durable sample work before shadow flushing."""
+        self._tick_recaptures = 0
         credentials = await repo.list_active_wallet_credentials(as_of)
         raw_pin = await self._read_mint_wallet_pin()
         topology = await resolve_executor_topology(repo, credentials, raw_pin, self._clock)
@@ -593,6 +623,7 @@ class PortfolioPnlSnapshotter:
 
     def _prune_absent_scopes(self, current_wallets: set[str]) -> None:
         """Drop in-memory state for wallets absent from this discovery pass (B5)."""
+        prune_checkpoint_metrics(current_wallets)
         self._unsupported_logged.intersection_update(current_wallets)
         self._mint_identity_logged.intersection_update(current_wallets)
         self._no_anchor_logged.intersection_update(current_wallets)
@@ -1100,6 +1131,101 @@ class PortfolioPnlSnapshotter:
         self._log_repair_from_lag(ctx, committed)
         self._report_withheld(ctx.wallet_public_id, plan.withheld, bool(plan.chunk.edits))
 
+    def _can_recapture(self) -> bool:
+        """Return whether this tick still has budget for a full anchor recapture."""
+        return self._tick_recaptures < checkpoint_dispatch.MAX_RECAPTURES_PER_TICK
+
+    def _consume_recapture(
+        self,
+        request: _CheckpointDispatchRequest,
+        end: datetime,
+    ) -> PnlCheckpointCaptureRequest | None:
+        """Issue one tip recapture request when the per-tick recapture budget permits."""
+        ctx, frontier = request.ctx, request.frontier
+        if not self._can_recapture():
+            if (
+                checkpoint_dispatch.checkpoint_capture_permitted(frontier.key.calc_version)
+                and frontier.next_minute is not None
+                and end == frontier.tip
+                and frontier.has_fill_gap is False
+            ):
+                checkpoint_dispatch.record_checkpoint_write_refusal(
+                    ctx.scope,
+                    "capture_recapture_budget_exceeded",
+                )
+            return None
+        recapture = capture_request_for(frontier, ctx.scope, ctx.anchor, end)
+        if recapture is not None:
+            self._tick_recaptures += 1
+        return recapture
+
+    @staticmethod
+    def _shadow_window(chunk: ChunkWindow, key: PnlCorrectionKey) -> PnlCheckpointShadowWindow:
+        """Bind window bounds, exact four-part scope identity, and calc version."""
+        return PnlCheckpointShadowWindow(
+            from_time=chunk.start,
+            to_time=chunk.end,
+            scope=(
+                key.wallet_public_id,
+                key.mode,
+                key.valuation_ccy,
+                key.epoch_public_id,
+            ),
+            calc_version=key.calc_version,
+        )
+
+    async def _record_shadow_mismatch(
+        self,
+        repo: Repository,
+        ctx: _ScopeContext,
+        resume: PnlCheckpointResume,
+        mismatch: PnlCheckpointShadowMismatch,
+    ) -> None:
+        """Count, delete, and log a genuine shadow divergence using an aliased wallet."""
+        record_checkpoint_shadow_mismatch(ctx.scope)
+        await delete_checkpoint(repo, ctx.scope, resume.record)
+        logger.error(
+            "checkpoint_shadow_mismatch wallet=%s generation=%s point=%s field=%s",
+            checkpoint_wallet_alias(ctx.wallet_public_id),
+            resume.record.certificate.source_generation,
+            mismatch.point_time,
+            mismatch.field,
+            extra={
+                "checkpoint_shadow_mismatch": True,
+                "point_time": mismatch.point_time,
+                "field": mismatch.field,
+            },
+        )
+
+    async def _compare_shadow_branch(
+        self,
+        request: _CheckpointDispatchRequest,
+        evidence: PnlCorrectionEvidence,
+        anchor_pair: tuple[ChunkWindow, PnlWalletSeriesResult, PlannedPnlCorrection],
+        resumed_pair: tuple[ChunkWindow, PnlWalletSeriesResult],
+    ) -> None:
+        """Plan resumed shadow work without side effects and compare identical windows."""
+        ctx, resume = request.ctx, request.resume
+        assert resume is not None
+        anchor_chunk, anchor, anchor_plan = anchor_pair
+        resumed_chunk, resumed = resumed_pair
+        anchor_window = self._shadow_window(anchor_chunk, request.frontier.key)
+        resumed_window = self._shadow_window(resumed_chunk, resume.record.certificate.key)
+        if anchor_window != resumed_window:
+            record_checkpoint_shadow_skipped("window_mismatch", ctx.scope)
+            return
+        resumed_plan = await self._plan_shadow_chunk(request.repo, ctx, resumed, evidence)
+        outcome = compare_checkpoint_shadow_sides(
+            PnlCheckpointShadowSide(anchor_window, anchor, anchor_plan),
+            PnlCheckpointShadowSide(resumed_window, resumed, resumed_plan),
+        )
+        if outcome.skipped_reason is not None:
+            record_checkpoint_shadow_skipped(outcome.skipped_reason, ctx.scope)
+            return
+        record_checkpoint_shadow_comparison(ctx.scope)
+        if outcome.mismatch is not None:
+            await self._record_shadow_mismatch(request.repo, ctx, resume, outcome.mismatch)
+
     async def _advance_checkpoint(
         self,
         repo: Repository,
@@ -1117,14 +1243,15 @@ class PortfolioPnlSnapshotter:
                 frontier,
                 chunk.start,
                 self._checkpoint_mode,
+                recapture_budget_exhausted=not self._can_recapture(),
             )
         )
         resume = decision.resume
-        capture = (
-            capture_request_for(frontier, ctx.scope, ctx.anchor, chunk.end)
-            if decision.recapture is not None
-            else None
-        )
+        capture: PnlCheckpointCaptureRequest | None = None
+        if decision.recapture is not None:
+            capture = capture_request_for(frontier, ctx.scope, ctx.anchor, chunk.end)
+            if capture is not None:
+                self._tick_recaptures += 1
         request = _CheckpointDispatchRequest(repo, ctx, frontier, chunk, started, capture, resume)
         if self._checkpoint_mode == "shadow" and resume is not None:
             await self._advance_shadow(request)
@@ -1147,7 +1274,7 @@ class PortfolioPnlSnapshotter:
         fallback = result.checkpoint_resume_fallback
         if resume is not None and fallback is not None:
             await handle_resume_fallback(repo, ctx.scope, frontier, resume, fallback)
-            recapture = capture or capture_request_for(frontier, ctx.scope, ctx.anchor, chunk.end)
+            recapture = capture or self._consume_recapture(request, chunk.end)
             chunk, result = await self._replay_series(
                 repo,
                 ctx,
@@ -1167,7 +1294,7 @@ class PortfolioPnlSnapshotter:
         anchor_chunk, anchor = await self._replay_series(repo, ctx, request.chunk, frontier)
         record_checkpoint_resume_attempted(ctx.scope)
         with activate_fx_shadow_context(None):
-            _, resumed = await self._replay_series(
+            resumed_chunk, resumed = await self._replay_series(
                 repo,
                 ctx,
                 request.chunk,
@@ -1187,34 +1314,23 @@ class PortfolioPnlSnapshotter:
             return
         anchor_plan = await self._plan_chunk(repo, ctx, anchor, evidence)
         if fallback is None:
-            resumed_plan = await self._plan_chunk(repo, ctx, resumed, evidence)
-            mismatch = compare_checkpoint_shadow(anchor, anchor_plan, resumed, resumed_plan)
-            record_checkpoint_shadow_comparison(ctx.scope)
-            if mismatch is not None:
-                record_checkpoint_shadow_mismatch(ctx.scope)
-                await delete_checkpoint(repo, ctx.scope, resume.record)
-                logger.error(
-                    "checkpoint_shadow_mismatch wallet=%s generation=%s point=%s field=%s",
-                    ctx.wallet_public_id,
-                    resume.record.certificate.source_generation,
-                    mismatch.point_time,
-                    mismatch.field,
-                    extra={
-                        "checkpoint_shadow_mismatch": True,
-                        "point_time": mismatch.point_time,
-                        "field": mismatch.field,
-                    },
-                )
+            await self._compare_shadow_branch(
+                request,
+                evidence,
+                (anchor_chunk, anchor, anchor_plan),
+                (resumed_chunk, resumed),
+            )
         capture_result = anchor
         if fallback is not None:
-            recapture = capture_request_for(frontier, ctx.scope, ctx.anchor, anchor_chunk.end)
-            _, capture_result = await self._replay_series(
-                repo,
-                ctx,
-                anchor_chunk,
-                frontier,
-                _CheckpointReplayOptions(capture=recapture),
-            )
+            recapture = self._consume_recapture(request, anchor_chunk.end)
+            if recapture is not None:
+                _, capture_result = await self._replay_series(
+                    repo,
+                    ctx,
+                    anchor_chunk,
+                    frontier,
+                    _CheckpointReplayOptions(capture=recapture),
+                )
         await self._commit_checkpoint_plan(request, anchor_chunk, capture_result, anchor_plan)
 
     async def _plan_and_commit_checkpoint(
@@ -1244,14 +1360,31 @@ class PortfolioPnlSnapshotter:
         """Commit the selected plan with only a pre-certified checkpoint write."""
         repo, ctx, frontier = request.repo, request.ctx, request.frontier
         write = certified_checkpoint_write(frontier, ctx.scope, plan, result)
-        committed = await repo.commit_portfolio_pnl_correction_chunk(
-            ctx.scope,
-            frontier,
-            plan.chunk,
-            checkpoint=write,
-        )
+        try:
+            committed = await repo.commit_portfolio_pnl_correction_chunk(
+                ctx.scope,
+                frontier,
+                plan.chunk,
+                checkpoint=write,
+            )
+        except PnlCheckpointWriteRefusalError:
+            checkpoint_dispatch.record_checkpoint_write_refusal(
+                ctx.scope,
+                "capture_write_failed",
+            )
+            committed = await repo.commit_portfolio_pnl_correction_chunk(
+                ctx.scope,
+                frontier,
+                plan.chunk,
+                checkpoint=None,
+            )
+            write = None
+        write_refusal = repo.consume_last_pnl_checkpoint_write_refusal()
         if write is not None:
-            record_checkpoint_capture_committed(ctx.scope)
+            if write_refusal is None:
+                record_checkpoint_capture_committed(ctx.scope)
+            else:
+                checkpoint_dispatch.record_checkpoint_write_refusal(ctx.scope, write_refusal)
         self._record_chunk_outcome(ctx.wallet_public_id, self._monotonic() - request.started, chunk)
         self._log_repair_from_lag(ctx, committed)
         self._report_withheld(ctx.wallet_public_id, plan.withheld, bool(plan.chunk.edits))
@@ -1363,17 +1496,23 @@ class PortfolioPnlSnapshotter:
             reasons,
         )
 
-    async def _plan_chunk(
+    async def _plan_chunk_impl(
         self,
-        repo: Repository,
-        ctx: _ScopeContext,
-        result: PnlWalletSeriesResult,
-        physical_evidence: PnlCorrectionEvidence,
+        request: _ChunkPlanRequest,
+        *,
+        advance_sequence: bool,
     ) -> PlannedPnlCorrection:
-        """Plan each minute against the exact financial versions and causal prefix read."""
+        """Plan each minute against exact financial versions with isolated sequence choice."""
+        repo, ctx, result, physical_evidence = (
+            request.repo,
+            request.ctx,
+            request.result,
+            request.physical_evidence,
+        )
         chunk = ChunkWindow(physical_evidence.start, physical_evidence.end)
         observations, valuation = await self._load_chunk_evidence(repo, ctx, chunk)
         positions = await self._load_position_versions(repo, ctx, chunk)
+        shadow_sequence = itertools.count(1)
         return plan_correction_chunk(
             PnlCorrectionPlanInputs(
                 evidence=physical_evidence,
@@ -1389,9 +1528,38 @@ class PortfolioPnlSnapshotter:
                 expected_venues=ctx.expected_venues,
                 position_versions=positions,
                 make_row=lambda sample: self._to_row(
-                    sample, ctx, _watermarks_json(result.replay_metadata, sample.point_time)
+                    sample,
+                    ctx,
+                    _watermarks_json(result.replay_metadata, sample.point_time),
+                    sequence_id=None if advance_sequence else next(shadow_sequence),
                 ),
             )
+        )
+
+    async def _plan_chunk(
+        self,
+        repo: Repository,
+        ctx: _ScopeContext,
+        result: PnlWalletSeriesResult,
+        physical_evidence: PnlCorrectionEvidence,
+    ) -> PlannedPnlCorrection:
+        """Plan each minute against the exact financial versions and causal prefix read."""
+        return await self._plan_chunk_impl(
+            _ChunkPlanRequest(repo, ctx, result, physical_evidence),
+            advance_sequence=True,
+        )
+
+    async def _plan_shadow_chunk(
+        self,
+        repo: Repository,
+        ctx: _ScopeContext,
+        result: PnlWalletSeriesResult,
+        physical_evidence: PnlCorrectionEvidence,
+    ) -> PlannedPnlCorrection:
+        """Plan a shadow comparison chunk without mutating ``_sequence`` or shared cursors."""
+        return await self._plan_chunk_impl(
+            _ChunkPlanRequest(repo, ctx, result, physical_evidence),
+            advance_sequence=False,
         )
 
     async def _load_position_versions(
@@ -1489,14 +1657,23 @@ class PortfolioPnlSnapshotter:
         return planes
 
     def _to_row(
-        self, sample: PlannedSample, ctx: _ScopeContext, watermarks_json: str
+        self,
+        sample: PlannedSample,
+        ctx: _ScopeContext,
+        watermarks_json: str,
+        *,
+        sequence_id: int | None = None,
     ) -> PortfolioPnlSampleRow:
         """Stamp write-time provenance and watermarks onto a planned sample row."""
-        self._sequence += 1
+        if sequence_id is None:
+            self._sequence += 1
+            assigned_sequence = self._sequence
+        else:
+            assigned_sequence = sequence_id
         return {
             "public_id": str(uuid7()),
             "session_id": self._session_id,
-            "sequence_id": self._sequence,
+            "sequence_id": assigned_sequence,
             "timestamp": ctx.as_of,
             "wallet_public_id": ctx.wallet_public_id,
             "mode": _LIVE_MODE,

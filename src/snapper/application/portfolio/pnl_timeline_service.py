@@ -51,7 +51,6 @@ dropped.
 """
 
 import asyncio
-import hashlib
 import json
 import math
 from bisect import bisect_left
@@ -149,6 +148,9 @@ from snapper.application.portfolio.pnl_opening_checkpoint_capture import (
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import PnlCheckpointCaptureRequest
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import _AccrualPrefixRequest
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import capture_checkpoint_write
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    execution_manifest_digest,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_resume import PnlCheckpointSuffixBounds
 from snapper.application.portfolio.pnl_opening_checkpoint_resume import has_late_resume_execution
 from snapper.application.portfolio.pnl_opening_checkpoint_resume import load_checkpoint_suffix
@@ -1701,9 +1703,7 @@ def _applied_annulment_identity(
 
 def _execution_manifest_digest(annulments: Sequence[PnlTimelineAppliedAnnulment]) -> str:
     """Hash all certified correction identities in canonical order, including an empty set."""
-    identities = sorted(_applied_annulment_identity(annulment) for annulment in annulments)
-    canonical = json.dumps(identities, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    return execution_manifest_digest(annulments)
 
 
 async def _new_annulments_inside_replay_cut(
@@ -6876,9 +6876,8 @@ async def _load_series_accounting_tail(
 
 def _validate_checkpoint_resume_policy(
     options: PnlSeriesReplayOptions,
-    policy: PnlSeriesReadPolicy,
 ) -> None:
-    """Require frozen exact non-probe reads for checkpoint resume.
+    """Require frozen non-probe reads for checkpoint resume.
 
     A late-fill probe must never run over a resumed suffix: on a resumed read,
     ``earliest_affected_minute`` only sees suffix rows. Rejecting both
@@ -6887,19 +6886,15 @@ def _validate_checkpoint_resume_policy(
 
     Args:
         options: Replay options carrying optional verified resume state.
-        policy: Series read policy controlling carry valuation.
 
     Raises:
-        ValueError: When checkpoint resume omits a frozen execution cut, enables
-            carry valuation, sets ``previous_replay_as_of``, or enables
-            ``metadata_only``.
+        ValueError: When checkpoint resume omits a frozen execution cut, sets
+            ``previous_replay_as_of``, or enables ``metadata_only``.
     """
     if options.checkpoint_resume is None:
         return
     if options.frozen_execution_watermarks is None:
         raise ValueError("A P&L checkpoint resume requires a captured raw execution cut")
-    if policy.carry_valuation:
-        raise ValueError("A P&L checkpoint resume does not permit carry valuation")
     if options.previous_replay_as_of is not None:
         raise ValueError("A P&L checkpoint resume does not permit previous_replay_as_of")
     if options.metadata_only:
@@ -6910,7 +6905,7 @@ def _validate_frozen_replay_policy(
     options: PnlSeriesReplayOptions, policy: PnlSeriesReadPolicy, to_time: datetime, as_of: datetime
 ) -> None:
     """Keep generation admission and resumed evidence reads historically scoped."""
-    _validate_checkpoint_resume_policy(options, policy)
+    _validate_checkpoint_resume_policy(options)
     frozen = options.frozen_execution_watermarks
     if frozen is None and options.frozen_execution_manifest_digest is not None:
         raise ValueError("A frozen P&L execution manifest requires its captured raw cut")
@@ -7477,6 +7472,25 @@ def _series_engine_options(options: PnlSeriesReplayOptions) -> PnlEngineOptions:
     )
 
 
+def _checkpoint_read_profile_supported(
+    options: PnlSeriesReplayOptions,
+    policy: PnlSeriesReadPolicy,
+) -> bool:
+    """Return whether the active read profile is pointwise exact FX without carry."""
+    return options.pointwise_exact_fx and not policy.carry_valuation
+
+
+def _enforce_checkpoint_resume_read_profile(
+    options: PnlSeriesReplayOptions,
+    policy: PnlSeriesReadPolicy,
+) -> None:
+    """Refuse direct resume with anchor fallback unless read profile is pointwise without carry."""
+    if options.checkpoint_resume is not None and not _checkpoint_read_profile_supported(
+        options, policy
+    ):
+        raise _CheckpointResumeFallbackError("checkpoint_ineligible")
+
+
 def _activate_checkpoint_capture(
     options: PnlSeriesReplayOptions,
     policy: PnlSeriesReadPolicy,
@@ -7495,7 +7509,7 @@ def _activate_checkpoint_capture(
     request = options.checkpoint_capture
     if request is not None:
         request.activate(to_time, options.replay_generation_tip)
-        if not options.pointwise_exact_fx or policy.carry_valuation:
+        if not _checkpoint_read_profile_supported(options, policy):
             request.refuse_read_policy()
     return request
 
@@ -7922,6 +7936,7 @@ async def build_wallet_pnl_series(
                 valuation_ccy,
             )
     try:
+        _enforce_checkpoint_resume_read_profile(options, policy)
         with pnl_read_phase("series_replay"):
             replay = await _load_series_replay_inputs(repo, anchor_load, to_time, options)
             replay_metadata = await _series_replay_metadata(

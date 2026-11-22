@@ -8,7 +8,17 @@ import pytest
 from snapper.application.portfolio import pnl_snapshotter_checkpoint_shadow as shadow_module
 from snapper.application.portfolio.pnl_correction_planner import PlannedPnlCorrection
 from snapper.application.portfolio.pnl_snapshotter_checkpoint_shadow import (
+    PnlCheckpointShadowOutcome,
+)
+from snapper.application.portfolio.pnl_snapshotter_checkpoint_shadow import PnlCheckpointShadowSide
+from snapper.application.portfolio.pnl_snapshotter_checkpoint_shadow import (
+    PnlCheckpointShadowWindow,
+)
+from snapper.application.portfolio.pnl_snapshotter_checkpoint_shadow import (
     compare_checkpoint_shadow,
+)
+from snapper.application.portfolio.pnl_snapshotter_checkpoint_shadow import (
+    compare_checkpoint_shadow_sides,
 )
 from snapper.data.pnl_correction_state import PnlCorrectionChunk
 from snapper.data.pnl_correction_state import PnlCorrectionEvidence
@@ -147,3 +157,47 @@ def test_shadow_canonicalizes_retractions_and_rejects_unknown_values() -> None:
     )
     with pytest.raises(TypeError, match="Unsupported checkpoint shadow value"):
         shadow_module._canonical(object())
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"from_time": fixtures._minute(4)},
+        {"to_time": fixtures._minute(4)},
+        {"scope": ("other-wallet", "live", "USD", fixtures._anchor()["epoch_public_id"])},
+        {"calc_version": "5C.5"},
+    ],
+)
+def test_shadow_sides_mismatching_window_scope_or_calc_version_record_skip(
+    override: dict[str, object],
+) -> None:
+    """Skip shadow comparison with ``window_mismatch`` when bounds, scope, or version differ.
+
+    Given: Divergent anchor and resumed series paired with differing window identities.
+    When: ``compare_checkpoint_shadow_sides`` checks window equality first.
+    Then: It returns ``skipped_reason="window_mismatch"`` and ``mismatch=None``.
+
+    Args:
+        override: Single field override making the resumed window differ from anchor.
+    """
+    frontier = _frontier()
+    plan = _plan(frontier)
+    anchor = fixtures._series(fixtures._minute(3), fixtures._minute(3))
+    divergent = replace(anchor, points=(replace(anchor.points[0], realized_pnl=999.0),))
+    base_window = PnlCheckpointShadowWindow(
+        from_time=fixtures._minute(3),
+        to_time=fixtures._minute(3),
+        scope=(
+            frontier.key.wallet_public_id,
+            frontier.key.mode,
+            frontier.key.valuation_ccy,
+            frontier.key.epoch_public_id,
+        ),
+        calc_version=frontier.key.calc_version,
+    )
+    resumed_window = replace(base_window, **override)
+    outcome = compare_checkpoint_shadow_sides(
+        PnlCheckpointShadowSide(base_window, anchor, plan),
+        PnlCheckpointShadowSide(resumed_window, divergent, plan),
+    )
+    assert outcome == PnlCheckpointShadowOutcome(skipped_reason="window_mismatch", mismatch=None)

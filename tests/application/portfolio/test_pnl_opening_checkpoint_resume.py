@@ -824,33 +824,61 @@ async def test_checkpoint_resume_without_frozen_watermarks_is_rejected(
         )
 
 
-async def test_checkpoint_resume_with_carry_valuation_is_rejected(
+@pytest.mark.parametrize(
+    ("pointwise_exact_fx", "carry_valuation"),
+    [(False, False), (True, True), (False, True)],
+)
+async def test_checkpoint_resume_with_ineligible_read_profile_falls_back_to_anchor(
     monkeypatch: pytest.MonkeyPatch,
+    pointwise_exact_fx: bool,
+    carry_valuation: bool,
 ) -> None:
-    """Reject checkpoint resume when carry_valuation is enabled.
+    """Refuse direct resume whenever read profile is not pointwise exact without carry.
 
     Given: A verified checkpoint resume state and frozen generation watermarks.
-    When: build_wallet_pnl_series is called with policy.carry_valuation=True.
-    Then: Policy validation raises ValueError.
+    When: ``build_wallet_pnl_series`` runs with ``pointwise_exact_fx=False`` or
+        ``carry_valuation=True``.
+    Then: Suffix reads are skipped, ``checkpoint_resume_fallback`` is
+        ``"checkpoint_ineligible"``, and points equal the anchor replay under that profile.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
+        pointwise_exact_fx: Pointwise exact FX flag on replay options.
+        carry_valuation: Carry valuation flag on the series read policy.
     """
     repo = _ResumeRepo()
     resume = await _verified_resume(monkeypatch, repo)
-    with pytest.raises(ValueError, match="carry valuation"):
-        await build_wallet_pnl_series(
-            repo,
-            fixtures._W1,
-            "live",
-            fixtures._m(5),
-            _T,
-            "1m",
-            fixtures._m(10),
-            "USD",
-            policy=PnlSeriesReadPolicy(allow_anchor_creation=False, carry_valuation=True),
-            options=_resume_options(resume),
-        )
+    policy = PnlSeriesReadPolicy(allow_anchor_creation=False, carry_valuation=carry_valuation)
+    options = replace(_resume_options(resume), pointwise_exact_fx=pointwise_exact_fx)
+    resumed = await build_wallet_pnl_series(
+        repo,
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=policy,
+        options=options,
+    )
+    assert repo.suffix_calls == 0
+    assert resumed.checkpoint_resume_fallback == "checkpoint_ineligible"
+    anchor_repo = _ResumeRepo()
+    anchor_repo._execution_watermarks = {"kraken": 4}
+    anchor = await build_wallet_pnl_series(
+        anchor_repo,
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=policy,
+        options=replace(options, checkpoint_resume=None),
+    )
+    checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
 
 
 async def test_checkpoint_resume_with_previous_replay_as_of_is_rejected(

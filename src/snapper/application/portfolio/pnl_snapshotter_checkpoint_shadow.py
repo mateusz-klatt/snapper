@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from dataclasses import fields
 from dataclasses import is_dataclass
 from datetime import datetime
+from typing import Literal
 
 from snapper.application.portfolio.pnl_correction_planner import PlannedPnlCorrection
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
@@ -21,6 +22,33 @@ class PnlCheckpointShadowMismatch:
 
     point_time: datetime | None
     field: str
+
+
+@dataclass(frozen=True)
+class PnlCheckpointShadowWindow:
+    """Exact comparison identity binding window bounds, scope, and calc version."""
+
+    from_time: datetime
+    to_time: datetime
+    scope: tuple[str, str, str, str]
+    calc_version: str
+
+
+@dataclass(frozen=True)
+class PnlCheckpointShadowSide:
+    """One side of a shadow comparison bundled with its exact replay window."""
+
+    window: PnlCheckpointShadowWindow
+    result: PnlWalletSeriesResult
+    plan: PlannedPnlCorrection
+
+
+@dataclass(frozen=True)
+class PnlCheckpointShadowOutcome:
+    """Typed outcome of comparing two shadow sides on window identity and financial equivalence."""
+
+    skipped_reason: Literal["window_mismatch"] | None = None
+    mismatch: PnlCheckpointShadowMismatch | None = None
 
 
 def _canonical(value: object) -> JsonValue:
@@ -177,3 +205,27 @@ def compare_checkpoint_shadow(
         The first exact mismatch, including point identity and field, or ``None``.
     """
     return _compare_results(anchor, resumed) or _compare_plans(anchor_plan, resumed_plan)
+
+
+def compare_checkpoint_shadow_sides(
+    anchor_side: PnlCheckpointShadowSide,
+    resumed_side: PnlCheckpointShadowSide,
+) -> PnlCheckpointShadowOutcome:
+    """Compare shadow sides only when their window, scope, and calc version match.
+
+    Args:
+        anchor_side: Anchor window metadata, replay result, and planned chunk.
+        resumed_side: Resumed window metadata, replay result, and planned chunk.
+
+    Returns:
+        A ``window_mismatch`` skip outcome if windows differ, otherwise the comparison result.
+    """
+    if anchor_side.window != resumed_side.window:
+        return PnlCheckpointShadowOutcome(skipped_reason="window_mismatch", mismatch=None)
+    mismatch = compare_checkpoint_shadow(
+        anchor_side.result,
+        anchor_side.plan,
+        resumed_side.result,
+        resumed_side.plan,
+    )
+    return PnlCheckpointShadowOutcome(skipped_reason=None, mismatch=mismatch)

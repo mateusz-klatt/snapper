@@ -177,6 +177,9 @@ from snapper.application.portfolio.pnl_anchor_identity import (
 )
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    PnlCheckpointWriteRefusalError,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     checkpoint_write_refusal,
 )
 from snapper.application.portfolio.reconciliation_invariants import (
@@ -6788,6 +6791,14 @@ class Repository(ABC):
             ``True`` iff the guarded row existed with matching generation and was removed.
         """
         ...
+
+    def consume_last_pnl_checkpoint_write_refusal(self) -> str | None:
+        """Return and clear the latest savepoint checkpoint refusal recorded on commit.
+
+        Returns:
+            Closed refusal reason if a checkpoint upsert rolled back, otherwise ``None``.
+        """
+        return None
 
     @abstractmethod
     async def get_pnl_accrual_prefix_fingerprint(
@@ -20167,6 +20178,8 @@ class SQLAlchemyRepository(Repository):
             raise PortfolioPnlCorrectionConflictError("P&L correction final checkpoint CAS lost")
         await self._delete_invalidated_opening_checkpoint(s, frontier)
 
+    _last_pnl_checkpoint_write_refusal: str | None = None
+
     _PNL_OPENING_CHECKPOINT_PK: Final[tuple[str, ...]] = (
         "wallet_public_id",
         "mode",
@@ -20612,31 +20625,27 @@ class SQLAlchemyRepository(Repository):
             )
         )
 
-    async def _persist_pnl_opening_checkpoint(
+    def consume_last_pnl_checkpoint_write_refusal(self) -> str | None:
+        """Return and clear the latest savepoint checkpoint refusal recorded on commit.
+
+        Returns:
+            Closed refusal reason if the latest checkpoint upsert rolled back, else ``None``.
+        """
+        refusal = getattr(self, "_last_pnl_checkpoint_write_refusal", None)
+        self._last_pnl_checkpoint_write_refusal = None
+        return refusal
+
+    async def _upsert_pnl_opening_checkpoint(
         self,
         s: AsyncSession,
-        frontier: PnlCorrectionFrontier,
-        chunk: PnlCorrectionChunk,
         checkpoint: PnlOpeningCheckpointWrite,
     ) -> None:
-        """Validate write eligibility inside the CAS fence and atomically upsert by PK.
-
-        Uses dialect-specific ``ON CONFLICT DO UPDATE`` inside the same fenced
-        transaction rather than a separate delete-then-insert pair so forward
-        settlement replaces any older generation's row in one atomic SQL statement.
+        """Execute the dialect-specific atomic upsert into opening checkpoints.
 
         Args:
-            s: Active fenced write session after ``_write_pnl_correction`` succeeded.
-            frontier: Committed-to-be frontier computed under the CAS fence.
-            chunk: Chunk being committed.
+            s: Active database write session or nested savepoint.
             checkpoint: Staged opening-checkpoint write payload.
-
-        Raises:
-            ValueError: When ``checkpoint_write_refusal`` rejects writing.
         """
-        refusal = checkpoint_write_refusal(frontier, chunk, checkpoint.certificate)
-        if refusal is not None:
-            raise ValueError(f"Refusing opening checkpoint write: {refusal}")
         values = self._pnl_opening_checkpoint_values(checkpoint, datetime.now(UTC))
         insert_fn = (
             pg_insert(PortfolioPnlOpeningCheckpoint)
@@ -20652,6 +20661,43 @@ class SQLAlchemyRepository(Repository):
             },
         )
         await s.execute(stmt)
+
+    async def _persist_pnl_opening_checkpoint(
+        self,
+        s: AsyncSession,
+        frontier: PnlCorrectionFrontier,
+        chunk: PnlCorrectionChunk,
+        checkpoint: PnlOpeningCheckpointWrite,
+    ) -> None:
+        """Validate write eligibility inside the CAS fence and upsert inside a savepoint.
+
+        Uses dialect-specific ``ON CONFLICT DO UPDATE`` inside a nested savepoint
+        after ``checkpoint_write_refusal`` so any upsert failure rolls back only
+        the checkpoint write while the outer sample chunk and cursor commit.
+
+        Args:
+            s: Active fenced write session after ``_write_pnl_correction`` succeeded.
+            frontier: Committed-to-be frontier computed under the CAS fence.
+            chunk: Chunk being committed.
+            checkpoint: Staged opening-checkpoint write payload.
+
+        Raises:
+            PnlCheckpointWriteRefusalError: When ``checkpoint_write_refusal`` rejects writing.
+        """
+        refusal = checkpoint_write_refusal(frontier, chunk, checkpoint.certificate)
+        if refusal is not None:
+            raise PnlCheckpointWriteRefusalError(refusal)
+        try:
+            async with s.begin_nested():
+                await self._upsert_pnl_opening_checkpoint(s, checkpoint)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._last_pnl_checkpoint_write_refusal = "capture_upsert_failed"
+            logger.warning(
+                "Opening checkpoint upsert rolled back inside savepoint; chunk will commit (%s)",
+                type(exc).__name__,
+            )
 
     async def get_portfolio_pnl_opening_checkpoint(
         self, scope: PortfolioPnlSampleScope
@@ -20875,6 +20921,7 @@ class SQLAlchemyRepository(Repository):
         """
         canonical = self._normalize_portfolio_pnl_sample_scope(scope)
         key = self._pnl_correction_key(canonical)
+        self._last_pnl_checkpoint_write_refusal = None
         chunk = self._normalize_pnl_correction_chunk(chunk)
         for edit in chunk.edits:
             if edit.replacement is not None:

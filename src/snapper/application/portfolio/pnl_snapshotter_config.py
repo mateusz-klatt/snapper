@@ -176,19 +176,3 @@ def resolve_checkpoint_modes(env_value: str | None) -> ResolvedCheckpointMode:
             DEFAULT_CHECKPOINT_MODE,
         )
     return ResolvedCheckpointMode(configured=configured, effective=DEFAULT_CHECKPOINT_MODE)
-
-
-def resolve_checkpoint_mode(env_value: str | None) -> CheckpointMode:
-    """Resolve the effective ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` value.
-
-    Args:
-        env_value: Raw env-var value, or ``None`` when unset.
-
-    Returns:
-        The effective :data:`CheckpointMode` literal after the kill switch.
-
-    Raises:
-        ValueError: When ``env_value`` is non-empty and not one of ``off``,
-            ``shadow``, or ``active``.
-    """
-    return resolve_checkpoint_modes(env_value).effective

@@ -30,6 +30,9 @@ from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_t
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     event_fx_exchanges_digest,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    partition_execution_watermarks,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import prefix_annulment_digest
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import prefix_lineage_digest
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import symbol_ref_digest
@@ -107,6 +110,9 @@ type PnlCheckpointCaptureRefusal = Literal[
     "capture_not_permitted",
     "capture_not_at_tip",
     "capture_execution_chain_error",
+    "capture_write_failed",
+    "capture_upsert_failed",
+    "capture_recapture_budget_exceeded",
     "global_withhold",
     "engine_checkpoint_missing",
     "carried_event_inputs",
@@ -631,7 +637,7 @@ def capture_checkpoint_write(
                 ),
             )
         )
-    except ValueError:
+    except (ValueError, TypeError, KeyError):
         return None, "capture_value_error"
     return write, None
 
@@ -690,14 +696,7 @@ def _execution_watermark_partitions(
     Returns:
         Applied maximum watermarks and sorted deferred sequences by exchange.
     """
-    deferred_set = set(engine_state.deferred_execution_keys)
-    applied: dict[str, int] = {}
-    deferred: dict[str, list[int]] = {}
-    for row in prefix["executions"]:
-        exchange = row["exchange"]
-        sequence = row["scope_sequence"]
-        if (exchange, sequence) in deferred_set:
-            deferred.setdefault(exchange, []).append(sequence)
-        else:
-            applied[exchange] = max(applied.get(exchange, 0), sequence)
-    return applied, {exchange: tuple(sequences) for exchange, sequences in sorted(deferred.items())}
+    return partition_execution_watermarks(
+        prefix["executions"],
+        engine_state.deferred_execution_keys,
+    )

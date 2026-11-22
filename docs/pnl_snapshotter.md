@@ -332,5 +332,8 @@ anchor-replay behavior. `shadow` and `active` are currently disabled in code
 a once-per-process warning naming both the configured and effective modes until
 checkpoint capture is enabled; startup info logs both `checkpoint_mode` and
 `configured_checkpoint_mode`. Consequently, the snapshotter performs no
-checkpoint reads or writes and plans once per chunk even when `shadow` or
-`active` is configured.
+checkpoint reads, resumes, shadow comparisons, or captures and plans once per
+chunk even when `shadow` or `active` is configured. However,
+correction-invalidation deletes during frontier writes still run even when the
+effective checkpoint mode is `off`, retiring any previously persisted opening
+checkpoint whose generation or window is invalidated by a rewrite.

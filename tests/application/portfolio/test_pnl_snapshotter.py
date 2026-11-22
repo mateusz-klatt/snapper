@@ -17,8 +17,13 @@ import pytest
 from sqlalchemy.exc import DBAPIError
 
 from snapper.application.portfolio import pnl_correction_planner
+from snapper.application.portfolio import pnl_engine_options
 from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio import pnl_snapshotter_config
+from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    PnlCheckpointWriteRefusalError,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     checkpoint_write_refusal,
 )
@@ -689,6 +694,27 @@ class _FakeRepo:
             )
         ]
 
+    def consume_last_pnl_checkpoint_write_refusal(self) -> str | None:
+        """Return and clear the synthetic savepoint write refusal if any."""
+        refusal = getattr(self, "_last_pnl_checkpoint_write_refusal", None)
+        self._last_pnl_checkpoint_write_refusal = None
+        return refusal
+
+    def _upsert_synthetic_checkpoint(
+        self,
+        key: PnlCorrectionKey,
+        checkpoint: PnlOpeningCheckpointWrite,
+    ) -> None:
+        """Store one synthetic opening checkpoint or raise configured upsert failure."""
+        failure = getattr(self, "upsert_failure", None)
+        if failure is not None:
+            raise failure
+        self._opening_checkpoints[key] = PnlOpeningCheckpointRecord(
+            checkpoint.certificate,
+            checkpoint.state_json,
+            datetime.now(UTC),
+        )
+
     def _record_synthetic_checkpoint(
         self,
         key: PnlCorrectionKey,
@@ -696,17 +722,18 @@ class _FakeRepo:
         chunk: PnlCorrectionChunk,
         checkpoint: PnlOpeningCheckpointWrite | None,
     ) -> None:
-        """Validate and persist a staged synthetic opening checkpoint when provided."""
+        """Validate and persist a staged synthetic opening checkpoint inside a savepoint."""
         if checkpoint is None:
             return
         refusal = checkpoint_write_refusal(frontier, chunk, checkpoint.certificate)
         if refusal is not None:
-            raise ValueError(f"Refusing opening checkpoint write: {refusal}")
-        self._opening_checkpoints[key] = PnlOpeningCheckpointRecord(
-            checkpoint.certificate,
-            checkpoint.state_json,
-            datetime.now(UTC),
-        )
+            raise PnlCheckpointWriteRefusalError(refusal)
+        try:
+            self._upsert_synthetic_checkpoint(key, checkpoint)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._last_pnl_checkpoint_write_refusal = "capture_upsert_failed"
 
     def _stage_chunk_edits(
         self,
@@ -753,6 +780,7 @@ class _FakeRepo:
     ) -> PnlCorrectionFrontier:
         """Publish exact-version sample edits and their cursor together."""
         self.attempted_chunks.append(chunk)
+        self._last_pnl_checkpoint_write_refusal = None
         key = self._correction_key(scope)
         evidence = self._evidence(scope, chunk.evidence.start, chunk.end)
         if (
@@ -1131,6 +1159,11 @@ class TestConstructorAndProperties:
             await off_snap._tick_once()
 
         monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+        monkeypatch.setattr(
+            pnl_engine_options,
+            "_engine_options_table",
+            lambda: {PNL_SAMPLE_CALC_VERSION: PnlEngineOptions(True, False, False)},
+        )
         shadow_repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
         checkpoint_read = mock.AsyncMock(wraps=shadow_repo.get_portfolio_pnl_opening_checkpoint)
         monkeypatch.setattr(shadow_repo, "get_portfolio_pnl_opening_checkpoint", checkpoint_read)
