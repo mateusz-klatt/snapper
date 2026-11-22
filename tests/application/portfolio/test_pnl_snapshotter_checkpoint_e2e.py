@@ -15,7 +15,6 @@ from sqlalchemy import update
 from snapper.application.portfolio import pnl_engine_options
 from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio import pnl_snapshotter_checkpoint as dispatch
-from snapper.application.portfolio import pnl_snapshotter_config
 from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_metrics
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import reset_checkpoint_metrics
@@ -251,12 +250,6 @@ async def _run_mode(
     path.parent.mkdir(parents=True, exist_ok=True)
     url = f"sqlite+aiosqlite:///{path.as_posix()}"
     scope = await idless._seed(url, complete=False)
-    if mode != "off":
-        monkeypatch.setattr(
-            pnl_snapshotter_config,
-            "CHECKPOINT_MODES_ENABLED",
-            frozenset({"off", "shadow", "active"}),
-        )
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", mode)
     monkeypatch.delenv("PNL_FX_SHADOW_PINNING_ENABLED", raising=False)
     async with idless._repository(url) as repo:
@@ -448,12 +441,6 @@ async def _run_three_tick_lifecycle(
     path.parent.mkdir(parents=True, exist_ok=True)
     url = f"sqlite+aiosqlite:///{path.as_posix()}"
     scope = await idless._seed(url, complete=False)
-    if mode != "off":
-        monkeypatch.setattr(
-            pnl_snapshotter_config,
-            "CHECKPOINT_MODES_ENABLED",
-            frozenset({"off", "active"}),
-        )
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", mode)
     monkeypatch.delenv("PNL_FX_SHADOW_PINNING_ENABLED", raising=False)
     capture_tip = samples._T0 + _MINUTE

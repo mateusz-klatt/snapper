@@ -4,6 +4,7 @@ import asyncio
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime
@@ -80,11 +81,11 @@ class _ScalarResult:
 
 
 class _PreflightSession:
-    """Minimal async context-manager session returning a fixed preflight scalar."""
+    """Minimal async context-manager session returning mapped preflight scalars."""
 
-    def __init__(self, value: object) -> None:
-        """Store the scalar value emitted by ``session.execute``."""
-        self._value = value
+    def __init__(self, responses: Mapping[str, object]) -> None:
+        """Store SQL-to-scalar responses emitted by ``session.execute``."""
+        self._responses = responses
 
     async def __aenter__(self) -> _PreflightSession:
         """Enter the async preflight session context."""
@@ -94,19 +95,19 @@ class _PreflightSession:
         """Exit the async preflight session context."""
         return None
 
-    async def execute(self, _statement: object) -> _ScalarResult:
-        """Return the configured scalar result."""
-        return _ScalarResult(self._value)
+    async def execute(self, statement: object) -> _ScalarResult:
+        """Return the configured scalar result matching ``statement``."""
+        return _ScalarResult(self._responses.get(str(statement)))
 
 
 class _DialectProbeRepo(SQLAlchemyRepository):
-    """Test-only ``SQLAlchemyRepository`` subclass overriding dialect and session scalar."""
+    """Test-only ``SQLAlchemyRepository`` subclass overriding dialect and session scalars."""
 
-    def __init__(self, dialect_name: str, preflight_scalar: object) -> None:
+    def __init__(self, dialect_name: str, responses: Mapping[str, object]) -> None:
         """Bind an in-memory SQLite engine while reporting ``dialect_name`` cleanly."""
         super().__init__("sqlite+aiosqlite:///:memory:")
         self._override_dialect = dialect_name
-        self._preflight_scalar = preflight_scalar
+        self._responses = responses
 
     @property
     def dialect_name(self) -> str:
@@ -115,8 +116,8 @@ class _DialectProbeRepo(SQLAlchemyRepository):
 
     @asynccontextmanager
     async def session(self) -> _PreflightSession:
-        """Yield a lightweight preflight session returning ``_preflight_scalar``."""
-        yield _PreflightSession(self._preflight_scalar)
+        """Yield a lightweight preflight session returning ``_responses``."""
+        yield _PreflightSession(self._responses)
 
 
 def _sample_key() -> PnlCorrectionKey:
@@ -287,12 +288,26 @@ def test_cli_main_and_subprocess_succeed_on_real_sqlite(
     """
     db_path = tmp_path / "cli_probe.db"
     url, scope = asyncio.run(_seed_and_catchup(db_path, monkeypatch))
-    rc = probe.main(["--wallet", scope.wallet_public_id, "--window-minutes", "4", "--db-url", url])
+    rc = probe.main(
+        [
+            "--wallet",
+            scope.wallet_public_id,
+            "--window-minutes",
+            "4",
+            "--statement-timeout-ms",
+            "15000",
+            "--max-runtime-seconds",
+            "30",
+            "--db-url",
+            url,
+        ]
+    )
     assert rc == 0
     captured = capsys.readouterr()
     assert "bit_identical=True" in captured.out
     assert "cold_seconds=" in captured.out
     assert "resume_seconds=" in captured.out
+    assert captured.out.strip().splitlines()[-1] == "RESULT: PASS"
 
     repo_root = Path(probe.__file__).resolve().parents[1]
     env = dict(os.environ)
@@ -317,16 +332,72 @@ def test_cli_main_and_subprocess_succeed_on_real_sqlite(
     )
     assert proc.returncode == 0, proc.stderr
     assert "bit_identical=True" in proc.stdout
+    assert proc.stdout.strip().splitlines()[-1] == "RESULT: PASS"
+
+
+def test_postgres_shaped_statement_allowlist_and_duration_parsing() -> None:
+    """Allow production Postgres FX/tx read statements while blocking locking/writes and bad SETs.
+
+    Given: A PostgreSQL-shaped read statement sequence from FX/timeline reads, mutating
+        statements, ``SELECT ... FOR UPDATE``, unsafe ``SET``/``PRAGMA``, and PG durations.
+    When: Checked by ``_assert_read_only_sql`` and ``_parse_pg_duration_ms``.
+    Then: Every legitimate read-only session setting passes, every write or row-locking query
+        raises ``CheckpointResumeProbeError``, and timeout durations parse accurately.
+    """
+    postgres_read_statements = (
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+        "SET TRANSACTION READ ONLY",
+        "SET LOCAL jit = off",
+        "SET LOCAL jit = on",
+        "SET LOCAL statement_timeout = '30000ms'",
+        "SET LOCAL statement_timeout = 15000",
+        "SET LOCAL lock_timeout = '1s'",
+        "SET LOCAL lock_timeout = 1000",
+        "SAVEPOINT sa_savepoint_1",
+        "RELEASE SAVEPOINT sa_savepoint_1",
+        "ROLLBACK TO SAVEPOINT sa_savepoint_1",
+        "PRAGMA busy_timeout = 1000",
+        "SELECT id, close FROM candles WHERE label = 'FOR UPDATE'",
+    )
+    for statement in postgres_read_statements:
+        probe._assert_read_only_sql(statement)
+
+    for forbidden in (
+        "COPY candles TO STDOUT",
+        "CREATE TABLE tmp_x (id INT)",
+        "ALTER TABLE symbols ADD COLUMN x TEXT",
+        "DROP TABLE symbols",
+        "SET work_mem = '1GB'",
+        "SET LOCAL role = snapper_admin",
+        "PRAGMA busy_timeout = 5000",
+        "SELECT * FROM orders FOR UPDATE",
+        "SELECT * FROM orders FOR SHARE",
+        "WITH x AS (SELECT * FROM orders FOR UPDATE) SELECT * FROM x",
+    ):
+        with pytest.raises(probe.CheckpointResumeProbeError, match="write_sql_refused"):
+            probe._assert_read_only_sql(forbidden)
+
+    assert probe._parse_pg_duration_ms("0") == 0
+    assert probe._parse_pg_duration_ms("500ms") == 500
+    assert probe._parse_pg_duration_ms("1s") == 1_000
+    assert probe._parse_pg_duration_ms("30s") == 30_000
+    assert probe._parse_pg_duration_ms("2min") == 120_000
+    assert probe._parse_pg_duration_ms("1h") == 3_600_000
+    assert probe._parse_pg_duration_ms("1min 30s") == 90_000
+    assert probe._parse_pg_duration_ms("") is None
+    assert probe._parse_pg_duration_ms("off") is None
 
 
 def test_read_only_sql_dialect_and_orm_guards_reject_every_mutation() -> None:
-    """Enforce SQL verb checks, dialect setup, and ORM dirty-session guards.
+    """Enforce SQL verb checks, dialect timeout setup, and ORM dirty-session guards.
 
     Given: Read-only and mutating SQL statements, dialect cursors, and clean vs dirty sessions.
     When: Checked by ``_assert_read_only_sql``, ``_enforce_connection_read_only``, and
         ``_guard_session_write``.
-    Then: Read-only operations pass cleanly and any mutation, writable CTE, unsafe PRAGMA/SET,
-        unsupported dialect, or staged ORM write raises ``CheckpointResumeProbeError``.
+    Then: Read-only and timeout setup succeeds while any mutation, writable CTE, unsafe
+        PRAGMA/SET, unsupported dialect, bad timeout, or staged ORM write refuses cleanly.
     """
     for safe_sql in (
         "",
@@ -357,13 +428,23 @@ def test_read_only_sql_dialect_and_orm_guards_reject_every_mutation() -> None:
 
     sqlite_conn = _RecordingConnection()
     probe._enforce_connection_read_only(sqlite_conn, "sqlite")
-    assert sqlite_conn.cursor_obj.commands == ["PRAGMA query_only = ON"]
+    assert sqlite_conn.cursor_obj.commands == [
+        "PRAGMA query_only = ON",
+        "PRAGMA busy_timeout = 1000",
+    ]
     assert sqlite_conn.cursor_obj.closed is True
 
     pg_conn = _RecordingConnection()
-    probe._enforce_connection_read_only(pg_conn, "postgresql")
-    assert pg_conn.cursor_obj.commands == ["SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY"]
+    probe._enforce_connection_read_only(pg_conn, "postgresql", statement_timeout_ms=15_000)
+    assert pg_conn.cursor_obj.commands == [
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
+        "SET SESSION statement_timeout = 15000",
+        "SET SESSION lock_timeout = 1000",
+    ]
     assert pg_conn.cursor_obj.closed is True
+
+    with pytest.raises(probe.CheckpointResumeProbeError, match="invalid_statement_timeout_ms:0"):
+        probe._enforce_connection_read_only(_RecordingConnection(), "postgresql", 0)
 
     with pytest.raises(probe.CheckpointResumeProbeError, match="unsupported_dialect:mysql"):
         probe._enforce_connection_read_only(_RecordingConnection(), "mysql")
@@ -425,7 +506,9 @@ async def test_sqlite_preflight_and_runtime_guards_refuse_mutations(
                     session.add(prefix._symbol())
                     await session.commit()
 
-        monkeypatch.setattr(probe, "_enforce_connection_read_only", lambda _conn, _dialect: None)
+        monkeypatch.setattr(
+            probe, "_enforce_connection_read_only", lambda _conn, _dialect, _timeout=30_000: None
+        )
         repo_writable = SQLAlchemyRepository(url)
         try:
             with (
@@ -441,41 +524,144 @@ async def test_sqlite_preflight_and_runtime_guards_refuse_mutations(
         finally:
             await repo_writable.engine.dispose()
 
+        sqlite_bad_timeout = _DialectProbeRepo(
+            "sqlite",
+            {"PRAGMA query_only": 1, "PRAGMA busy_timeout": 5000},
+        )
+        try:
+            with (
+                probe._read_only_guards(sqlite_bad_timeout),
+                pytest.raises(
+                    probe.CheckpointResumeProbeError, match="database_lock_timeout_mismatch"
+                ),
+            ):
+                await probe._preflight_read_only(
+                    sqlite_bad_timeout,
+                    PnlSeriesReadPolicy(allow_anchor_creation=False),
+                )
+        finally:
+            await sqlite_bad_timeout.engine.dispose()
+
 
 async def test_postgresql_and_unsupported_dialect_preflight_guards() -> None:
-    """Verify PostgreSQL read-only preflight accepts read-only sessions and rejects writable ones.
+    """Verify PostgreSQL read-only and timeout preflight accepts valid sessions and rejects others.
 
-    Given: Simulated PostgreSQL read-only, PostgreSQL writable, and unsupported MySQL dialects.
+    Given: Simulated PostgreSQL sessions with valid or mismatched read-only/timeout settings
+        and an unsupported MySQL dialect.
     When: ``_preflight_read_only`` inspects each repository under read-only guards.
-    Then: PostgreSQL read-only passes while writable PostgreSQL and MySQL refuse.
+    Then: Valid PostgreSQL read-only + timeouts pass, while writable or mismatched timeouts refuse.
     """
     policy = PnlSeriesReadPolicy(allow_anchor_creation=False)
-    pg_ok = _DialectProbeRepo("postgresql", "on")
+    pg_ok = _DialectProbeRepo(
+        "postgresql",
+        {
+            "SHOW transaction_read_only": "on",
+            "SHOW statement_timeout": "30s",
+            "SHOW lock_timeout": "1s",
+        },
+    )
     try:
         with probe._read_only_guards(pg_ok):
             await probe._preflight_read_only(pg_ok, policy)
     finally:
         await pg_ok.engine.dispose()
 
-    pg_writable = _DialectProbeRepo("postgresql", "off")
-    try:
-        with (
-            probe._read_only_guards(pg_writable),
-            pytest.raises(probe.CheckpointResumeProbeError, match="database_write_would_commit"),
-        ):
-            await probe._preflight_read_only(pg_writable, policy)
-    finally:
-        await pg_writable.engine.dispose()
+    bad_cases: tuple[tuple[str, dict[str, object], str], ...] = (
+        (
+            "postgresql",
+            {
+                "SHOW transaction_read_only": "off",
+                "SHOW statement_timeout": "30s",
+                "SHOW lock_timeout": "1s",
+            },
+            "database_write_would_commit",
+        ),
+        (
+            "postgresql",
+            {
+                "SHOW transaction_read_only": "on",
+                "SHOW statement_timeout": "10s",
+                "SHOW lock_timeout": "1s",
+            },
+            "database_statement_timeout_mismatch",
+        ),
+        (
+            "postgresql",
+            {
+                "SHOW transaction_read_only": "on",
+                "SHOW statement_timeout": "30s",
+                "SHOW lock_timeout": "5s",
+            },
+            "database_lock_timeout_mismatch",
+        ),
+        ("mysql", {}, "unsupported_dialect:mysql"),
+    )
+    for dialect_name, responses, expected_error in bad_cases:
+        repo = _DialectProbeRepo(dialect_name, responses)
+        try:
+            with (
+                probe._read_only_guards(repo),
+                pytest.raises(probe.CheckpointResumeProbeError, match=expected_error),
+            ):
+                await probe._preflight_read_only(repo, policy)
+        finally:
+            await repo.engine.dispose()
 
-    bad_dialect = _DialectProbeRepo("mysql", "off")
-    try:
-        with (
-            probe._read_only_guards(bad_dialect),
-            pytest.raises(probe.CheckpointResumeProbeError, match="unsupported_dialect:mysql"),
+
+async def test_probe_enforces_max_runtime_seconds_and_validates_bounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enforce ``statement_timeout_ms`` and ``max_runtime_seconds`` bounds on every probe run.
+
+    Given: Out-of-bounds timeout configs and a slow series call exceeding ``max_runtime_seconds``.
+    When: ``probe_with_repository`` evaluates the config or runs under ``asyncio.timeout``.
+    Then: Invalid bounds fail immediately and over-budget execution raises
+        ``probe_max_runtime_exceeded``.
+
+    Args:
+        tmp_path: Pytest isolated directory for temporary SQLite fixture.
+        monkeypatch: Pytest fixture injecting a slow series delay.
+    """
+    url, scope = await _seed_and_catchup(tmp_path / "timeout.db", monkeypatch)
+    async with idless._repository(url) as repo:
+        with pytest.raises(
+            probe.CheckpointResumeProbeError, match="invalid_statement_timeout_ms:0"
         ):
-            await probe._preflight_read_only(bad_dialect, policy)
-    finally:
-        await bad_dialect.engine.dispose()
+            await probe.probe_with_repository(
+                repo,
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=scope.wallet_public_id,
+                    statement_timeout_ms=0,
+                ),
+            )
+        with pytest.raises(probe.CheckpointResumeProbeError, match="invalid_max_runtime_seconds:0"):
+            await probe.probe_with_repository(
+                repo,
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=scope.wallet_public_id,
+                    max_runtime_seconds=0.0,
+                ),
+            )
+
+        async def slow_series(*_args: object, **_kwargs: object) -> PnlWalletSeriesResult:
+            """Simulate a stalled database query triggering the overall runtime ceiling."""
+            await asyncio.sleep(0.2)
+            return _sample_result(())
+
+        monkeypatch.setattr(probe, "build_wallet_pnl_series", slow_series)
+        with pytest.raises(
+            probe.CheckpointResumeProbeError,
+            match="probe_max_runtime_exceeded:0.02",
+        ):
+            await probe.probe_with_repository(
+                repo,
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=scope.wallet_public_id,
+                    window_minutes=4,
+                    max_runtime_seconds=0.02,
+                ),
+            )
 
 
 async def test_probe_refuses_invalid_configs_and_incomplete_frontiers(
@@ -743,7 +929,36 @@ def test_canonical_sequence_comparison_and_cli_exit_codes(
         probe, "probe_wallet_checkpoint_resume", AsyncMock(return_value=mismatch_report)
     )
     assert probe.main(["--wallet", prefix._WALLET]) == 1
-    assert "bit_identical=False mismatch_detail=points[0]" in capsys.readouterr().out
+    mismatch_out = capsys.readouterr().out
+    assert "bit_identical=False mismatch_detail=points[0]" in mismatch_out
+    assert mismatch_out.strip().splitlines()[-1] == "RESULT: FAIL points[0]"
+
+    monkeypatch.setattr(
+        probe,
+        "probe_wallet_checkpoint_resume",
+        AsyncMock(
+            side_effect=probe.CheckpointResumeProbeError(
+                "checkpoint_verify_fallback:checkpoint_late_execution"
+            )
+        ),
+    )
+    assert probe.main(["--wallet", prefix._WALLET]) == 2
+    refusal_io = capsys.readouterr()
+    assert "checkpoint resume probe refused:" in refusal_io.err
+    assert (
+        refusal_io.out.strip().splitlines()[-1]
+        == "RESULT: PASS(refused:checkpoint_verify_fallback:checkpoint_late_execution)"
+    )
+
+    monkeypatch.setattr(
+        probe,
+        "probe_wallet_checkpoint_resume",
+        AsyncMock(side_effect=probe.CheckpointResumeProbeError("capture_fill_gap")),
+    )
+    assert probe.main(["--wallet", prefix._WALLET]) == 2
+    assert (
+        capsys.readouterr().out.strip().splitlines()[-1] == "RESULT: PASS(refused:capture_fill_gap)"
+    )
 
     monkeypatch.setattr(
         probe,
@@ -751,4 +966,6 @@ def test_canonical_sequence_comparison_and_cli_exit_codes(
         AsyncMock(side_effect=probe.CheckpointResumeProbeError("database_write_would_commit")),
     )
     assert probe.main(["--wallet", prefix._WALLET]) == 2
-    assert "checkpoint resume probe refused: database_write_would_commit" in capsys.readouterr().err
+    fail_io = capsys.readouterr()
+    assert "checkpoint resume probe refused: database_write_would_commit" in fail_io.err
+    assert fail_io.out.strip().splitlines()[-1] == "RESULT: FAIL database_write_would_commit"

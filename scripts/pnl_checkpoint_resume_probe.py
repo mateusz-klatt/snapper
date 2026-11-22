@@ -23,12 +23,14 @@ from dataclasses import fields
 from dataclasses import is_dataclass
 from datetime import datetime
 from datetime import timedelta
+from typing import Final
 from typing import Protocol
 from typing import cast
 
 from sqlalchemy import event
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from snapper.application.portfolio.fx_conversion_shadow import POINTWISE_FX_ELECTION_POLICY_VERSION
@@ -67,10 +69,21 @@ from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PortfolioPnlAnchorRow
 
 _MINUTE = timedelta(minutes=1)
-_SQL_NOISE_RE = re.compile(r"'(?:''|[^'])*'|--[^\n]*|/\*[\s\S]*?\*/")
+DEFAULT_STATEMENT_TIMEOUT_MS: Final[int] = 30_000
+LOCK_TIMEOUT_MS: Final[int] = 1_000
+DEFAULT_MAX_RUNTIME_SECONDS: Final[float] = 120.0
+_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*[\s\S]*?\*/")
+_SQL_STRING_RE = re.compile(r"'(?:''|[^'])*'")
+_FOR_LOCK_RE = re.compile(r"\bFOR\s+(?:(?:NO\s+KEY\s+)?UPDATE|(?:KEY\s+)?SHARE)\b")
+_PG_DURATION_TOKEN_RE = re.compile(r"(?:(\d+)\s*(ms|s|min|h))\s*")
+_PG_UNIT_MS: Final[dict[str, int]] = {
+    "ms": 1,
+    "s": 1_000,
+    "min": 60_000,
+    "h": 3_600_000,
+}
 _READ_ONLY_VERBS = frozenset(
     {
-        "SELECT",
         "SHOW",
         "VALUES",
         "EXPLAIN",
@@ -104,6 +117,22 @@ _WRITE_KEYWORDS = frozenset(
         "DO",
         "LOCK",
     }
+)
+_CLOSED_REFUSAL_EXACT = frozenset(
+    {
+        "missing_active_anchor",
+        "missing_correction_frontier",
+        "frontier_has_fill_gap",
+        "frontier_incomplete_cut",
+        "frontier_window_too_short",
+        "capture_fill_gap",
+        "missing_capture_fill_witness_cut",
+    }
+)
+_CLOSED_REFUSAL_PREFIXES: Final[tuple[str, ...]] = (
+    "checkpoint_capture_refused:",
+    "checkpoint_verify_fallback:",
+    "checkpoint_resume_fallback:",
 )
 
 
@@ -140,6 +169,8 @@ class CheckpointResumeProbeConfig:
     valuation_ccy: str = "USD"
     window_minutes: int = 60
     db_url: str | None = None
+    statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS
+    max_runtime_seconds: float = DEFAULT_MAX_RUNTIME_SECONDS
 
 
 @dataclass(frozen=True)
@@ -195,7 +226,7 @@ def _is_read_only_pragma(normalized: str) -> bool:
         normalized: Whitespace-collapsed uppercase SQL fragment starting with ``PRAGMA``.
 
     Returns:
-        ``True`` only for read-only introspection pragmas or ``PRAGMA QUERY_ONLY = ON/1/TRUE``.
+        ``True`` only for read-only introspection pragmas or allowed read/timeout settings.
     """
     if "=" not in normalized:
         return True
@@ -204,27 +235,42 @@ def _is_read_only_pragma(normalized: str) -> bool:
         "PRAGMAQUERY_ONLY=ON",
         "PRAGMAQUERY_ONLY=1",
         "PRAGMAQUERY_ONLY=TRUE",
+        f"PRAGMABUSY_TIMEOUT={LOCK_TIMEOUT_MS}",
     }
 
 
 def _is_read_only_set(normalized: str) -> bool:
-    """Return whether a PostgreSQL ``SET`` statement pins read-only execution.
+    """Return whether a PostgreSQL ``SET`` statement pins read-only or allowed read settings.
 
     Args:
         normalized: Whitespace-collapsed uppercase SQL fragment starting with ``SET``.
 
     Returns:
-        ``True`` only for read-only session or transaction characteristics.
+        ``True`` only for read-only characteristics, isolation, local JIT, or timeout settings.
     """
     if "READ WRITE" in normalized:
         return False
-    return normalized == "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY" or (
-        normalized.startswith("SET TRANSACTION ") and normalized.endswith("READ ONLY")
+    if normalized == "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY":
+        return True
+    if re.fullmatch(
+        r"SET TRANSACTION (?:READ ONLY|ISOLATION LEVEL "
+        r"(?:READ COMMITTED|REPEATABLE READ|SERIALIZABLE)(?:, READ ONLY)?)",
+        normalized,
+    ):
+        return True
+    if re.fullmatch(r"SET LOCAL JIT\s*(?:=|TO)\s*(?:ON|OFF|TRUE|FALSE|'')", normalized):
+        return True
+    return (
+        re.fullmatch(
+            r"SET LOCAL (?:STATEMENT_TIMEOUT|LOCK_TIMEOUT)\s*(?:=|TO)\s*(?:''|\d+(?:MS|S)?)",
+            normalized,
+        )
+        is not None
     )
 
 
 def _assert_fragment_read_only(fragment: str) -> None:
-    """Reject any SQL fragment capable of mutating database state or settings.
+    """Reject any SQL fragment capable of mutating or row-locking database state.
 
     Args:
         fragment: Comment- and literal-stripped SQL fragment without semicolons.
@@ -237,9 +283,13 @@ def _assert_fragment_read_only(fragment: str) -> None:
     if not tokens:
         return
     verb = tokens[0]
-    if verb in _READ_ONLY_VERBS:
+    if verb in {"SELECT", "WITH"}:
+        if _FOR_LOCK_RE.search(normalized):
+            raise CheckpointResumeProbeError("write_sql_refused:FOR_UPDATE")
+        if verb == "WITH" and (_WRITE_KEYWORDS & set(tokens)):
+            raise CheckpointResumeProbeError("write_sql_refused:WITH")
         return
-    if verb == "WITH" and not (_WRITE_KEYWORDS & set(tokens)):
+    if verb in _READ_ONLY_VERBS:
         return
     if verb == "PRAGMA" and _is_read_only_pragma(normalized):
         return
@@ -254,28 +304,58 @@ def _assert_read_only_sql(statement: str) -> None:
     Args:
         statement: Raw SQL string submitted to SQLAlchemy cursor execution.
     """
-    cleaned = _SQL_NOISE_RE.sub(" ", statement)
+    comment_free = _SQL_COMMENT_RE.sub(" ", statement)
+    cleaned = _SQL_STRING_RE.sub("''", comment_free)
     for fragment in cleaned.split(";"):
         _assert_fragment_read_only(fragment)
 
 
-def _enforce_connection_read_only(dbapi_connection: object, dialect_name: str) -> None:
-    """Enable read-only transaction enforcement on a DBAPI connection.
+def _parse_pg_duration_ms(raw: str) -> int | None:
+    """Parse a PostgreSQL timeout duration string from ``SHOW`` into milliseconds.
+
+    Args:
+        raw: Raw duration string returned by PostgreSQL ``SHOW``.
+
+    Returns:
+        Timeout in integer milliseconds, or ``None`` when unparseable.
+    """
+    cleaned = raw.strip().lower()
+    if cleaned.isdigit():
+        return int(cleaned)
+    if not cleaned or not re.fullmatch(r"(?:\d+\s*(?:ms|s|min|h)\s*)+", cleaned):
+        return None
+    return sum(int(qty) * _PG_UNIT_MS[unit] for qty, unit in _PG_DURATION_TOKEN_RE.findall(cleaned))
+
+
+def _enforce_connection_read_only(
+    dbapi_connection: object,
+    dialect_name: str,
+    statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
+) -> None:
+    """Enable read-only transaction and timeout bounds on a DBAPI connection.
 
     Args:
         dbapi_connection: Raw driver connection opened or checked out by SQLAlchemy.
         dialect_name: SQLAlchemy dialect name (``sqlite`` or ``postgresql``).
+        statement_timeout_ms: PostgreSQL per-statement timeout in milliseconds.
 
     Raises:
-        CheckpointResumeProbeError: For unsupported database dialects.
+        CheckpointResumeProbeError: For unsupported dialects or invalid timeout bounds.
     """
     conn = cast(_DbapiConnectionProtocol, dbapi_connection)
     cursor = conn.cursor()
     try:
         if dialect_name == "sqlite":
             cursor.execute("PRAGMA query_only = ON")
+            cursor.execute(f"PRAGMA busy_timeout = {LOCK_TIMEOUT_MS}")
         elif dialect_name == "postgresql":
+            _require(
+                statement_timeout_ms >= 1,
+                f"invalid_statement_timeout_ms:{statement_timeout_ms}",
+            )
             cursor.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+            cursor.execute(f"SET SESSION statement_timeout = {int(statement_timeout_ms)}")
+            cursor.execute(f"SET SESSION lock_timeout = {LOCK_TIMEOUT_MS}")
         else:
             raise CheckpointResumeProbeError(f"unsupported_dialect:{dialect_name}")
     finally:
@@ -314,11 +394,16 @@ def _guard_session_write(session: object, *_args: object) -> None:
 
 
 @contextmanager
-def _read_only_guards(repo: Repository) -> Iterator[SQLAlchemyRepository]:
-    """Attach DBAPI read-only mode, SQL filters, and ORM commit guards to ``repo``.
+def _read_only_guards(
+    repo: Repository,
+    *,
+    statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
+) -> Iterator[SQLAlchemyRepository]:
+    """Attach DBAPI read-only/timeout hooks, SQL filters, and ORM commit guards.
 
     Args:
         repo: Candidate repository instance supplied to the probe.
+        statement_timeout_ms: PostgreSQL per-statement timeout in milliseconds.
 
     Yields:
         Verified ``SQLAlchemyRepository`` with active read-only event guards.
@@ -332,16 +417,16 @@ def _read_only_guards(repo: Repository) -> Iterator[SQLAlchemyRepository]:
     dialect_name = sa_repo.dialect_name
 
     def _on_connect(dbapi_connection: object, _connection_record: object) -> None:
-        """Apply DBAPI read-only mode on newly opened connections."""
-        _enforce_connection_read_only(dbapi_connection, dialect_name)
+        """Apply DBAPI read-only mode and timeout bounds on newly opened connections."""
+        _enforce_connection_read_only(dbapi_connection, dialect_name, statement_timeout_ms)
 
     def _on_checkout(
         dbapi_connection: object,
         _connection_record: object,
         _connection_proxy: object,
     ) -> None:
-        """Re-assert DBAPI read-only mode when borrowing pooled connections."""
-        _enforce_connection_read_only(dbapi_connection, dialect_name)
+        """Re-assert DBAPI read-only mode and timeout bounds on pooled checkout."""
+        _enforce_connection_read_only(dbapi_connection, dialect_name, statement_timeout_ms)
 
     event.listen(sync_engine, "connect", _on_connect)
     event.listen(sync_engine, "checkout", _on_checkout)
@@ -358,15 +443,56 @@ def _read_only_guards(repo: Repository) -> Iterator[SQLAlchemyRepository]:
         event.remove(sync_engine, "connect", _on_connect)
 
 
+async def _verify_connection_state(
+    session: AsyncSession,
+    dialect_name: str,
+    statement_timeout_ms: int,
+) -> None:
+    """Verify read-only mode, ``statement_timeout``, and ``lock_timeout`` on a live session.
+
+    Args:
+        session: Open async session checked out under read-only hooks.
+        dialect_name: Target SQLAlchemy dialect name.
+        statement_timeout_ms: Expected PostgreSQL ``statement_timeout`` in milliseconds.
+
+    Raises:
+        CheckpointResumeProbeError: When read-only mode or timeout bounds are absent.
+    """
+    if dialect_name == "sqlite":
+        query_only = (await session.execute(text("PRAGMA query_only"))).scalar_one()
+        _require(query_only == 1, "database_write_would_commit")
+        busy_timeout = (await session.execute(text("PRAGMA busy_timeout"))).scalar_one()
+        _require(busy_timeout == LOCK_TIMEOUT_MS, "database_lock_timeout_mismatch")
+        return
+    if dialect_name == "postgresql":
+        read_only = (await session.execute(text("SHOW transaction_read_only"))).scalar_one()
+        _require(str(read_only).lower() == "on", "database_write_would_commit")
+        stmt_raw = (await session.execute(text("SHOW statement_timeout"))).scalar_one()
+        _require(
+            _parse_pg_duration_ms(str(stmt_raw)) == statement_timeout_ms,
+            "database_statement_timeout_mismatch",
+        )
+        lock_raw = (await session.execute(text("SHOW lock_timeout"))).scalar_one()
+        _require(
+            _parse_pg_duration_ms(str(lock_raw)) == LOCK_TIMEOUT_MS,
+            "database_lock_timeout_mismatch",
+        )
+        return
+    raise CheckpointResumeProbeError(f"unsupported_dialect:{dialect_name}")
+
+
 async def _preflight_read_only(
     repo: SQLAlchemyRepository,
     policy: PnlSeriesReadPolicy,
+    *,
+    statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
 ) -> None:
-    """Verify read policy, SQL/ORM hooks, and live connection read-only status.
+    """Verify read policy, SQL/ORM hooks, and live connection read-only/timeout state.
 
     Args:
         repo: Guarded SQLAlchemy repository instance.
         policy: Series read policy that will govern all probe service calls.
+        statement_timeout_ms: Expected PostgreSQL ``statement_timeout`` in milliseconds.
 
     Raises:
         CheckpointResumeProbeError: When any write hazard or missing guard is detected.
@@ -379,14 +505,19 @@ async def _preflight_read_only(
         "read_only_guard_missing",
     )
     async with repo.session() as session:
-        if repo.dialect_name == "sqlite":
-            value = (await session.execute(text("PRAGMA query_only"))).scalar_one()
-            _require(value == 1, "database_write_would_commit")
-        elif repo.dialect_name == "postgresql":
-            value = (await session.execute(text("SHOW transaction_read_only"))).scalar_one()
-            _require(str(value).lower() == "on", "database_write_would_commit")
-        else:
-            raise CheckpointResumeProbeError(f"unsupported_dialect:{repo.dialect_name}")
+        await _verify_connection_state(session, repo.dialect_name, statement_timeout_ms)
+
+
+def _validate_runtime_bounds(config: CheckpointResumeProbeConfig) -> None:
+    """Validate timeout and runtime ceiling bounds before opening connections."""
+    _require(
+        config.statement_timeout_ms >= 1,
+        f"invalid_statement_timeout_ms:{config.statement_timeout_ms}",
+    )
+    _require(
+        math.isfinite(config.max_runtime_seconds) and config.max_runtime_seconds > 0,
+        f"invalid_max_runtime_seconds:{config.max_runtime_seconds}",
+    )
 
 
 def _validate_config(config: CheckpointResumeProbeConfig) -> tuple[str, str, str]:
@@ -398,6 +529,7 @@ def _validate_config(config: CheckpointResumeProbeConfig) -> tuple[str, str, str
     Returns:
         Normalized ``(wallet_public_id, mode, valuation_ccy)`` tuple.
     """
+    _validate_runtime_bounds(config)
     wallet = normalize_portfolio_pnl_wallet_public_id(config.wallet_public_id)
     _require(config.mode in ("live", "paper"), f"invalid_mode:{config.mode}")
     ccy = normalize_portfolio_pnl_valuation_ccy(config.valuation_ccy)
@@ -695,48 +827,34 @@ def _compare_series(
     return _compare_sequences("rate_sources", cold.rate_sources, resumed.rate_sources)
 
 
-async def probe_with_repository(
-    repo: Repository,
+async def _execute_probe_pipeline(
+    sa_repo: SQLAlchemyRepository,
     config: CheckpointResumeProbeConfig,
-    *,
-    read_policy: PnlSeriesReadPolicy | None = None,
+    policy: PnlSeriesReadPolicy,
 ) -> CheckpointResumeProbeReport:
-    """Run read-only preflight, cold replay, in-memory capture, resume, and comparison.
-
-    Args:
-        repo: Database repository (must be ``SQLAlchemyRepository``).
-        config: Operator wallet, mode, currency, and suffix-window parameters.
-        read_policy: Optional override read policy (defaults to non-mutating policy).
-
-    Returns:
-        Probe timings and bit-exact comparison report.
-
-    Raises:
-        CheckpointResumeProbeError: When any read-only check, capture, or resume refuses.
-    """
-    policy = read_policy or PnlSeriesReadPolicy(
-        allow_anchor_creation=False,
-        current_truth_horizon=False,
+    """Run guarded preflight, cold replay, in-memory capture, resume, and compare."""
+    await _preflight_read_only(
+        sa_repo,
+        policy,
+        statement_timeout_ms=config.statement_timeout_ms,
     )
-    with _read_only_guards(repo) as sa_repo:
-        await _preflight_read_only(sa_repo, policy)
-        prepared = await _load_prepared_scope(sa_repo, config)
-        cold_result, cold_seconds = await _run_window_series(sa_repo, prepared, policy, None)
-        verified, capture_seconds, verify_seconds = await _capture_and_verify_in_memory(
-            sa_repo,
-            prepared,
-            policy,
-        )
-        resumed_result, resume_seconds = await _run_window_series(
-            sa_repo,
-            prepared,
-            policy,
-            verified,
-        )
-        _require(
-            resumed_result.checkpoint_resume_fallback is None,
-            f"checkpoint_resume_fallback:{resumed_result.checkpoint_resume_fallback}",
-        )
+    prepared = await _load_prepared_scope(sa_repo, config)
+    cold_result, cold_seconds = await _run_window_series(sa_repo, prepared, policy, None)
+    verified, capture_seconds, verify_seconds = await _capture_and_verify_in_memory(
+        sa_repo,
+        prepared,
+        policy,
+    )
+    resumed_result, resume_seconds = await _run_window_series(
+        sa_repo,
+        prepared,
+        policy,
+        verified,
+    )
+    _require(
+        resumed_result.checkpoint_resume_fallback is None,
+        f"checkpoint_resume_fallback:{resumed_result.checkpoint_resume_fallback}",
+    )
     mismatch = _compare_series(cold_result, resumed_result)
     return CheckpointResumeProbeReport(
         wallet_public_id=prepared.scope.wallet_public_id,
@@ -754,6 +872,40 @@ async def probe_with_repository(
         matched=mismatch is None,
         mismatch_detail=mismatch,
     )
+
+
+async def probe_with_repository(
+    repo: Repository,
+    config: CheckpointResumeProbeConfig,
+    *,
+    read_policy: PnlSeriesReadPolicy | None = None,
+) -> CheckpointResumeProbeReport:
+    """Run read-only preflight, cold replay, in-memory capture, resume, and comparison.
+
+    Args:
+        repo: Database repository (must be ``SQLAlchemyRepository``).
+        config: Operator wallet, mode, currency, suffix-window, and timeout parameters.
+        read_policy: Optional override read policy (defaults to non-mutating policy).
+
+    Returns:
+        Probe timings and bit-exact comparison report.
+
+    Raises:
+        CheckpointResumeProbeError: When any read-only check, timeout, capture, or resume refuses.
+    """
+    _validate_runtime_bounds(config)
+    policy = read_policy or PnlSeriesReadPolicy(
+        allow_anchor_creation=False,
+        current_truth_horizon=False,
+    )
+    with _read_only_guards(repo, statement_timeout_ms=config.statement_timeout_ms) as sa_repo:
+        try:
+            async with asyncio.timeout(config.max_runtime_seconds):
+                return await _execute_probe_pipeline(sa_repo, config, policy)
+        except TimeoutError as exc:
+            raise CheckpointResumeProbeError(
+                f"probe_max_runtime_exceeded:{config.max_runtime_seconds}"
+            ) from exc
 
 
 async def probe_wallet_checkpoint_resume(
@@ -775,6 +927,23 @@ async def probe_wallet_checkpoint_resume(
         await repo.engine.dispose()
 
 
+def _format_failure_result(failure: Exception) -> str:
+    """Format an exit-2 refusal or failure as a closed ``RESULT:`` status line.
+
+    Args:
+        failure: Exception caught by the CLI boundary.
+
+    Returns:
+        ``RESULT: PASS(refused:<reason>)`` for closed refusals or ``RESULT: FAIL <reason>``.
+    """
+    reason = str(failure)
+    if isinstance(failure, CheckpointResumeProbeError) and (
+        reason in _CLOSED_REFUSAL_EXACT or reason.startswith(_CLOSED_REFUSAL_PREFIXES)
+    ):
+        return f"RESULT: PASS(refused:{reason})"
+    return f"RESULT: FAIL {reason}"
+
+
 def _format_report(report: CheckpointResumeProbeReport) -> str:
     """Format probe timings and comparison verdict as operator-readable stdout lines.
 
@@ -782,8 +951,9 @@ def _format_report(report: CheckpointResumeProbeReport) -> str:
         report: Completed probe report returned by :func:`probe_wallet_checkpoint_resume`.
 
     Returns:
-        Multi-line summary containing scope, timings, counts, and equivalence status.
+        Multi-line summary containing scope, timings, counts, and final ``RESULT:`` line.
     """
+    verdict = "RESULT: PASS" if report.matched else f"RESULT: FAIL {report.mismatch_detail}"
     return "\n".join(
         (
             (
@@ -802,6 +972,7 @@ def _format_report(report: CheckpointResumeProbeReport) -> str:
                 f"verify_seconds={report.verify_seconds:.6f}"
             ),
             f"bit_identical={report.matched} mismatch_detail={report.mismatch_detail or 'none'}",
+            verdict,
         )
     )
 
@@ -810,7 +981,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser for the read-only checkpoint resume probe.
 
     Returns:
-        Configured argument parser accepting wallet, scope, window, and optional URL.
+        Configured argument parser accepting wallet, scope, window, timeouts, and optional URL.
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wallet", required=True, help="Wallet public ID to probe.")
@@ -818,6 +989,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--valuation-ccy", default="USD")
     parser.add_argument("--window-minutes", type=int, default=60)
     parser.add_argument("--db-url", default=None)
+    parser.add_argument("--statement-timeout-ms", type=int, default=DEFAULT_STATEMENT_TIMEOUT_MS)
+    parser.add_argument("--max-runtime-seconds", type=float, default=DEFAULT_MAX_RUNTIME_SECONDS)
     return parser
 
 
@@ -837,11 +1010,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         valuation_ccy=arguments.valuation_ccy,
         window_minutes=arguments.window_minutes,
         db_url=arguments.db_url,
+        statement_timeout_ms=arguments.statement_timeout_ms,
+        max_runtime_seconds=arguments.max_runtime_seconds,
     )
     try:
         report = asyncio.run(probe_wallet_checkpoint_resume(config))
     except (CheckpointResumeProbeError, ValueError, OSError, SQLAlchemyError) as failure:
         print(f"checkpoint resume probe refused: {failure}", file=sys.stderr)
+        print(_format_failure_result(failure))
         return 2
     print(_format_report(report))
     return 0 if report.matched else 1
