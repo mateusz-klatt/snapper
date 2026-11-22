@@ -161,12 +161,18 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
                 if not self._enter_locked_update(session, now):
                     return
                 observed_at = self._last_fetch_observed_at or now
+                validated_schemas: list[KrakenFuturesInstrumentSchema] = []
                 for raw_instrument in symbols:
-                    schema = self._validate_instrument_schema(raw_instrument)
-                    if schema is None:
+                    validated = self._validate_instrument_schema(raw_instrument)
+                    if validated is None:
                         skipped_count += 1
                         continue
-
+                    validated_schemas.append(validated)
+                ordered_schemas = self._sort_records_by_native_symbol(
+                    validated_schemas,
+                    self._futures_native_sort_key,
+                )
+                for schema in ordered_schemas:
                     symbol_public_id = self._persist_instrument_schema(
                         session,
                         schema,
@@ -246,6 +252,12 @@ class KrakenFuturesSymbolUpdaterService(SymbolUpdaterService[KrakenFuturesExchan
                 "Kraken Futures reopened {} runtime trade channel capability row(s)", closed
             )
         return closed
+
+    @classmethod
+    def _futures_native_sort_key(cls, schema: KrakenFuturesInstrumentSchema) -> str:
+        """Return canonical native-symbol sort key for one validated futures schema."""
+        symbol_metadata = cls._resolve_symbol_metadata(schema)
+        return symbol_metadata[0] if symbol_metadata is not None else ""
 
     def _validate_instrument_schema(
         self,

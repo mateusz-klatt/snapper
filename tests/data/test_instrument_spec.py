@@ -4,6 +4,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -25,6 +26,7 @@ from snapper.data.models import Symbol
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.data.repository import is_effective_unit_certified
 from snapper.data.repository_types import InstrumentSpecRow
 
@@ -661,6 +663,7 @@ class TestUpdaterReviseHelper:
         repo, ipid = sync_repo
         ts = _ts()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -698,6 +701,7 @@ class TestUpdaterReviseHelper:
         ts1 = _ts()
         ts2 = ts1 + timedelta(hours=1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -710,6 +714,7 @@ class TestUpdaterReviseHelper:
             )
             session.commit()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -741,6 +746,7 @@ class TestUpdaterReviseHelper:
         ts1 = _ts()
         ts2 = ts1 + timedelta(hours=1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -752,6 +758,7 @@ class TestUpdaterReviseHelper:
             )
             session.commit()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -781,6 +788,7 @@ class TestUpdaterReviseHelper:
         repo, ipid = sync_repo
         ts = _ts()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -816,6 +824,7 @@ class TestUpdaterReviseHelper:
         ts1 = _ts()
         ts2 = ts1 + timedelta(hours=1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -829,6 +838,7 @@ class TestUpdaterReviseHelper:
             )
             session.commit()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -877,6 +887,7 @@ class TestInstrumentMetadataRevision:
         first = _ts()
         second = _ts(1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -888,6 +899,7 @@ class TestInstrumentMetadataRevision:
             )
             session.commit()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -914,6 +926,7 @@ class TestInstrumentMetadataRevision:
         first = _ts()
         second = _ts(1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -942,6 +955,7 @@ class TestInstrumentMetadataRevision:
             unit_certified=True,
         )
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -967,6 +981,7 @@ class TestInstrumentMetadataRevision:
         repo, instrument_public_id = sync_repo
         observed_at = _ts()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -1011,6 +1026,7 @@ class TestInstrumentMetadataRevision:
             unit_certified=False,
         )
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -1048,6 +1064,7 @@ class TestInstrumentMetadataRevision:
         first = _ts()
         second = _ts(1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -1175,3 +1192,103 @@ class TestEffectiveUnitCertification:
     ) -> None:
         """Every invalid freshness input produces an ineffective certification."""
         assert is_effective_unit_certified(row, evaluated_at) is False
+
+
+def test_revise_instrument_spec_resolves_preserve_existing_inside_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve ``PRESERVE_EXISTING`` under lock rather than via unlocked pre-reads."""
+    db_path = tmp_path / "spec-locked-preserve.db"
+    repo = DatabaseRepository(f"sqlite:///{db_path}")
+    repo.create_all()
+    ts1 = _ts()
+    ts_concurrent = ts1 + timedelta(minutes=2)
+    ts_updater = ts1 + timedelta(minutes=1)
+    with repo.get_session() as session:
+        sym = Symbol(
+            native_symbol="SPEC-LOCK-USD",
+            base="SPEC",
+            quote="USD",
+            asset_type="crypto",
+            created_at=ts1,
+            timestamp=ts1,
+            session_id="seed",
+            sequence_id=1,
+        )
+        session.add(sym)
+        session.flush()
+        inst = Instrument(
+            symbol_public_id=sym.public_id,
+            exchange="kraken",
+            timestamp=ts1,
+            session_id="seed",
+            sequence_id=1,
+        )
+        session.add(inst)
+        session.commit()
+        inst_pid = inst.public_id
+
+    try:
+        with repo.get_session() as session:
+            begin_scd2_write_sync(session)
+            SymbolUpdaterService._revise_instrument_spec(
+                session=session,
+                instrument_public_id=inst_pid,
+                now=ts1,
+                session_id="s1",
+                sequence_id=1,
+                funding_type="perpetual_funding",
+                funding_frequency_hours=8,
+                metadata=PRESERVE_EXISTING,
+            )
+            DatabaseRepository.revise_instrument_spec_sync(
+                session=session,
+                instrument_public_id=inst_pid,
+                session_id="concurrent-writer",
+                sequence_id=2,
+                timestamp=ts_concurrent,
+                spec=InstrumentSpecInput(
+                    instrument_kind="spot",
+                    funding_type="spot_margin_rollover",
+                    funding_frequency_hours=4,
+                    rollover_rate_long=0.0005,
+                ),
+            )
+            session.commit()
+
+        def _forbid_unlocked_preread(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("Unlocked get_instrument_spec_sync must not be called")
+
+        monkeypatch.setattr(
+            DatabaseRepository,
+            "get_instrument_spec_sync",
+            staticmethod(_forbid_unlocked_preread),
+        )
+
+        with repo.get_session() as session:
+            begin_scd2_write_sync(session)
+            SymbolUpdaterService._revise_instrument_spec(
+                session=session,
+                instrument_public_id=inst_pid,
+                now=ts_updater,
+                session_id="updater-locked",
+                sequence_id=3,
+                expiry_at=None,
+                instrument_kind="spot",
+            )
+            session.commit()
+
+        with repo.get_session() as session:
+            active = session.scalars(
+                select(InstrumentSpec).where(
+                    InstrumentSpec.instrument_public_id == inst_pid,
+                    InstrumentSpec.known_to == KNOWN_TO_MAX,
+                )
+            ).one()
+            assert active.funding_type == "spot_margin_rollover"
+            assert active.funding_frequency_hours == 4
+            assert active.rollover_rate_long == pytest.approx(0.0005)
+            assert active.timestamp == ts_concurrent
+    finally:
+        repo.engine.dispose()

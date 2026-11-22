@@ -792,3 +792,83 @@ def test_persist_snapshots_scd2_passes_snapshot_timestamp_directly() -> None:
         updater._persist_snapshots_scd2([snap])
     bus_time = mock_ci.call_args.kwargs["bus_time"]
     assert bus_time is now
+
+
+def test_persist_snapshots_scd2_sorts_locks_by_instrument_and_timestamp() -> None:
+    """Persist snapshots in deterministic ``(instrument_public_id, timestamp)`` order.
+
+    Given: Reverse-ordered snapshots across instruments and timestamps,
+    When: ``_persist_snapshots_scd2`` is called,
+    Then: ``close_and_insert_sync`` runs sorted by ``(instrument_public_id, timestamp)``.
+    """
+    session = _FakeSession([])
+    updater = _make_updater_with_session(session)
+    t_early = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+    t_late = datetime(2026, 8, 1, 10, 1, tzinfo=UTC)
+    snaps = [
+        MarketSnapshot(
+            instrument_public_id="inst-b",
+            bid=10.0,
+            bid_volume=1.0,
+            ask=11.0,
+            ask_volume=1.0,
+            last_price=10.5,
+            volume_24h=1.0,
+            vwap_24h=10.5,
+            low_24h=10.0,
+            high_24h=11.0,
+            change_24h=0.0,
+            spread=1.0,
+            spread_pct=1.0,
+            timestamp=t_early,
+            session_id="s1",
+            sequence_id=1,
+        ),
+        MarketSnapshot(
+            instrument_public_id="inst-a",
+            bid=20.0,
+            bid_volume=1.0,
+            ask=21.0,
+            ask_volume=1.0,
+            last_price=20.5,
+            volume_24h=1.0,
+            vwap_24h=20.5,
+            low_24h=20.0,
+            high_24h=21.0,
+            change_24h=0.0,
+            spread=1.0,
+            spread_pct=1.0,
+            timestamp=t_late,
+            session_id="s1",
+            sequence_id=2,
+        ),
+        MarketSnapshot(
+            instrument_public_id="inst-a",
+            bid=22.0,
+            bid_volume=1.0,
+            ask=23.0,
+            ask_volume=1.0,
+            last_price=22.5,
+            volume_24h=1.0,
+            vwap_24h=22.5,
+            low_24h=22.0,
+            high_24h=23.0,
+            change_24h=0.0,
+            spread=1.0,
+            spread_pct=1.0,
+            timestamp=t_early,
+            session_id="s1",
+            sequence_id=3,
+        ),
+    ]
+    with patch("snapper.infrastructure.market_data.base.close_and_insert_sync") as mock_ci:
+        updater._persist_snapshots_scd2(snaps)
+    order = [
+        (call.kwargs["new_values"]["instrument_public_id"], call.kwargs["bus_time"])
+        for call in mock_ci.call_args_list
+    ]
+    assert order == [
+        ("inst-a", t_early),
+        ("inst-a", t_late),
+        ("inst-b", t_early),
+    ]

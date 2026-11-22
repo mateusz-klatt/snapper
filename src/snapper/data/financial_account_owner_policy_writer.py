@@ -31,6 +31,7 @@ from snapper.data.financial_account_owner_store import _require_supported_histor
 from snapper.data.financial_owner_policy_clock import require_financial_owner_policy_close_clock
 from snapper.data.models import Setting
 from snapper.data.models import is_open_ended_version
+from snapper.data.repository import assert_scd2_write_reserved
 from snapper.data.repository import close_and_insert
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
@@ -66,6 +67,7 @@ async def _lock_reserved_policy(session: AsyncSession) -> Setting | None:
     proves membership even when the ORM entity is cached. The revision clock is
     still sampled once by the caller after this row-lock operation returns.
     """
+    assert_scd2_write_reserved(session)
     if session.get_bind().dialect.name == "postgresql":
         await session.execute(
             text("SELECT pg_advisory_xact_lock(hashtext(:namespace), hashtext(:setting_key))"),
@@ -100,6 +102,7 @@ async def _write_locked_revision(
     clock: datetime,
 ) -> FinancialAccountOwnerPolicyReference:
     """Reuse generic SCD2 only after the real row lock and actual post-wait clock were acquired."""
+    assert_scd2_write_reserved(session)
     row = await close_and_insert(
         session,
         Setting,

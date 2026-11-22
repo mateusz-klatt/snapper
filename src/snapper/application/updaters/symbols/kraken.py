@@ -10,6 +10,7 @@ import hashlib
 import inspect
 import json
 import math
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
@@ -50,7 +51,8 @@ from snapper.data.models import FundingRate
 from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
-from snapper.data.repository import close_and_insert_sync
+from snapper.data.repository import Scd2UpsertSpec
+from snapper.data.repository import upsert_scd2_sync
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.tokenized_spec_provenance import TOKENIZED_MAX_DECIMALS
 from snapper.infrastructure.exchanges.tokenized_spec_provenance import TOKENIZED_SPEC_ETL_VERSION
@@ -1522,13 +1524,6 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             InstrumentOrderCapability.instrument_public_id == instrument_public_id,
             InstrumentOrderCapability.exchange == ExchangeEnum.KRAKEN,
         ]
-        existing = session.execute(
-            select(InstrumentOrderCapability).where(
-                *filters,
-                InstrumentOrderCapability.timestamp <= now,
-                InstrumentOrderCapability.known_to > now,
-            )
-        ).scalar_one_or_none()
         values: JsonObject = {
             "instrument_public_id": instrument_public_id,
             "exchange": ExchangeEnum.KRAKEN,
@@ -1548,20 +1543,26 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             "max_order_size": None,
             "top_of_book_quality": "unknown",
         }
-        if existing is not None and all(
-            getattr(existing, key) == value for key, value in values.items()
-        ):
-            return
-        close_and_insert_sync(
-            session,
-            InstrumentOrderCapability,
-            filters,
-            {
+
+        def _decide(existing: InstrumentOrderCapability | None) -> Mapping[str, object] | None:
+            if existing is not None and all(
+                getattr(existing, key) == value for key, value in values.items()
+            ):
+                return None
+            return {
                 **values,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence("order_capabilities"),
-            },
-            now,
+            }
+
+        upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
+                model=InstrumentOrderCapability,
+                match_filters=filters,
+                bus_time=now,
+                decide=_decide,
+            ),
         )
 
     @staticmethod
@@ -1735,6 +1736,31 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             return AssetTypeEnum.FOREX
         return AssetTypeEnum.CRYPTO
 
+    def _upsert_symbols_sorted(
+        self,
+        session: SyncSession,
+        resolved_records: list[KrakenSymbolRecord],
+        now: datetime,
+    ) -> dict[str, str]:
+        """Upsert Symbol rows in deterministic native_symbol order before alias writes."""
+        symbol_ids_by_native: dict[str, str] = {}
+        for symbol_data in self._sort_records_by_native_symbol(
+            resolved_records,
+            lambda symbol_data: symbol_data["native_symbol"],
+        ):
+            native_symbol = symbol_data["native_symbol"]
+            symbol_ids_by_native[native_symbol] = self._upsert_symbol(
+                session,
+                native_symbol,
+                symbol_data["base_currency"],
+                symbol_data["quote_currency"],
+                self._classify_spot_record(symbol_data),
+                now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence("symbols"),
+            )
+        return symbol_ids_by_native
+
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Persist symbol catalog and alias rows to the database.
 
@@ -1765,22 +1791,13 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 now = datetime.now(UTC)
                 if not self._enter_locked_update(session, now):
                     return
-                for raw_symbol_data in records:
-                    symbol_data = self._preserve_tokenized_alias_owner(
-                        session, raw_symbol_data, now
-                    )
-                    native_symbol = symbol_data["native_symbol"]
-                    asset_type = self._classify_spot_record(symbol_data)
-                    symbol_public_id = self._upsert_symbol(
-                        session,
-                        native_symbol,
-                        symbol_data["base_currency"],
-                        symbol_data["quote_currency"],
-                        asset_type,
-                        now,
-                        session_id=self._tracker.session_id,
-                        sequence_id=self._tracker.next_sequence("symbols"),
-                    )
+                resolved_records = [
+                    self._preserve_tokenized_alias_owner(session, raw_symbol_data, now)
+                    for raw_symbol_data in records
+                ]
+                symbol_ids_by_native = self._upsert_symbols_sorted(session, resolved_records, now)
+                for symbol_data in resolved_records:
+                    symbol_public_id = symbol_ids_by_native[symbol_data["native_symbol"]]
                     processed_symbol_public_ids.add(symbol_public_id)
                     is_btnl = symbol_data.get("is_btnl") == "true"
                     is_ws_only = symbol_data.get("ws_only") == "true"

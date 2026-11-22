@@ -7,6 +7,8 @@ mappings to the database.
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
+from collections.abc import Iterable
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -43,9 +45,12 @@ from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
+from snapper.data.repository import Scd2UpsertSpec
+from snapper.data.repository import begin_scd2_write
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import close_and_insert_sync
 from snapper.data.repository import get_repository
+from snapper.data.repository import upsert_scd2_sync
 from snapper.data.repository import where_active_now
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.messaging.infrastructure.publisher import MessagePublisher
@@ -160,6 +165,14 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.warning("ZMQ publisher not available, skipping cache invalidation broadcast")
 
     @staticmethod
+    def _sort_records_by_native_symbol[RecordT](
+        records: Iterable[RecordT],
+        native_symbol_fn: Callable[[RecordT], str],
+    ) -> list[RecordT]:
+        """Order records deterministically by native symbol to prevent cross-updater deadlocks."""
+        return sorted(records, key=native_symbol_fn)
+
+    @staticmethod
     def _upsert_symbol(
         session: Any,
         native_symbol: str,
@@ -170,11 +183,11 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         session_id: str,
         sequence_id: int,
     ) -> str:
-        """Upsert a Symbol row using SCD Type 2 close+insert.
+        """Upsert a Symbol row via Contract C SAVEPOINT retry and re-decision.
 
-        Finds the active Symbol by native_symbol. If identical, returns
-        the existing public_id. If changed, closes the old row and inserts
-        a new one with the same public_id. If not found, inserts a new row.
+        Finds the active Symbol by ``native_symbol`` under write reservation and
+        FLUSH SAVEPOINT protection, returning ``public_id`` when unchanged or
+        inserting/closing carrying ``created_at`` and ``public_id``.
 
         Args:
             session: SQLAlchemy session.
@@ -189,48 +202,36 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             The public_id of the active Symbol row.
         """
-        existing = session.execute(
-            select(Symbol).where(
-                Symbol.native_symbol == native_symbol,
-                Symbol.timestamp <= now,
-                Symbol.known_to > now,
-            )
-        ).scalar_one_or_none()
-        if existing is None:
-            sym = Symbol(
-                native_symbol=native_symbol,
-                base=base,
-                quote=quote,
-                asset_type=asset_type,
-                created_at=now,
-                timestamp=now,
-                session_id=session_id,
-                sequence_id=sequence_id,
-            )
-            session.add(sym)
-            session.flush()
-            return sym.public_id
 
-        changed = (
-            existing.base != base or existing.quote != quote or existing.asset_type != asset_type
-        )
-        if changed:
-            close_and_insert_sync(
-                session=session,
+        def _decide(existing: Symbol | None) -> Mapping[str, object] | None:
+            if (
+                existing is not None
+                and existing.base == base
+                and existing.quote == quote
+                and existing.asset_type == asset_type
+            ):
+                return None
+            return {
+                "native_symbol": native_symbol,
+                "base": base,
+                "quote": quote,
+                "asset_type": asset_type,
+                "created_at": existing.created_at if existing is not None else now,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+            }
+
+        result = upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
                 model=Symbol,
                 match_filters=[Symbol.native_symbol == native_symbol],
-                new_values={
-                    "native_symbol": native_symbol,
-                    "base": base,
-                    "quote": quote,
-                    "asset_type": asset_type,
-                    "created_at": existing.created_at,
-                    "session_id": session_id,
-                    "sequence_id": sequence_id,
-                },
                 bus_time=now,
-            )
-        return str(existing.public_id)
+                decide=_decide,
+            ),
+        )
+        assert result.row is not None
+        return str(result.row.public_id)
 
     @staticmethod
     def _upsert_alias(
@@ -243,7 +244,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         session_id: str,
         sequence_id: int,
     ) -> UpsertResult:
-        """Upsert a SymbolAlias row using SCD Type 2 close+insert.
+        """Upsert a SymbolAlias row via Contract C SAVEPOINT retry and re-decision.
 
         Args:
             session: SQLAlchemy session.
@@ -258,51 +259,34 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             One of ``created``, ``updated``, or ``unchanged``.
         """
-        existing = session.execute(
-            select(SymbolAlias).where(
-                SymbolAlias.symbol_public_id == symbol_public_id,
-                SymbolAlias.exchange == exchange,
-                SymbolAlias.channel == channel,
-                SymbolAlias.timestamp <= now,
-                SymbolAlias.known_to > now,
-            )
-        ).scalar_one_or_none()
-        if existing is None:
-            session.add(
-                SymbolAlias(
-                    symbol_public_id=symbol_public_id,
-                    exchange=exchange,
-                    channel=channel,
-                    exchange_symbol=exchange_symbol,
-                    created_at=now,
-                    timestamp=now,
-                    session_id=session_id,
-                    sequence_id=sequence_id,
-                )
-            )
-            return "created"
-        if existing.exchange_symbol != exchange_symbol:
-            close_and_insert_sync(
-                session=session,
+
+        def _decide(existing: SymbolAlias | None) -> Mapping[str, object] | None:
+            if existing is not None and existing.exchange_symbol == exchange_symbol:
+                return None
+            return {
+                "symbol_public_id": symbol_public_id,
+                "exchange": exchange,
+                "channel": channel,
+                "exchange_symbol": exchange_symbol,
+                "created_at": existing.created_at if existing is not None else now,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+            }
+
+        result = upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
                 model=SymbolAlias,
                 match_filters=[
                     SymbolAlias.symbol_public_id == symbol_public_id,
                     SymbolAlias.exchange == exchange,
                     SymbolAlias.channel == channel,
                 ],
-                new_values={
-                    "symbol_public_id": symbol_public_id,
-                    "exchange": exchange,
-                    "channel": channel,
-                    "exchange_symbol": exchange_symbol,
-                    "created_at": existing.created_at,
-                    "session_id": session_id,
-                    "sequence_id": sequence_id,
-                },
                 bus_time=now,
-            )
-            return "updated"
-        return "unchanged"
+                decide=_decide,
+            ),
+        )
+        return result.outcome
 
     @staticmethod
     def _upsert_capability(
@@ -317,7 +301,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         session_id: str,
         sequence_id: int,
     ) -> UpsertResult:
-        """Upsert a SymbolExchangeCapability row using SCD Type 2 close+insert.
+        """Upsert a SymbolExchangeCapability row via Contract C SAVEPOINT retry.
 
         Args:
             session: SQLAlchemy session.
@@ -334,59 +318,41 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             One of ``created``, ``updated``, or ``unchanged``.
         """
-        existing = session.execute(
-            select(SymbolExchangeCapability).where(
-                SymbolExchangeCapability.symbol_public_id == symbol_public_id,
-                SymbolExchangeCapability.exchange == exchange,
-                SymbolExchangeCapability.timestamp <= now,
-                SymbolExchangeCapability.known_to > now,
-            )
-        ).scalar_one_or_none()
-        if existing is None:
-            session.add(
-                SymbolExchangeCapability(
-                    symbol_public_id=symbol_public_id,
-                    exchange=exchange,
-                    can_market_data=can_market_data,
-                    can_trade=can_trade,
-                    source=source,
-                    reason=reason,
-                    created_at=now,
-                    timestamp=now,
-                    session_id=session_id,
-                    sequence_id=sequence_id,
-                )
-            )
-            return "created"
-        changed = (
-            existing.can_market_data != can_market_data
-            or existing.can_trade != can_trade
-            or existing.source != source
-            or existing.reason != reason
-        )
-        if changed:
-            close_and_insert_sync(
-                session=session,
+
+        def _decide(existing: SymbolExchangeCapability | None) -> Mapping[str, object] | None:
+            if (
+                existing is not None
+                and existing.can_market_data == can_market_data
+                and existing.can_trade == can_trade
+                and existing.source == source
+                and existing.reason == reason
+            ):
+                return None
+            return {
+                "symbol_public_id": symbol_public_id,
+                "exchange": exchange,
+                "can_market_data": can_market_data,
+                "can_trade": can_trade,
+                "source": source,
+                "reason": reason,
+                "created_at": existing.created_at if existing is not None else now,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+            }
+
+        result = upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
                 model=SymbolExchangeCapability,
                 match_filters=[
                     SymbolExchangeCapability.symbol_public_id == symbol_public_id,
                     SymbolExchangeCapability.exchange == exchange,
                 ],
-                new_values={
-                    "symbol_public_id": symbol_public_id,
-                    "exchange": exchange,
-                    "can_market_data": can_market_data,
-                    "can_trade": can_trade,
-                    "source": source,
-                    "reason": reason,
-                    "created_at": existing.created_at,
-                    "session_id": session_id,
-                    "sequence_id": sequence_id,
-                },
                 bus_time=now,
-            )
-            return "updated"
-        return "unchanged"
+                decide=_decide,
+            ),
+        )
+        return result.outcome
 
     @staticmethod
     def _ensure_instrument_identity(
@@ -399,9 +365,9 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
     ) -> str:
         """Ensure an Instrument row exists for the given symbol+exchange pair.
 
-        Idempotent sync variant of Repository.ensure_instrument. Looks up
-        the active Instrument by business key; inserts a new row if none
-        exists. Never closes an existing version.
+        Idempotent sync variant of Repository.ensure_instrument using Contract C
+        SAVEPOINT protection so concurrent absence races return the winner's
+        ``public_id`` without duplicating or closing existing rows.
 
         Args:
             session: SQLAlchemy sync session.
@@ -414,26 +380,31 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Returns:
             The instrument public_id (stable across SCD2 versions).
         """
-        existing = session.execute(
-            select(Instrument).where(
-                Instrument.symbol_public_id == symbol_public_id,
-                Instrument.exchange == exchange,
-                Instrument.timestamp <= now,
-                Instrument.known_to > now,
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            return str(existing.public_id)
-        inst = Instrument(
-            symbol_public_id=symbol_public_id,
-            exchange=exchange,
-            timestamp=now,
-            session_id=session_id,
-            sequence_id=sequence_id,
+
+        def _decide(existing: Instrument | None) -> Mapping[str, object] | None:
+            if existing is not None:
+                return None
+            return {
+                "symbol_public_id": symbol_public_id,
+                "exchange": exchange,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+            }
+
+        result = upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
+                model=Instrument,
+                match_filters=[
+                    Instrument.symbol_public_id == symbol_public_id,
+                    Instrument.exchange == exchange,
+                ],
+                bus_time=now,
+                decide=_decide,
+            ),
         )
-        session.add(inst)
-        session.flush()
-        return str(inst.public_id)
+        assert result.row is not None
+        return str(result.row.public_id)
 
     @staticmethod
     def _resolve_one_funding_field[V](
@@ -699,67 +670,64 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             metadata: Atomic venue metadata replacement, or
                 ``PRESERVE_EXISTING`` to carry the existing block forward.
         """
-        existing = DatabaseRepository.get_instrument_spec_sync(
-            session,
-            instrument_public_id,
-            now,
-        )
-        (
-            resolved_funding_type,
-            resolved_funding_frequency_hours,
-            resolved_rollover_rate_long,
-            resolved_rollover_rate_short,
-            resolved_max_funding_rate,
-        ) = SymbolUpdaterService._resolve_funding_fields(
-            existing,
-            funding_type,
-            funding_frequency_hours,
-            rollover_rate_long,
-            rollover_rate_short,
-            max_funding_rate,
-        )
-        resolved_metadata = SymbolUpdaterService._resolve_instrument_metadata(
-            session,
-            existing,
-            metadata,
-            instrument_public_id,
-        )
-        spec = InstrumentSpecInput(
-            tick_size=resolved_metadata.tick_size,
-            lot_size=resolved_metadata.lot_size,
-            min_order_size=resolved_metadata.min_order_size,
-            max_order_size=resolved_metadata.max_order_size,
-            cost_decimals=resolved_metadata.cost_decimals,
-            qty_decimals=resolved_metadata.qty_decimals,
-            margin_initial=resolved_metadata.margin_initial,
-            position_limit_long=resolved_metadata.position_limit_long,
-            position_limit_short=resolved_metadata.position_limit_short,
-            status=resolved_metadata.status,
-            contract_size=resolved_metadata.contract_size,
-            quantity_unit=resolved_metadata.quantity_unit,
-            native_order_quantity_unit=resolved_metadata.native_order_quantity_unit,
-            contract_payoff_model=resolved_metadata.contract_payoff_model,
-            contract_value_currency=resolved_metadata.contract_value_currency,
-            settlement_currency=resolved_metadata.settlement_currency,
-            spec_source=resolved_metadata.spec_source,
-            spec_version=resolved_metadata.spec_version,
-            spec_observed_at=resolved_metadata.spec_observed_at,
-            unit_certified=resolved_metadata.unit_certified,
-            expiry_at=expiry_at,
-            instrument_kind=instrument_kind,
-            funding_type=resolved_funding_type,
-            funding_frequency_hours=resolved_funding_frequency_hours,
-            rollover_rate_long=resolved_rollover_rate_long,
-            rollover_rate_short=resolved_rollover_rate_short,
-            max_funding_rate=resolved_max_funding_rate,
-        )
-        DatabaseRepository.revise_instrument_spec_sync(
+
+        def _build_from_locked(existing: InstrumentSpec | None) -> InstrumentSpecInput:
+            (
+                resolved_funding_type,
+                resolved_funding_frequency_hours,
+                resolved_rollover_rate_long,
+                resolved_rollover_rate_short,
+                resolved_max_funding_rate,
+            ) = SymbolUpdaterService._resolve_funding_fields(
+                existing,
+                funding_type,
+                funding_frequency_hours,
+                rollover_rate_long,
+                rollover_rate_short,
+                max_funding_rate,
+            )
+            resolved_metadata = SymbolUpdaterService._resolve_instrument_metadata(
+                session,
+                existing,
+                metadata,
+                instrument_public_id,
+            )
+            return InstrumentSpecInput(
+                tick_size=resolved_metadata.tick_size,
+                lot_size=resolved_metadata.lot_size,
+                min_order_size=resolved_metadata.min_order_size,
+                max_order_size=resolved_metadata.max_order_size,
+                cost_decimals=resolved_metadata.cost_decimals,
+                qty_decimals=resolved_metadata.qty_decimals,
+                margin_initial=resolved_metadata.margin_initial,
+                position_limit_long=resolved_metadata.position_limit_long,
+                position_limit_short=resolved_metadata.position_limit_short,
+                status=resolved_metadata.status,
+                contract_size=resolved_metadata.contract_size,
+                quantity_unit=resolved_metadata.quantity_unit,
+                native_order_quantity_unit=resolved_metadata.native_order_quantity_unit,
+                contract_payoff_model=resolved_metadata.contract_payoff_model,
+                contract_value_currency=resolved_metadata.contract_value_currency,
+                settlement_currency=resolved_metadata.settlement_currency,
+                spec_source=resolved_metadata.spec_source,
+                spec_version=resolved_metadata.spec_version,
+                spec_observed_at=resolved_metadata.spec_observed_at,
+                unit_certified=resolved_metadata.unit_certified,
+                expiry_at=expiry_at,
+                instrument_kind=instrument_kind,
+                funding_type=resolved_funding_type,
+                funding_frequency_hours=resolved_funding_frequency_hours,
+                rollover_rate_long=resolved_rollover_rate_long,
+                rollover_rate_short=resolved_rollover_rate_short,
+                max_funding_rate=resolved_max_funding_rate,
+            )
+
+        DatabaseRepository.revise_instrument_spec_from_locked_sync(
             session=session,
             instrument_public_id=instrument_public_id,
-            session_id=session_id,
-            sequence_id=sequence_id,
-            timestamp=now,
-            spec=spec,
+            provenance=(session_id, sequence_id, now),
+            resolve_spec=_build_from_locked,
+            active_only=True,
         )
 
     @staticmethod
@@ -1022,6 +990,7 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
         try:
             repository = get_repository(self.settings.db_url)
             async with repository.session() as session:
+                await begin_scd2_write(session)
                 iso_timestamp = timestamp.isoformat()
                 await close_and_insert(
                     session=session,

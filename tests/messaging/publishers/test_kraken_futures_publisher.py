@@ -12,6 +12,8 @@ import pytest
 
 from snapper.config.app import AppSettings
 from snapper.data.models import SymbolMarketDataChannelCapability
+from snapper.data.repository import Scd2UpsertOutcome
+from snapper.data.repository import Scd2UpsertSpec
 from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
@@ -954,25 +956,64 @@ class TestKrakenFuturesMarketDataPublisher:
         result.scalar_one_or_none.return_value = None
         session.execute = AsyncMock(return_value=result)
         repository.session.return_value = _AsyncSessionContext(session)
-        existing = SimpleNamespace(
+        existing = SymbolMarketDataChannelCapability(
+            symbol_public_id=symbol_public_id,
+            exchange="kraken_futures",
+            channel="trade",
             can_market_data=False,
             source="kraken_futures_publisher_runtime",
             reason="Learned: trade not confirmed while ticker confirmed",
             created_at=now,
+            session_id="test",
+            sequence_id=1,
         )
         repeated_result = MagicMock()
         repeated_result.scalar_one_or_none.return_value = existing
         unresolved_repository = MagicMock()
         publisher = KrakenFuturesMarketDataPublisher(symbols=[native_symbol])
+        close_mock = AsyncMock(return_value=SimpleNamespace())
+
+        async def _fake_begin(_session: object) -> None:
+            return None
+
+        async def _fake_upsert(
+            target_session: MagicMock,
+            spec: Scd2UpsertSpec[SymbolMarketDataChannelCapability],
+        ) -> Scd2UpsertOutcome[SymbolMarketDataChannelCapability]:
+            current = (await target_session.execute(None)).scalar_one_or_none()
+            new_values = spec.decide(current)
+            if new_values is None:
+                return Scd2UpsertOutcome(row=current, outcome="unchanged")
+            await close_mock(model=spec.model, new_values=new_values)
+            row = SymbolMarketDataChannelCapability(
+                symbol_public_id=str(new_values["symbol_public_id"]),
+                exchange=str(new_values["exchange"]),
+                channel=str(new_values["channel"]),
+                can_market_data=bool(new_values["can_market_data"]),
+                source=str(new_values["source"]),
+                reason=str(new_values["reason"]) if new_values["reason"] is not None else None,
+                created_at=now,
+                session_id="test",
+                sequence_id=1,
+            )
+            return Scd2UpsertOutcome(
+                row=row,
+                outcome="inserted" if current is None else "updated",
+            )
+
         with (
             patch(
                 "snapper.messaging.publishers.kraken_futures.resolve_symbol_public_id",
                 new=AsyncMock(side_effect=[symbol_public_id, symbol_public_id, None]),
             ),
             patch(
-                "snapper.messaging.publishers.kraken_futures.close_and_insert",
-                new=AsyncMock(return_value=SimpleNamespace()),
-            ) as close_mock,
+                "snapper.messaging.publishers.kraken_futures.begin_scd2_write",
+                new=_fake_begin,
+            ),
+            patch(
+                "snapper.messaging.publishers.kraken_futures.upsert_scd2",
+                new=_fake_upsert,
+            ),
         ):
             inserted = await publisher._persist_runtime_trade_channel_false(
                 repository,
@@ -1009,11 +1050,16 @@ class TestKrakenFuturesMarketDataPublisher:
         session.commit = AsyncMock()
         now = datetime.now(UTC)
         symbol_public_id = "44444444-4444-7444-8444-444444444444"
-        existing = SimpleNamespace(
+        existing = SymbolMarketDataChannelCapability(
+            symbol_public_id=symbol_public_id,
+            exchange="kraken_futures",
+            channel="trade",
             can_market_data=True,
             source="manual",
             reason=None,
             created_at=now,
+            session_id="test",
+            sequence_id=1,
         )
         result = MagicMock()
         result.scalar_one_or_none.return_value = existing
@@ -1021,15 +1067,34 @@ class TestKrakenFuturesMarketDataPublisher:
         repository.session.return_value = _AsyncSessionContext(session)
         native_symbol = "TST2-USD-PERP"
         publisher = KrakenFuturesMarketDataPublisher(symbols=[native_symbol])
+        close_mock = AsyncMock(return_value=SimpleNamespace())
+
+        async def _fake_begin(_session: object) -> None:
+            return None
+
+        async def _fake_upsert(
+            target_session: MagicMock,
+            spec: Scd2UpsertSpec[SymbolMarketDataChannelCapability],
+        ) -> Scd2UpsertOutcome[SymbolMarketDataChannelCapability]:
+            current = (await target_session.execute(None)).scalar_one_or_none()
+            new_values = spec.decide(current)
+            assert new_values is not None
+            await close_mock(model=spec.model, new_values=new_values)
+            return Scd2UpsertOutcome(row=existing, outcome="updated")
+
         with (
             patch(
                 "snapper.messaging.publishers.kraken_futures.resolve_symbol_public_id",
                 new=AsyncMock(return_value=symbol_public_id),
             ),
             patch(
-                "snapper.messaging.publishers.kraken_futures.close_and_insert",
-                new=AsyncMock(return_value=SimpleNamespace()),
-            ) as close_mock,
+                "snapper.messaging.publishers.kraken_futures.begin_scd2_write",
+                new=_fake_begin,
+            ),
+            patch(
+                "snapper.messaging.publishers.kraken_futures.upsert_scd2",
+                new=_fake_upsert,
+            ),
         ):
             persisted = await publisher._persist_runtime_trade_channel_false(
                 repository,
@@ -1052,11 +1117,16 @@ class TestKrakenFuturesMarketDataPublisher:
         session.commit = AsyncMock()
         now = datetime.now(UTC)
         symbol_public_id = "77777777-7777-7777-8777-777777777777"
-        existing = SimpleNamespace(
+        existing = SymbolMarketDataChannelCapability(
+            symbol_public_id=symbol_public_id,
+            exchange="kraken_futures",
+            channel="trade",
             can_market_data=False,
             source="operator",
             reason="disabled by operator",
             created_at=now,
+            session_id="test",
+            sequence_id=1,
         )
         result = MagicMock()
         result.scalar_one_or_none.return_value = existing
@@ -1064,15 +1134,35 @@ class TestKrakenFuturesMarketDataPublisher:
         repository.session.return_value = _AsyncSessionContext(session)
         native_symbol = "TST3-USD-PERP"
         publisher = KrakenFuturesMarketDataPublisher(symbols=[native_symbol])
+        close_mock = AsyncMock(return_value=SimpleNamespace())
+
+        async def _fake_begin(_session: object) -> None:
+            return None
+
+        async def _fake_upsert(
+            target_session: MagicMock,
+            spec: Scd2UpsertSpec[SymbolMarketDataChannelCapability],
+        ) -> Scd2UpsertOutcome[SymbolMarketDataChannelCapability]:
+            current = (await target_session.execute(None)).scalar_one_or_none()
+            new_values = spec.decide(current)
+            if new_values is None:
+                return Scd2UpsertOutcome(row=current, outcome="unchanged")
+            await close_mock(model=spec.model, new_values=new_values)
+            return Scd2UpsertOutcome(row=existing, outcome="updated")
+
         with (
             patch(
                 "snapper.messaging.publishers.kraken_futures.resolve_symbol_public_id",
                 new=AsyncMock(return_value=symbol_public_id),
             ),
             patch(
-                "snapper.messaging.publishers.kraken_futures.close_and_insert",
-                new=AsyncMock(return_value=SimpleNamespace()),
-            ) as close_mock,
+                "snapper.messaging.publishers.kraken_futures.begin_scd2_write",
+                new=_fake_begin,
+            ),
+            patch(
+                "snapper.messaging.publishers.kraken_futures.upsert_scd2",
+                new=_fake_upsert,
+            ),
         ):
             persisted = await publisher._persist_runtime_trade_channel_false(
                 repository,

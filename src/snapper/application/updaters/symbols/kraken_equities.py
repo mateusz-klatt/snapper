@@ -117,16 +117,22 @@ class KrakenEquitiesSymbolUpdaterService(SymbolUpdaterService[KrakenEquitiesExch
                 now = datetime.now(UTC)
                 if not self._enter_locked_update(session, now):
                     return
+                validated_contracts: list[KrakenEquitiesInstrumentSchema] = []
                 for raw_contract in symbols:
                     try:
-                        schema = KrakenEquitiesInstrumentSchema.model_validate(raw_contract)
+                        validated_contracts.append(
+                            KrakenEquitiesInstrumentSchema.model_validate(raw_contract)
+                        )
                     except Exception as exc:
                         logger.warning(
                             f"Skipping invalid contract: {raw_contract.get('symbol', '?')}: {exc}"
                         )
                         skipped_count += 1
-                        continue
-
+                ordered_contracts = self._sort_records_by_native_symbol(
+                    validated_contracts,
+                    lambda schema: _build_native_symbol(schema) or "",
+                )
+                for schema in ordered_contracts:
                     native = _build_native_symbol(schema)
                     if native is None:
                         logger.debug(f"Skipping unmappable contract: {schema.symbol}")

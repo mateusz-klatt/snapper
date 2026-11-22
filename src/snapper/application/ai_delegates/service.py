@@ -52,6 +52,7 @@ from snapper.data.models import UserActiveToken
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
 from snapper.data.repository import Repository
+from snapper.data.repository import begin_scd2_write
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
@@ -875,6 +876,7 @@ class DelegateService:
         """
         self._guard_owner(owner_public_id)
         async with self.repository.session() as session:
+            await begin_scd2_write(session)
             user_row, _caps = await self._load_delegate_with_caps(
                 session, public_id, owner_public_id
             )

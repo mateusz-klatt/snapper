@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import and_
+from sqlalchemy import event
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy import update
@@ -34,6 +35,8 @@ from snapper.data.models import UserLoginEvent
 from snapper.data.repository import _CANDLE_ID_CACHE_LOOKBACK
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import TemporalVersionConflictError
+from snapper.data.repository import begin_scd2_write
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
@@ -716,6 +719,7 @@ async def _upsert_symbol_pattern(
         now: Bus timestamp for the operation.
     """
     async with repo.session() as s:
+        await begin_scd2_write(s)
         existing = (
             (
                 await s.execute(
@@ -1189,6 +1193,7 @@ class TestUserBitemporal:
         user_v1 = await _create_user(repo, "alice", "hash_v1", t1)
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 session=s,
                 model=User,
@@ -1234,6 +1239,7 @@ class TestUserBitemporal:
         user_v1 = await _create_user(repo, "bob", "hash_v1", t1)
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 session=s,
                 model=User,
@@ -1253,6 +1259,7 @@ class TestUserBitemporal:
             await s.commit()
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 session=s,
                 model=User,
@@ -1539,6 +1546,7 @@ class TestSettingsApiBitemporal:
             await s.commit()
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 session=s,
                 model=Setting,
@@ -1557,6 +1565,7 @@ class TestSettingsApiBitemporal:
             await s.commit()
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 session=s,
                 model=Setting,
@@ -1825,6 +1834,7 @@ class TestInstrumentBitemporal:
             original_pid = sym.public_id
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 s,
                 Symbol,
@@ -2077,6 +2087,153 @@ class TestReviseInstrument:
             timestamp=datetime(2024, 7, 1, tzinfo=UTC),
         )
         assert new_pid != inst_pid
+
+    @pytest.mark.asyncio
+    async def test_revise_closed_only_instrument_raises_conflict_not_historical_id(
+        self, tmp_path: Path
+    ) -> None:
+        """Closed-only instruments raise TemporalVersionConflictError instead of returning old IDs."""
+        repo, inst_id, inst_pid = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
+        assert spid is not None
+        close_time = datetime(2024, 5, 1, tzinfo=UTC)
+        async with repo.session() as s:
+            await s.execute(
+                update(Instrument).where(Instrument.id == inst_id).values(known_to=close_time)
+            )
+            await s.commit()
+
+        with pytest.raises(TemporalVersionConflictError):
+            await repo.revise_instrument(
+                instrument_public_id=inst_pid,
+                symbol_public_id=spid,
+                exchange="kraken",
+                session_id="rev-closed",
+                sequence_id=1,
+                timestamp=datetime(2024, 6, 1, tzinfo=UTC),
+            )
+
+    @pytest.mark.asyncio
+    async def test_revise_clock_skewed_unchanged_attrs_raises_conflict(
+        self, tmp_path: Path
+    ) -> None:
+        """Update-only Contract A timestamp check precedes matching-attribute early return."""
+        repo, _inst_id, inst_pid = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
+        assert spid is not None
+        rev_time = datetime(2024, 6, 1, tzinfo=UTC)
+        new_id = await repo.revise_instrument(
+            instrument_public_id=inst_pid,
+            symbol_public_id=spid,
+            exchange="binance",
+            session_id="rev-forward",
+            sequence_id=1,
+            timestamp=rev_time,
+        )
+        assert new_id > 0
+
+        skewed_time = datetime(2024, 3, 1, tzinfo=UTC)
+        with pytest.raises(TemporalVersionConflictError):
+            await repo.revise_instrument(
+                instrument_public_id=inst_pid,
+                symbol_public_id=spid,
+                exchange="kraken",
+                session_id="rev-skew-match-old",
+                sequence_id=2,
+                timestamp=skewed_time,
+            )
+
+        with pytest.raises(TemporalVersionConflictError):
+            await repo.revise_instrument(
+                instrument_public_id=inst_pid,
+                symbol_public_id=spid,
+                exchange="binance",
+                session_id="rev-skew-match-current",
+                sequence_id=3,
+                timestamp=skewed_time,
+            )
+
+    @pytest.mark.asyncio
+    async def test_revise_lock_wake_miss_raises_temporal_version_conflict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lock-wake empty FOR UPDATE read on an existing instrument raises TemporalVersionConflictError."""
+        repo, _inst_id, inst_pid = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
+        assert spid is not None
+        async with repo.session() as s:
+            await begin_scd2_write(s)
+            original_execute = s.execute
+            call_num = 0
+
+            async def _fake_lock_miss(statement: Any, *args: Any, **kwargs: Any) -> Any:
+                nonlocal call_num
+                call_num += 1
+                result = await original_execute(statement, *args, **kwargs)
+                if call_num == 1:
+
+                    class _EmptyScalars:
+                        def all(self) -> list[Instrument]:
+                            return []
+
+                    class _EmptyResult:
+                        def scalars(self) -> _EmptyScalars:
+                            return _EmptyScalars()
+
+                    return _EmptyResult()
+                return result
+
+            monkeypatch.setattr(s, "execute", _fake_lock_miss)
+            with pytest.raises(TemporalVersionConflictError):
+                await repo._load_revise_instrument_locked_rows(
+                    s,
+                    inst_pid,
+                    spid,
+                    "binance",
+                    datetime(2024, 6, 1, tzinfo=UTC),
+                )
+
+    @pytest.mark.asyncio
+    async def test_revise_instrument_locks_in_ascending_id_order(self, tmp_path: Path) -> None:
+        """Reciprocal rekeys lock target and conflict rows in single-query ascending id order."""
+        repo, first_id, first_pid = await _create_repo_with_instrument(tmp_path)
+        spid = await resolve_symbol_public_id(repo, "BTC-USD", as_of=datetime.now(UTC))
+        assert spid is not None
+        second_id, second_pid = await repo.ensure_instrument(
+            symbol_public_id=spid,
+            exchange="binance",
+            session_id="seed-2",
+            sequence_id=1,
+            timestamp=datetime(2024, 2, 1, tzinfo=UTC),
+        )
+        assert first_id < second_id
+
+        captured_sql: list[str] = []
+
+        @event.listens_for(repo.engine.sync_engine, "before_cursor_execute")
+        def _capture_sql(
+            _conn: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            if "FROM instruments" in statement:
+                captured_sql.append(statement)
+
+        with pytest.raises(ValueError, match=f"already occupied by instrument {first_pid}"):
+            await repo.revise_instrument(
+                instrument_public_id=second_pid,
+                symbol_public_id=spid,
+                exchange="kraken",
+                session_id="rekey-2",
+                sequence_id=1,
+                timestamp=datetime(2024, 6, 1, tzinfo=UTC),
+            )
+
+        assert captured_sql
+        assert "ORDER BY instruments.id ASC" in captured_sql[0]
 
 
 class TestReviseInstrumentSpec:
@@ -2402,6 +2559,7 @@ class TestInstrumentJoinSemantics:
             original_pid = sym.public_id
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 s,
                 Symbol,

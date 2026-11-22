@@ -23,6 +23,7 @@ from snapper.data.models import Instrument
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Symbol
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.data.repository import close_and_insert_sync
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
@@ -177,8 +178,13 @@ class MarketSnapshotUpdaterService(ABC):
         if not snapshots:
             return 0
         with self.repository.session_factory() as session:
+            begin_scd2_write_sync(session)
             count = 0
-            for snap in snapshots:
+            ordered_snapshots = sorted(
+                snapshots,
+                key=lambda snap: (snap.instrument_public_id, snap.timestamp),
+            )
+            for snap in ordered_snapshots:
                 bus_time = snap.timestamp
                 new_values: dict[str, Any] = {
                     "instrument_public_id": snap.instrument_public_id,

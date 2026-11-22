@@ -12,6 +12,7 @@ import pytest
 from aiosqlite import Connection
 from sqlalchemy import ColumnElement
 from sqlalchemy import SQLColumnExpression
+from sqlalchemy import event
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -306,3 +307,55 @@ async def test_sqlite_user_writer_preserves_deactivation(
     assert current.public_id == user.public_id and not current.is_active, detail
     if isinstance(outcome, BaseException):
         assert isinstance(outcome, UserAuthorityConflictError), detail
+
+
+@pytest.mark.asyncio
+async def test_sqlite_create_user_uses_begin_immediate_and_serializes_concurrent_signups(
+    repositories: tuple[SQLAlchemyRepository, SQLAlchemyRepository],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serialize concurrent SQLite signups via ``BEGIN IMMEDIATE``.
+
+    Given: Two independent repositories connected to the same SQLite database.
+    When: Two concurrent ``create_user`` calls attempt to create the same username.
+    Then: The first engine emits ``BEGIN IMMEDIATE``, one call succeeds, and the
+        loser fails with a duplicate error.
+    """
+    first_repo, second_repo = repositories
+    first = _user_service(first_repo, monkeypatch)
+    second = _user_service(second_repo, monkeypatch)
+    begin_statements: list[str] = []
+
+    def _capture(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if "BEGIN IMMEDIATE" in statement.upper():
+            begin_statements.append(statement)
+
+    event.listen(first_repo.engine.sync_engine, "before_cursor_execute", _capture)
+    try:
+        outcomes = await asyncio.wait_for(
+            asyncio.gather(
+                first.create_user("signup-race", _OLD_PASSWORD),
+                second.create_user("signup-race", _NEW_PASSWORD),
+                return_exceptions=True,
+            ),
+            _WAIT,
+        )
+    finally:
+        event.remove(first_repo.engine.sync_engine, "before_cursor_execute", _capture)
+
+    assert begin_statements
+    profiles = [item for item in outcomes if isinstance(item, UserProfile)]
+    errors = [item for item in outcomes if isinstance(item, ValueError)]
+    assert len(profiles) == 1
+    assert len(errors) == 1
+    assert "already exists" in str(errors[0])
+    async with first_repo.session() as session:
+        active = (await session.scalars(select(User).where(User.username == "signup-race"))).all()
+    assert len(active) == 1

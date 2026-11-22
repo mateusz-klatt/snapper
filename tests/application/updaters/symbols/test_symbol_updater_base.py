@@ -12,12 +12,18 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
+from snapper.application.updaters.symbols.kraken_equities import KrakenEquitiesSymbolUpdaterService
+from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSymbolUpdaterService
+from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterService
+from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
@@ -28,6 +34,7 @@ from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import _repository_cache
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.data.repository import close_and_insert_sync
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -889,6 +896,7 @@ def test_upsert_symbol_creates_new_entry(
     now = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USD", "crypto", now, session_id="", sequence_id=0
         )
@@ -935,6 +943,7 @@ def test_upsert_symbol_updates_base_currency(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "XBT", "USD", "crypto", update_time, session_id="", sequence_id=0
         )
@@ -983,6 +992,7 @@ def test_upsert_symbol_updates_quote_currency(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USDT", "crypto", update_time, session_id="", sequence_id=0
         )
@@ -1031,6 +1041,7 @@ def test_upsert_symbol_updates_asset_type(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_symbol(
             session, "EUR-USD", "EUR", "USD", "forex", update_time, session_id="", sequence_id=0
         )
@@ -1079,6 +1090,7 @@ def test_upsert_symbol_preserves_timestamp_when_unchanged(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USD", "crypto", update_time, session_id="", sequence_id=0
         )
@@ -1136,6 +1148,7 @@ def test_upsert_capability_creates_new_entry(
     _spid = _seed_catalog(updater, "BTC-USD", now)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1197,6 +1210,7 @@ def test_upsert_capability_updates_can_trade(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1257,6 +1271,7 @@ def test_upsert_capability_updates_can_market_data(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1317,6 +1332,7 @@ def test_upsert_capability_updates_source(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1377,6 +1393,7 @@ def test_upsert_capability_updates_reason(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1437,6 +1454,7 @@ def test_upsert_capability_unchanged(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1514,6 +1532,7 @@ def test_deactivate_stale_capabilities_deactivates_removed(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
             session,
             "kraken",
@@ -1566,6 +1585,7 @@ def test_deactivate_stale_capabilities_leaves_active_untouched(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
             session,
             "kraken",
@@ -1597,6 +1617,7 @@ def test_deactivate_stale_skips_already_inactive(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
             session,
             "kraken",
@@ -1628,6 +1649,7 @@ def test_reconcile_capabilities_proceeds_above_threshold(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._reconcile_capabilities(
             session,
             "kraken",
@@ -1660,6 +1682,7 @@ def test_reconcile_capabilities_skips_below_threshold(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._reconcile_capabilities(
             session,
             "kraken",
@@ -1700,6 +1723,7 @@ def test_reconcile_capabilities_empty_existing(
     now = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._reconcile_capabilities(
             session,
             "kraken",
@@ -1730,6 +1754,7 @@ def test_deactivate_stale_different_exchange_not_touched(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
             session,
             "kraken",
@@ -1767,6 +1792,7 @@ def test_close_and_insert_sync_creates_fresh_row_when_no_existing(
     _spid = _seed_catalog(updater, "BTC-USD", now)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         new_row = close_and_insert_sync(
             session=session,
             model=SymbolExchangeCapability,
@@ -1828,6 +1854,7 @@ def test_close_and_insert_sync_closes_existing_and_inserts_new(
         original_public_id = original.public_id
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         close_and_insert_sync(
             session=session,
             model=SymbolExchangeCapability,
@@ -1905,6 +1932,7 @@ def test_real_updater_catalog_reingest_same_payload_is_noop(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USD", "crypto", t1, session_id="", sequence_id=0
         )
@@ -1920,6 +1948,7 @@ def test_real_updater_catalog_reingest_same_payload_is_noop(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USD", "crypto", t2, session_id="", sequence_id=0
         )
@@ -1954,6 +1983,7 @@ def test_real_updater_alias_reingest_preserves_public_id_and_timestamp(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result1 = SymbolUpdaterService._upsert_alias(
             session, _spid, "kraken", "ws", "XBT/USD", t1, session_id="", sequence_id=0
         )
@@ -1979,6 +2009,7 @@ def test_real_updater_alias_reingest_preserves_public_id_and_timestamp(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result2 = SymbolUpdaterService._upsert_alias(
             session, _spid, "kraken", "ws", "XBT/USD", t2, session_id="", sequence_id=0
         )
@@ -2022,6 +2053,7 @@ def test_real_updater_capability_change_closes_old_inserts_new(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result1 = SymbolUpdaterService._upsert_capability(
             session, _spid, "kraken", True, False, "seed", None, t1, session_id="", sequence_id=0
         )
@@ -2030,6 +2062,7 @@ def test_real_updater_capability_change_closes_old_inserts_new(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result2 = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -2070,10 +2103,16 @@ def test_ensure_instrument_identity_returns_existing() -> None:
     When: _ensure_instrument_identity is called,
     Then: It returns the existing public_id without inserting.
     """
-    existing = SimpleNamespace(public_id="existing-inst-pid")
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = existing
     now = datetime.now(UTC)
+    existing = SimpleNamespace(
+        public_id="existing-inst-pid",
+        known_to=KNOWN_TO_MAX,
+        timestamp=now - timedelta(seconds=1),
+    )
+    session = MagicMock()
+    session.info = {"scd2_write_reserved": True}
+    session.execute.return_value.scalar_one_or_none.return_value = existing
+    session.execute.return_value.scalars.return_value.first.return_value = existing
     result = SymbolUpdaterService._ensure_instrument_identity(
         session, "sym-pid", "kraken", now, session_id="s", sequence_id=1
     )
@@ -2310,6 +2349,7 @@ def test_alias_rename_keeps_the_previous_observation_and_logical_identity(
     symbol_id = _seed_catalog(updater, "BTC-USD", original_at)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         assert (
             SymbolUpdaterService._upsert_alias(
                 session, symbol_id, "kraken", "ws", "XBT/USD", original_at, "test-session", 1
@@ -2319,6 +2359,7 @@ def test_alias_rename_keeps_the_previous_observation_and_logical_identity(
         session.commit()
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         assert (
             SymbolUpdaterService._upsert_alias(
                 session, symbol_id, "kraken", "ws", "BTC/USD", changed_at, "test-session", 2
@@ -2390,3 +2431,162 @@ def test_nonowning_refresh_preserves_stored_base_asset_units_and_source_clock(
         assert metadata.contract_size is None
         assert metadata.contract_payoff_model is None
         assert metadata.unit_certified is False
+
+
+async def test_cross_exchange_updaters_acquire_symbol_locks_in_deterministic_native_order(
+    tmp_path: Path,
+) -> None:
+    """Acquire Symbol row locks in ascending native_symbol order across updaters.
+
+    Given: Reverse-ordered symbol payloads for Kraken, Polygon, Walutomat,
+        Kraken Futures, and Kraken Equities updaters,
+    When: Each concrete updater runs ``_update_database`` against an initialized repository,
+    Then: Every updater calls ``_upsert_symbol`` in deterministic ascending
+        ``native_symbol`` order.
+    """
+    db_url = f"sqlite:///{tmp_path / 'cross-exchange-order.db'}"
+    repo = DatabaseRepository(db_url)
+    repo.create_all()
+    recorded_natives: list[str] = []
+    original_upsert_symbol = SymbolUpdaterService._upsert_symbol
+
+    def _recording_upsert(*args: Any, **kwargs: Any) -> str:
+        recorded_natives.append(str(kwargs.get("native_symbol") or args[1]))
+        return original_upsert_symbol(*args, **kwargs)
+
+    try:
+        with patch.object(SymbolUpdaterService, "_upsert_symbol", side_effect=_recording_upsert):
+            kraken = KrakenSymbolUpdaterService(force=True)
+            kraken.repository = repo
+            recorded_natives.clear()
+            await kraken._update_database(
+                [
+                    {
+                        "native_symbol": "ZZZ-USD",
+                        "base_currency": "ZZZ",
+                        "quote_currency": "USD",
+                        "kraken_websocket_symbol": "ZZZ/USD",
+                        "kraken_rest_symbol": "ZZZUSD",
+                        "ccxt_symbol": "ZZZ/USD",
+                    },
+                    {
+                        "native_symbol": "AAA-USD",
+                        "base_currency": "AAA",
+                        "quote_currency": "USD",
+                        "kraken_websocket_symbol": "AAA/USD",
+                        "kraken_rest_symbol": "AAAUSD",
+                        "ccxt_symbol": "AAA/USD",
+                    },
+                ]
+            )
+            assert recorded_natives == ["AAA-USD", "ZZZ-USD"]
+
+            polygon = PolygonSymbolUpdaterService(force=True, insert_new=True)
+            polygon.repository = repo
+            recorded_natives.clear()
+            await polygon._update_database(
+                [
+                    {
+                        "ticker": "X:ZZZUSD",
+                        "base_currency_symbol": "ZZZ",
+                        "currency_symbol": "USD",
+                    },
+                    {
+                        "ticker": "X:AAAUSD",
+                        "base_currency_symbol": "AAA",
+                        "currency_symbol": "USD",
+                    },
+                ]
+            )
+            assert recorded_natives == ["AAA-USD", "ZZZ-USD"]
+
+            walutomat = WalutomatSymbolUpdaterService(update_threshold_hours=6, force=True)
+            walutomat.repository = repo
+            recorded_natives.clear()
+            await walutomat._update_database(
+                [
+                    {
+                        "symbol": "ZZZ_USD",
+                        "walutomat_rest_symbol": "ZZZUSD",
+                        "native_symbol": "ZZZ-USD",
+                        "base": "ZZZ",
+                        "quote": "USD",
+                    },
+                    {
+                        "symbol": "AAA_USD",
+                        "walutomat_rest_symbol": "AAAUSD",
+                        "native_symbol": "AAA-USD",
+                        "base": "AAA",
+                        "quote": "USD",
+                    },
+                ]
+            )
+            assert recorded_natives == ["AAA-USD", "ZZZ-USD"]
+
+            futures = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6, force=True)
+            futures.repository = repo
+            recorded_natives.clear()
+            await futures._update_database(
+                [
+                    {
+                        "symbol": "PF_ZZZUSD",
+                        "type": "futures_vanilla",
+                        "tickSize": 0.5,
+                        "contractSize": 1,
+                        "tradeable": True,
+                        "base": "ZZZ",
+                        "quote": "USD",
+                    },
+                    {
+                        "symbol": "PF_AAAUSD",
+                        "type": "futures_vanilla",
+                        "tickSize": 0.5,
+                        "contractSize": 1,
+                        "tradeable": True,
+                        "base": "AAA",
+                        "quote": "USD",
+                    },
+                ]
+            )
+            assert len(recorded_natives) == 2
+            assert recorded_natives == sorted(recorded_natives)
+
+            equities = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6, force=True)
+            equities.repository = repo
+            recorded_natives.clear()
+            await equities._update_database(
+                [
+                    {
+                        "symbol": "ZZZM6.NYMEX",
+                        "name": "ZZZM6 19May26",
+                        "short_name": "ZZZ",
+                        "contract_name": "ZZZM6",
+                        "tradable": True,
+                        "status": "active",
+                        "category": "Equities",
+                        "exchange": "NYMEX",
+                        "tick_size": "0.01",
+                        "contract_size": "1",
+                        "base": "ZZZ",
+                        "quote": "USD",
+                    },
+                    {
+                        "symbol": "AAAM6.NYMEX",
+                        "name": "AAAM6 19May26",
+                        "short_name": "AAA",
+                        "contract_name": "AAAM6",
+                        "tradable": True,
+                        "status": "active",
+                        "category": "Equities",
+                        "exchange": "NYMEX",
+                        "tick_size": "0.01",
+                        "contract_size": "1",
+                        "base": "AAA",
+                        "quote": "USD",
+                    },
+                ]
+            )
+            assert len(recorded_natives) == 2
+            assert recorded_natives == sorted(recorded_natives)
+    finally:
+        repo.engine.dispose()

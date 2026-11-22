@@ -247,13 +247,12 @@ async def test_upsert_candles_mid_batch_failure_rolls_back_all(
 async def test_upsert_market_snapshots_mid_batch_failure_rolls_back_all(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A RuntimeError on row 2's UPDATE-close rolls back row 1's close+insert too.
+    """A RuntimeError on row 2's locked lookup rolls back row 1's close+insert too.
 
     Same contract as candles: both seeded snapshots keep their original
     ``public_id`` values with ``known_to == KNOWN_TO_MAX``; no closed
-    versions are created; no new snapshot rows land — the autoflushed
-    INSERT for row 1's new version was rolled back along with row 1's
-    UPDATE-close and the aborted row 2 UPDATE-close.
+    versions are created; no new snapshot rows land — the flushed INSERT
+    for row 1's new version is rolled back along with row 1's UPDATE-close.
     """
     db_path = tmp_path / "scd2_snapshots.db"
     repo, _inst_id, inst_public_id = await _create_repo_with_instrument(db_path)

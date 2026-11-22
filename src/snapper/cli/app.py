@@ -65,6 +65,7 @@ import os
 import signal
 import threading
 from collections.abc import Callable
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import date as date_type
 from datetime import datetime
@@ -182,9 +183,13 @@ from snapper.data.archiver import ExportResult
 from snapper.data.archiver import StateArchiver
 from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.models import Setting
+from snapper.data.models import is_open_ended_version
 from snapper.data.repository import DatabaseRepository
-from snapper.data.repository import close_and_insert
+from snapper.data.repository import Scd2UpsertSpec
+from snapper.data.repository import assert_scd2_write_reserved
+from snapper.data.repository import begin_scd2_write
 from snapper.data.repository import get_repository
+from snapper.data.repository import upsert_scd2
 from snapper.data.repository import where_active_now
 from snapper.data.repository_types import BacktestResultInsertRow
 from snapper.data.repository_types import BacktestRunRow
@@ -1353,6 +1358,54 @@ def _verify_encryption_services(
         raise ValueError("Encryption verification failed - check your passwords")
 
 
+_MAX_SETTING_ROTATE_ATTEMPTS = 3
+
+
+async def _upsert_setting_rotation(
+    session: Any,
+    key: str,
+    bus_time: datetime,
+    decide: Callable[[Setting | None], Mapping[str, object] | None],
+) -> str:
+    """Apply locked encryption rotation with bounded re-read on lock-wake misses."""
+    attempt = 0
+    current_bus_time = bus_time
+    while True:
+        try:
+            result = await upsert_scd2(
+                session,
+                Scd2UpsertSpec(
+                    model=Setting,
+                    match_filters=[Setting.key == key],
+                    bus_time=current_bus_time,
+                    decide=decide,
+                    active_only=True,
+                ),
+            )
+            return result.outcome
+        except KeyError:
+            attempt += 1
+            if attempt >= _MAX_SETTING_ROTATE_ATTEMPTS:
+                raise
+            active_row = (
+                (
+                    await session.execute(
+                        sa.select(Setting)
+                        .where(Setting.key == key, Setting.known_to > datetime.now(UTC))
+                        .order_by(Setting.known_to.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if active_row is not None and not is_open_ended_version(active_row.known_to):
+                active_row = None
+            if active_row is None:
+                return "unchanged"
+            current_bus_time = max(current_bus_time, active_row.timestamp)
+
+
 async def _rotate_single_setting(
     setting: Any,
     old_encryption: SettingsEncryptionService,
@@ -1362,6 +1415,10 @@ async def _rotate_single_setting(
     tracker: SequenceTracker,
 ) -> bool:
     """Re-encrypt a single setting from old to new encryption.
+
+    Derives the replacement ciphertext from the locked current ``Setting`` row
+    under Contract C ``upsert_scd2`` so concurrent settings writes are never
+    overwritten with stale plaintext or metadata.
 
     Args:
         setting: Database Setting row with key and value.
@@ -1381,28 +1438,38 @@ async def _rotate_single_setting(
         typer.echo(f"Skipping empty setting: {setting.key}")
         return False
     try:
-        decrypted_value = old_encryption.decrypt(setting.value)
-        new_encrypted_value = new_encryption.encrypt(decrypted_value)
+        if dry_run:
+            decrypted_value = old_encryption.decrypt(setting.value)
+            new_encryption.encrypt(decrypted_value)
+            typer.echo(f"Rotating: {setting.key}")
+            return False
+        assert_scd2_write_reserved(session)
+        now = datetime.now(UTC)
+
+        def _decide_rotate(locked: Setting | None) -> Mapping[str, object] | None:
+            if locked is None:
+                raise KeyError(setting.key)
+            if not locked.is_encrypted or not locked.value:
+                return None
+            decrypted_value = old_encryption.decrypt(locked.value)
+            new_encrypted_value = new_encryption.encrypt(decrypted_value)
+            return {
+                "key": locked.key,
+                "value": new_encrypted_value,
+                "category": locked.category,
+                "description": locked.description,
+                "is_encrypted": locked.is_encrypted,
+                "updated_by": locked.updated_by,
+                "session_id": tracker.session_id,
+                "sequence_id": tracker.next_sequence("settings"),
+            }
+
+        outcome = await _upsert_setting_rotation(session, setting.key, now, _decide_rotate)
+        if outcome == "unchanged":
+            typer.echo(f"Skipping empty setting: {setting.key}")
+            return False
         typer.echo(f"Rotating: {setting.key}")
-        if not dry_run:
-            now = datetime.now(UTC)
-            await close_and_insert(
-                session=session,
-                model=Setting,
-                match_filters=[Setting.key == setting.key],
-                new_values={
-                    "key": setting.key,
-                    "value": new_encrypted_value,
-                    "category": setting.category,
-                    "description": setting.description,
-                    "is_encrypted": setting.is_encrypted,
-                    "updated_by": setting.updated_by,
-                    "session_id": tracker.session_id,
-                    "sequence_id": tracker.next_sequence("settings"),
-                },
-                bus_time=now,
-            )
-        return not dry_run
+        return True
     except Exception as e:
         typer.echo(f"Failed to rotate {setting.key}: {e}")
         if not dry_run:
@@ -1467,6 +1534,8 @@ async def _run_encryption_rotation(
         session_factory = async_sessionmaker(engine)
         rotation_tracker = SequenceTracker()
         async with session_factory() as session:
+            if not dry_run:
+                await begin_scd2_write(session)
             result = await session.execute(
                 sa.select(Setting).where(Setting.is_encrypted, *where_active_now(Setting))
             )

@@ -24,6 +24,7 @@ from snapper.application.updaters.symbols.kraken_futures import _native_order_qu
 from snapper.data.models import Base
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_ETL_VERSION
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesInstrumentSchema
@@ -226,6 +227,7 @@ def test_real_flexible_definition_reaches_persistence_without_enabling_trading(
         with Session(engine) as session:
             updater = KrakenFuturesSymbolUpdaterService()
             schema = KrakenFuturesInstrumentSchema.model_validate(raw)
+            begin_scd2_write_sync(session)
             updater._persist_instrument_schema(session, schema, _OBSERVED_AT)
             session.commit()
             spec = session.execute(select(InstrumentSpec)).scalar_one()

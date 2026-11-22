@@ -8,6 +8,7 @@ from datetime import datetime
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
+from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -36,6 +37,7 @@ from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 
 
@@ -312,9 +314,7 @@ class TestKrakenSymbolUpdater:
             },
         ]
         mock_session = MagicMock(spec=Session)
-        mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
-            KNOWN_TO_MAX
-        )
+        mock_session.execute.return_value.scalars.return_value.first.return_value = None
         mock_session.__enter__.return_value = mock_session
         mock_session.__exit__.return_value = None
         mock_session.execute.return_value.scalar_one_or_none.return_value = None
@@ -619,6 +619,63 @@ async def test_update_database_inserts_and_updates(monkeypatch: pytest.MonkeyPat
         engine.dispose()
 
 
+class _NoOpNested:
+    """No-op SAVEPOINT context manager for faulty sync session stubs."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> Literal[False]:
+        return False
+
+
+class _FaultySession(Session):
+    """Session stub that fails on commit."""
+
+    def __init__(self) -> None:
+        """Skip base SQLAlchemy Session initialization for the stub."""
+        self.info = {"scd2_write_reserved": True}
+
+    def __enter__(self) -> _FaultySession:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        return None
+
+    def in_transaction(self) -> bool:
+        return False
+
+    def get_bind(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def begin_nested(self) -> _NoOpNested:
+        return _NoOpNested()
+
+    def execute(self, _stmt: Any) -> Any:
+        """Return stub supporting scalar_one_or_none, first and scalars().all()."""
+        return SimpleNamespace(
+            scalar_one_or_none=lambda: None,
+            first=lambda: None,
+            scalars=lambda: SimpleNamespace(all=lambda: [], first=lambda: None),
+        )
+
+    def add(self, _obj: Any) -> None:
+        return None
+
+    def flush(self) -> None:
+        return None
+
+    def commit(self) -> None:
+        raise RuntimeError("fail")
+
+
+class _FaultyRepo:
+    """Repository stub returning _FaultySession."""
+
+    def get_session(self) -> _FaultySession:
+        return _FaultySession()
+
+
 @pytest.mark.asyncio
 async def test_update_database_handles_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify _update_database propagates commit errors.
@@ -628,43 +685,7 @@ async def test_update_database_handles_error(monkeypatch: pytest.MonkeyPatch) ->
     Then: RuntimeError propagated.
     """
     svc = KrakenSymbolUpdaterService()
-
-    class FaultySession(Session):
-        """Session stub that fails on commit."""
-
-        def __init__(self) -> None:
-            """Skip base SQLAlchemy Session initialization for the stub."""
-
-        def __enter__(self) -> FaultySession:
-            return self
-
-        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-            return None
-
-        def execute(self, _stmt: Any) -> Any:
-            """Return stub supporting scalar_one_or_none, first and scalars().all()."""
-            return SimpleNamespace(
-                scalar_one_or_none=lambda: None,
-                first=lambda: None,
-                scalars=lambda: SimpleNamespace(all=lambda: [], first=lambda: None),
-            )
-
-        def add(self, _obj: Any) -> None:
-            return None
-
-        def flush(self) -> None:
-            return None
-
-        def commit(self) -> None:
-            raise RuntimeError("fail")
-
-    class Repo:
-        """Repository stub returning FaultySession."""
-
-        def get_session(self) -> FaultySession:
-            return FaultySession()
-
-    svc.repository = Repo()
+    svc.repository = _FaultyRepo()
     symbols = [
         {
             "native_symbol": "BTC-USD",
@@ -2752,6 +2773,7 @@ class TestKrakenPersistHelpers:
             session.commit()
 
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym = session.query(Symbol).filter_by(native_symbol="BTGOX-USD").one()
             symbol_data: dict[str, Any] = {
                 "native_symbol": "BTGOX-USD",
@@ -2811,6 +2833,7 @@ class TestKrakenPersistHelpers:
             session.commit()
 
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             symbol_data: dict[str, Any] = {
                 "native_symbol": "FOO-USD",
                 "kraken_websocket_symbol": "",
@@ -2879,6 +2902,7 @@ class TestKrakenPersistHelpers:
             session.commit()
 
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             symbol_data: dict[str, Any] = {
                 "native_symbol": "BTGOX-USD",
                 "kraken_websocket_symbol": "BTGOx/USD",
@@ -2944,6 +2968,7 @@ class TestKrakenPersistHelpers:
             session.commit()
 
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             symbol_data: dict[str, Any] = {
                 "native_symbol": "BTGOX-USD",
                 "kraken_websocket_symbol": "BTGOx/USD",
@@ -2985,6 +3010,7 @@ class TestKrakenPersistHelpers:
             session.commit()
 
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             extracted = updater._extract_ccxt_market_pair(
                 "BTC/USD",
                 {
@@ -3302,6 +3328,7 @@ class TestKrakenSpotMarginFunding:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             symbol_public_id = self._create_symbol_and_get_id(session, "BTC-USD", "BTC", "USD")
             symbol_data: dict[str, Any] = {
                 "native_symbol": "BTC-USD",
@@ -3338,6 +3365,7 @@ class TestKrakenSpotMarginFunding:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             symbol_public_id = self._create_symbol_and_get_id(session, "BTC-USD", "BTC", "USD")
             symbol_data: dict[str, Any] = {
                 "native_symbol": "BTC-USD",
@@ -3379,6 +3407,7 @@ class TestKrakenSpotMarginFunding:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             symbol_public_id = self._create_symbol_and_get_id(session, "FOO-USD", "FOO", "USD")
             symbol_data: dict[str, Any] = {
                 "native_symbol": "FOO-USD",
@@ -3416,6 +3445,7 @@ class TestKrakenSpotMarginFunding:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             symbol_public_id = self._create_symbol_and_get_id(session, "BAR-USD", "BAR", "USD")
             symbol_data: dict[str, Any] = {
                 "native_symbol": "BAR-USD",
@@ -3469,6 +3499,7 @@ class TestKrakenSeedSpotRolloverRates:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym = Symbol(
                 native_symbol="ETH-USD",
                 base="ETH",
@@ -3507,6 +3538,7 @@ class TestKrakenSeedSpotRolloverRates:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym = Symbol(
                 native_symbol="ETH-USD",
                 base="ETH",
@@ -3527,6 +3559,7 @@ class TestKrakenSeedSpotRolloverRates:
             session.commit()
 
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym_row = session.query(Symbol).filter_by(native_symbol="ETH-USD").one()
             instrument_public_id = SymbolUpdaterService._ensure_instrument_identity(
                 session, sym_row.public_id, "kraken", now, session_id="test", sequence_id=2
@@ -3577,6 +3610,7 @@ class TestKrakenMarginToNonMarginTransition:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym = Symbol(
                 native_symbol="BTC-USD",
                 base="BTC",
@@ -3609,6 +3643,7 @@ class TestKrakenMarginToNonMarginTransition:
 
         later = now + timedelta(days=1)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym_row = session.query(Symbol).filter_by(native_symbol="BTC-USD").one()
             non_margin_data: dict[str, Any] = {
                 "native_symbol": "BTC-USD",
@@ -3644,6 +3679,7 @@ class TestKrakenMarginToNonMarginTransition:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym = Symbol(
                 native_symbol="ETH-USD",
                 base="ETH",
@@ -3676,6 +3712,7 @@ class TestKrakenMarginToNonMarginTransition:
 
         later = now + timedelta(days=1)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym_row = session.query(Symbol).filter_by(native_symbol="ETH-USD").one()
             non_margin_data: dict[str, Any] = {
                 "native_symbol": "ETH-USD",
@@ -3710,6 +3747,7 @@ class TestKrakenMarginToNonMarginTransition:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym = Symbol(
                 native_symbol="FOO-USD",
                 base="FOO",
@@ -3755,6 +3793,7 @@ class TestKrakenMarginToNonMarginTransition:
         """
         now = datetime.now(UTC)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym = Symbol(
                 native_symbol="XYZ-USD",
                 base="XYZ",
@@ -3807,6 +3846,7 @@ class TestKrakenMarginToNonMarginTransition:
 
         later = now + timedelta(days=1)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym_row = session.query(Symbol).filter_by(native_symbol="XYZ-USD").one()
             ws_only_data: dict[str, Any] = {
                 "native_symbol": "XYZ-USD",
@@ -4146,6 +4186,7 @@ class TestKrakenBtnlDiscovery:
                 )
             )
             session.commit()
+            begin_scd2_write_sync(session)
             sym_row = session.query(Symbol).filter_by(native_symbol="NOWS-USD-BTNL").one()
             created, updated = updater._persist_btnl_symbol(
                 session,
@@ -4206,6 +4247,7 @@ class TestKrakenBtnlDiscovery:
                 )
             )
             session.commit()
+            begin_scd2_write_sync(session)
             sym_row = session.query(Symbol).filter_by(native_symbol="BTC-USD-BTNL").one()
             updater._persist_btnl_symbol(
                 session,
@@ -4222,6 +4264,7 @@ class TestKrakenBtnlDiscovery:
             session.commit()
         second_now = datetime(2026, 5, 12, 9, 0, tzinfo=UTC)
         with db_session_factory() as session:
+            begin_scd2_write_sync(session)
             sym_row = session.query(Symbol).filter_by(native_symbol="BTC-USD-BTNL").one()
             created, updated = updater._persist_btnl_symbol(
                 session,

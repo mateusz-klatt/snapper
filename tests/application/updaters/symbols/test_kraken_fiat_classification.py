@@ -25,6 +25,7 @@ from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import begin_scd2_write_sync
 
 _FIRST = datetime(2026, 10, 1, 12, tzinfo=UTC)
 
@@ -56,6 +57,7 @@ class FiatCatalog:
     def seed(self, record: KrakenSymbolRecord, asset_type: AssetTypeEnum) -> str:
         """Seed an earlier writer version using the shared symbol upsert."""
         with self.sessions() as session:
+            begin_scd2_write_sync(session)
             public_id = self.updater._upsert_symbol(
                 session,
                 record["native_symbol"],

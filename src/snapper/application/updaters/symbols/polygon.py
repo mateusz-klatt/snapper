@@ -25,8 +25,10 @@ from snapper.core.types import ExchangeEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.data.models import InstrumentSpec
 from snapper.data.models import Symbol
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import InstrumentSpecInput
 from snapper.infrastructure.exchanges.implementations.polygon import PolygonExchangeClient
 
 
@@ -245,7 +247,7 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
         profile: PolygonCashProfile,
         now: datetime,
     ) -> None:
-        """Replace the exact source profile and revoke earlier conflicting evidence.
+        """Replace the exact source profile under lock and revoke conflicting evidence.
 
         Args:
             session: Active synchronous catalog transaction.
@@ -253,23 +255,59 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             profile: Interpretation of the exact record and catalog base/quote.
             now: Current catalog revision time, separate from provider accuracy time.
         """
-        existing = DatabaseRepository.get_instrument_spec_sync(session, instrument_public_id, now)
-        if existing is None and profile.instrument_kind is None:
-            return
-        self._revise_instrument_spec(
-            session,
+        resolved_metadata = self._replacement_instrument_metadata(
+            profile.metadata,
             instrument_public_id,
-            now,
-            session_id=self._tracker.session_id,
-            sequence_id=self._tracker.next_sequence("specs"),
+        )
+        spec = InstrumentSpecInput(
+            tick_size=resolved_metadata.tick_size,
+            lot_size=resolved_metadata.lot_size,
+            min_order_size=resolved_metadata.min_order_size,
+            max_order_size=resolved_metadata.max_order_size,
+            cost_decimals=resolved_metadata.cost_decimals,
+            qty_decimals=resolved_metadata.qty_decimals,
+            margin_initial=resolved_metadata.margin_initial,
+            position_limit_long=resolved_metadata.position_limit_long,
+            position_limit_short=resolved_metadata.position_limit_short,
+            status=resolved_metadata.status,
+            contract_size=resolved_metadata.contract_size,
+            quantity_unit=resolved_metadata.quantity_unit,
+            native_order_quantity_unit=resolved_metadata.native_order_quantity_unit,
+            contract_payoff_model=resolved_metadata.contract_payoff_model,
+            contract_value_currency=resolved_metadata.contract_value_currency,
+            settlement_currency=resolved_metadata.settlement_currency,
+            spec_source=resolved_metadata.spec_source,
+            spec_version=resolved_metadata.spec_version,
+            spec_observed_at=resolved_metadata.spec_observed_at,
+            unit_certified=resolved_metadata.unit_certified,
+            expiry_at=None,
             instrument_kind=profile.instrument_kind,
             funding_type=None,
             funding_frequency_hours=None,
             rollover_rate_long=None,
             rollover_rate_short=None,
             max_funding_rate=None,
-            metadata=profile.metadata,
         )
+
+        def _resolve_locked(existing: InstrumentSpec | None) -> InstrumentSpecInput | None:
+            if existing is None and profile.instrument_kind is None:
+                return None
+            return spec
+
+        DatabaseRepository.revise_instrument_spec_from_locked_sync(
+            session=session,
+            instrument_public_id=instrument_public_id,
+            provenance=(self._tracker.session_id, self._tracker.next_sequence("specs"), now),
+            resolve_spec=_resolve_locked,
+            active_only=True,
+        )
+
+    def _polygon_sort_key(self, symbol_data: PolygonSymbolRecord) -> str:
+        """Return canonical native-symbol sort key for one Polygon record."""
+        ticker = symbol_data.get("ticker")
+        if not ticker:
+            return ""
+        return self._match_polygon_to_native(ticker, symbol_data) or ""
 
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Update database with fetched symbol data.
@@ -278,7 +316,10 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             symbols: List of symbol dictionaries from Polygon API.
         """
         assert self.repository is not None
-        records = cast(list[PolygonSymbolRecord], symbols)
+        records = self._sort_records_by_native_symbol(
+            cast(list[PolygonSymbolRecord], symbols),
+            self._polygon_sort_key,
+        )
         stats = {"updated": 0, "inserted": 0, "skipped": 0}
         now = datetime.now(UTC)
         processed_symbol_public_ids: set[str] = set()
