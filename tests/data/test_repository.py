@@ -5737,8 +5737,7 @@ async def test_has_pending_cancel_command_false_for_unknown(tmp_path: Path) -> N
 async def test_has_pending_cancel_command_true_for_pending(tmp_path: Path) -> None:
     """Returns True when a non-terminal cancel command row is present.
 
-    Given: an active trade_commands row with ``command_type='cancel'``
-        and status ``created``,
+    Given: an active cancel with ``status='created'`` and a venue id,
     When: has_pending_cancel_command is called for that client_order_id,
     Then: True is returned so recovery can dedupe.
     """
@@ -5755,6 +5754,7 @@ async def test_has_pending_cancel_command_true_for_pending(tmp_path: Path) -> No
             "strategy_id": "manual",
             "client_order_id": "cid-pend-1",
             "venue_client_id": "cid-pend-1",
+            "exchange_order_id": "ex-pend-1",
             "side": "buy",
             "order_type": "market",
             "quantity": 0.5,

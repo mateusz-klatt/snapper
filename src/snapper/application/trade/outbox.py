@@ -16,6 +16,7 @@ from datetime import datetime
 
 from loguru import logger
 
+from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.core.command_material import TradeCommandMaterialChangedError
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import TradeCommandStatusEnum
@@ -305,6 +306,22 @@ class OutboxDispatcher:
             return False
         return True
 
+    async def _publish_or_hold(self, cmd: TradeCommandRow) -> bool:
+        """Publish when possible and hold only unresolved cancels without mutation.
+
+        Args:
+            cmd: Durable command selected for dispatch.
+
+        Returns:
+            False for an unresolved cancel; True after publish or when publishing is disabled.
+        """
+        try:
+            if self._publish_fn is not None:
+                await self._publish_fn(cmd)
+        except CancelTargetUnresolvedError:
+            return False
+        return True
+
     async def _dispatch_batch(self) -> None:
         """Fetch and dispatch one batch of undispatched commands.
 
@@ -325,8 +342,8 @@ class OutboxDispatcher:
             if await self._expire_if_stale(cmd):
                 continue
             try:
-                if self._publish_fn is not None:
-                    await self._publish_fn(cmd)
+                if not await self._publish_or_hold(cmd):
+                    continue
                 bus_time = datetime.now(UTC)
                 success_updates.append(
                     TradeCommandDispatchUpdate(

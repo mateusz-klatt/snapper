@@ -2,6 +2,7 @@
 
 import sys
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -26,6 +27,7 @@ from snapper.application.plans.settlement import serialize_candidate
 from snapper.application.plans.settlement import settle_single_recovered_plan
 from snapper.application.plans.settlement import settlement_code_revision
 from snapper.application.plans.settlement import settlement_database_endpoint
+from snapper.application.plans.settlement import verify_plan_child_settlement_candidate
 from snapper.core.json_types import JsonObject
 from snapper.data.models import ExecutionPlan
 from snapper.data.repository import SQLAlchemyRepository
@@ -168,6 +170,7 @@ def _venue_event_row(
     event_type: str,
     status: str | None = None,
     cum_fill_size: float | None = None,
+    exchange_order_id: str | None = "EX-1",
 ) -> VenueEventRow:
     """Build a synthetic `VenueEventRow` for pure inspection tests.
 
@@ -176,6 +179,7 @@ def _venue_event_row(
         event_type: Venue event type string.
         status: Optional order status string.
         cum_fill_size: Optional cumulative fill quantity.
+        exchange_order_id: Venue id carried by the event.
 
     Returns:
         Typed `VenueEventRow` dictionary.
@@ -194,7 +198,7 @@ def _venue_event_row(
         "command_public_id": None,
         "client_order_id": "cid-1",
         "venue_client_id": "cid-1",
-        "exchange_order_id": "EX-1",
+        "exchange_order_id": exchange_order_id,
         "exec_id": None,
         "trade_id": None,
         "side": "buy",
@@ -679,7 +683,13 @@ async def test_inspect_cancel_requested_preserves_g2b_target_confirmation() -> N
                 last_error="order_interlock_blocked",
                 exchange_order_id=None,
             ),
-            events=[_venue_event_row(event_id=1, event_type="order_interlock_blocked")],
+            events=[
+                _venue_event_row(
+                    event_id=1,
+                    event_type="order_interlock_blocked",
+                    exchange_order_id=None,
+                )
+            ],
         ),
         plan,
     )
@@ -757,9 +767,16 @@ async def test_inspect_cancel_requested_failed_rejects_either_venue_id(
         _mock_reader(
             command=_command_row(
                 status="failed",
+                last_error="order_interlock_blocked",
                 exchange_order_id=command_exchange_order_id,
             ),
-            events=[_venue_event_row(event_id=1, event_type="order_interlock_blocked")],
+            events=[
+                _venue_event_row(
+                    event_id=1,
+                    event_type="order_interlock_blocked",
+                    exchange_order_id=None,
+                )
+            ],
             order_exchange_order_id=order_exchange_order_id,
         ),
         _plan_row(status="cancel_requested"),
@@ -767,6 +784,68 @@ async def test_inspect_cancel_requested_failed_rejects_either_venue_id(
 
     assert isinstance(decision, PlanSettlementSkipped)
     assert decision.skip_code == "unconfirmed_failed_child"
+
+
+@pytest.mark.asyncio
+async def test_locked_child_recheck_accepts_only_unchanged_exact_candidate(
+    sqlite_repo: SQLAlchemyRepository,
+) -> None:
+    """Recheck child evidence under locks and reject every candidate drift.
+
+    Given: A real cancel-requested interlock plan and its valid candidate,
+    When: The locked recheck receives valid, multi-child, stale-plan, and changed-evidence candidates,
+    Then: Only the unchanged single-child candidate verifies.
+    """
+    plan_pid = await _seed_plan_with_child(
+        sqlite_repo,
+        created_at=_T0,
+        plan_status="cancel_requested",
+        child_order_id="cid-locked-recheck",
+        child_status="failed",
+    )
+    event: VenueEventInsertRow = {
+        "event_type": "order_interlock_blocked",
+        "shard_key": f"kraken.XRP-EUR.live.{_WALLET_ID}",
+        "exchange": "kraken",
+        "instrument": "XRP-EUR",
+        "mode": "live",
+        "client_order_id": "cid-locked-recheck",
+        "venue_client_id": "cid-locked-recheck",
+        "side": "buy",
+        "status": "failed",
+        "error": "order_interlock_blocked",
+        "exchange_order_id": None,
+        "liquidity_role": "unknown",
+        "received_at": _T0 + timedelta(seconds=1),
+        "session_id": "seed-sess",
+        "sequence_id": 4,
+        "timestamp": _T0 + timedelta(seconds=1),
+        "wallet_public_id": _WALLET_ID,
+    }
+    await sqlite_repo.insert_venue_event(event)
+    plan = await sqlite_repo.get_execution_plan(plan_pid, as_of=datetime.now(UTC))
+    assert plan is not None
+    decision = await inspect_plan_settlement(sqlite_repo, plan)
+    assert isinstance(decision, PlanSettlementCandidate)
+
+    assert await verify_plan_child_settlement_candidate(sqlite_repo, decision) is True
+    assert (
+        await verify_plan_child_settlement_candidate(sqlite_repo, replace(decision, children=()))
+        is False
+    )
+    assert (
+        await verify_plan_child_settlement_candidate(
+            sqlite_repo,
+            replace(decision, current_sequence_id=decision.current_sequence_id + 1),
+        )
+        is False
+    )
+    assert (
+        await verify_plan_child_settlement_candidate(
+            sqlite_repo, replace(decision, last_error="changed")
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio

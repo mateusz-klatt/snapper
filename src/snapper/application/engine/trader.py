@@ -55,6 +55,9 @@ from snapper.application.process_manager.registry import register_process
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.services.settings import SettingsService
+from snapper.application.trade.cancel_target import CancelTargetIdentityReader
+from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
+from snapper.application.trade.cancel_target import cancel_target_exchange_order_id
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.command_request import order_request_from_command
 from snapper.application.trade.command_request import parse_shard_key
@@ -6645,11 +6648,12 @@ class TraderCoordinator(RegisterableProcess):
           the ``.submit`` topic for the exchange executor to place.
         - ``cancel``: publishes an ``OrderCancelData`` to the ``.cancel``
           topic, carrying the original order's ``client_order_id`` and
-          ``exchange_order_id``. The venue id is re-hydrated from the
-          active ``orders`` row at dispatch time so a late venue ACK
-          landing after the REST route snapshotted the command row
-          still results in a cancel that targets the correct exchange
-          order id. Cancels remain admissible after recovery
+          ``exchange_order_id``. The venue id is re-hydrated at dispatch
+          time from the active Order, create command, or accepted/fill
+          evidence so a late venue ACK landing after the REST route
+          snapshotted the command row still targets the correct venue order.
+          Unresolved targets raise before publication, leaving the durable
+          cancel CREATED for a later outbox retry. Cancels remain admissible after recovery
           certification fails because they use durable order identity,
           not uncertified position projections, and remove resting
           exposure. They are part of the repair surface; blocking them
@@ -6666,11 +6670,18 @@ class TraderCoordinator(RegisterableProcess):
             topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.CANCEL)
             resolved_venue_id = cmd.get("exchange_order_id") or ""
             if not resolved_venue_id:
-                fresh = await self.repository.get_exchange_order_id_for_client_order_id(
-                    cmd["client_order_id"], as_of=datetime.now(UTC)
+                fresh = await cancel_target_exchange_order_id(
+                    cast(CancelTargetIdentityReader, self.repository),
+                    cmd["client_order_id"],
+                    cmd["exchange"],
+                    datetime.now(UTC),
                 )
                 if fresh:
                     resolved_venue_id = fresh
+            if not resolved_venue_id:
+                raise CancelTargetUnresolvedError(
+                    f"cancel target venue id unresolved for {cmd['client_order_id']}"
+                )
             cancel = OrderCancelData(
                 public_id=cmd["client_order_id"],
                 timestamp=datetime.now(UTC),

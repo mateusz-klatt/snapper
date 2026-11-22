@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy import func
 from sqlalchemy import select
 
+from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.plans.service import _EVALUATOR_REGISTRY
@@ -24,6 +25,8 @@ from snapper.application.plans.service import PlanExecutorService
 from snapper.application.plans.settlement import PlanChildOutcome
 from snapper.application.plans.settlement import PlanSettlementCandidate
 from snapper.application.plans.settlement import PlanSettlementSkipped
+from snapper.application.plans.settlement import settle_single_recovered_plan
+from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import TradeService
 from snapper.data.models import ExecutionPlanCheckpoint
@@ -33,6 +36,7 @@ from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import OrderInsertRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import VenueEventInsertRow
+from snapper.data.repository_types import VenueEventRow
 from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import SignalData
@@ -4107,6 +4111,8 @@ class TestStrandedCancelMultiChild:
         )
         mock_repo.has_pending_cancel_command = AsyncMock(return_value=False)
         mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+        mock_repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
+        mock_repo.get_order_lifecycle_events = AsyncMock(return_value=[])
         mock_repo.insert_trade_command = AsyncMock(return_value=(1, "cmd"))
         mock_repo_fn.return_value = mock_repo
         service = PlanExecutorService()
@@ -4133,10 +4139,12 @@ def _stranded_repo(target_status: str | None, ended_at: datetime | None) -> Asyn
     repo = AsyncMock(spec=SQLAlchemyRepository)
     repo.get_plan_public_ids_for_client_order_ids = AsyncMock(return_value={"cid-1": "plan-strand"})
     repo.has_pending_cancel_command = AsyncMock(return_value=False)
+    repo.get_pending_cancel_command_for_client_order_id = AsyncMock(return_value=None)
     repo.get_active_create_command_by_client_order_id = AsyncMock(
         return_value=None if target_status is None else {"status": target_status}
     )
     repo.get_latest_venue_event_received_at = AsyncMock(return_value=ended_at)
+    repo.get_order_lifecycle_events = AsyncMock(return_value=[])
     repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-1")
     repo.insert_trade_command = AsyncMock(return_value=(1, "cmd-1"))
     return repo
@@ -4371,6 +4379,8 @@ class _StrandedChildSpec:
     event_types: tuple[str, ...] = ()
     command_exchange_order_id: str | None = None
     order_exchange_order_id: str | None = None
+    event_exchange_order_id: str | None = None
+    failure_reason: str | None = None
 
 
 async def _seed_stranded_child(
@@ -4409,7 +4419,11 @@ async def _seed_stranded_child(
                 if spec.status in ("failed", "rejected", "cancelled", "expired", "filled")
                 else None
             ),
-            last_error="order_interlock_blocked" if spec.status == "failed" else None,
+            last_error=(
+                (spec.failure_reason or "order_interlock_blocked")
+                if spec.status == "failed"
+                else None
+            ),
         )
     for index, event_type in enumerate(spec.event_types):
         event = _strand_child_event(
@@ -4417,7 +4431,7 @@ async def _seed_stranded_child(
         )
         event["client_order_id"] = spec.client_order_id
         event["venue_client_id"] = spec.client_order_id
-        event["exchange_order_id"] = None
+        event["exchange_order_id"] = spec.event_exchange_order_id
         await repo.insert_venue_event(event)
     if spec.order_exchange_order_id is not None:
         order: OrderInsertRow = {
@@ -4492,14 +4506,16 @@ async def _assert_stranded_reemitted(
         plan_pid: Recovered plan public id.
         child_client_order_id: Child expected to have a pending cancel.
     """
-    pending = await repo.has_pending_cancel_command(child_client_order_id, as_of=datetime.now(UTC))
+    pending = await repo.get_pending_cancel_command_for_client_order_id(
+        child_client_order_id, datetime.now(UTC)
+    )
     plan = await repo.get_execution_plan(plan_pid, as_of=datetime.now(UTC))
-    assert pending is True
+    assert pending is not None
     assert plan is not None and plan["status"] == "cancel_requested"
 
 
 class TestStrandedCancelNeverPlacedTarget:
-    """Startup recovery settles cancels whose target never reached the venue."""
+    """Startup recovery retains retryable cancels for every unsafe shape."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("target_status", ["dispatched", "pending", "sent"])
@@ -4562,6 +4578,10 @@ class TestStrandedCancelNeverPlacedTarget:
             await PlanExecutorService()._recover_plans()
 
             await _assert_stranded_reemitted(repo, plan_pid, "cid-1")
+            inserted = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert inserted is not None and inserted["exchange_order_id"] == "ex-1"
         finally:
             await repo.engine.dispose()
 
@@ -4573,6 +4593,9 @@ class TestStrandedCancelNeverPlacedTarget:
             ("dispatched", ("order_accepted",)),
             ("accepted", ()),
             ("partially_filled", ()),
+            ("created", ()),
+            ("direct_dispatched", ()),
+            ("filled", ()),
         ],
     )
     @patch("snapper.application.plans.service.get_settings")
@@ -4680,13 +4703,62 @@ class TestStrandedCancelNeverPlacedTarget:
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
     @patch("snapper.application.plans.service.get_repository")
-    async def test_mixed_live_and_unplaced_children_do_not_settle_plan(
+    async def test_ack_between_startup_phases_reemits_with_event_only_id(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock, tmp_path: Path
     ) -> None:
-        """Cancel only the live child without terminalizing a mixed plan.
+        """Carry an ack-only venue id on the cancel inserted later in recovery.
+
+        Given a dispatched child when startup recovery begins,
+        When an accepted event commits during child-plan link resolution,
+        Then recovery inserts a cancel carrying the event's venue id.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'late_ack_event_id.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        mock_settings.return_value.plan_recovery_auto_settle_enabled = False
+        try:
+            plan_pid = await _seed_stranded_recovery_plan(
+                repo,
+                [
+                    _StrandedChildSpec(
+                        client_order_id="cid-1",
+                        status="dispatched",
+                        event_types=(),
+                    )
+                ],
+            )
+            original_lookup = repo.get_plan_public_ids_for_client_order_ids
+
+            async def _ack_then_lookup(
+                client_order_ids: list[str], as_of: datetime
+            ) -> dict[str, str]:
+                ack = _strand_child_event("order_accepted", datetime.now(UTC), 50)
+                ack["exchange_order_id"] = "ex-event-only"
+                await repo.insert_venue_event(ack)
+                return await original_lookup(client_order_ids, as_of=as_of)
+
+            repo.get_plan_public_ids_for_client_order_ids = _ack_then_lookup
+
+            await PlanExecutorService()._recover_plans()
+
+            await _assert_stranded_reemitted(repo, plan_pid, "cid-1")
+            inserted = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert inserted is not None and inserted["exchange_order_id"] == "ex-event-only"
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_mixed_live_and_unplaced_children_reemit_only_live_without_settlement(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock, tmp_path: Path
+    ) -> None:
+        """Cancel only the live child after the safe child survives locked recheck.
 
         Given one accepted empty-id child and one interlock-only failed child,
-        When startup recovery classifies both children,
+        When startup recovery classifies and rechecks both children,
         Then only the live child gets a cancel and the plan remains cancel_requested.
         """
         repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'mixed_children.db'}")
@@ -4709,24 +4781,526 @@ class TestStrandedCancelNeverPlacedTarget:
             await PlanExecutorService()._recover_plans()
 
             await _assert_stranded_reemitted(repo, plan_pid, "cid-live")
-            unplaced_pending = await repo.has_pending_cancel_command(
-                "cid-unplaced", as_of=datetime.now(UTC)
+            unplaced_pending = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-unplaced", datetime.now(UTC)
             )
-            assert unplaced_pending is False
+            assert unplaced_pending is None
         finally:
             await repo.engine.dispose()
 
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
     @patch("snapper.application.plans.service.get_repository")
-    async def test_second_startup_after_local_settlement_is_noop(
+    async def test_breaker_refused_create_settles(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock, tmp_path: Path
     ) -> None:
-        """Do not repeat local settlement after the plan becomes terminal.
+        """Settle the exact circuit-breaker refusal shape without a cancel.
 
-        Given a failed empty-id create and an already-failed cancel in SQLite,
-        When two independent startup recoveries run with auto-settlement disabled,
-        Then the first settles the plan and neither inserts another cancel command.
+        Given a failed id-less create with circuit_breaker_open and its sole marker,
+        When startup recovery classifies and settles the plan,
+        Then the plan is failed and no pending cancel exists.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'breaker_refusal.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        mock_settings.return_value.plan_recovery_auto_settle_enabled = False
+        try:
+            plan_pid = await _seed_stranded_recovery_plan(
+                repo,
+                [
+                    _StrandedChildSpec(
+                        client_order_id="cid-1",
+                        status="failed",
+                        event_types=("order_breaker_open",),
+                        failure_reason="circuit_breaker_open",
+                    )
+                ],
+            )
+
+            await PlanExecutorService()._recover_plans()
+
+            plan = await repo.get_execution_plan(plan_pid, as_of=datetime.now(UTC))
+            pending = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert plan is not None and plan["status"] == "failed"
+            assert plan["last_error"] == "circuit_breaker_open"
+            assert pending is None
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_real_create_lookup_error_reemits(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock, tmp_path: Path
+    ) -> None:
+        """Re-emit an id-less held cancel when real classifier lookups fail.
+
+        Given a dispatched unknown-evidence child in SQLite,
+        When its create lookup raises during classification and normal recovery,
+        Then a retryable unresolved cancel row exists and the plan stays actionable.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'lookup_error.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        mock_settings.return_value.plan_recovery_auto_settle_enabled = False
+        try:
+            plan_pid = await _seed_stranded_recovery_plan(
+                repo,
+                [
+                    _StrandedChildSpec(
+                        client_order_id="cid-1",
+                        status="dispatched",
+                        event_types=("order_submit_unknown",),
+                    )
+                ],
+            )
+
+            async def _lookup_error(_client_order_id: str, _exchange: str) -> None:
+                raise RuntimeError("lookup failed")
+
+            repo.get_active_create_command_by_client_order_id = _lookup_error
+
+            await PlanExecutorService()._recover_plans()
+
+            await _assert_stranded_reemitted(repo, plan_pid, "cid-1")
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_evidence_change_before_cas_reemits(
+        self,
+        mock_repo_fn: MagicMock,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fall back to a fresh cancel when locked evidence changes before CAS.
+
+        Given an initially safe interlock-only plan,
+        When an ack is committed immediately before the real locked settlement,
+        Then settlement is refused and a cancel carrying the ack id is inserted.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'cas_evidence_change.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        mock_settings.return_value.plan_recovery_auto_settle_enabled = False
+        try:
+            plan_pid = await _seed_stranded_recovery_plan(
+                repo,
+                [
+                    _StrandedChildSpec(
+                        client_order_id="cid-1",
+                        status="failed",
+                        event_types=("order_interlock_blocked",),
+                    )
+                ],
+            )
+
+            async def _settle_with_late_ack(
+                repository: SQLAlchemyRepository,
+                candidate: PlanSettlementCandidate,
+                *,
+                settled_at: datetime,
+                session_id: str,
+                sequence_id: int,
+            ) -> bool:
+                ack = _strand_child_event("order_accepted", datetime.now(UTC), 50)
+                ack["exchange_order_id"] = "ex-late-cas"
+                await repository.insert_venue_event(ack)
+                return await settle_single_recovered_plan(
+                    repository,
+                    candidate,
+                    settled_at=settled_at,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                )
+
+            monkeypatch.setattr(
+                "snapper.application.plans.service.settle_single_recovered_plan",
+                _settle_with_late_ack,
+            )
+
+            await PlanExecutorService()._recover_plans()
+
+            await _assert_stranded_reemitted(repo, plan_pid, "cid-1")
+            pending = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert pending is not None and pending["exchange_order_id"] == "ex-late-cas"
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_idless_cancel_is_held_then_hydrated_without_duplicate(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock, tmp_path: Path
+    ) -> None:
+        """Hold an unresolved cancel and later hydrate that same row for dispatch.
+
+        Given a non-safe child with no venue id,
+        When recovery and trader dispatch run before and after a command-only id arrives,
+        Then no blank frame is sent, dedup is nonblocking, and the same row is hydrated.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'held_cancel.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        mock_settings.return_value.plan_recovery_auto_settle_enabled = False
+        try:
+            await _seed_stranded_recovery_plan(
+                repo,
+                [
+                    _StrandedChildSpec(
+                        client_order_id="cid-1",
+                        status="dispatched",
+                        event_types=("order_submit_unknown",),
+                    )
+                ],
+            )
+            coordinator = TraderCoordinator.__new__(TraderCoordinator)
+            coordinator.repository = repo
+            coordinator.msg_publisher = AsyncMock()
+
+            await PlanExecutorService()._recover_plans()
+
+            pending = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert pending is not None and pending["exchange_order_id"] is None
+            assert await repo.has_pending_cancel_command("cid-1", datetime.now(UTC)) is False
+            with pytest.raises(CancelTargetUnresolvedError):
+                await coordinator._outbox_publish(pending)
+            coordinator.msg_publisher.send.assert_not_awaited()
+
+            await PlanExecutorService()._recover_plans()
+            still_pending = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert still_pending is not None
+            assert still_pending["public_id"] == pending["public_id"]
+
+            create = await repo.get_active_create_command_by_client_order_id("cid-1", "kraken")
+            assert create is not None
+            await repo.advance_trade_command_lifecycle(
+                public_id=create["public_id"],
+                expected_status="dispatched",
+                new_status="dispatched",
+                bus_time=datetime.now(UTC),
+                session_id="s1",
+                sequence_id=60,
+                exchange_order_id="ex-command-only",
+            )
+            original_update = repo.update_trade_command_status
+
+            async def _hydration_error(**_kwargs: object) -> None:
+                raise RuntimeError("hydration failed")
+
+            repo.update_trade_command_status = _hydration_error
+            try:
+                await PlanExecutorService()._recover_plans()
+            finally:
+                repo.update_trade_command_status = original_update
+
+            unresolved = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert unresolved is not None and unresolved["exchange_order_id"] is None
+
+            await PlanExecutorService()._recover_plans()
+
+            hydrated = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert hydrated is not None
+            assert hydrated["public_id"] == pending["public_id"]
+            assert hydrated["exchange_order_id"] == "ex-command-only"
+            assert await repo.has_pending_cancel_command("cid-1", datetime.now(UTC)) is True
+            await coordinator._outbox_publish(hydrated)
+            sent = coordinator.msg_publisher.send.await_args.args[1]
+            assert sent.exchange_order_id == "ex-command-only"
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_settlement_exception_and_reload_error_reemit_original_plan(
+        self,
+        mock_repo_fn: MagicMock,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Use the original plan when settlement and fallback reload both fail.
+
+        Given: An exact safe plan whose settlement raises,
+        When: The fallback plan reload also raises,
+        Then: Recovery emits an unresolved retryable cancel using the original row.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'settle_reload_error.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        mock_settings.return_value.plan_recovery_auto_settle_enabled = False
+        try:
+            plan_pid = await _seed_stranded_recovery_plan(
+                repo,
+                [
+                    _StrandedChildSpec(
+                        client_order_id="cid-1",
+                        status="failed",
+                        event_types=("order_interlock_blocked",),
+                    )
+                ],
+            )
+
+            async def _raise_settlement(
+                repository: SQLAlchemyRepository,
+                candidate: PlanSettlementCandidate,
+                *,
+                settled_at: datetime,
+                session_id: str,
+                sequence_id: int,
+            ) -> bool:
+                raise RuntimeError("settlement failed")
+
+            monkeypatch.setattr(
+                "snapper.application.plans.service.settle_single_recovered_plan",
+                _raise_settlement,
+            )
+            original_get_plan = repo.get_execution_plan
+
+            async def _reload_error(public_id: str, as_of: datetime) -> None:
+                raise RuntimeError("reload failed")
+
+            repo.get_execution_plan = _reload_error
+            try:
+                await PlanExecutorService()._recover_plans()
+            finally:
+                repo.get_execution_plan = original_get_plan
+
+            await _assert_stranded_reemitted(repo, plan_pid, "cid-1")
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_second_inspect_evidence_change_reemits(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock, tmp_path: Path
+    ) -> None:
+        """Re-emit when evidence changes before the second full inspection.
+
+        Given: A plan that is safe during per-child classification,
+        When: An ack arrives before the second inspection,
+        Then: Local settlement is refused and the cancel carries the new event id.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'second_inspect_change.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        mock_settings.return_value.plan_recovery_auto_settle_enabled = False
+        try:
+            plan_pid = await _seed_stranded_recovery_plan(
+                repo,
+                [
+                    _StrandedChildSpec(
+                        client_order_id="cid-1",
+                        status="failed",
+                        event_types=("order_interlock_blocked",),
+                    )
+                ],
+            )
+            original_events = repo.get_order_lifecycle_events
+            calls = 0
+
+            async def _events_with_ack(client_order_ids: list[str]) -> list[VenueEventRow]:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    ack = _strand_child_event("order_accepted", datetime.now(UTC), 50)
+                    ack["exchange_order_id"] = "ex-second-inspect"
+                    await repo.insert_venue_event(ack)
+                return await original_events(client_order_ids)
+
+            repo.get_order_lifecycle_events = _events_with_ack
+
+            await PlanExecutorService()._recover_plans()
+
+            await _assert_stranded_reemitted(repo, plan_pid, "cid-1")
+            pending = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert pending is not None and pending["exchange_order_id"] == "ex-second-inspect"
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("recheck_failure", ["false", "raise"])
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_mixed_locked_recheck_doubt_reemits_safe_child(
+        self,
+        mock_repo_fn: MagicMock,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+        recheck_failure: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fail mixed-plan locked rechecks to emission on False or exceptions.
+
+        Given: A mixed plan with one initially safe child,
+        When: Its locked recheck returns False or raises,
+        Then: Both children receive retryable cancels and the plan stays actionable.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'mixed_recheck_doubt.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        mock_settings.return_value.plan_recovery_auto_settle_enabled = False
+        try:
+            plan_pid = await _seed_stranded_recovery_plan(
+                repo,
+                [
+                    _StrandedChildSpec(client_order_id="cid-live", status="accepted"),
+                    _StrandedChildSpec(
+                        client_order_id="cid-safe",
+                        status="failed",
+                        event_types=("order_interlock_blocked",),
+                    ),
+                ],
+            )
+
+            async def _recheck_doubt(
+                repository: SQLAlchemyRepository,
+                candidate: PlanSettlementCandidate,
+            ) -> bool:
+                if recheck_failure == "raise":
+                    raise RuntimeError("recheck failed")
+                return False
+
+            monkeypatch.setattr(
+                "snapper.application.plans.service.verify_plan_child_settlement_candidate",
+                _recheck_doubt,
+            )
+
+            await PlanExecutorService()._recover_plans()
+
+            await _assert_stranded_reemitted(repo, plan_pid, "cid-live")
+            await _assert_stranded_reemitted(repo, plan_pid, "cid-safe")
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_non_sqlalchemy_safe_helpers_fail_to_reemit(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock
+    ) -> None:
+        """Keep non-SQLAlchemy repositories on the normal emission path.
+
+        Given: A service without SQLAlchemy settlement support,
+        When: Locked recheck or settlement helpers are called directly,
+        Then: They return no verified children and False respectively.
+        """
+        mock_repo_fn.return_value = AsyncMock()
+        service = PlanExecutorService()
+
+        assert await service._locked_safe_unplaced_children({}) == set()
+        assert (
+            await service._settle_safe_unplaced_plan(_stranded_plan(), datetime.now(UTC)) is False
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reload_state", ["terminal", "no_native", "no_children"])
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_refused_settlement_reload_guards_do_not_emit_stale_metadata(
+        self,
+        mock_repo_fn: MagicMock,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+        reload_state: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stop fallback only for terminal or unemittable reloaded plan versions.
+
+        Given: A real safe plan whose settlement loses its CAS,
+        When: Reload returns terminal, metadata-less, or child-less current state,
+        Then: Recovery returns without using stale cancel metadata.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'reload_guards.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        mock_settings.return_value.plan_recovery_auto_settle_enabled = False
+        try:
+            await _seed_stranded_recovery_plan(
+                repo,
+                [
+                    _StrandedChildSpec(
+                        client_order_id="cid-1",
+                        status="failed",
+                        event_types=("order_interlock_blocked",),
+                    )
+                ],
+            )
+
+            async def _refuse_settlement(
+                repository: SQLAlchemyRepository,
+                candidate: PlanSettlementCandidate,
+                *,
+                settled_at: datetime,
+                session_id: str,
+                sequence_id: int,
+            ) -> bool:
+                return False
+
+            monkeypatch.setattr(
+                "snapper.application.plans.service.settle_single_recovered_plan",
+                _refuse_settlement,
+            )
+            original_get_plan = repo.get_execution_plan
+
+            async def _mutated_reload(public_id: str, as_of: datetime) -> ExecutionPlanRow | None:
+                current = await original_get_plan(public_id, as_of=as_of)
+                assert current is not None
+                reloaded = _cast(ExecutionPlanRow, dict(current))
+                if reload_state == "terminal":
+                    reloaded["status"] = "failed"
+                    return reloaded
+                params = dict(reloaded.get("params") or {})
+                if reload_state == "no_native":
+                    params.pop("native_instrument", None)
+                else:
+                    params.pop("child_client_order_id", None)
+                    params.pop("child_client_order_ids", None)
+                reloaded["params"] = params
+                return reloaded
+
+            repo.get_execution_plan = _mutated_reload
+
+            await PlanExecutorService()._recover_plans()
+
+            repo.get_execution_plan = original_get_plan
+            pending = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert pending is None
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_incident_settles_once_and_second_startup_is_noop(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock, tmp_path: Path
+    ) -> None:
+        """Settle the exact incident without ever inserting a venue cancel.
+
+        Given a failed id-less create with only its interlock refusal marker,
+        When two independent startup recoveries run,
+        Then the first settles the plan and the second finds no actionable plan.
         """
         repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'never_placed.db'}")
         await repo.create_all()
@@ -4784,18 +5358,19 @@ class TestStrandedCancelNeverPlacedTarget:
             cancel["plan_public_id"] = plan_pid
             cancel["correlation_id"] = plan_pid
             await repo.insert_trade_command(cancel)
-            insert_spy = AsyncMock(wraps=repo.insert_trade_command)
-            repo.insert_trade_command = insert_spy
 
             await PlanExecutorService()._recover_plans()
-            settled = await repo.get_execution_plan(plan_pid, as_of=datetime.now(UTC))
+            recovered = await repo.get_execution_plan(plan_pid, as_of=datetime.now(UTC))
             await PlanExecutorService()._recover_plans()
+            pending = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
         finally:
             await repo.engine.dispose()
 
-        insert_spy.assert_not_awaited()
-        assert settled is not None and settled["status"] == "failed"
-        assert settled["last_error"] == "order_interlock_blocked"
+        assert recovered is not None and recovered["status"] == "failed"
+        assert recovered["last_error"] == "order_interlock_blocked"
+        assert pending is None
 
 
 class TestRecoverySettlementAndCheckpointDedup:

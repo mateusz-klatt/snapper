@@ -27321,39 +27321,56 @@ class SQLAlchemyRepository(Repository):
                 return None
             return row[0]
 
-    async def has_pending_cancel_command(
+    async def get_pending_cancel_command_for_client_order_id(
         self,
         client_order_id: str,
         as_of: datetime,
-    ) -> bool:
-        """Return True when a non-terminal cancel command exists for the cid.
-
-        Looks for an active SCD2 ``trade_commands`` row with
-        ``command_type='cancel'`` whose status is not in a terminal
-        set (``filled``/``cancelled``/``expired``/``rejected``/``failed``).
-        PlanExecutorService recovery uses this as a dedup guard when
-        re-emitting stranded cancels.
+    ) -> TradeCommandRow | None:
+        """Return the newest active non-terminal cancel for a client order id.
 
         Args:
             client_order_id: Child client id to search.
             as_of: Temporal point for active-version selection.
 
         Returns:
-            True iff a live cancel command already exists.
+            Newest pending cancel row, or None when no active cancel exists.
         """
-        terminal_statuses = _TRADE_COMMAND_TERMINAL_STATUSES
         async with self.session() as s:
             result = await s.execute(
-                select(TradeCommand.id)
+                select(TradeCommand)
                 .where(
                     TradeCommand.client_order_id == client_order_id,
                     TradeCommand.command_type == "cancel",
-                    TradeCommand.status.notin_(terminal_statuses),
+                    TradeCommand.status.notin_(_TRADE_COMMAND_TERMINAL_STATUSES),
                     *where_active(TradeCommand, as_of),
                 )
+                .order_by(TradeCommand.created_at.desc(), TradeCommand.id.desc())
                 .limit(1)
             )
-            return result.first() is not None
+            cancel = result.scalars().first()
+            return None if cancel is None else self._trade_command_to_row(cancel)
+
+    async def has_pending_cancel_command(
+        self,
+        client_order_id: str,
+        as_of: datetime,
+    ) -> bool:
+        """Return True for a cancel that already blocks duplicate emission.
+
+        An unresolved CREATED cancel is deliberately nonblocking: recovery may
+        hydrate that same row once an Order, command, or ack supplies a venue id.
+
+        Args:
+            client_order_id: Child client id to search.
+            as_of: Temporal point for active-version selection.
+
+        Returns:
+            True unless the only pending cancel is CREATED without a venue id.
+        """
+        pending = await self.get_pending_cancel_command_for_client_order_id(client_order_id, as_of)
+        return pending is not None and not (
+            pending["status"] == TradeCommandStatusEnum.CREATED and not pending["exchange_order_id"]
+        )
 
     async def update_trade_command_status(
         self,

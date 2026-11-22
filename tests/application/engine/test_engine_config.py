@@ -29,6 +29,7 @@ from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
+from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.application.trade.trade_service import TradeService
@@ -2197,22 +2198,30 @@ async def test_outbox_publish_cancel_sends_order_cancel_data() -> None:
 
 
 @pytest.mark.asyncio
-async def test_outbox_publish_cancel_rehydrates_missing_exchange_order_id() -> None:
-    """Cancel dispatch refreshes exchange_order_id from the repo when empty.
+@pytest.mark.parametrize("id_source", ["order", "command", "event"])
+async def test_outbox_publish_cancel_rehydrates_missing_exchange_order_id(id_source: str) -> None:
+    """Cancel dispatch refreshes an empty venue id from durable target evidence.
 
-    Given: a TraderCoordinator whose outbox is publishing a cancel
-        TradeCommand whose ``exchange_order_id`` is ``None`` (the REST
-        cancel route snapshotted the row before the venue ACK assigned
-        the id),
+    Given: a cancel command and an id on the Order, create command, or ack event,
     When: ``_outbox_publish`` is invoked,
-    Then: the dispatcher re-queries the repository at publish time and
-        the resulting ``OrderCancelData`` carries the hydrated venue id
-        so the live adapter can cancel by exchange id.
+    Then: the resulting ``OrderCancelData`` carries the hydrated venue id.
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.msg_publisher = AsyncMock()
     mock_repo = MagicMock()
-    mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-late")
+    mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(
+        return_value="ex-late" if id_source == "order" else None
+    )
+    mock_repo.get_active_create_command_by_client_order_id = AsyncMock(
+        return_value={"exchange_order_id": "ex-late"} if id_source == "command" else None
+    )
+    mock_repo.get_order_lifecycle_events = AsyncMock(
+        return_value=(
+            [{"event_type": "order_accepted", "exchange_order_id": "ex-late"}]
+            if id_source == "event"
+            else []
+        )
+    )
     coord.repository = mock_repo
     cmd: dict[str, Any] = {
         "public_id": "cmd-cancel",
@@ -2243,21 +2252,19 @@ async def test_outbox_publish_cancel_rehydrates_missing_exchange_order_id() -> N
 
 
 @pytest.mark.asyncio
-async def test_outbox_publish_cancel_repo_returns_none_keeps_empty() -> None:
-    """Cancel dispatch still publishes when the repo has no venue id yet.
+async def test_outbox_publish_cancel_repo_returns_none_holds_created() -> None:
+    """Cancel dispatch holds an unresolved target instead of publishing blank.
 
-    Given: a cancel TradeCommand whose ``exchange_order_id`` is empty
-        and whose matching ``orders`` row has not yet been ACKed by
-        the venue,
+    Given: a cancel with no venue id in any durable identity source,
     When: ``_outbox_publish`` is invoked,
-    Then: the resulting ``OrderCancelData`` is still published with an
-        empty ``exchange_order_id`` so paper executors can fall back
-        to cancelling by ``client_order_id``.
+    Then: it raises the dedicated hold exception and sends no frame.
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.msg_publisher = AsyncMock()
     mock_repo = MagicMock()
     mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+    mock_repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
+    mock_repo.get_order_lifecycle_events = AsyncMock(return_value=[])
     coord.repository = mock_repo
     cmd: dict[str, Any] = {
         "public_id": "cmd-cancel",
@@ -2281,10 +2288,9 @@ async def test_outbox_publish_cancel_repo_returns_none_keeps_empty() -> None:
         "operator_public_id": None,
         "user_public_id": None,
     }
-    await coord._outbox_publish(cmd)
-    sent = coord.msg_publisher.send.call_args[0][1]
-    assert sent.exchange_order_id == ""
-    assert sent.client_order_id == "cid-cancel"
+    with pytest.raises(CancelTargetUnresolvedError):
+        await coord._outbox_publish(cmd)
+    coord.msg_publisher.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio

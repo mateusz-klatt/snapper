@@ -118,6 +118,11 @@ _PRE_VENUE_REFUSAL_EVENTS: Final[frozenset[str]] = frozenset(
     }
 )
 
+_FAILED_REFUSAL_EVENT_BY_REASON: Final[dict[str, str]] = {
+    "order_interlock_blocked": "order_interlock_blocked",
+    "circuit_breaker_open": "order_breaker_open",
+}
+
 _OUTBOX_EXPIRY_PREFIX: Final[str] = "expired by outbox dispatch TTL"
 _MAX_LAST_ERROR_LENGTH: Final[int] = 1024
 
@@ -492,6 +497,24 @@ def _has_pre_venue_refusal_only(events: Sequence[VenueEventRow]) -> bool:
     return bool(events) and all(row["event_type"] in _PRE_VENUE_REFUSAL_EVENTS for row in events)
 
 
+def _has_exact_failed_refusal_only(
+    command: TradeCommandRow, events: Sequence[VenueEventRow]
+) -> bool:
+    """Match the stored failure reason to exclusive id-less local refusals.
+
+    Args:
+        command: Active failed create or submit command.
+        events: Complete lifecycle history for the child.
+
+    Returns:
+        True only for the exact interlock/breaker reason and its sole marker type.
+    """
+    expected_event = _FAILED_REFUSAL_EVENT_BY_REASON.get(command.get("last_error") or "")
+    return bool(expected_event and events) and all(
+        row["event_type"] == expected_event and not row["exchange_order_id"] for row in events
+    )
+
+
 def _latest_matching_event_id(
     events: Sequence[VenueEventRow],
     event_types: frozenset[str],
@@ -635,14 +658,17 @@ async def _inspect_child_command(
             f"child {client_order_id} has live venue evidence after rejection",
         )
     if status == TradeCommandStatusEnum.FAILED:
-        unconfirmed = not _has_pre_venue_refusal_only(events)
         if plan["status"] == ExecutionPlanStatusEnum.CANCEL_REQUESTED:
             order_exchange_order_id = await reader.get_exchange_order_id_for_client_order_id(
                 client_order_id, datetime.now(UTC)
             )
-            unconfirmed = unconfirmed or bool(
-                command.get("exchange_order_id") or order_exchange_order_id
+            unconfirmed = (
+                not _has_exact_failed_refusal_only(command, events)
+                or bool(command.get("exchange_order_id"))
+                or bool(order_exchange_order_id)
             )
+        else:
+            unconfirmed = not _has_pre_venue_refusal_only(events)
         if unconfirmed:
             return _skipped(
                 plan,
@@ -1088,6 +1114,44 @@ async def settle_single_recovered_plan(
         )
         await session.commit()
         return True
+
+
+async def verify_plan_child_settlement_candidate(
+    repository: SQLAlchemyRepository,
+    candidate: PlanSettlementCandidate,
+) -> bool:
+    """Recheck one safe child under the plan and command locks without writes.
+
+    Args:
+        repository: Target SQLAlchemy repository.
+        candidate: Single-child settlement candidate from preliminary inspection.
+
+    Returns:
+        True only when the locked plan version and all child evidence are unchanged.
+    """
+    if len(candidate.children) != 1:
+        return False
+    child = candidate.children[0]
+    async with repository.session() as session:
+        await begin_plan_settlement_transaction(session, dialect_name=repository.dialect_name)
+        await lock_child_create_commands(
+            session, child_orders=((candidate.exchange, child.client_order_id),)
+        )
+        locked_plans = await lock_active_execution_plans(
+            session, plan_public_ids=(candidate.plan_public_id,)
+        )
+        existing = locked_plans.get(candidate.plan_public_id)
+        if existing is None or not _matches_candidate_version(existing, candidate):
+            return False
+        locked_plan = repository._plan_row_to_dict(existing)
+        params = dict(locked_plan.get("params") or {})
+        params["child_client_order_id"] = child.client_order_id
+        params["child_client_order_ids"] = [child.client_order_id]
+        single_child_plan = cast(ExecutionPlanRow, {**locked_plan, "params": params})
+        reverified = await inspect_plan_settlement(
+            SessionPlanSettlementReader(repository, session), single_child_plan
+        )
+        return reverified == candidate
 
 
 async def apply_plan_settlements(

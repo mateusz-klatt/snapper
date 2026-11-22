@@ -28,14 +28,18 @@ from snapper.application.plans.bracket import BracketEvaluator
 from snapper.application.plans.evaluator import PlanEvaluator
 from snapper.application.plans.manual_once import ManualOnceEvaluator
 from snapper.application.plans.params import core_order_type_from_plan_params
+from snapper.application.plans.settlement import PlanSettlementCandidate
 from snapper.application.plans.settlement import PlanSettlementSkipped
 from snapper.application.plans.settlement import extract_plan_child_ids
 from snapper.application.plans.settlement import inspect_plan_settlement
 from snapper.application.plans.settlement import settle_single_recovered_plan
+from snapper.application.plans.settlement import verify_plan_child_settlement_candidate
 from snapper.application.plans.trailing_stop import TrailingStopEvaluator
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
+from snapper.application.trade.cancel_target import CancelTargetIdentityReader
+from snapper.application.trade.cancel_target import cancel_target_exchange_order_id
 from snapper.application.trade.cancel_target import target_end_time
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -56,6 +60,7 @@ from snapper.data.repository_types import ExecutionPlanDecisionOutboxInsertRow
 from snapper.data.repository_types import ExecutionPlanDecisionOutboxRow
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import TradeCommandInsertRow
+from snapper.data.repository_types import TradeCommandRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_ORDER_FLOW
 from snapper.messaging.infrastructure.validated_socket import ValidatedPublisher
@@ -561,8 +566,9 @@ class PlanExecutorService(RegisterableProcess):
             - Skipped if a non-terminal cancel command already exists
               for this child id, so this is idempotent across restarts
               while the plan is still ``cancel_requested``.
-            - Safe-unplaced failed children are skipped after shared settlement
-              classification. The plan settles only when every child qualifies.
+            - Exact pre-venue-refused children settle only as a complete plan;
+              mixed-plan skips are locked and rechecked, and every settlement
+              refusal falls back to a fresh all-child venue-cancel pass.
 
         Args:
             plan: Recovered plan row in ``cancel_requested`` status.
@@ -587,34 +593,58 @@ class PlanExecutorService(RegisterableProcess):
         if not child_order_ids:
             return
         now = datetime.now(UTC)
-        safe_unplaced = await self._safe_unplaced_stranded_children(plan, child_order_ids)
-        if len(safe_unplaced) == len(child_order_ids):
-            await self._settle_safe_unplaced_stranded_plan(plan, now)
+        candidates = await self._safe_unplaced_stranded_candidates(plan, child_order_ids)
+        if len(candidates) == len(child_order_ids) and await self._settle_safe_unplaced_plan(
+            plan, now
+        ):
             return
-        linked_plan_map = await self._resolve_child_plan_links(plan, child_order_ids, now)
-        for child_client_order_id in child_order_ids:
-            if child_client_order_id in safe_unplaced:
-                continue
-            linked_plan_id = linked_plan_map.get(child_client_order_id)
-            await self._reemit_single_stranded_cancel(
-                plan, child_client_order_id, native_instrument, linked_plan_id, now
-            )
+        if len(candidates) == len(child_order_ids):
+            try:
+                reloaded = await self.repository.get_execution_plan(
+                    plan["public_id"], as_of=datetime.now(UTC)
+                )
+            except Exception as exc:
+                logger.error(
+                    "Stranded cancel settlement fallback reload failed for {}: {}",
+                    plan["public_id"],
+                    exc,
+                )
+                reloaded = plan
+            if reloaded is None or reloaded["status"] != ExecutionPlanStatusEnum.CANCEL_REQUESTED:
+                return
+            plan = reloaded
+            params = plan.get("params") or {}
+            reloaded_native = params.get("native_instrument")
+            if not isinstance(reloaded_native, str):
+                return
+            native_instrument = reloaded_native
+            child_order_ids = self._extract_child_ids(params)
+            if not child_order_ids:
+                return
+            candidates = {}
+            now = datetime.now(UTC)
+        safe_unplaced = (
+            set() if not candidates else await self._locked_safe_unplaced_children(candidates)
+        )
+        await self._reemit_stranded_children(
+            plan, child_order_ids, native_instrument, safe_unplaced, now
+        )
 
-    async def _safe_unplaced_stranded_children(
+    async def _safe_unplaced_stranded_candidates(
         self, plan: ExecutionPlanRow, child_order_ids: list[str]
-    ) -> set[str]:
-        """Classify every child with the shared durable settlement inspector.
+    ) -> dict[str, PlanSettlementCandidate]:
+        """Classify all children independently with the real settlement inspector.
 
         Args:
-            plan: Recovered plan row in ``cancel_requested`` status.
+            plan: Recovered cancel-requested plan.
             child_order_ids: Every child id stamped on the plan.
 
         Returns:
-            Child ids proven failed, id-less, and exclusively pre-venue refused.
+            Single-child candidates for exactly matched local refusal shapes.
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
-            return set()
-        safe: set[str] = set()
+            return {}
+        candidates: dict[str, PlanSettlementCandidate] = {}
         for child_client_order_id in child_order_ids:
             params = dict(plan.get("params") or {})
             params["child_client_order_id"] = child_client_order_id
@@ -635,34 +665,56 @@ class PlanExecutorService(RegisterableProcess):
                 and len(decision.children) == 1
                 and decision.children[0].command_status == TradeCommandStatusEnum.FAILED
             ):
-                safe.add(child_client_order_id)
-        return safe
+                candidates[child_client_order_id] = decision
+        return candidates
 
-    async def _settle_safe_unplaced_stranded_plan(
-        self, plan: ExecutionPlanRow, now: datetime
-    ) -> None:
-        """Atomically settle a plan whose every child is safely unplaced.
+    async def _locked_safe_unplaced_children(
+        self, candidates: Mapping[str, PlanSettlementCandidate]
+    ) -> set[str]:
+        """Lock and recheck each preliminary mixed-plan skip, failing to re-emit.
 
         Args:
-            plan: Recovered plan row with only safe-unplaced children.
-            now: Timestamp for the terminal plan transition.
+            candidates: Preliminary single-child candidates keyed by client order id.
+
+        Returns:
+            Child ids whose evidence remained exact under the settlement locks.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return set()
+        verified: set[str] = set()
+        for child_client_order_id, candidate in candidates.items():
+            try:
+                if await verify_plan_child_settlement_candidate(self.repository, candidate):
+                    verified.add(child_client_order_id)
+            except Exception as exc:
+                logger.warning(
+                    "Stranded cancel locked recheck failed for plan {} child {}: {}",
+                    candidate.plan_public_id,
+                    child_client_order_id,
+                    exc,
+                )
+        return verified
+
+    async def _settle_safe_unplaced_plan(self, plan: ExecutionPlanRow, now: datetime) -> bool:
+        """CAS-settle an exactly refused plan, returning False on any refusal.
+
+        Args:
+            plan: Plan whose children all passed preliminary classification.
+            now: Terminal transition timestamp.
+
+        Returns:
+            True only when the locked evidence recheck and settlement commit succeed.
         """
         reason_code = "stranded_cancel_create_failed"
         repository = self.repository
         if not isinstance(repository, SQLAlchemyRepository):
-            return
+            return False
         try:
             decision = await inspect_plan_settlement(repository, plan)
             if isinstance(decision, PlanSettlementSkipped) or any(
                 child.command_status != TradeCommandStatusEnum.FAILED for child in decision.children
             ):
-                logger.warning(
-                    "PlanExecutorService: stranded cancel settlement evidence changed "
-                    "for plan {} reason_code={}",
-                    plan["public_id"],
-                    reason_code,
-                )
-                return
+                return False
             settled = await settle_single_recovered_plan(
                 repository,
                 decision,
@@ -672,13 +724,13 @@ class PlanExecutorService(RegisterableProcess):
             )
         except Exception as exc:
             logger.warning(
-                "PlanExecutorService: stranded cancel settlement failed for plan {} "
+                "PlanExecutorService: stranded cancel settlement refused for plan {} "
                 "reason_code={}: {}",
                 plan["public_id"],
                 reason_code,
                 exc,
             )
-            return
+            return False
         if not settled:
             logger.warning(
                 "PlanExecutorService: stranded cancel settlement lost plan version race "
@@ -686,13 +738,40 @@ class PlanExecutorService(RegisterableProcess):
                 plan["public_id"],
                 reason_code,
             )
-            return
+            return False
         self._unregister_plan(plan["public_id"])
         logger.info(
             "PlanExecutorService: settled safe-unplaced stranded plan {} reason_code={}",
             plan["public_id"],
             reason_code,
         )
+        return True
+
+    async def _reemit_stranded_children(
+        self,
+        plan: ExecutionPlanRow,
+        child_order_ids: list[str],
+        native_instrument: str,
+        safe_unplaced: set[str],
+        now: datetime,
+    ) -> None:
+        """Run the normal recovery path for every child not locked as safe.
+
+        Args:
+            plan: Current cancel-requested plan.
+            child_order_ids: Current child ids to process.
+            native_instrument: Venue symbol for cancel commands.
+            safe_unplaced: Children whose exact evidence survived locked recheck.
+            now: Shared recovery timestamp.
+        """
+        linked_plan_map = await self._resolve_child_plan_links(plan, child_order_ids, now)
+        for child_client_order_id in child_order_ids:
+            if child_client_order_id in safe_unplaced:
+                continue
+            linked_plan_id = linked_plan_map.get(child_client_order_id)
+            await self._reemit_single_stranded_cancel(
+                plan, child_client_order_id, native_instrument, linked_plan_id, now
+            )
 
     async def _resolve_child_plan_links(
         self,
@@ -860,6 +939,33 @@ class PlanExecutorService(RegisterableProcess):
         )
         return True
 
+    async def _stranded_cancel_pending_state(
+        self, child_client_order_id: str, now: datetime
+    ) -> tuple[bool, TradeCommandRow | None]:
+        """Separate healthy pending cancels from hydratable unresolved rows.
+
+        Args:
+            child_client_order_id: Child whose cancel commands are inspected.
+            now: Temporal point for active-version selection.
+
+        Returns:
+            `(deduplicate, unresolved_row)` for the recovery caller.
+        """
+        if not isinstance(self.repository, SQLAlchemyRepository):
+            return (
+                await self.repository.has_pending_cancel_command(child_client_order_id, as_of=now),
+                None,
+            )
+        pending = await self.repository.get_pending_cancel_command_for_client_order_id(
+            child_client_order_id, now
+        )
+        if pending is None:
+            return False, None
+        unresolved = (
+            pending["status"] == TradeCommandStatusEnum.CREATED and not pending["exchange_order_id"]
+        )
+        return not unresolved, pending if unresolved else None
+
     async def _reemit_single_stranded_cancel(
         self,
         plan: ExecutionPlanRow,
@@ -892,8 +998,8 @@ class PlanExecutorService(RegisterableProcess):
             )
             return
         try:
-            already_pending = await self.repository.has_pending_cancel_command(
-                child_client_order_id, as_of=now
+            already_pending, unresolved_cancel = await self._stranded_cancel_pending_state(
+                child_client_order_id, now
             )
         except Exception as exc:
             logger.error(
@@ -912,12 +1018,34 @@ class PlanExecutorService(RegisterableProcess):
         if await self._stranded_cancel_target_ended(plan, child_client_order_id):
             return
         try:
-            exchange_order_id = await self.repository.get_exchange_order_id_for_client_order_id(
-                child_client_order_id, as_of=now
+            exchange_order_id = await cancel_target_exchange_order_id(
+                cast(CancelTargetIdentityReader, self.repository),
+                child_client_order_id,
+                plan["exchange"],
+                now,
             )
         except Exception as exc:
             logger.error("Stranded cancel venue lookup failed for {}: {}", plan["public_id"], exc)
             exchange_order_id = None
+        if unresolved_cancel is not None:
+            if exchange_order_id:
+                try:
+                    await cast(SQLAlchemyRepository, self.repository).update_trade_command_status(
+                        public_id=unresolved_cancel["public_id"],
+                        new_status=TradeCommandStatusEnum.CREATED,
+                        bus_time=datetime.now(UTC),
+                        session_id=self.tracker.session_id,
+                        sequence_id=self.tracker.next_sequence("plan_stranded_cancels"),
+                        exchange_order_id=exchange_order_id,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Stranded cancel identity hydration failed for plan {} child {}: {}",
+                        plan["public_id"],
+                        child_client_order_id,
+                        exc,
+                    )
+            return
         session_id = self.tracker.session_id
         sequence_id = self.tracker.next_sequence("plan_stranded_cancels")
         row: dict[str, Any] = {

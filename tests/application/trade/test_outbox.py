@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository_types import TradeCommandRow
@@ -153,6 +154,25 @@ async def test_dispatch_handles_publish_failure() -> None:
     assert call_kwargs["new_status"] == "created"
     assert call_kwargs["attempt_count"] == 1
     assert call_kwargs["last_error"] == "dispatch failed"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_holds_unresolved_cancel_without_status_mutation() -> None:
+    """Leave an unresolved cancel CREATED without dispatch or attempt churn.
+
+    Given: a cancel whose publisher raises `CancelTargetUnresolvedError`,
+    When: one outbox batch runs,
+    Then: neither dispatch nor failure-revert persistence is called.
+    """
+    repo = AsyncMock()
+    repo.get_undispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+    publish_fn = AsyncMock(side_effect=CancelTargetUnresolvedError("unresolved"))
+    dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn)
+
+    await dispatcher._dispatch_batch()
+
+    repo.bulk_dispatch_trade_commands.assert_not_awaited()
+    repo.update_trade_command_status.assert_not_awaited()
 
 
 @pytest.mark.asyncio
