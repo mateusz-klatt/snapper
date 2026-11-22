@@ -812,6 +812,16 @@ class _FakeRepo:
         del planes, open_ats, as_of
         return IdAggregate(0, 0, 0, None)
 
+    async def get_pnl_event_fx_candle_fingerprints_by_plane(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> dict[PnlFxRatePlane, IdAggregate]:
+        """Return empty per-plane event-FX aggregates for synthetic snapshotter tests."""
+        del planes, open_ats, as_of
+        return {}
+
     async def get_pnl_execution_prefix_counts(
         self,
         wallet_public_id: str,
@@ -1105,6 +1115,14 @@ class TestConstructorAndProperties:
             open_ats=[],
             as_of=_T0,
         ) == IdAggregate(0, 0, 0, None)
+        assert (
+            await repo.get_pnl_event_fx_candle_fingerprints_by_plane(
+                planes=[("EUR", "USD", "kraken")],
+                open_ats=[],
+                as_of=_T0,
+            )
+            == {}
+        )
         assert await repo.get_pnl_execution_prefix_counts(
             wallet_public_id="wallet-1",
             mode="live",

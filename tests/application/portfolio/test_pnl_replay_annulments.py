@@ -4,6 +4,7 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
+from typing import Literal
 
 import pytest
 
@@ -47,7 +48,7 @@ class _ReplayRepo(fixtures.FakeRepo):
         self._refuse_previous_cut = refuse_previous_cut
         self.reported_cut: dict[str, int] | None = None
         self.drop_witness_cut = False
-        self.fixed_witnesses: list[PnlTimelineFillWitnessCut | None] = []
+        self.fixed_witnesses: list[PnlTimelineFillWitnessCut | Literal["capture"] | None] = []
 
     async def get_pnl_timeline_execution_prefix_at_watermarks(
         self,
@@ -56,7 +57,7 @@ class _ReplayRepo(fixtures.FakeRepo):
         watermarks: Mapping[str, int],
         as_of: datetime,
         *,
-        fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
+        fill_witness_cut: PnlTimelineFillWitnessCut | Literal["capture"] | None = None,
     ) -> PnlTimelineExecutionPrefix:
         """Record the cut and return only annulments proved within its coordinates."""
         self.previous_cuts.append((wallet_public_id, mode, dict(watermarks), as_of))
@@ -77,7 +78,9 @@ class _ReplayRepo(fixtures.FakeRepo):
                 if row["scope_sequence"] <= watermarks.get(row["exchange"], 0)
             ],
         }
-        if fill_witness_cut is not None and not self.drop_witness_cut:
+        if fill_witness_cut == "capture":
+            result["fill_witness_cut"] = {"watermarks": {}, "digest": self._fill_witness_digest}
+        elif fill_witness_cut is not None and not self.drop_witness_cut:
             result["fill_witness_cut"] = fill_witness_cut
         return result
 

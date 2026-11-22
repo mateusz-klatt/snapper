@@ -24,6 +24,7 @@ from uuid import uuid7
 import pytest
 from aiosqlite import Connection as SQLiteConnection
 from sqlalchemy import create_engine
+from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import make_url
@@ -31,6 +32,7 @@ from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.portfolio.execution_chain import ExecutionChainError
+from snapper.application.portfolio.execution_chain import execution_row_digest
 from snapper.core.wallet_short import compute_wallet_short
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
@@ -43,6 +45,7 @@ from snapper.data.models import VenueEvent
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _ExecutionKnowledgeHorizon
 from snapper.data.repository import _PnlTimelineExecutionCandidate
+from snapper.data.repository import _PnlTimelineExecutionCut
 from snapper.data.repository import _PnlTimelineExecutionPrefixSource
 from snapper.data.repository import _PnlTimelineFillAssignmentState
 from snapper.data.repository import _PnlTimelineFillIndex
@@ -52,6 +55,7 @@ from snapper.data.repository import _PnlTimelineNativeExactFillKey
 from snapper.data.repository import _PnlTimelineScopeExactFillKey
 from snapper.data.repository import _PnlTimelineScopeExecTradeFillKey
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
+from snapper.data.repository_types import PnlTimelineExecutionSuffixRequest
 from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 
@@ -3435,3 +3439,835 @@ async def test_empty_scope_returns_an_empty_frozen_bundle(
     prefix = await repository.get_pnl_timeline_execution_prefix(_WALLET, "live", _AS_OF)
 
     assert prefix == {"watermarks": {}, "executions": [], "annulments": []}
+
+
+async def test_prefix_at_watermarks_capture_fill_witness_cut(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Capture or revalidate fill-witness cuts through one explicit argument.
+
+    Given: One witnessed execution row in the repository.
+    When: ``get_pnl_timeline_execution_prefix_at_watermarks`` runs with the
+        default, an explicit ``None``, ``fill_witness_cut="capture"``, and then
+        the captured cut.
+    Then: The first two calls preserve the existing result, ``"capture"`` emits
+        the exact cut computed by ``_pnl_timeline_fill_witness_cut``, and the
+        final call revalidates against that cut.
+    """
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _instrument(),
+                _order(),
+                _execution("kraken", 1),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD),
+            ]
+        )
+        await session.commit()
+
+    unchanged_default = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+        _WALLET, "live", {"kraken": 1}, _AS_OF
+    )
+    unchanged_explicit = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+        _WALLET, "live", {"kraken": 1}, _AS_OF, fill_witness_cut=None
+    )
+    assert "fill_witness_cut" not in unchanged_default
+    assert unchanged_explicit == unchanged_default
+
+    captured = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+        _WALLET, "live", {"kraken": 1}, _AS_OF, fill_witness_cut="capture"
+    )
+    async with repository.session() as session:
+        fill_rows = list((await session.execute(select(VenueEvent))).scalars().all())
+    expected_cut = SQLAlchemyRepository._pnl_timeline_fill_witness_cut(
+        fill_rows,
+        _PnlTimelineExecutionCut({"kraken": 1}, capture_fill_witness_cut=True),
+    )
+    assert expected_cut is not None
+    assert captured.get("fill_witness_cut") == expected_cut
+
+    replayed = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+        _WALLET, "live", {"kraken": 1}, _AS_OF, fill_witness_cut=expected_cut
+    )
+    assert replayed == captured
+
+
+@pytest.mark.parametrize("idless", [False, True])
+async def test_execution_suffix_matches_full_prefix_filtered_to_requested_keys(
+    repository: SQLAlchemyRepository,
+    idless: bool,
+) -> None:
+    """Return exactly suffix and deferred rows under the certified fold.
+
+    Given: Two witnessed fills and a cutoff below the generation watermark.
+    When: The suffix read requests the upper fill and deferred lower fill.
+    Then: It equals the full-prefix rows filtered to those keys for both ordinary
+        and ID-less evidence.
+
+    Args:
+        repository: Isolated SQLite repository.
+        idless: Whether execution and witness rows omit external identifiers.
+    """
+    executions = [_execution("kraken", sequence) for sequence in (1, 2)]
+    fills = [_fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=sequence) for sequence in (1, 2)]
+    if idless:
+        for row in [*executions, *fills]:
+            row.exec_id = None
+            row.trade_id = None
+    async with repository.session() as session:
+        session.add_all([_instrument(), _order(), *executions, *fills])
+        await session.commit()
+    full = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+        _WALLET,
+        "live",
+        {"kraken": 2},
+        _AS_OF,
+    )
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"kraken": 1},
+        generation_watermarks={"kraken": 2},
+        deferred_execution_sequences={"kraken": (1,)},
+        as_of=_AS_OF,
+    )
+    suffix = await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+    requested_keys = {("kraken", 1), ("kraken", 2)}
+    expected = [
+        row
+        for row in full["executions"]
+        if (row["exchange"], row["scope_sequence"]) in requested_keys
+    ]
+    assert suffix == {"executions": expected, "annulments": []}
+    empty = await repository.get_pnl_timeline_execution_suffix_at_watermarks(
+        PnlTimelineExecutionSuffixRequest(
+            wallet_public_id=_WALLET,
+            mode="live",
+            cutoff_watermarks={"kraken": 1},
+            generation_watermarks={"kraken": 1},
+            deferred_execution_sequences={},
+            as_of=_AS_OF,
+        )
+    )
+    assert empty == {"executions": [], "annulments": []}
+
+
+async def test_execution_suffix_rejects_superseded_row(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Reject a suffix execution whose known_to is closed rather than KNOWN_TO_MAX.
+
+    Given: One active prefix execution and one superseded suffix execution.
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` validates the suffix.
+    Then: It raises ``ExecutionChainError`` naming ``superseded_execution_row``.
+
+    Args:
+        repository: Isolated SQLite repository.
+    """
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _instrument(),
+                _order(),
+                _execution("kraken", 1),
+                _execution("kraken", 2, known_to=_EARLIER),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=1),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=2),
+            ]
+        )
+        await session.commit()
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"kraken": 1},
+        generation_watermarks={"kraken": 2},
+        deferred_execution_sequences={},
+        as_of=_AS_OF,
+    )
+    with pytest.raises(ExecutionChainError, match="superseded_execution_row"):
+        await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+
+
+async def test_execution_suffix_rejects_duplicate_coordinate(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Reject duplicate suffix coordinates produced by duplicate active lineage.
+
+    Given: Two active Order rows matching the same suffix execution coordinate.
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` validates the suffix.
+    Then: It raises ``ExecutionChainError`` for the duplicate coordinate.
+
+    Args:
+        repository: Isolated SQLite repository.
+    """
+    async with repository.session() as session:
+        await session.execute(text("DROP INDEX ix_orders_public_id"))
+        await session.commit()
+    second_order = _order(client_order_id="client-duplicate-suffix")
+    second_order.sequence_id = 2
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _instrument(),
+                _order(),
+                second_order,
+                _execution("kraken", 1),
+                _execution("kraken", 2),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=1),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=2),
+                _fill_event(
+                    "client-duplicate-suffix",
+                    _KRAKEN_SHARD,
+                    sequence_id=3,
+                    execution_scope_sequence=2,
+                ),
+            ]
+        )
+        await session.commit()
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"kraken": 1},
+        generation_watermarks={"kraken": 2},
+        deferred_execution_sequences={},
+        as_of=_AS_OF,
+    )
+    with pytest.raises(ExecutionChainError, match="duplicate_execution_suffix_row"):
+        await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+
+
+async def test_execution_suffix_rejects_missing_sequence_in_range(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Reject a gap inside ``(cutoff, generation]`` even when partial rows exist.
+
+    Given: Sequences 1 and 3 stored in the database while sequence 2 is absent.
+    When: The suffix read requests ``(1, 3]`` or a wholly missing ``(1, 2]``.
+    Then: Both calls raise ``ExecutionChainError`` for missing suffix rows.
+
+    Args:
+        repository: Isolated SQLite repository.
+    """
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _instrument(),
+                _order(),
+                _execution("kraken", 1),
+                _execution("kraken", 3),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=1),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=3),
+            ]
+        )
+        await session.commit()
+    with pytest.raises(ExecutionChainError, match="missing_execution_suffix_row"):
+        await repository.get_pnl_timeline_execution_suffix_at_watermarks(
+            PnlTimelineExecutionSuffixRequest(
+                wallet_public_id=_WALLET,
+                mode="live",
+                cutoff_watermarks={"kraken": 1},
+                generation_watermarks={"kraken": 3},
+                deferred_execution_sequences={},
+                as_of=_AS_OF,
+            )
+        )
+    with pytest.raises(ExecutionChainError, match="missing_execution_suffix_row"):
+        await repository.get_pnl_timeline_execution_suffix_at_watermarks(
+            PnlTimelineExecutionSuffixRequest(
+                wallet_public_id=_WALLET,
+                mode="live",
+                cutoff_watermarks={"kraken": 1},
+                generation_watermarks={"kraken": 2},
+                deferred_execution_sequences={},
+                as_of=_AS_OF,
+            )
+        )
+
+
+async def test_execution_suffix_rejects_missing_deferred_sequence(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Reject a requested deferred execution sequence absent from the ledger.
+
+    Given: Only sequence 2 stored in the database while deferred sequence 1 is absent.
+    When: The suffix read requests ``(1, 2]`` with deferred sequence ``(1,)``.
+    Then: It raises ``ExecutionChainError`` naming ``missing_execution_suffix_row``.
+
+    Args:
+        repository: Isolated SQLite repository.
+    """
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _instrument(),
+                _order(),
+                _execution("kraken", 2),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=2),
+            ]
+        )
+        await session.commit()
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"kraken": 1},
+        generation_watermarks={"kraken": 2},
+        deferred_execution_sequences={"kraken": (1,)},
+        as_of=_AS_OF,
+    )
+    with pytest.raises(ExecutionChainError, match="missing_execution_suffix_row"):
+        await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+
+
+async def test_execution_suffix_rejects_generation_below_cutoff(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Reject a suffix request whose generation watermark regresses below cutoff.
+
+    Given: Cutoff watermark 2 and generation watermark 1 (or missing exchange).
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` runs.
+    Then: It raises ``ExecutionChainError`` naming ``regressed_execution_suffix_watermarks``.
+
+    Args:
+        repository: Isolated SQLite repository.
+    """
+    for generation in ({"kraken": 1}, {}):
+        request = PnlTimelineExecutionSuffixRequest(
+            wallet_public_id=_WALLET,
+            mode="live",
+            cutoff_watermarks={"kraken": 2},
+            generation_watermarks=generation,
+            deferred_execution_sequences={},
+            as_of=_AS_OF,
+        )
+        with pytest.raises(ExecutionChainError, match="regressed_execution_suffix_watermarks"):
+            await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+
+
+async def test_execution_suffix_fires_crossed_annulment_scope(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Preserve crossed_annulment_scope detection without pre-filtering annulments.
+
+    Given: Suffix execution 2 and a visible annulment recorded under coordinate 99
+        that names execution 2's public_id.
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` runs.
+    Then: The annulment fold raises ``ExecutionChainError`` naming
+        ``crossed_annulment_scope``.
+
+    Args:
+        repository: Isolated SQLite repository.
+    """
+    exec1 = _execution("kraken", 1)
+    exec2 = _execution("kraken", 2)
+    annulment_id = "00000000-0000-7000-8000-0000000000d7"
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _instrument(),
+                _order(),
+                exec1,
+                exec2,
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=1),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=2),
+            ]
+        )
+        await session.flush()
+        annulment = ExecutionAnnulment(
+            public_id=annulment_id,
+            target_execution_public_id=exec2.public_id,
+            target_execution_digest=execution_row_digest(
+                SQLAlchemyRepository._execution_chain_record(exec2)
+            ),
+            wallet_public_id=_WALLET,
+            exchange="kraken",
+            mode="live",
+            scope_sequence=99,
+            annulled_by_user_public_id="00000000-0000-7000-8000-0000000009d1",
+            correction_time=_EARLIER,
+            reason="unwitnessed_phantom",
+            evidence_json='{"diagnosis":"crossed coordinate"}',
+            session_id=_SESSION,
+            sequence_id=1,
+            timestamp=_EARLIER,
+            known_to=KNOWN_TO_MAX,
+        )
+        session.add(annulment)
+        await session.flush()
+        session.add(
+            ExecutionAnnulmentVisibility(
+                annulment_public_id=annulment_id,
+                annulment_id=annulment.id,
+                observed_at=_EARLIER,
+                wallet_public_id=_WALLET,
+                exchange="kraken",
+                mode="live",
+                session_id=_SESSION,
+                sequence_id=1,
+                timestamp=_EARLIER,
+                known_to=KNOWN_TO_MAX,
+            )
+        )
+        await session.commit()
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"kraken": 1},
+        generation_watermarks={"kraken": 2},
+        deferred_execution_sequences={},
+        as_of=_AS_OF,
+    )
+    with pytest.raises(ExecutionChainError, match="crossed_annulment_scope"):
+        await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+
+
+async def test_execution_suffix_honours_prefix_has_idless_executions_fallback(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Use the full-prefix fallback when the certificate flags an ID-less prefix.
+
+    Given: Prefix execution 1 without external IDs and suffix execution 2 with
+        exact IDs sharing one client_order_id and only one fill witness.
+    When: The suffix read runs with ``prefix_has_idless_executions=True``.
+    Then: Full-prefix witness certification runs and catches witness reuse.
+
+    Args:
+        repository: Isolated SQLite repository.
+    """
+    exec1 = _execution("kraken", 1)
+    exec1.exec_id = None
+    exec1.trade_id = None
+    exec2 = _execution("kraken", 2)
+    fill = _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=2)
+    async with repository.session() as session:
+        session.add_all([_instrument(), _order(), exec1, exec2, fill])
+        await session.commit()
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"kraken": 1},
+        generation_watermarks={"kraken": 2},
+        deferred_execution_sequences={},
+        as_of=_AS_OF,
+        prefix_has_idless_executions=True,
+    )
+    with pytest.raises(ExecutionChainError, match="reused_execution_fill_lineage"):
+        await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+
+
+async def test_execution_suffix_returns_suffix_applied_annulments_only(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Return suffix-applied annulments while ignoring valid prefix annulments.
+
+    Given: Prefix execution 1 with a valid prefix annulment and suffix execution 2
+        with a valid suffix annulment (both unwitnessed).
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` reads ``(1, 2]``.
+    Then: The returned suffix has no surviving executions and carries only
+        sequence 2's applied annulment.
+
+    Args:
+        repository: Isolated SQLite repository.
+    """
+    exec1 = _execution("kraken", 1)
+    exec2 = _execution("kraken", 2)
+    annul1_id = "00000000-0000-7000-8000-0000000000d5"
+    annul2_id = "00000000-0000-7000-8000-0000000000d6"
+    async with repository.session() as session:
+        session.add_all([_instrument(), _order(), exec1, exec2])
+        await session.flush()
+        annul1 = ExecutionAnnulment(
+            public_id=annul1_id,
+            target_execution_public_id=exec1.public_id,
+            target_execution_digest=execution_row_digest(
+                SQLAlchemyRepository._execution_chain_record(exec1)
+            ),
+            wallet_public_id=_WALLET,
+            exchange="kraken",
+            mode="live",
+            scope_sequence=1,
+            annulled_by_user_public_id="00000000-0000-7000-8000-0000000009d1",
+            correction_time=_EARLIER,
+            reason="unwitnessed_phantom",
+            evidence_json='{"diagnosis":"prefix phantom"}',
+            session_id=_SESSION,
+            sequence_id=1,
+            timestamp=_EARLIER,
+            known_to=KNOWN_TO_MAX,
+        )
+        annul2 = ExecutionAnnulment(
+            public_id=annul2_id,
+            target_execution_public_id=exec2.public_id,
+            target_execution_digest=execution_row_digest(
+                SQLAlchemyRepository._execution_chain_record(exec2)
+            ),
+            wallet_public_id=_WALLET,
+            exchange="kraken",
+            mode="live",
+            scope_sequence=2,
+            annulled_by_user_public_id="00000000-0000-7000-8000-0000000009d1",
+            correction_time=_EARLIER,
+            reason="unwitnessed_phantom",
+            evidence_json='{"diagnosis":"suffix phantom"}',
+            session_id=_SESSION,
+            sequence_id=2,
+            timestamp=_EARLIER,
+            known_to=KNOWN_TO_MAX,
+        )
+        session.add_all([annul1, annul2])
+        await session.flush()
+        session.add_all(
+            [
+                ExecutionAnnulmentVisibility(
+                    annulment_public_id=annul1_id,
+                    annulment_id=annul1.id,
+                    observed_at=_EARLIER,
+                    wallet_public_id=_WALLET,
+                    exchange="kraken",
+                    mode="live",
+                    session_id=_SESSION,
+                    sequence_id=1,
+                    timestamp=_EARLIER,
+                    known_to=KNOWN_TO_MAX,
+                ),
+                ExecutionAnnulmentVisibility(
+                    annulment_public_id=annul2_id,
+                    annulment_id=annul2.id,
+                    observed_at=_EARLIER,
+                    wallet_public_id=_WALLET,
+                    exchange="kraken",
+                    mode="live",
+                    session_id=_SESSION,
+                    sequence_id=2,
+                    timestamp=_EARLIER,
+                    known_to=KNOWN_TO_MAX,
+                ),
+            ]
+        )
+        await session.commit()
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"kraken": 1},
+        generation_watermarks={"kraken": 2},
+        deferred_execution_sequences={},
+        as_of=_AS_OF,
+    )
+    suffix = await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+    assert suffix["executions"] == []
+    assert [row["public_id"] for row in suffix["annulments"]] == [annul2_id]
+
+
+async def test_execution_suffix_treats_blank_exec_id_as_idless_for_full_prefix_fallback(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Route a whitespace-only exec_id suffix row through the full-prefix fallback.
+
+    Given: An exact prefix execution 1 and a suffix execution 2 whose ``exec_id``
+        is whitespace ``"  "`` and ``trade_id`` is ``None``.
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` reads ``(1, 2]``.
+    Then: It invokes ``_load_pnl_timeline_execution_prefix_for_watermarks`` and
+        returns the exact full-prefix suffix result.
+
+    Args:
+        repository: Isolated SQLite repository.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    exec1 = _execution("kraken", 1)
+    exec2 = _execution("kraken", 2, exec_id="  ")
+    exec2.trade_id = None
+    fill1 = _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=1)
+    fill2 = _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=2)
+    fill2.exec_id = None
+    fill2.trade_id = None
+    async with repository.session() as session:
+        session.add_all([_instrument(), _order(), exec1, exec2, fill1, fill2])
+        await session.commit()
+    full = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+        _WALLET,
+        "live",
+        {"kraken": 2},
+        _AS_OF,
+    )
+    fallback_calls = 0
+    original = repository._load_pnl_timeline_execution_prefix_for_watermarks
+
+    async def spy_full_prefix(
+        s: AsyncSession,
+        wallet_public_id: str,
+        mode: str,
+        cut: _PnlTimelineExecutionCut,
+        horizon: _ExecutionKnowledgeHorizon,
+    ) -> PnlTimelineExecutionPrefix:
+        """Count full-prefix fallback invocations before delegating.
+
+        Args:
+            s: Active read snapshot session.
+            wallet_public_id: Wallet scope.
+            mode: Trading mode.
+            cut: Execution watermark and witness cut.
+            horizon: Resolved knowledge horizon.
+
+        Returns:
+            The certified full execution prefix.
+        """
+        nonlocal fallback_calls
+        fallback_calls += 1
+        return await original(s, wallet_public_id, mode, cut, horizon)
+
+    monkeypatch.setattr(
+        repository,
+        "_load_pnl_timeline_execution_prefix_for_watermarks",
+        spy_full_prefix,
+    )
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"kraken": 1},
+        generation_watermarks={"kraken": 2},
+        deferred_execution_sequences={},
+        as_of=_AS_OF,
+    )
+    suffix = await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+    assert fallback_calls == 1
+    assert suffix["executions"] == [row for row in full["executions"] if row["scope_sequence"] == 2]
+
+
+@pytest.mark.parametrize("idless", [False, True])
+async def test_execution_suffix_threads_fill_witness_cut_on_both_paths(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+    idless: bool,
+) -> None:
+    """Pass frozen fill_witness_cut on both bounded suffix and full-prefix fallback paths.
+
+    Given: Two witnessed executions whose frozen generation ``fill_witness_cut``
+        is captured before a later conflicting fill arrives at ``<= as_of``.
+    When: Anchor replay and suffix replay both pass that frozen ``fill_witness_cut``
+        for exact (suffix path) and ID-less (fallback path) executions.
+    Then: ``_read_pnl_timeline_fill_lineage`` receives the exact cut and the
+        suffix output equals the anchor replay filtered to the requested keys.
+
+    Args:
+        repository: Isolated SQLite repository.
+        monkeypatch: Pytest monkeypatch fixture.
+        idless: Whether executions and witnesses omit external IDs.
+    """
+    executions = [_execution("kraken", sequence) for sequence in (1, 2)]
+    fills = [_fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=sequence) for sequence in (1, 2)]
+    if idless:
+        for row in [*executions, *fills]:
+            row.exec_id = None
+            row.trade_id = None
+    async with repository.session() as session:
+        session.add_all([_instrument(), _order(), *executions, *fills])
+        await session.commit()
+    captured = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+        _WALLET,
+        "live",
+        {"kraken": 2},
+        _AS_OF,
+        fill_witness_cut="capture",
+    )
+    frozen_cut = captured.get("fill_witness_cut")
+    assert frozen_cut is not None
+    late_conflicting_fill = _fill_event(
+        _CLIENT_ORDER,
+        "kraken.BTC-USD.live.other",
+        sequence_id=3,
+        execution_scope_sequence=2,
+    )
+    if idless:
+        late_conflicting_fill.exec_id = None
+        late_conflicting_fill.trade_id = None
+    async with repository.session() as session:
+        session.add(late_conflicting_fill)
+        await session.commit()
+    anchor = await repository.get_pnl_timeline_execution_prefix_at_watermarks(
+        _WALLET,
+        "live",
+        {"kraken": 2},
+        _AS_OF,
+        fill_witness_cut=frozen_cut,
+    )
+    recorded_cuts: list[PnlTimelineFillWitnessCut | None] = []
+    original_read = repository._read_pnl_timeline_fill_lineage
+
+    async def spy_fill_lineage(
+        s: AsyncSession,
+        client_order_ids: list[str],
+        as_of: datetime,
+        fill_witness_cut: PnlTimelineFillWitnessCut | None,
+    ) -> list[VenueEvent]:
+        """Record the fill_witness_cut passed to fill-lineage loading.
+
+        Args:
+            s: Active read snapshot session.
+            client_order_ids: Target client order identifiers.
+            as_of: Knowledge horizon.
+            fill_witness_cut: Frozen witness cut or ``None``.
+
+        Returns:
+            Loaded fill witness rows.
+        """
+        recorded_cuts.append(fill_witness_cut)
+        return await original_read(s, client_order_ids, as_of, fill_witness_cut)
+
+    monkeypatch.setattr(repository, "_read_pnl_timeline_fill_lineage", spy_fill_lineage)
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"kraken": 1},
+        generation_watermarks={"kraken": 2},
+        deferred_execution_sequences={},
+        as_of=_AS_OF,
+        fill_witness_cut=frozen_cut,
+    )
+    suffix = await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+    assert recorded_cuts == [frozen_cut]
+    assert suffix["executions"] == [
+        row for row in anchor["executions"] if row["scope_sequence"] == 2
+    ]
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "generation", "deferred", "pattern"),
+    [
+        ({"kraken": -1}, {"kraken": 0}, {}, "watermark"),
+        ({"kraken": -2}, {"kraken": -1}, {}, "watermark"),
+        ({"kraken": 0}, {"kraken": -1}, {}, "watermark"),
+        ({"kraken": 1}, {"kraken": 2}, {"kraken": (3,)}, "deferred"),
+        ({"kraken": 1}, {"kraken": 2}, {"kraken": (0,)}, "deferred"),
+    ],
+)
+async def test_execution_suffix_rejects_negative_watermarks_and_out_of_range_deferred(
+    repository: SQLAlchemyRepository,
+    cutoff: dict[str, int],
+    generation: dict[str, int],
+    deferred: dict[str, tuple[int, ...]],
+    pattern: str,
+) -> None:
+    """Reject negative watermarks and deferred sequences outside 1..generation.
+
+    Given: A direct caller supplying negative cutoff or generation watermarks or
+        a deferred execution sequence below 1 or above the generation watermark.
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` validates the request.
+    Then: It raises ``ValueError`` before executing suffix queries.
+
+    Args:
+        repository: Isolated SQLite repository.
+        cutoff: Cutoff watermark map under test.
+        generation: Generation watermark map under test.
+        deferred: Deferred sequence map under test.
+        pattern: Substring expected in the raised ``ValueError``.
+    """
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks=cutoff,
+        generation_watermarks=generation,
+        deferred_execution_sequences=deferred,
+        as_of=_AS_OF,
+    )
+    with pytest.raises(ValueError, match=pattern):
+        await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+
+
+async def test_execution_suffix_skips_quiet_exchange_and_returns_active_exchange_rows(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Skip an exchange with no suffix or deferred rows while returning another's suffix.
+
+    Given: Two exchanges where ``coinbase`` has cutoff equal to generation and no
+        deferred sequences while ``kraken`` has a new suffix execution 2.
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` reads both exchanges.
+    Then: ``coinbase`` contributes no rows and ``kraken`` sequence 2 is returned.
+
+    Args:
+        repository: Isolated SQLite repository.
+    """
+    coinbase_instrument = _instrument(
+        exchange="coinbase",
+        public_id="00000000-0000-7000-8000-000000000b99",
+    )
+    coinbase_order = _order(
+        public_id="00000000-0000-7000-8000-000000000c99",
+        instrument_public_id="00000000-0000-7000-8000-000000000b99",
+        client_order_id="client-coinbase",
+    )
+    async with repository.session() as session:
+        session.add_all(
+            [
+                _instrument(),
+                _order(),
+                coinbase_instrument,
+                coinbase_order,
+                _execution("coinbase", 1, order_public_id="00000000-0000-7000-8000-000000000c99"),
+                _execution("kraken", 1),
+                _execution("kraken", 2),
+                _fill_event(
+                    "client-coinbase",
+                    "coinbase.BTC-USD.live.s1",
+                    exchange="coinbase",
+                    sequence_id=1,
+                ),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=1),
+                _fill_event(_CLIENT_ORDER, _KRAKEN_SHARD, sequence_id=2),
+            ]
+        )
+        await session.commit()
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks={"coinbase": 1, "kraken": 1},
+        generation_watermarks={"coinbase": 1, "kraken": 2},
+        deferred_execution_sequences={},
+        as_of=_AS_OF,
+    )
+    suffix = await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)
+    assert [(row["exchange"], row["scope_sequence"]) for row in suffix["executions"]] == [
+        ("kraken", 2)
+    ]
+    assert suffix["annulments"] == []
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "generation", "deferred", "pattern"),
+    [
+        ({"kraken": True}, {"kraken": 1}, {}, "watermark"),
+        ({"kraken": 0}, {"kraken": True}, {}, "watermark"),
+        ({"kraken": False}, {"kraken": 1}, {}, "watermark"),
+        ({"kraken": 1}, {"kraken": 2}, {"kraken": (True,)}, "deferred"),
+    ],
+)
+async def test_execution_suffix_rejects_bool_watermarks_and_deferred(
+    repository: SQLAlchemyRepository,
+    cutoff: dict[str, int],
+    generation: dict[str, int],
+    deferred: dict[str, tuple[int, ...]],
+    pattern: str,
+) -> None:
+    """Reject boolean cutoff, generation, or deferred sequence values.
+
+    Given: A direct caller passing ``bool`` values inside cutoff watermarks,
+        generation watermarks, or deferred execution sequences.
+    When: ``get_pnl_timeline_execution_suffix_at_watermarks`` validates bounds.
+    Then: It raises ``ValueError`` instead of coercing booleans to 0 or 1.
+
+    Args:
+        repository: Isolated SQLite repository.
+        cutoff: Cutoff watermark map under test.
+        generation: Generation watermark map under test.
+        deferred: Deferred sequence map under test.
+        pattern: Substring expected in the raised ``ValueError``.
+    """
+    request = PnlTimelineExecutionSuffixRequest(
+        wallet_public_id=_WALLET,
+        mode="live",
+        cutoff_watermarks=cutoff,
+        generation_watermarks=generation,
+        deferred_execution_sequences=deferred,
+        as_of=_AS_OF,
+    )
+    with pytest.raises(ValueError, match=pattern):
+        await repository.get_pnl_timeline_execution_suffix_at_watermarks(request)

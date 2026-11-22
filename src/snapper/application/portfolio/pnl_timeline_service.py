@@ -117,6 +117,12 @@ from snapper.application.portfolio.pnl_carry import carry_serves
 from snapper.application.portfolio.pnl_carry import fx_gap_anchors
 from snapper.application.portfolio.pnl_carry import leading_mark_gaps
 from snapper.application.portfolio.pnl_carry import read_windows
+from snapper.application.portfolio.pnl_conversion_mark_evidence import (
+    _accrual_with_conversion_mark_evidence,
+)
+from snapper.application.portfolio.pnl_conversion_mark_evidence import (
+    _execution_with_conversion_mark_evidence,
+)
 from snapper.application.portfolio.pnl_fx_diagnostics import PnlFxFailure
 from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_conversion_scope
 from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_diagnostics_active
@@ -124,6 +130,28 @@ from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_execution_ti
 from snapper.application.portfolio.pnl_fx_diagnostics import record_pnl_fx_election
 from snapper.application.portfolio.pnl_fx_diagnostics import record_pnl_fx_failure
 from snapper.application.portfolio.pnl_fx_diagnostics import reset_pnl_fx_execution_order
+from snapper.application.portfolio.pnl_fx_replay_state import _EventFxReplayState
+from snapper.application.portfolio.pnl_fx_replay_state import _FxInstrumentRequirements
+from snapper.application.portfolio.pnl_fx_replay_state import _FxMinuteRequirements
+from snapper.application.portfolio.pnl_fx_replay_state import _MarkReplayState
+from snapper.application.portfolio.pnl_fx_replay_state import _PoolKey
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlMarkFxReplayStatePayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import event_walk_state_from_replay
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import event_walk_state_to_replay
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import mark_walk_state_from_replay
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import mark_walk_state_to_replay
+from snapper.application.portfolio.pnl_opening_checkpoint_capture import (
+    PnlCheckpointCaptureFinalization,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_capture import PnlCheckpointCaptureRequest
+from snapper.application.portfolio.pnl_opening_checkpoint_capture import _AccrualPrefixRequest
+from snapper.application.portfolio.pnl_opening_checkpoint_capture import capture_checkpoint_write
+from snapper.application.portfolio.pnl_opening_checkpoint_resume import PnlCheckpointSuffixBounds
+from snapper.application.portfolio.pnl_opening_checkpoint_resume import has_late_resume_execution
+from snapper.application.portfolio.pnl_opening_checkpoint_resume import load_checkpoint_suffix
+from snapper.application.portfolio.pnl_opening_checkpoint_resume import merge_resume_spans
+from snapper.application.portfolio.pnl_opening_checkpoint_resume import resume_engine_opening
+from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointResume
 from snapper.application.portfolio.pnl_read_timing import pnl_read_core
 from snapper.application.portfolio.pnl_read_timing import pnl_read_count
 from snapper.application.portfolio.pnl_read_timing import pnl_read_fx_window
@@ -145,6 +173,7 @@ from snapper.application.portfolio.pnl_timeline import (
     PnlTimelineWorkBudgetError as _PnlTimelineWorkBudgetError,
 )
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
+from snapper.application.portfolio.pnl_timeline import TimelineCheckpointOpening
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
 from snapper.application.portfolio.pnl_timeline import TimelineExecutionLineage
 from snapper.application.portfolio.pnl_timeline import TimelineMarkEvidence
@@ -155,8 +184,10 @@ from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
 from snapper.application.portfolio.pnl_timeline import canonical_carried_inputs
 from snapper.application.portfolio.pnl_timeline import canonical_incompleteness_reasons
 from snapper.application.portfolio.pnl_timeline import derive_timeline_opening
+from snapper.core.numeric import is_exact_zero
 from snapper.core.numeric import is_positive_finite
 from snapper.data.fx_conversion_carry import MAX_CARRIED_MINUTES
+from snapper.data.pnl_correction_state import PnlOpeningCheckpointWrite
 from snapper.data.repository import PnlTimelineAnchorEvidenceMismatchError
 from snapper.data.repository import PortfolioPnlSampleQuery
 from snapper.data.repository import Repository
@@ -543,6 +574,8 @@ class PnlSeriesReplayOptions:
     physical replay chunk. It is an exact-only snapshotter calculation policy.
     ``metadata_only`` skips lineage, accruals, market data, FX, shadow collection,
     and timeline valuation once ``replay_metadata`` is certified for a probe.
+    ``checkpoint_capture`` carries an optional source-bound capture request whose
+    ordered evidence reads and soft refusal never change ordinary published points.
     """
 
     preloaded_evidence: _SeriesReadEvidence | None = None
@@ -557,6 +590,8 @@ class PnlSeriesReplayOptions:
     verify_replay_probe: bool = False
     pointwise_exact_fx: bool = False
     metadata_only: bool = False
+    checkpoint_capture: PnlCheckpointCaptureRequest | None = None
+    checkpoint_resume: PnlCheckpointResume | None = None
 
 
 _NO_SERIES_REPLAY_OPTIONS: Final[PnlSeriesReplayOptions] = PnlSeriesReplayOptions()
@@ -663,6 +698,13 @@ class _SeriesReplayInputs:
     applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...]
     raw_watermarks: Mapping[str, int]
     fill_witness_cut: PnlTimelineFillWitnessCut | None = None
+    initial_last_effective: Mapping[_PoolKey, datetime] = field(default_factory=dict)
+    initial_applied_watermarks: Mapping[str, int] = field(default_factory=dict)
+    carried_price_ref_spans: Mapping[str, tuple[datetime, datetime]] = field(default_factory=dict)
+    carried_display_spans: Mapping[str, tuple[datetime, datetime]] = field(default_factory=dict)
+    carried_seen_instruments: tuple[str, ...] = ()
+    carried_pool_keys: tuple[_PoolKey, ...] = ()
+    checkpoint_minute: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -686,6 +728,10 @@ class _SeriesMarketRefs:
     quote_by_instrument: dict[str, str]
     base_by_instrument: dict[str, str]
     untrusted_price_reasons_by_instrument: dict[str, set[PnlIncompletenessReason]]
+
+
+class _CheckpointLateExecutionError(Exception):
+    """Internal signal requesting an anchor replay after a late resumed row."""
 
 
 class PnlAnchorEvidenceError(ValueError):
@@ -846,13 +892,13 @@ def _validated_anchor_raw_unrealized(row: PortfolioPnlAnchorRow) -> float:
         or row["calc_version"] != PNL_ANCHOR_CALC_VERSION
         or row["valuation_status"] != "complete"
         or type(row["realized_pnl"]) is not float
-        or not _is_exact_zero(row["realized_pnl"])
+        or not is_exact_zero(row["realized_pnl"])
         or type(row["fee_pnl"]) is not float
-        or not _is_exact_zero(row["fee_pnl"])
+        or not is_exact_zero(row["fee_pnl"])
         or type(row["accrual_pnl"]) is not float
-        or not _is_exact_zero(row["accrual_pnl"])
+        or not is_exact_zero(row["accrual_pnl"])
         or type(row["external_flow_adjustment"]) is not float
-        or not _is_exact_zero(row["external_flow_adjustment"])
+        or not is_exact_zero(row["external_flow_adjustment"])
         or row["cash_usd"] is not None
         or row["position_value_usd"] is not None
         or row["drawdown"] is not None
@@ -1303,6 +1349,9 @@ class PnlWalletSeriesResult(PnlTimelineResult):
     equity_overlay: Mapping[datetime, PnlPointEquityOverlay] = _EMPTY_EQUITY_OVERLAY_MAP
     equity_coverage: PnlEquityCoverage = _UNSAMPLED_EQUITY_COVERAGE
     applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...] = ()
+    checkpoint_write: PnlOpeningCheckpointWrite | None = field(default=None, kw_only=True)
+    checkpoint_capture_refusal: str | None = field(default=None, kw_only=True)
+    checkpoint_resume_fallback: str | None = field(default=None, kw_only=True)
 
     def equity_overlay_at(self, point_time: datetime) -> PnlPointEquityOverlay:
         """Return the persisted equity overlay for one point, or the null overlay.
@@ -1394,6 +1443,7 @@ def _preactivation_pnl_series(
 
 def _execution_rows_with_effective_time(
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    initial_last_effective: Mapping[_PoolKey, datetime] | None = None,
 ) -> list[tuple[PnlTimelineOpeningExecutionRow, datetime]]:
     """Pair each suffix execution with its per-pool monotone-clamped event time.
 
@@ -1406,11 +1456,12 @@ def _execution_rows_with_effective_time(
 
     Args:
         execution_rows: Suffix rows in ``(exchange, scope_sequence)`` order.
+        initial_last_effective: Optional checkpoint per-pool replay cursors.
 
     Returns:
         Each row paired with its clamped effective time, preserving input order.
     """
-    last_effective: dict[tuple[str, str], datetime] = {}
+    last_effective: dict[tuple[str, str], datetime] = dict(initial_last_effective or {})
     paired: list[tuple[PnlTimelineOpeningExecutionRow, datetime]] = []
     for row in execution_rows:
         pool_key = (row["instrument_public_id"], row["shard_key"])
@@ -1425,9 +1476,10 @@ def _series_replay_execution_windows(
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
     to_time: datetime,
     reference_tip: datetime,
+    initial_last_effective: Mapping[_PoolKey, datetime] | None = None,
 ) -> tuple[list[PnlTimelineOpeningExecutionRow], list[PnlTimelineOpeningExecutionRow]]:
     """Return the accounting and reference windows under the same effective clock."""
-    paired = _execution_rows_with_effective_time(execution_rows)
+    paired = _execution_rows_with_effective_time(execution_rows, initial_last_effective)
     replayed = [row for row, effective_time in paired if effective_time <= to_time]
     if reference_tip == to_time:
         return replayed, replayed
@@ -1490,6 +1542,30 @@ class _SeriesAssembly:
     replay_metadata: PnlSeriesReplayMetadata | None
     applied_annulments: tuple[PnlTimelineAppliedAnnulment, ...]
     overlay_request: _EquityOverlayRequest
+    checkpoint_write: PnlOpeningCheckpointWrite | None = None
+    checkpoint_capture_refusal: str | None = None
+    checkpoint_resume_fallback: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _SeriesRequirementInput:
+    """Inputs for planning ordinary or checkpoint-resumed FX evidence."""
+
+    replay: _SeriesReplayInputs
+    trusted_replayed_rows: Sequence[PnlTimelineOpeningExecutionRow]
+    mark_request: _MarkCarryRequest
+    options: PnlSeriesReplayOptions
+    policy: PnlSeriesReadPolicy
+    opening: TimelineOpening
+
+
+class _SeriesRequirementPlan(NamedTuple):
+    """Requirement walks, carry plan, and identity pins for FX loading."""
+
+    mark_requirements: _FxInstrumentRequirements
+    event_requirements: _FxInstrumentRequirements
+    mark_carry: _MarkCarryPlan
+    identity_planes: _FxIdentityPlanes
 
 
 def _ceil_to_minute(instant: datetime) -> datetime:
@@ -1498,12 +1574,25 @@ def _ceil_to_minute(instant: datetime) -> datetime:
     return floored if floored == instant else floored + timedelta(minutes=1)
 
 
+@dataclass(frozen=True, slots=True)
+class _ReplayMetadataSeed:
+    """Optional checkpoint cursors and applied watermarks seeding metadata replay."""
+
+    last_effective: Mapping[_PoolKey, datetime] = field(default_factory=dict)
+    applied_watermarks: Mapping[str, int] = field(default_factory=dict)
+
+
+_EMPTY_METADATA_SEED: Final[_ReplayMetadataSeed] = _ReplayMetadataSeed()
+"""Shared empty metadata seed for ordinary anchor replay."""
+
+
 def _derive_series_replay_metadata(
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
     baseline_watermarks: Mapping[str, int],
     to_time: datetime,
     *,
     rewind_scope_regressions: bool = False,
+    seed: _ReplayMetadataSeed = _EMPTY_METADATA_SEED,
 ) -> PnlSeriesReplayMetadata:
     """Derive the late-fill boundary from the clamped suffix and one baseline.
 
@@ -1512,6 +1601,10 @@ def _derive_series_replay_metadata(
     when its clamped effective time is at or before ``to_time``; it counts toward
     the earliest affected minute only when its ``scope_sequence`` exceeds the
     caller's baseline for its exchange (defaulting to zero for an unseen exchange).
+
+    A late-fill probe must never run over a resumed suffix: on a resumed read,
+    ``earliest_affected_minute`` only sees suffix rows and cannot see earlier
+    prefix rows.
 
     Args:
         execution_rows: The suffix rows already filtered above the anchor
@@ -1522,13 +1615,17 @@ def _derive_series_replay_metadata(
         rewind_scope_regressions: Include a late execution's raw event time when
             it precedes its clamped time. Previously served minutes in this gap
             can become untrusted under the replay's scope-order check.
+        seed: Verified checkpoint cursors and prefix applied watermarks.
 
     Returns:
         The advanced per-exchange watermark and the earliest affected minute.
     """
-    max_scope_sequence: dict[str, int] = {}
+    max_scope_sequence: dict[str, int] = dict(seed.applied_watermarks)
     earliest_affected: datetime | None = None
-    for row, effective_time in _execution_rows_with_effective_time(execution_rows):
+    for row, effective_time in _execution_rows_with_effective_time(
+        execution_rows,
+        seed.last_effective,
+    ):
         exchange = row["exchange"]
         scope_sequence = row["scope_sequence"]
         if effective_time <= to_time:
@@ -1634,11 +1731,16 @@ async def _series_replay_metadata(
         return None
     _, to_time = window
     previous_as_of = options.previous_replay_as_of
+    metadata_seed = _ReplayMetadataSeed(
+        last_effective=replay.initial_last_effective,
+        applied_watermarks=replay.initial_applied_watermarks,
+    )
     metadata = _derive_series_replay_metadata(
         replay.loaded_execution_rows,
         baseline,
         to_time,
         rewind_scope_regressions=previous_as_of is not None,
+        seed=metadata_seed,
     )
     metadata = replace(
         metadata,
@@ -1647,7 +1749,11 @@ async def _series_replay_metadata(
         has_fill_gap=replay.fill_gap_reason is not None,
         fill_witness_cut=replay.fill_witness_cut,
         sample_watermarks_by_minute=(
-            _sample_watermarks_for_window(replay.loaded_execution_rows, window)
+            _sample_watermarks_for_window(
+                replay.loaded_execution_rows,
+                window,
+                metadata_seed,
+            )
             if options.replay_generation_tip is not None
             else None
         ),
@@ -1668,12 +1774,14 @@ async def _series_replay_metadata(
 
 
 def _sample_watermarks_for_window(
-    rows: Sequence[PnlTimelineOpeningExecutionRow], window: tuple[datetime, datetime]
+    rows: Sequence[PnlTimelineOpeningExecutionRow],
+    window: tuple[datetime, datetime],
+    seed: _ReplayMetadataSeed = _EMPTY_METADATA_SEED,
 ) -> dict[datetime, dict[str, int]]:
     """Fold the effective execution prefix independently for each exact writer minute."""
     start, end = window
     changes: dict[datetime, dict[str, int]] = {}
-    for row, effective in _execution_rows_with_effective_time(rows):
+    for row, effective in _execution_rows_with_effective_time(rows, seed.last_effective):
         minute = max(start, _ceil_to_minute(effective))
         if minute > end:
             continue
@@ -1681,7 +1789,7 @@ def _sample_watermarks_for_window(
         minute_changes = changes.setdefault(minute, {})
         minute_changes[exchange] = max(minute_changes.get(exchange, 0), scope_sequence)
     result: dict[datetime, dict[str, int]] = {}
-    cumulative: dict[str, int] = {}
+    cumulative: dict[str, int] = dict(seed.applied_watermarks)
     minute = start
     while minute <= end:
         for exchange, sequence in changes.get(minute, {}).items():
@@ -1706,11 +1814,6 @@ def _rate_minute(moment: datetime) -> datetime:
         The minute key to look the rate up under.
     """
     return moment.replace(second=0, microsecond=0)
-
-
-def _is_exact_zero(value: float) -> bool:
-    """Return whether a floating-point value is exactly positive or negative zero."""
-    return math.isclose(value, 0.0, rel_tol=0.0, abs_tol=0.0)
 
 
 def build_fx_rates(rows: Sequence[PnlFxRateRow]) -> FxRateMap:
@@ -1979,7 +2082,7 @@ def _to_timeline_execution(
     fee_incompleteness_reason: PnlIncompletenessReason | None = (
         "fx_conversion_unproven"
         if math.isfinite(row["fee"])
-        and not _is_exact_zero(row["fee"])
+        and not is_exact_zero(row["fee"])
         and row["fee_asset"] != valuation_ccy
         and converted_fee is None
         else None
@@ -2145,7 +2248,7 @@ def _to_timeline_accrual(
     incompleteness_reason: PnlIncompletenessReason | None = (
         "fx_conversion_unproven"
         if math.isfinite(row["amount"])
-        and not _is_exact_zero(row["amount"])
+        and not is_exact_zero(row["amount"])
         and row["amount_asset"] != valuation_ccy
         and converted is None
         else None
@@ -2177,6 +2280,8 @@ def _to_timeline_accrual(
 def _withhold_series_for_global_reason(
     result: PnlTimelineResult,
     global_reason: PnlIncompletenessReasonEntry,
+    *,
+    capture_requested: bool = False,
 ) -> PnlTimelineResult:
     """Post-transform a built series when one global ledger guard fails.
 
@@ -2188,6 +2293,7 @@ def _withhold_series_for_global_reason(
     Args:
         result: Series built from the currently visible execution prefix.
         global_reason: Global cause stamped by the positive evidence read.
+        capture_requested: Whether the caller requested checkpoint capture.
 
     Returns:
         The same grid and metadata with every point fully untrusted.
@@ -2237,6 +2343,12 @@ def _withhold_series_for_global_reason(
         points=points,
         granularity=result.granularity,
         valuation_ccy=result.valuation_ccy,
+        closing_checkpoint=None,
+        closing_checkpoint_refusal=(
+            "global_withhold"
+            if capture_requested or result.closing_checkpoint is not None
+            else None
+        ),
     )
 
 
@@ -2328,6 +2440,8 @@ def _with_instrument_display_identities(
         points=points,
         granularity=result.granularity,
         valuation_ccy=result.valuation_ccy,
+        closing_checkpoint=result.closing_checkpoint,
+        closing_checkpoint_refusal=result.closing_checkpoint_refusal,
     )
 
 
@@ -2848,6 +2962,7 @@ def _partition_price_refs(
 def _partition_series_execution_price_refs(
     execution_rows: Sequence[PnlTimelineExecutionRow],
     refs: Sequence[InstrumentSymbolRefRow],
+    carried_spans: Mapping[str, tuple[datetime, datetime]] | None = None,
 ) -> tuple[list[InstrumentSymbolRefRow], _InstrumentIncompletenessReasons]:
     """Prove convertible execution prices over complete instrument spans.
 
@@ -2858,13 +2973,14 @@ def _partition_series_execution_price_refs(
     Args:
         execution_rows: Scope execution prefix replayed by the P&L kernel.
         refs: Historical symbol-reference intervals for those instruments.
+        carried_spans: Optional verified prefix price-reference spans.
 
     Returns:
         References whose quote and venue can be converted safely, and the
         stamped per-instrument reasons whose denomination or venue remains
         untrusted.
     """
-    spans: dict[str, tuple[datetime, datetime]] = {}
+    spans: dict[str, tuple[datetime, datetime]] = dict(carried_spans or {})
     for row in execution_rows:
         instrument_public_id = row["instrument_public_id"]
         event_time = row["timestamp"]
@@ -2923,20 +3039,11 @@ def _partition_execution_price_refs(
     return direct_refs, untrusted_instruments
 
 
-type _FxMinuteRequirements = dict[FxPairKey, set[datetime]]
-"""Exact conversion minutes grouped by unordered currency pair."""
-
-type _FxInstrumentRequirements = dict[str, _FxMinuteRequirements]
-"""Exact conversion minutes grouped first by consuming instrument."""
-
 type _FxIdentityPlanes = dict[str, PnlFxRatePlane]
 """Canonical source plane keyed by the held instrument that justifies it."""
 
 type _FxPlanesByInstrument = dict[str, dict[FxPairKey, PnlFxRatePlane]]
 """Selected conversion planes keyed by consuming instrument and pair."""
-
-type _PoolKey = tuple[str, str]
-"""Durable instrument and shard identity used by replay state."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -2946,17 +3053,6 @@ class _EventFxContext:
     base_by_instrument: Mapping[str, str]
     quote_by_instrument: Mapping[str, str]
     valuation_ccy: str
-
-
-@dataclass(slots=True)
-class _EventFxReplayState:
-    """Mutable position and trust state for event FX requirements."""
-
-    requirements: _FxInstrumentRequirements
-    last_effective: dict[_PoolKey, datetime]
-    position_qty: dict[_PoolKey, float]
-    basis_unknown: set[_PoolKey]
-    untrusted_at: dict[str, datetime]
 
 
 def _add_fx_minute(
@@ -2981,7 +3077,9 @@ def _add_fx_minute(
     pair_requirements.setdefault(currency_pair_key(currency, valuation_ccy), set()).add(minute)
 
 
-def _opening_pool_quantities(opening: TimelineOpening | None) -> dict[_PoolKey, float]:
+def _opening_pool_quantities(
+    opening: TimelineOpening | TimelineCheckpointOpening | None,
+) -> dict[_PoolKey, float]:
     """Return opening quantities keyed by their durable replay pools."""
     if opening is None:
         return {}
@@ -3057,7 +3155,7 @@ def _add_execution_fx_requirements(
     quote_currency = context.quote_by_instrument.get(instrument_public_id)
     if (
         quote_currency is not None
-        and not _is_exact_zero(signed_size)
+        and not is_exact_zero(signed_size)
         and price_is_known_valid
         and pool_key not in state.basis_unknown
     ):
@@ -3068,7 +3166,7 @@ def _add_execution_fx_requirements(
             context.valuation_ccy,
             minute,
         )
-    if not _is_exact_zero(row["fee"]):
+    if not is_exact_zero(row["fee"]):
         _add_fx_minute(
             state.requirements,
             instrument_public_id,
@@ -3091,7 +3189,7 @@ def _add_accrual_fx_requirement(
     accrual: PnlTimelineAccrualRow,
 ) -> None:
     """Add one publishable nonzero accrual's exact conversion minute."""
-    if _is_exact_zero(accrual["amount"]):
+    if is_exact_zero(accrual["amount"]):
         return
     invalid_at = state.untrusted_at.get(accrual["instrument_public_id"])
     if invalid_at is not None and accrual["accrued_at"] >= invalid_at:
@@ -3103,6 +3201,43 @@ def _add_accrual_fx_requirement(
         valuation_ccy,
         _rate_minute(accrual["accrued_at"]),
     )
+
+
+def _replay_event_fx_state(
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    accrual_rows: Sequence[PnlTimelineAccrualRow],
+    context: _EventFxContext,
+    opening: TimelineOpening | None = None,
+    initial_state: _EventFxReplayState | None = None,
+) -> _EventFxReplayState:
+    """Replay event evidence and expose every final carried state field.
+
+    Args:
+        execution_rows: Trusted scope executions replayed by the kernel.
+        accrual_rows: Scope accruals, whose amount carries ``amount_asset``.
+        context: Immutable denomination evidence used by execution FX replay.
+        opening: Rebased per-shard quantities active before the suffix.
+        initial_state: Optional verified event-walk state captured at C.
+
+    Returns:
+        The complete mutable event replay state after all prefix rows.
+    """
+    state = (
+        initial_state
+        if initial_state is not None
+        else _EventFxReplayState(
+            requirements={},
+            last_effective={},
+            position_qty=_opening_pool_quantities(opening),
+            basis_unknown=set(),
+            untrusted_at={},
+        )
+    )
+    for row in execution_rows:
+        _add_execution_fx_requirements(state, context, row)
+    for accrual in accrual_rows:
+        _add_accrual_fx_requirement(state, context.valuation_ccy, accrual)
+    return state
 
 
 def _event_fx_minutes(
@@ -3133,36 +3268,16 @@ def _event_fx_minutes(
     Returns:
         Exact required minutes grouped by instrument and unordered currency pair.
     """
-    state = _EventFxReplayState(
-        requirements={},
-        last_effective={},
-        position_qty=_opening_pool_quantities(opening),
-        basis_unknown=set(),
-        untrusted_at={},
-    )
     context = _EventFxContext(
         base_by_instrument=base_by_instrument,
         quote_by_instrument=quote_by_instrument,
         valuation_ccy=valuation_ccy,
     )
-    for row in execution_rows:
-        _add_execution_fx_requirements(state, context, row)
-    for accrual in accrual_rows:
-        _add_accrual_fx_requirement(state, valuation_ccy, accrual)
-    return state.requirements
+    return _replay_event_fx_state(execution_rows, accrual_rows, context, opening).requirements
 
 
 type _EffectiveMarkEvent = tuple[datetime, str, int, str, float, bool]
 """Monotone event time, ordering lineage, quantity delta, and invalidity."""
-
-
-@dataclass(slots=True)
-class _MarkReplayState:
-    """Mutable per-instrument position state while visiting mark minutes."""
-
-    event_index: int
-    pool_quantities: dict[str, float]
-    mark_eligible: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -3198,10 +3313,11 @@ def _effective_mark_events(
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
     base_by_instrument: Mapping[str, str],
     quote_by_instrument: Mapping[str, str],
+    initial_last_effective: Mapping[_PoolKey, datetime] | None = None,
 ) -> tuple[dict[str, list[_EffectiveMarkEvent]], list[tuple[datetime, datetime]]]:
     """Build monotone mark replay events and scope-wide regression shadows."""
     effective_events: dict[str, list[_EffectiveMarkEvent]] = {}
-    last_effective: dict[_PoolKey, datetime] = {}
+    last_effective: dict[_PoolKey, datetime] = dict(initial_last_effective or {})
     regression_shadows: list[tuple[datetime, datetime]] = []
     for row in execution_rows:
         instrument_public_id = row["instrument_public_id"]
@@ -3296,6 +3412,23 @@ def _eligible_mark_minutes(
     window: _MarkFxWindow,
 ) -> set[datetime]:
     """Replay one instrument and return the exact minutes needing mark FX."""
+    return _eligible_mark_minutes_and_state(
+        instrument_public_id,
+        candles,
+        events,
+        opening_quantities,
+        window,
+    )[0]
+
+
+def _eligible_mark_minutes_and_state(
+    instrument_public_id: str,
+    candles: Sequence[PnlTimelineCandleRow],
+    events: Sequence[_EffectiveMarkEvent],
+    opening_quantities: Mapping[_PoolKey, float],
+    window: _MarkFxWindow,
+) -> tuple[set[datetime], _MarkReplayState]:
+    """Replay one instrument and expose its minutes and complete final state."""
     state = _MarkReplayState(
         event_index=0,
         pool_quantities={
@@ -3305,12 +3438,44 @@ def _eligible_mark_minutes(
         },
         mark_eligible=True,
     )
+    minutes = _eligible_mark_minutes_from_state(
+        instrument_public_id,
+        candles,
+        events,
+        window,
+        state,
+    )
+    return minutes, state
+
+
+def _eligible_mark_minutes_from_state(
+    instrument_public_id: str,
+    candles: Sequence[PnlTimelineCandleRow],
+    events: Sequence[_EffectiveMarkEvent],
+    window: _MarkFxWindow,
+    state: _MarkReplayState,
+) -> set[datetime]:
+    """Walk suffix candles from a supplied mutable mark replay state.
+
+    Args:
+        instrument_public_id: Instrument being replayed.
+        candles: Its suffix candles.
+        events: Its suffix-effective execution events.
+        window: Grid bounds and all carried plus suffix regression shadows.
+        state: Carried quantities and latch with a suffix-local event index.
+
+    Returns:
+        Exact eligible mark minutes from the suffix.
+    """
     minutes: set[datetime] = set()
     for candle in sorted(candles, key=lambda item: item["open_at"]):
         mark_minute = candle["open_at"] + timedelta(minutes=1)
+        if mark_minute > window.to_time:
+            break
         _advance_mark_replay(state, events, mark_minute)
         if _mark_minute_is_eligible(candle, mark_minute, state, window):
             minutes.add(mark_minute)
+    _advance_mark_replay(state, events, window.to_time)
     return minutes
 
 
@@ -3435,6 +3600,267 @@ class _MarkCarryRequest:
     to_time: datetime
     opening: TimelineOpening | None
     as_of: datetime
+
+
+def _capture_mark_walk_state(request: _MarkCarryRequest) -> PnlMarkFxReplayStatePayload:
+    """Capture every final per-instrument mark state and global regression shadow."""
+    effective_events, regression_shadows = _effective_mark_events(
+        request.execution_rows,
+        request.base_by_instrument,
+        request.quote_by_instrument,
+    )
+    opening_quantities = _opening_pool_quantities(request.opening)
+    candles_by_instrument = _candles_by_instrument(request.candles)
+    window = _MarkFxWindow(
+        grid_start=request.from_time.replace(second=0, microsecond=0),
+        to_time=request.to_time,
+        regression_shadows=regression_shadows,
+    )
+    instrument_ids = sorted(
+        set(candles_by_instrument)
+        | set(effective_events)
+        | {instrument_public_id for instrument_public_id, _ in opening_quantities}
+    )
+    states: dict[str, _MarkReplayState] = {}
+    for instrument_public_id in instrument_ids:
+        _, state = _eligible_mark_minutes_and_state(
+            instrument_public_id,
+            candles_by_instrument.get(instrument_public_id, ()),
+            sorted(effective_events.get(instrument_public_id, [])),
+            opening_quantities,
+            window,
+        )
+        states[instrument_public_id] = state
+    return mark_walk_state_from_replay(states, regression_shadows)
+
+
+def _capture_walk_states(
+    options: PnlSeriesReplayOptions,
+    replay: _SeriesReplayInputs,
+    trusted_replayed_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    mark_request: _MarkCarryRequest,
+) -> None:
+    """Capture real event and mark walk states without changing ordinary replay.
+
+    Args:
+        options: Replay options carrying the optional capture request.
+        replay: Loaded accounting evidence for the current prefix.
+        trusted_replayed_rows: Event rows with trusted denomination evidence.
+        mark_request: Complete mark replay inputs and bounds.
+    """
+    request = options.checkpoint_capture
+    if request is None or not request.active:
+        return
+    try:
+        event_state = _replay_event_fx_state(
+            trusted_replayed_rows,
+            replay.accrual_rows,
+            _EventFxContext(
+                base_by_instrument=mark_request.base_by_instrument,
+                quote_by_instrument=mark_request.quote_by_instrument,
+                valuation_ccy=mark_request.valuation_ccy,
+            ),
+            mark_request.opening,
+        )
+        request.set_walk_states(
+            event_walk_state_from_replay(event_state),
+            _capture_mark_walk_state(mark_request),
+        )
+    except ValueError:
+        request.refuse_value_error()
+
+
+def _resume_event_requirements(
+    resume: PnlCheckpointResume,
+    replay: _SeriesReplayInputs,
+    trusted_replayed_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    request: _MarkCarryRequest,
+) -> _FxInstrumentRequirements:
+    """Walk only suffix event inputs from the verified carried event state."""
+    state = event_walk_state_to_replay(resume.bundle.event_walk_state)
+    return _replay_event_fx_state(
+        trusted_replayed_rows,
+        replay.accrual_rows,
+        _EventFxContext(
+            base_by_instrument=request.base_by_instrument,
+            quote_by_instrument=request.quote_by_instrument,
+            valuation_ccy=request.valuation_ccy,
+        ),
+        initial_state=state,
+    ).requirements
+
+
+def _resume_mark_requirements(
+    resume: PnlCheckpointResume,
+    request: _MarkCarryRequest,
+) -> _FxInstrumentRequirements:
+    """Walk suffix marks from carried quantities, latches, cursors, and shadows."""
+    opening = resume_engine_opening(resume)
+    effective_events, suffix_shadows = _effective_mark_events(
+        request.execution_rows,
+        request.base_by_instrument,
+        request.quote_by_instrument,
+        dict(opening.last_effective_by_pool),
+    )
+    states, prefix_shadows = mark_walk_state_to_replay(resume.bundle.mark_walk_state)
+    opening_quantities = _opening_pool_quantities(opening)
+    window = _MarkFxWindow(
+        grid_start=request.from_time.replace(second=0, microsecond=0),
+        to_time=request.to_time,
+        regression_shadows=(*prefix_shadows, *suffix_shadows),
+    )
+    needed: _FxInstrumentRequirements = {}
+    for instrument_public_id, candles in _candles_by_instrument(request.candles).items():
+        state = states.get(instrument_public_id)
+        if state is None:
+            state = _MarkReplayState(
+                event_index=0,
+                pool_quantities={
+                    shard_key: quantity
+                    for (instrument, shard_key), quantity in opening_quantities.items()
+                    if instrument == instrument_public_id
+                },
+                mark_eligible=True,
+            )
+        state.event_index = 0
+        minutes = _eligible_mark_minutes_from_state(
+            instrument_public_id,
+            candles,
+            sorted(effective_events.get(instrument_public_id, [])),
+            window,
+            state,
+        )
+        for minute in minutes:
+            _add_fx_minute(
+                needed,
+                instrument_public_id,
+                request.quote_by_instrument[instrument_public_id],
+                request.valuation_ccy,
+                minute,
+            )
+    return needed
+
+
+def _series_requirements_for_replay(
+    resume: PnlCheckpointResume | None,
+    replay: _SeriesReplayInputs,
+    trusted_replayed_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    request: _MarkCarryRequest,
+    opening: TimelineOpening,
+) -> tuple[_FxInstrumentRequirements, _FxInstrumentRequirements]:
+    """Return ordinary anchor requirements or seeded suffix-only requirements."""
+    if resume is not None:
+        return (
+            _resume_mark_requirements(resume, request),
+            _resume_event_requirements(resume, replay, trusted_replayed_rows, request),
+        )
+    mark = _mark_fx_minutes(
+        request.candles,
+        replay.loaded_execution_rows,
+        request.base_by_instrument,
+        request.quote_by_instrument,
+        request.valuation_ccy,
+        request.from_time,
+        request.to_time,
+        opening,
+    )
+    event = _event_fx_minutes(
+        trusted_replayed_rows,
+        replay.accrual_rows,
+        request.base_by_instrument,
+        request.quote_by_instrument,
+        request.valuation_ccy,
+        opening,
+    )
+    return mark, event
+
+
+async def _series_requirement_plan(
+    repo: Repository,
+    inputs: _SeriesRequirementInput,
+) -> _SeriesRequirementPlan:
+    """Plan mark and event FX requirements and carry windows in domain order.
+
+    Args:
+        repo: Repository providing carried-mark evidence.
+        inputs: Replay rows, mark inputs, and exact read policies.
+
+    Returns:
+        The complete requirement walks, carry plan, and identity pins.
+    """
+    request = inputs.mark_request
+    mark, event = _series_requirements_for_replay(
+        inputs.options.checkpoint_resume,
+        inputs.replay,
+        inputs.trusted_replayed_rows,
+        request,
+        inputs.opening,
+    )
+    carry = (
+        await _plan_mark_carry(repo, request) if inputs.policy.carry_valuation else _NO_MARK_CARRY
+    )
+    identity = _identity_fx_planes(
+        request.refs,
+        _merge_instrument_fx_minutes(
+            _merge_instrument_fx_minutes(mark, event),
+            carry.fx_requirements,
+        ),
+    )
+    _capture_walk_states(
+        inputs.options,
+        inputs.replay,
+        inputs.trusted_replayed_rows,
+        request,
+    )
+    return _SeriesRequirementPlan(mark, event, carry, identity)
+
+
+def _series_valuation_context(
+    resume: PnlCheckpointResume | None,
+    replay: _SeriesReplayInputs,
+    anchor: _ResolvedPnlAnchor,
+) -> tuple[
+    tuple[PnlIncompletenessReasonEntry, ...],
+    TimelineOpening | TimelineCheckpointOpening,
+]:
+    """Select global withhold reasons and the anchor or decoded engine opening."""
+    reasons = tuple(
+        reason
+        for reason in (replay.fill_gap_reason, replay.late_pre_activation_reason)
+        if reason is not None
+    )
+    opening = resume_engine_opening(resume) if resume is not None else anchor.opening
+    return reasons, opening
+
+
+def _resume_rate_sources(
+    suffix: tuple[PnlFxRateSource, ...],
+    resume: PnlCheckpointResume,
+) -> tuple[PnlFxRateSource, ...]:
+    """Union suffix sources with the event-only carried source prefix."""
+    carried = tuple(
+        PnlFxRateSource(
+            source_currency=source.source_currency,
+            valuation_currency=source.valuation_currency,
+            base_currency=source.base_currency,
+            quote_currency=source.quote_currency,
+            exchange=source.exchange,
+        )
+        for source in resume.bundle.rate_sources_prefix
+    )
+    unique = set(suffix) | set(carried)
+    return tuple(
+        sorted(
+            unique,
+            key=lambda source: (
+                source.source_currency,
+                source.valuation_currency,
+                source.base_currency,
+                source.quote_currency,
+                source.exchange,
+            ),
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -5943,6 +6369,93 @@ def _require_anchor_manifest_unchanged(
         )
 
 
+async def _load_checkpoint_resume_inputs(
+    repo: Repository,
+    anchor_load: _AnchorLoadResult,
+    to_time: datetime,
+    options: PnlSeriesReplayOptions,
+) -> _SeriesReplayInputs:
+    """Load and bound only suffix evidence for a verified checkpoint resume.
+
+    Args:
+        repo: Repository providing suffix-only reads.
+        anchor_load: Resolved anchor and resuming scope.
+        to_time: Inclusive suffix accounting boundary.
+        options: Replay options carrying verified resume state.
+
+    Returns:
+        Replay inputs carrying the checkpoint cursors and prefix spans.
+
+    Raises:
+        _CheckpointLateExecutionError: When a suffix or deferred row reaches C or t0.
+    """
+    resume = options.checkpoint_resume
+    frozen = options.frozen_execution_watermarks
+    assert resume is not None
+    assert frozen is not None
+    scope = anchor_load.scope
+    anchor = cast(_ResolvedPnlAnchor, anchor_load.anchor)
+    reference_tip = options.replay_generation_tip or to_time
+    try:
+        evidence = await load_checkpoint_suffix(
+            repo,
+            resume,
+            PnlCheckpointSuffixBounds(
+                generation_watermarks=frozen,
+                reference_tip=reference_tip,
+                as_of=scope.knowledge_horizon,
+                fill_witness_cut=options.frozen_fill_witness_cut,
+            ),
+        )
+    except ExecutionChainError as error:
+        raise PnlFrozenReplayEvidenceChangedError(
+            "P&L frozen execution and fill witnesses could not be recertified"
+        ) from error
+    manifest = options.frozen_execution_manifest_digest
+    if manifest is not None and _execution_manifest_digest(evidence.annulments) != manifest:
+        raise PnlFrozenReplayEvidenceChangedError("P&L frozen execution manifest changed")
+    if has_late_resume_execution(resume, evidence.executions, anchor.opening.t0):
+        raise _CheckpointLateExecutionError
+    opening = resume_engine_opening(resume)
+    replayed, reference = _series_replay_execution_windows(
+        evidence.executions,
+        to_time,
+        reference_tip,
+        dict(opening.last_effective_by_pool),
+    )
+    initial_applied = {
+        exchange: sequence
+        for exchange, sequence in resume.record.certificate.applied_watermarks_by_exchange.items()
+        if sequence > anchor.watermarks.get(exchange, 0)
+    }
+    carried_pools = tuple(
+        (pool.instrument_public_id, pool.shard_key)
+        for entry in resume.bundle.engine_state.pool_keys_by_instrument
+        for pool in entry.pools
+    )
+    return _SeriesReplayInputs(
+        loaded_execution_rows=evidence.executions,
+        replayed_execution_rows=replayed,
+        accrual_rows=[row for row in evidence.accruals if row["accrued_at"] <= to_time],
+        reference_tip=reference_tip,
+        reference_execution_rows=reference,
+        reference_accrual_rows=evidence.accruals,
+        lineage=_build_execution_lineage(evidence.lineage),
+        fill_gap_reason=_fill_gap_reason(options.frozen_has_fill_gap or False),
+        late_pre_activation_reason=None,
+        applied_annulments=evidence.annulments,
+        raw_watermarks=frozen,
+        fill_witness_cut=options.frozen_fill_witness_cut,
+        initial_last_effective=dict(opening.last_effective_by_pool),
+        initial_applied_watermarks=initial_applied,
+        carried_price_ref_spans=resume.bundle.price_ref_spans_by_instrument,
+        carried_display_spans=resume.bundle.display_activity_spans_by_instrument,
+        carried_seen_instruments=resume.bundle.engine_state.seen,
+        carried_pool_keys=carried_pools,
+        checkpoint_minute=resume.record.certificate.checkpoint_minute,
+    )
+
+
 async def _load_series_replay_inputs(
     repo: Repository,
     anchor_load: _AnchorLoadResult,
@@ -5959,6 +6472,16 @@ async def _load_series_replay_inputs(
     wallet_public_id = scope.wallet_public_id
     mode = scope.mode
     as_of = scope.knowledge_horizon
+    if options.checkpoint_resume is not None:
+        return await _load_checkpoint_resume_inputs(repo, anchor_load, to_time, options)
+    capture_request = options.checkpoint_capture
+    if capture_request is not None:
+        await capture_request.capture_execution_prefix(
+            repo,
+            wallet_public_id,
+            mode,
+            as_of,
+        )
     loaded_prefix = await _series_execution_prefix(repo, anchor_load, options)
     frozen_gap = options.frozen_has_fill_gap
     fill_gap_reason = (
@@ -5991,7 +6514,7 @@ async def _load_series_replay_inputs(
         anchor_load,
         loaded_execution_rows,
         to_time,
-        options.replay_generation_tip or to_time,
+        options,
     )
     return _SeriesReplayInputs(
         loaded_execution_rows=loaded_execution_rows,
@@ -6043,6 +6566,7 @@ def _partition_series_market_refs(
     suffix_refs, untrusted_reasons = _partition_series_execution_price_refs(
         replay.reference_execution_rows,
         refs,
+        replay.carried_price_ref_spans,
     )
     opening_spans = {
         instrument_public_id: (opening_t0, max(opening_t0, replay.reference_tip))
@@ -6072,16 +6596,33 @@ def _partition_series_market_refs(
     )
 
 
+async def _series_reference_accruals(
+    repo: Repository,
+    scope: _AnchorScope,
+    opening_t0: datetime,
+    reference_tip: datetime,
+) -> list[PnlTimelineAccrualRow]:
+    """Read and bound accrual references through the generation tip."""
+    return [
+        row
+        for row in await repo.get_accruals_for_pnl(
+            scope.wallet_public_id, scope.mode, scope.knowledge_horizon
+        )
+        if opening_t0 < row["accrued_at"] <= reference_tip
+    ]
+
+
 async def _load_series_accounting_tail(
     repo: Repository,
     anchor_load: _AnchorLoadResult,
     loaded_execution_rows: list[PnlTimelineOpeningExecutionRow],
     to_time: datetime,
-    reference_tip: datetime,
+    options: PnlSeriesReplayOptions,
 ) -> _SeriesReplayAccountingTail:
     """Load windowed executions, lineage, and accruals required for full series valuation."""
     scope = anchor_load.scope
     anchor = cast(_ResolvedPnlAnchor, anchor_load.anchor)
+    reference_tip = options.replay_generation_tip or to_time
     replayed_execution_rows, reference_execution_rows = _series_replay_execution_windows(
         loaded_execution_rows, to_time, reference_tip
     )
@@ -6098,16 +6639,42 @@ async def _load_series_accounting_tail(
     order_public_ids = list(
         dict.fromkeys(row["order_public_id"] for row in replayed_execution_rows)
     )
-    lineage_rows = await repo.get_pnl_timeline_execution_lineage(
-        order_public_ids, scope.knowledge_horizon
-    )
-    reference_accrual_rows = [
-        row
-        for row in await repo.get_accruals_for_pnl(
-            scope.wallet_public_id, scope.mode, scope.knowledge_horizon
+    capture_request = options.checkpoint_capture
+    if capture_request is not None and capture_request.active:
+        await capture_request.capture_accrual_prefix(
+            repo,
+            _AccrualPrefixRequest(
+                wallet_public_id=scope.wallet_public_id,
+                mode=scope.mode,
+                after_exclusive=anchor.opening.t0,
+                through=to_time,
+                as_of=scope.knowledge_horizon,
+            ),
         )
-        if anchor.opening.t0 < row["accrued_at"] <= reference_tip
-    ]
+        reference_accrual_rows = await _series_reference_accruals(
+            repo,
+            scope,
+            anchor.opening.t0,
+            reference_tip,
+        )
+        await capture_request.capture_prefix_lineage(
+            repo,
+            [row["order_public_id"] for row in loaded_execution_rows],
+            scope.knowledge_horizon,
+        )
+        lineage_rows = await repo.get_pnl_timeline_execution_lineage(
+            order_public_ids, scope.knowledge_horizon
+        )
+    else:
+        lineage_rows = await repo.get_pnl_timeline_execution_lineage(
+            order_public_ids, scope.knowledge_horizon
+        )
+        reference_accrual_rows = await _series_reference_accruals(
+            repo,
+            scope,
+            anchor.opening.t0,
+            reference_tip,
+        )
     return _SeriesReplayAccountingTail(
         replayed_execution_rows=replayed_execution_rows,
         accrual_rows=[row for row in reference_accrual_rows if row["accrued_at"] <= to_time],
@@ -6119,10 +6686,43 @@ async def _load_series_accounting_tail(
     )
 
 
+def _validate_checkpoint_resume_policy(
+    options: PnlSeriesReplayOptions,
+    policy: PnlSeriesReadPolicy,
+) -> None:
+    """Require frozen exact non-probe reads for checkpoint resume.
+
+    A late-fill probe must never run over a resumed suffix: on a resumed read,
+    ``earliest_affected_minute`` only sees suffix rows. Rejecting both
+    ``previous_replay_as_of`` and ``metadata_only`` ensures late-fill probes
+    always inspect the full post-anchor prefix.
+
+    Args:
+        options: Replay options carrying optional verified resume state.
+        policy: Series read policy controlling carry valuation.
+
+    Raises:
+        ValueError: When checkpoint resume omits a frozen execution cut, enables
+            carry valuation, sets ``previous_replay_as_of``, or enables
+            ``metadata_only``.
+    """
+    if options.checkpoint_resume is None:
+        return
+    if options.frozen_execution_watermarks is None:
+        raise ValueError("A P&L checkpoint resume requires a captured raw execution cut")
+    if policy.carry_valuation:
+        raise ValueError("A P&L checkpoint resume does not permit carry valuation")
+    if options.previous_replay_as_of is not None:
+        raise ValueError("A P&L checkpoint resume does not permit previous_replay_as_of")
+    if options.metadata_only:
+        raise ValueError("A P&L checkpoint resume does not permit metadata_only")
+
+
 def _validate_frozen_replay_policy(
     options: PnlSeriesReplayOptions, policy: PnlSeriesReadPolicy, to_time: datetime, as_of: datetime
 ) -> None:
     """Keep generation admission and resumed evidence reads historically scoped."""
+    _validate_checkpoint_resume_policy(options, policy)
     frozen = options.frozen_execution_watermarks
     if frozen is None and options.frozen_execution_manifest_digest is not None:
         raise ValueError("A frozen P&L execution manifest requires its captured raw cut")
@@ -6670,6 +7270,25 @@ async def _resolve_equity_overlay(
     return _convert_equity_overlay(result, request.valuation_ccy, rates, venues)
 
 
+def _activate_checkpoint_capture(
+    options: PnlSeriesReplayOptions,
+    to_time: datetime,
+) -> PnlCheckpointCaptureRequest | None:
+    """Activate and return the optional capture request.
+
+    Args:
+        options: Replay options carrying the optional capture request.
+        to_time: Requested checkpoint minute C.
+
+    Returns:
+        The activated request, or ``None`` when capture was not requested.
+    """
+    request = options.checkpoint_capture
+    if request is not None:
+        request.activate(to_time, options.replay_generation_tip)
+    return request
+
+
 async def _finalize_wallet_pnl_series(
     repo: Repository,
     result: PnlTimelineResult,
@@ -6686,6 +7305,11 @@ async def _finalize_wallet_pnl_series(
         equity_overlay=overlay.overlay,
         equity_coverage=overlay.coverage,
         applied_annulments=assembly.applied_annulments,
+        closing_checkpoint=result.closing_checkpoint,
+        closing_checkpoint_refusal=result.closing_checkpoint_refusal,
+        checkpoint_write=assembly.checkpoint_write,
+        checkpoint_capture_refusal=assembly.checkpoint_capture_refusal,
+        checkpoint_resume_fallback=assembly.checkpoint_resume_fallback,
     )
 
 
@@ -6717,18 +7341,20 @@ def _series_instrument_ids(
     instrument_ids = list(
         dict.fromkeys(
             opening_instrument_ids
+            + list(replay.carried_seen_instruments)
             + execution_instrument_ids
             + [row["instrument_public_id"] for row in accrual_rows]
         )
     )
     pool_keys = {(pool.instrument_public_id, pool.shard_key) for pool in anchor.opening.pools}
+    pool_keys.update(replay.carried_pool_keys)
     pool_keys.update(
         (row["instrument_public_id"], row["shard_key"]) for row in replayed_execution_rows
     )
     pool_instruments = {instrument_public_id for instrument_public_id, _ in pool_keys}
-    accrual_only_instruments = {
-        row["instrument_public_id"] for row in accrual_rows
-    } - pool_instruments
+    accrual_only_instruments = (
+        set(replay.carried_seen_instruments) | {row["instrument_public_id"] for row in accrual_rows}
+    ) - pool_instruments
     _enforce_total_work_budget(
         from_time,
         to_time,
@@ -6772,6 +7398,76 @@ async def _offload_series_valuation(
     if cancelled:
         raise asyncio.CancelledError
     return result
+
+
+async def _capture_symbol_refs_before_replay(
+    repo: Repository,
+    options: PnlSeriesReplayOptions,
+    instrument_ids: Sequence[str],
+    as_of: datetime,
+) -> None:
+    """Capture engine-seen symbol references immediately before the replay read.
+
+    Args:
+        repo: Repository providing symbol references.
+        options: Replay options carrying the optional capture request.
+        instrument_ids: Engine-seen opening, applied-execution, and accrual instruments.
+        as_of: Generation knowledge horizon.
+    """
+    request = options.checkpoint_capture
+    if request is None or not request.active:
+        return
+    await request.capture_symbol_refs(repo, sorted(set(instrument_ids)), as_of)
+
+
+async def _capture_event_fx_before_replay(
+    repo: Repository,
+    options: PnlSeriesReplayOptions,
+    event_requirements: Mapping[str, _FxMinuteRequirements],
+    as_of: datetime,
+) -> None:
+    """Capture event-only FX evidence immediately before replay FX loading.
+
+    Args:
+        repo: Repository providing FX certificate evidence.
+        options: Replay options carrying the optional capture request.
+        event_requirements: Exact event-only conversion requirements.
+        as_of: Generation knowledge horizon.
+    """
+    request = options.checkpoint_capture
+    if request is not None and request.active:
+        await request.capture_event_fx(repo, event_requirements, as_of)
+
+
+async def _load_wallet_series_fx(
+    repo: Repository,
+    request: _FxRequest,
+    options: PnlSeriesReplayOptions,
+    policy: PnlSeriesReadPolicy,
+) -> _SeriesFxEvidence:
+    """Capture event-FX fingerprints, then load the unchanged replay FX evidence.
+
+    Args:
+        repo: Repository providing FX evidence.
+        request: Complete merged FX requirement request.
+        options: Replay options carrying capture and exactness policies.
+        policy: Read policy controlling carried valuation.
+
+    Returns:
+        The loaded series FX evidence.
+    """
+    await _capture_event_fx_before_replay(
+        repo,
+        options,
+        request.event_requirements,
+        request.as_of,
+    )
+    return await _load_series_fx(
+        repo,
+        request,
+        carry_valuation=policy.carry_valuation,
+        pointwise_exact_fx=options.pointwise_exact_fx,
+    )
 
 
 @pnl_read_stage("series")
@@ -6838,6 +7534,7 @@ async def build_wallet_pnl_series(
     """
     with pnl_read_phase("series_anchor"):
         _validate_frozen_replay_policy(options, policy, to_time, as_of)
+        capture_request = _activate_checkpoint_capture(options, to_time)
         wallet_public_id = normalize_portfolio_pnl_wallet_public_id(wallet_public_id)
         _enforce_total_work_budget(from_time, to_time, 0)
         anchor_load = await _load_or_create_anchor(
@@ -6872,7 +7569,29 @@ async def build_wallet_pnl_series(
                 valuation_ccy,
             )
     with pnl_read_phase("series_replay"):
-        replay = await _load_series_replay_inputs(repo, anchor_load, to_time, options)
+        try:
+            replay = await _load_series_replay_inputs(repo, anchor_load, to_time, options)
+        except _CheckpointLateExecutionError:
+            fallback = await build_wallet_pnl_series(
+                repo,
+                wallet_public_id,
+                mode,
+                from_time,
+                to_time,
+                granularity,
+                as_of,
+                valuation_ccy,
+                policy=policy,
+                options=replace(
+                    options,
+                    checkpoint_capture=None,
+                    checkpoint_resume=None,
+                ),
+            )
+            return replace(
+                fallback,
+                checkpoint_resume_fallback="checkpoint_late_execution",
+            )
         replay_metadata = await _series_replay_metadata(
             repo, anchor_load, replay, options, (from_time, to_time)
         )
@@ -6887,6 +7606,12 @@ async def build_wallet_pnl_series(
             anchor, replay, from_time, to_time
         )
     with pnl_read_phase("series_market_data"):
+        await _capture_symbol_refs_before_replay(
+            repo,
+            options,
+            instrument_ids,
+            as_of,
+        )
         refs = (
             await repo.get_instrument_symbol_refs(instrument_ids, as_of) if instrument_ids else []
         )
@@ -6897,10 +7622,17 @@ async def build_wallet_pnl_series(
             replay,
             anchor.opening.t0,
         )
-        trusted_refs = market_refs.trusted_refs
-        quote_by_instrument = market_refs.quote_by_instrument
-        base_by_instrument = market_refs.base_by_instrument
-        untrusted_price_reasons_by_instrument = market_refs.untrusted_price_reasons_by_instrument
+        (
+            trusted_refs,
+            quote_by_instrument,
+            base_by_instrument,
+            untrusted_price_reasons_by_instrument,
+        ) = (
+            market_refs.trusted_refs,
+            market_refs.quote_by_instrument,
+            market_refs.base_by_instrument,
+            market_refs.untrusted_price_reasons_by_instrument,
+        )
         mark_candles = await _load_mark_candles(
             repo,
             trusted_refs,
@@ -6909,40 +7641,35 @@ async def build_wallet_pnl_series(
             as_of,
         )
     with pnl_read_phase("series_requirements"):
-        trusted_instruments = set(quote_by_instrument)
         trusted_replayed_rows = [
             row
             for row in replay.replayed_execution_rows
-            if row["instrument_public_id"] in trusted_instruments
+            if row["instrument_public_id"] in quote_by_instrument
         ]
-        display_activity_spans = _series_display_activity_spans(
-            anchor.opening,
-            replay.reference_execution_rows,
-            replay.reference_accrual_rows,
+        display_activity_spans = merge_resume_spans(
+            replay.carried_display_spans,
+            _series_display_activity_spans(
+                (
+                    TimelineOpening(pools=(), t0=anchor.opening.t0)
+                    if replay.checkpoint_minute is not None
+                    else anchor.opening
+                ),
+                replay.reference_execution_rows,
+                replay.reference_accrual_rows,
+            ),
         )
         display_identities = _instrument_display_identities(display_activity_spans, refs)
-        mark_requirements = _mark_fx_minutes(
-            mark_candles,
-            replay.loaded_execution_rows,
-            base_by_instrument,
-            quote_by_instrument,
-            valuation_ccy,
-            from_time,
-            to_time,
-            anchor.opening,
-        )
-        event_requirements = _event_fx_minutes(
-            trusted_replayed_rows,
-            replay.accrual_rows,
-            base_by_instrument,
-            quote_by_instrument,
-            valuation_ccy,
-            anchor.opening,
-        )
-        mark_carry = (
-            await _plan_mark_carry(
-                repo,
-                _MarkCarryRequest(
+        (
+            mark_requirements,
+            event_requirements,
+            mark_carry,
+            identity_planes,
+        ) = await _series_requirement_plan(
+            repo,
+            _SeriesRequirementInput(
+                replay=replay,
+                trusted_replayed_rows=trusted_replayed_rows,
+                mark_request=_MarkCarryRequest(
                     candles=mark_candles,
                     execution_rows=replay.loaded_execution_rows,
                     base_by_instrument=base_by_instrument,
@@ -6954,18 +7681,12 @@ async def build_wallet_pnl_series(
                     opening=anchor.opening,
                     as_of=as_of,
                 ),
-            )
-            if policy.carry_valuation
-            else _NO_MARK_CARRY
-        )
-        identity_planes = _identity_fx_planes(
-            trusted_refs,
-            _merge_instrument_fx_minutes(
-                _merge_instrument_fx_minutes(mark_requirements, event_requirements),
-                mark_carry.fx_requirements,
+                options=options,
+                policy=policy,
+                opening=anchor.opening,
             ),
         )
-    fx_evidence = await _load_series_fx(
+    fx_evidence = await _load_wallet_series_fx(
         repo,
         _FxRequest(
             mark_requirements=mark_requirements,
@@ -6975,14 +7696,14 @@ async def build_wallet_pnl_series(
             valuation_ccy=valuation_ccy,
             carried_mark_requirements=mark_carry.fx_requirements,
         ),
-        carry_valuation=policy.carry_valuation,
-        pointwise_exact_fx=options.pointwise_exact_fx,
+        options,
+        policy,
     )
 
-    global_reasons = tuple(
-        reason
-        for reason in (replay.fill_gap_reason, replay.late_pre_activation_reason)
-        if reason is not None
+    global_reasons, engine_opening = _series_valuation_context(
+        options.checkpoint_resume,
+        replay,
+        anchor,
     )
 
     def value_series() -> tuple[PnlTimelineResult, tuple[PnlFxRateSource, ...]]:
@@ -7010,26 +7731,37 @@ async def build_wallet_pnl_series(
             )
             reset_pnl_fx_execution_order()
             executions = [
-                _to_timeline_execution(
-                    row,
-                    valuation_ccy,
-                    fx_evidence.book,
-                    base_asset=base_by_instrument.get(row["instrument_public_id"]),
-                    price_currency=quote_by_instrument.get(row["instrument_public_id"]),
-                    venues=fx_evidence.venues_at(
-                        row["instrument_public_id"], _rate_minute(row["timestamp"])
+                _execution_with_conversion_mark_evidence(
+                    _to_timeline_execution(
+                        row,
+                        valuation_ccy,
+                        fx_evidence.book,
+                        base_asset=base_by_instrument.get(row["instrument_public_id"]),
+                        price_currency=quote_by_instrument.get(row["instrument_public_id"]),
+                        venues=fx_evidence.venues_at(
+                            row["instrument_public_id"], _rate_minute(row["timestamp"])
+                        ),
                     ),
+                    row,
+                    quote_by_instrument.get(row["instrument_public_id"]),
+                    event_requirements,
+                    valuation_ccy,
                 )
                 for row in replay.loaded_execution_rows
             ]
             accruals = [
-                _to_timeline_accrual(
-                    row,
-                    valuation_ccy,
-                    fx_evidence.book,
-                    fx_evidence.venues_at(
-                        row["instrument_public_id"], _rate_minute(row["accrued_at"])
+                _accrual_with_conversion_mark_evidence(
+                    _to_timeline_accrual(
+                        row,
+                        valuation_ccy,
+                        fx_evidence.book,
+                        fx_evidence.venues_at(
+                            row["instrument_public_id"], _rate_minute(row["accrued_at"])
+                        ),
                     ),
+                    row,
+                    event_requirements,
+                    valuation_ccy,
                 )
                 for row in replay.accrual_rows
             ]
@@ -7039,20 +7771,25 @@ async def build_wallet_pnl_series(
                 granularity=granularity,
                 valuation_ccy=valuation_ccy,
                 recovery_budget_per_point=options.replay_generation_tip is not None,
+                capture_checkpoint=(capture_request is not None and capture_request.active),
             )
             result = _timed_build_pnl_timeline(
                 executions,
                 accruals,
                 marks,
                 window,
-                opening=anchor.opening,
+                opening=engine_opening,
                 lineage=replay.lineage,
                 untrusted_price_reasons_by_instrument=untrusted_price_reasons_by_instrument,
                 mark_evidence=mark_evidence,
             )
             _record_carry_timing(result.points, carry_valuation=policy.carry_valuation)
             for global_reason in global_reasons:
-                result = _withhold_series_for_global_reason(result, global_reason)
+                result = _withhold_series_for_global_reason(
+                    result,
+                    global_reason,
+                    capture_requested=(capture_request is not None and capture_request.active),
+                )
             result = _with_instrument_display_identities(
                 result,
                 display_identities,
@@ -7069,12 +7806,29 @@ async def build_wallet_pnl_series(
                     fx_evidence.used_planes
                 )
             )
+            if options.checkpoint_resume is not None:
+                rate_sources = _resume_rate_sources(rate_sources, options.checkpoint_resume)
         return result, rate_sources
 
     result, rate_sources = (
         await _offload_series_valuation(value_series)
         if options.offload_valuation
         else value_series()
+    )
+    checkpoint_write, capture_refusal = capture_checkpoint_write(
+        PnlCheckpointCaptureFinalization(
+            request=capture_request,
+            result=result,
+            global_reasons=global_reasons,
+            event_requirements=event_requirements,
+            fx_evidence=fx_evidence,
+            valuation_ccy=valuation_ccy,
+            reference_execution_rows=replay.reference_execution_rows,
+            display_activity_spans=display_activity_spans,
+            checkpoint_minute=to_time,
+            as_of=as_of,
+            timeline_calc_version=PNL_TIMELINE_CALC_VERSION,
+        )
     )
     with pnl_read_phase("series_overlay"):
         return await _finalize_wallet_pnl_series(
@@ -7096,6 +7850,8 @@ async def build_wallet_pnl_series(
                     as_of=as_of,
                     points=result.points,
                 ),
+                checkpoint_write=checkpoint_write,
+                checkpoint_capture_refusal=capture_refusal,
             ),
         )
 

@@ -14,9 +14,16 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
+from typing import Final
+from unittest.mock import Mock
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import sqlite
+from sqlalchemy.sql import Executable
+from sqlalchemy.sql import Select
 
 from snapper.data.models import AccrualLedger
 from snapper.data.models import Execution
@@ -24,6 +31,7 @@ from snapper.data.models import ExecutionAnnulment
 from snapper.data.models import ExecutionAnnulmentVisibility
 from snapper.data.models import Order
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import PnlTimelineAccrualRow
 
 _NOW = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 _TS = _NOW - timedelta(hours=3)
@@ -297,3 +305,177 @@ class TestGetAccrualsForPnl:
             "0000face-0000-7000-8000-0000000000ff", "live", _NOW
         )
         assert rows == []
+
+    async def test_unbounded_sql_is_byte_identical_to_baseline_for_sqlite_and_postgresql(
+        self,
+    ) -> None:
+        """Keep the unbounded accrual SQL byte-identical when both bounds are ``None``.
+
+        Given: ``get_accruals_for_pnl`` invoked with ``after_exclusive=None`` and
+            ``through=None`` under SQLite and PostgreSQL dialects.
+        When: Each executed statement is intercepted and compiled for its dialect.
+        Then: The compiled SQL text matches the exact pre-bounds golden queries.
+        """
+        statements: list[Executable] = []
+        repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+        try:
+            with patch.object(repo, "session", lambda: _CapturingAccrualSession(statements)):
+                await repo.get_accruals_for_pnl(_WALLET, "live", _NOW)
+                await repo.get_accruals_for_pnl(
+                    _WALLET,
+                    "live",
+                    _NOW,
+                    after_exclusive=None,
+                    through=None,
+                )
+        finally:
+            await repo.engine.dispose()
+        assert len(statements) == 2
+        for stmt in statements:
+            assert isinstance(stmt, Select)
+            assert str(stmt.compile(dialect=sqlite.dialect())) == _ACCRUAL_SQL_SQLITE
+            assert str(stmt.compile(dialect=postgresql.dialect())) == _ACCRUAL_SQL_POSTGRESQL
+
+    async def test_bounds_push_predicates_to_sql_and_match_python_filter(
+        self, repository: SQLAlchemyRepository
+    ) -> None:
+        """Push ``(after_exclusive, through]`` bounds into SQL matching a Python filter.
+
+        Given: Active accruals before, on, and after boundary instants including an
+            accrual exactly at ``as_of`` and one after ``as_of``.
+        When: ``get_accruals_for_pnl`` queries every combination of ``after_exclusive``
+            and ``through`` bounds.
+        Then: Every call emits the matching SQL predicates and returns the exact
+            same ordered rows as filtering the unbounded read in Python.
+        """
+        t_earliest = _NOW - timedelta(hours=3)
+        t_first = _NOW - timedelta(hours=2)
+        t_second = _NOW - timedelta(hours=1)
+        async with repository.session() as session:
+            session.add_all(
+                [
+                    _accrual(_I1, _WALLET, "live", t_earliest, 0.5),
+                    _accrual(_I2, _WALLET, "live", _NOW, 3.0),
+                ]
+            )
+            await session.commit()
+
+        baseline = await repository.get_accruals_for_pnl(_WALLET, "live", _NOW)
+        assert [row["accrued_at"] for row in baseline] == [
+            t_earliest,
+            t_first,
+            t_second,
+            _NOW,
+        ]
+        bound_cases: list[tuple[datetime | None, datetime | None]] = [
+            (None, None),
+            (t_first, None),
+            (None, t_second),
+            (t_first, t_second),
+            (t_first, _NOW),
+            (t_second, t_second),
+            (t_earliest, _NOW + timedelta(hours=2)),
+        ]
+        for after_exclusive, through in bound_cases:
+            actual = await repository.get_accruals_for_pnl(
+                _WALLET,
+                "live",
+                _NOW,
+                after_exclusive=after_exclusive,
+                through=through,
+            )
+            expected: list[PnlTimelineAccrualRow] = [
+                row
+                for row in baseline
+                if (after_exclusive is None or row["accrued_at"] > after_exclusive)
+                and (through is None or row["accrued_at"] <= through)
+            ]
+            assert actual == expected
+
+        statements: list[Executable] = []
+        with patch.object(repository, "session", lambda: _CapturingAccrualSession(statements)):
+            await repository.get_accruals_for_pnl(
+                _WALLET,
+                "live",
+                _NOW,
+                after_exclusive=t_first,
+                through=t_second,
+            )
+        compiled_bounded = str(statements[0].compile(dialect=sqlite.dialect()))
+        assert "accrual_ledger.accrued_at > ?" in compiled_bounded
+        assert compiled_bounded.count("accrual_ledger.accrued_at <= ?") == 2
+
+
+_ACCRUAL_SQL_SQLITE: Final[str] = (
+    "SELECT accrual_ledger.instrument_public_id, accrual_ledger.wallet_public_id, "
+    "accrual_ledger.operator_public_id, accrual_ledger.mode, accrual_ledger.accrual_type, "
+    "accrual_ledger.accrued_at, accrual_ledger.amount, accrual_ledger.amount_asset, "
+    "accrual_ledger.rate, accrual_ledger.notional, "
+    "accrual_ledger.position_quantity_at_accrual, accrual_ledger.exchange, "
+    "accrual_ledger.id, accrual_ledger.public_id, accrual_ledger.session_id, "
+    "accrual_ledger.sequence_id, accrual_ledger.timestamp, accrual_ledger.known_to \n"
+    "FROM accrual_ledger \n"
+    "WHERE accrual_ledger.wallet_public_id = ? AND accrual_ledger.mode = ? "
+    "AND accrual_ledger.accrued_at <= ? AND accrual_ledger.timestamp <= ? "
+    "AND accrual_ledger.known_to > ? ORDER BY accrual_ledger.accrued_at ASC"
+)
+"""Golden SQLite SQL for ``get_accruals_for_pnl`` when optional bounds are omitted."""
+
+_ACCRUAL_SQL_POSTGRESQL: Final[str] = (
+    "SELECT accrual_ledger.instrument_public_id, accrual_ledger.wallet_public_id, "
+    "accrual_ledger.operator_public_id, accrual_ledger.mode, accrual_ledger.accrual_type, "
+    "accrual_ledger.accrued_at, accrual_ledger.amount, accrual_ledger.amount_asset, "
+    "accrual_ledger.rate, accrual_ledger.notional, "
+    "accrual_ledger.position_quantity_at_accrual, accrual_ledger.exchange, "
+    "accrual_ledger.id, accrual_ledger.public_id, accrual_ledger.session_id, "
+    "accrual_ledger.sequence_id, accrual_ledger.timestamp, accrual_ledger.known_to \n"
+    "FROM accrual_ledger \n"
+    "WHERE accrual_ledger.wallet_public_id = %(wallet_public_id_1)s::UUID "
+    "AND accrual_ledger.mode = %(mode_1)s::VARCHAR "
+    "AND accrual_ledger.accrued_at <= %(accrued_at_1)s::TIMESTAMP WITH TIME ZONE "
+    "AND accrual_ledger.timestamp <= %(timestamp_1)s::TIMESTAMP WITH TIME ZONE "
+    "AND accrual_ledger.known_to > %(known_to_1)s::TIMESTAMP WITH TIME ZONE "
+    "ORDER BY accrual_ledger.accrued_at ASC"
+)
+"""Golden PostgreSQL SQL for ``get_accruals_for_pnl`` when optional bounds are omitted."""
+
+
+class _CapturingAccrualSession:
+    """Async session stand-in recording compiled statements and yielding zero rows."""
+
+    def __init__(self, statements: list[Executable]) -> None:
+        """Store the list receiving executed statements.
+
+        Args:
+            statements: List collecting SQLAlchemy statements executed by the repo.
+        """
+        self._statements = statements
+
+    async def __aenter__(self) -> _CapturingAccrualSession:
+        """Enter the async session context.
+
+        Returns:
+            This capturing session.
+        """
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        """Exit the async session context cleanly.
+
+        Args:
+            exc_info: Exception details, ignored.
+        """
+        del exc_info
+
+    async def execute(self, statement: Executable) -> Mock:
+        """Record an executed statement and return an empty scalar result.
+
+        Args:
+            statement: SQLAlchemy statement sent by the repository method.
+
+        Returns:
+            Mock result whose ``scalars().all()`` returns an empty list.
+        """
+        self._statements.append(statement)
+        scalars = Mock(all=Mock(return_value=[]))
+        return Mock(scalars=Mock(return_value=scalars))

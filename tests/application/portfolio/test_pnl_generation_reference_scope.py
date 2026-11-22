@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from datetime import datetime
+from typing import Literal
 
 import pytest
 
@@ -26,7 +27,7 @@ class _FixedCutRepo(fixtures.FakeRepo):
         watermarks: Mapping[str, int],
         as_of: datetime,
         *,
-        fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
+        fill_witness_cut: PnlTimelineFillWitnessCut | Literal["capture"] | None = None,
     ) -> PnlTimelineExecutionPrefix:
         """Refuse a test call asking to change the captured coordinates."""
         assert (wallet_public_id, mode) == (fixtures._W1, "live")

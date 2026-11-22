@@ -36,8 +36,13 @@ from snapper.application.portfolio.fx_conversion_shadow import reset_fx_shadow_p
 from snapper.application.portfolio.fx_rates import convert_amount
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_anchor_identity import portfolio_pnl_anchor_public_id
+from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
+from snapper.application.portfolio.pnl_timeline import PnlTimelineResult
 from snapper.application.portfolio.pnl_timeline import PnlTimelineWorkBudgetError
+from snapper.application.portfolio.pnl_timeline import TimelineExecution
+from snapper.application.portfolio.pnl_timeline import TimelineWindow
+from snapper.application.portfolio.pnl_timeline import build_pnl_timeline
 from snapper.application.portfolio.pnl_timeline_service import _UNSAMPLED_EQUITY_COVERAGE
 from snapper.application.portfolio.pnl_timeline_service import PNL_ANCHOR_CALC_VERSION
 from snapper.application.portfolio.pnl_timeline_service import PNL_SAMPLE_CALC_VERSION
@@ -64,6 +69,7 @@ from snapper.application.portfolio.pnl_timeline_service import _EquityOverlayReq
 from snapper.application.portfolio.pnl_timeline_service import _EquityOverlayResult
 from snapper.application.portfolio.pnl_timeline_service import _event_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _execution_rows_with_effective_time
+from snapper.application.portfolio.pnl_timeline_service import _finalize_wallet_pnl_series
 from snapper.application.portfolio.pnl_timeline_service import _mark_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _opening_mark_requirements
 from snapper.application.portfolio.pnl_timeline_service import _opening_marks_from_candles
@@ -76,8 +82,11 @@ from snapper.application.portfolio.pnl_timeline_service import _qualified_sample
 from snapper.application.portfolio.pnl_timeline_service import _resolve_equity_overlay
 from snapper.application.portfolio.pnl_timeline_service import _sample_coverage_flags
 from snapper.application.portfolio.pnl_timeline_service import _sample_point_overlay
+from snapper.application.portfolio.pnl_timeline_service import _SeriesAssembly
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_accrual
 from snapper.application.portfolio.pnl_timeline_service import _to_timeline_execution
+from snapper.application.portfolio.pnl_timeline_service import _with_instrument_display_identities
+from snapper.application.portfolio.pnl_timeline_service import _withhold_series_for_global_reason
 from snapper.application.portfolio.pnl_timeline_service import build_fx_rates
 from snapper.application.portfolio.pnl_timeline_service import build_marks
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
@@ -885,11 +894,22 @@ class FakeRepo:
         return list(self._ai_decisions[:limit])
 
     async def get_accruals_for_pnl(
-        self, wallet_public_id: str, mode: str, as_of: datetime
+        self,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+        *,
+        after_exclusive: datetime | None = None,
+        through: datetime | None = None,
     ) -> list[PnlTimelineAccrualRow]:
-        """Return the canned accrual rows."""
+        """Return the canned accrual rows bounded by optional ``(after_exclusive, through]``."""
         self.accrual_calls.append((wallet_public_id, mode, as_of))
-        return list(self._accruals)
+        return [
+            row
+            for row in self._accruals
+            if (after_exclusive is None or row["accrued_at"] > after_exclusive)
+            and (through is None or row["accrued_at"] <= through)
+        ]
 
     async def get_instrument_symbol_refs(
         self, instrument_public_ids: Sequence[str], as_of: datetime
@@ -7722,3 +7742,125 @@ class TestBuildWalletSeriesEquityOverlay:
         assert result.equity_coverage.sampled is False
         assert result.equity_overlay_at(_T0).equity is None
         assert repo.sample_calls == []
+
+
+def _captured_timeline_result() -> PnlTimelineResult:
+    """Build one non-empty timeline result carrying a captured closing checkpoint."""
+    captured = build_pnl_timeline(
+        (
+            TimelineExecution(
+                instrument_public_id=_I1,
+                shard_key=f"kraken:live:{_I1}:untagged",
+                exchange="kraken",
+                scope_sequence=1,
+                event_time=_m(1),
+                side="buy",
+                size=1.0,
+                position_delta=1.0,
+                price=100.0,
+                fee=0.0,
+                fee_asset="USD",
+                order_public_id=f"order-{_I1}-1",
+            ),
+        ),
+        (),
+        {(_I1, _m(1)): 105.0},
+        TimelineWindow(
+            from_time=_T0,
+            to_time=_m(1),
+            granularity="1m",
+            valuation_ccy="USD",
+            recovery_budget_per_point=True,
+            capture_checkpoint=True,
+        ),
+    )
+    assert captured.closing_checkpoint is not None
+    return captured
+
+
+class TestClosingCheckpointForwarding:
+    """Cover preservation and global withholding of closing checkpoints across wrappers."""
+
+    def test_display_identity_wrapper_forwards_closing_checkpoint_and_refusal(self) -> None:
+        """Preserve both closing checkpoint fields across display-identity attachment.
+
+        Given: A built timeline result carrying a closing checkpoint and another carrying
+            a capture refusal reason.
+        When: ``_with_instrument_display_identities`` wraps each result.
+        Then: Display identities attach while ``closing_checkpoint`` and
+            ``closing_checkpoint_refusal`` remain unchanged.
+        """
+        captured = _captured_timeline_result()
+        decorated = _with_instrument_display_identities(captured, {_I1: ("BTC-USD", "kraken")})
+        assert decorated.closing_checkpoint is captured.closing_checkpoint
+        assert decorated.closing_checkpoint_refusal is None
+        assert decorated.points[-1].per_instrument[0].native_symbol == "BTC-USD"
+
+        refused = PnlTimelineResult(
+            points=captured.points,
+            granularity=captured.granularity,
+            valuation_ccy=captured.valuation_ccy,
+            closing_checkpoint=None,
+            closing_checkpoint_refusal="carried_event_inputs",
+        )
+        decorated_refused = _with_instrument_display_identities(
+            refused, {_I1: ("BTC-USD", "kraken")}
+        )
+        assert decorated_refused.closing_checkpoint is None
+        assert decorated_refused.closing_checkpoint_refusal == "carried_event_inputs"
+
+    def test_global_withhold_clears_closing_checkpoint_with_global_withhold_reason(self) -> None:
+        """Clear any captured closing checkpoint when a global ledger withhold applies.
+
+        Given: A timeline result carrying a captured closing checkpoint and a global
+            ``fill_evidence_gap`` incompleteness entry.
+        When: ``_withhold_series_for_global_reason`` withholds the series.
+        Then: ``closing_checkpoint`` is cleared to ``None`` and
+            ``closing_checkpoint_refusal`` is forced to ``"global_withhold"``.
+        """
+        captured = _captured_timeline_result()
+        withheld = _withhold_series_for_global_reason(
+            captured,
+            PnlIncompletenessReasonEntry(
+                reason="fill_evidence_gap",
+                withholding_tier="untrusted",
+                withholding_scope="global",
+                trigger_instrument_public_id=None,
+            ),
+        )
+        assert withheld.closing_checkpoint is None
+        assert withheld.closing_checkpoint_refusal == "global_withhold"
+
+    async def test_finalize_wallet_pnl_series_forwards_closing_checkpoint_and_refusal(
+        self,
+    ) -> None:
+        """Forward both closing checkpoint fields onto ``PnlWalletSeriesResult``.
+
+        Given: One timeline result carrying a closing checkpoint and another carrying
+            ``closing_checkpoint_refusal="global_withhold"``.
+        When: ``_finalize_wallet_pnl_series`` assembles each ``PnlWalletSeriesResult``.
+        Then: Both ``closing_checkpoint`` and ``closing_checkpoint_refusal`` survive
+            onto the returned ``PnlWalletSeriesResult``.
+        """
+        repo = FakeRepo()
+        captured = _captured_timeline_result()
+        assembly = _SeriesAssembly(
+            rate_sources=(),
+            replay_metadata=None,
+            applied_annulments=(),
+            overlay_request=_overlay_request(captured.points, current_truth=False),
+        )
+        finalized_captured = await _finalize_wallet_pnl_series(repo, captured, assembly)
+        assert finalized_captured.closing_checkpoint is captured.closing_checkpoint
+        assert finalized_captured.closing_checkpoint_refusal is None
+
+        refused = PnlTimelineResult(
+            points=captured.points,
+            granularity=captured.granularity,
+            valuation_ccy=captured.valuation_ccy,
+            closing_checkpoint=None,
+            closing_checkpoint_refusal="global_withhold",
+        )
+        finalized_refused = await _finalize_wallet_pnl_series(repo, refused, assembly)
+        assert finalized_refused.closing_checkpoint is None
+        assert finalized_refused.closing_checkpoint_refusal == "global_withhold"

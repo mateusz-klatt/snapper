@@ -12,6 +12,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from typing import Literal
 from typing import cast
 from uuid import UUID
 
@@ -53,6 +54,7 @@ from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
+from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 
 _MINUTE = datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
@@ -168,8 +170,11 @@ class _DiscoveryRepository:
         mode: str,
         watermarks: dict[str, int],
         as_of: datetime,
+        *,
+        fill_witness_cut: PnlTimelineFillWitnessCut | Literal["capture"] | None = None,
     ) -> PnlTimelineExecutionPrefix:
         """Return the exact supplied cut and record its knowledge horizon."""
+        del wallet_public_id, mode, fill_witness_cut
         self.horizons.append(as_of)
         return {
             "watermarks": watermarks,
@@ -182,15 +187,27 @@ class _DiscoveryRepository:
         }
 
     async def get_accruals_for_pnl(
-        self, wallet_public_id: str, mode: str, as_of: datetime
+        self,
+        wallet_public_id: str,
+        mode: str,
+        as_of: datetime,
+        *,
+        after_exclusive: datetime | None = None,
+        through: datetime | None = None,
     ) -> list[PnlTimelineAccrualRow]:
         """Return the sealed foreign funding row at the same horizon."""
+        del wallet_public_id, mode
         self.horizons.append(as_of)
         before = _accrual()
         before["accrued_at"] = _MINUTE - timedelta(hours=2)
         after = _accrual()
         after["accrued_at"] = _MINUTE + timedelta(minutes=6)
-        return [before, _accrual(), after]
+        return [
+            row
+            for row in (before, _accrual(), after)
+            if (after_exclusive is None or row["accrued_at"] > after_exclusive)
+            and (through is None or row["accrued_at"] <= through)
+        ]
 
     async def get_instrument_symbol_refs(
         self, instrument_public_ids: list[str], as_of: datetime

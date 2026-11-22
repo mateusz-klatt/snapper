@@ -472,6 +472,8 @@ from snapper.data.repository_types import PnlTimelineExecutionLineageRow
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineExecutionPrefixBundle
 from snapper.data.repository_types import PnlTimelineExecutionRow
+from snapper.data.repository_types import PnlTimelineExecutionSuffix
+from snapper.data.repository_types import PnlTimelineExecutionSuffixRequest
 from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 from snapper.data.repository_types import PnlTimelineSignalMarkerRow
@@ -5461,9 +5463,17 @@ class Repository(ABC):
         watermarks: Mapping[str, int],
         as_of: datetime,
         *,
-        fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
+        fill_witness_cut: PnlTimelineFillWitnessCut | Literal["capture"] | None = None,
     ) -> PnlTimelineExecutionPrefix:
-        """Prove supplied execution bounds and any exact fill candidate cut."""
+        """Prove supplied execution bounds and capture or revalidate fill candidates."""
+        ...
+
+    @abstractmethod
+    async def get_pnl_timeline_execution_suffix_at_watermarks(
+        self,
+        request: PnlTimelineExecutionSuffixRequest,
+    ) -> PnlTimelineExecutionSuffix:
+        """Read only suffix and deferred coordinates under the certified fold."""
         ...
 
     @abstractmethod
@@ -5635,11 +5645,15 @@ class Repository(ABC):
         wallet_public_id: str,
         mode: str,
         as_of: datetime,
+        *,
+        after_exclusive: datetime | None = None,
+        through: datetime | None = None,
     ) -> list[PnlTimelineAccrualRow]:
         """Retrieve a scope's funding accruals for the P&L timeline.
 
         Every active accrual for ``(wallet_public_id, mode)`` with
-        ``accrued_at <= as_of``, ordered by ``accrued_at`` ascending. The native
+        ``accrued_at <= as_of``, ordered by ``accrued_at`` ascending, optionally
+        bounded by ``after_exclusive < accrued_at <= through``. The native
         ``amount``/``amount_asset`` pass through unconverted — the caller
         resolves the valuation-currency amount before feeding the pure builder.
         Live spot data carries no funding, so this read is normally empty.
@@ -5649,6 +5663,8 @@ class Repository(ABC):
             mode: Trading mode scope (``live``, ``paper``).
             as_of: Point-in-time for the temporal query; also the inclusive
                 ``accrued_at`` upper bound.
+            after_exclusive: Optional exclusive lower ``accrued_at`` bound.
+            through: Optional inclusive upper ``accrued_at`` bound.
 
         Returns:
             Accrual rows ordered by ``accrued_at`` ascending.
@@ -6031,6 +6047,26 @@ class Repository(ABC):
         Returns:
             Combined aggregate over exactly the rows ``get_pnl_fx_rate_candles_at``
             returns for the same arguments.
+        """
+        ...
+
+    @abstractmethod
+    async def get_pnl_event_fx_candle_fingerprints_by_plane(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> dict[PnlFxRatePlane, IdAggregate]:
+        """Return per-plane ``(count, id_sum, max_id, max_timestamp)`` for FX candles.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` FX planes of the consumed pairs.
+            open_ats: Exact 1-minute candle open timestamps to fingerprint.
+            as_of: Knowledge horizon of the replay's FX candle read.
+
+        Returns:
+            Mapping from populated ``(base, quote, exchange)`` planes to their
+            exact aggregates, omitting planes with zero matching rows.
         """
         ...
 
@@ -20625,6 +20661,59 @@ class SQLAlchemyRepository(Repository):
         )
         return [(execution, order, instrument) for execution, order, instrument in result.all()]
 
+    @staticmethod
+    async def _read_pnl_timeline_execution_suffix(
+        s: AsyncSession,
+        request: PnlTimelineExecutionSuffixRequest,
+    ) -> list[tuple[Execution, Order | None, Instrument | None]]:
+        """Read only suffix ranges and explicitly deferred coordinates."""
+        bounds = []
+        exchanges = set(request.cutoff_watermarks) | set(request.generation_watermarks)
+        exchanges.update(request.deferred_execution_sequences)
+        for exchange in sorted(exchanges):
+            lower = request.cutoff_watermarks.get(exchange, 0)
+            upper = request.generation_watermarks.get(exchange, 0)
+            deferred = tuple(request.deferred_execution_sequences.get(exchange, ()))
+            if lower >= upper and not deferred:
+                continue
+            bounds.append(
+                or_(
+                    and_(
+                        Execution.exchange == exchange,
+                        Execution.scope_sequence > lower,
+                        Execution.scope_sequence <= upper,
+                    ),
+                    and_(
+                        Execution.exchange == exchange,
+                        Execution.scope_sequence.in_(deferred),
+                    ),
+                )
+            )
+        result = await s.execute(
+            select(Execution, Order, Instrument)
+            .outerjoin(
+                Order,
+                and_(
+                    Execution.order_public_id == Order.public_id,
+                    Order.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .outerjoin(
+                Instrument,
+                and_(
+                    Order.instrument_public_id == Instrument.public_id,
+                    Instrument.known_to == KNOWN_TO_MAX,
+                ),
+            )
+            .where(
+                Execution.wallet_public_id == request.wallet_public_id,
+                Execution.mode == request.mode,
+                or_(*bounds),
+            )
+            .order_by(Execution.exchange.asc(), Execution.scope_sequence.asc())
+        )
+        return list(result.all())
+
     async def _read_pnl_timeline_fill_lineage(
         self,
         s: AsyncSession,
@@ -22402,6 +22491,143 @@ class SQLAlchemyRepository(Repository):
         )
 
     @staticmethod
+    def _expected_pnl_timeline_suffix_coordinates(
+        request: PnlTimelineExecutionSuffixRequest,
+    ) -> set[tuple[str, int]]:
+        """Validate suffix bounds and return every required ``(exchange, seq)`` coordinate.
+
+        Args:
+            request: Cutoff, generation, deferred coordinates, scope, and horizon.
+
+        Returns:
+            Exact set of ``(exchange, scope_sequence)`` coordinates required for the suffix.
+
+        Raises:
+            ValueError: When any watermark is negative or boolean, any exchange
+                name is blank, or any deferred sequence is boolean or lies
+                outside ``1..generation``.
+            ExecutionChainError: When any generation watermark regresses below its cutoff.
+        """
+        expected: set[tuple[str, int]] = set()
+        exchanges = sorted(
+            set(request.cutoff_watermarks)
+            | set(request.generation_watermarks)
+            | set(request.deferred_execution_sequences)
+        )
+        for exchange in exchanges:
+            cutoff = request.cutoff_watermarks.get(exchange, 0)
+            generation = request.generation_watermarks.get(exchange, 0)
+            if (
+                not exchange
+                or isinstance(cutoff, bool)
+                or isinstance(generation, bool)
+                or cutoff < 0
+                or generation < 0
+            ):
+                raise ValueError("execution suffix watermark map is invalid")
+            if generation < cutoff:
+                raise ExecutionChainError(
+                    "regressed_execution_suffix_watermarks: "
+                    f"scope=({request.wallet_public_id}, {exchange}, {request.mode}) "
+                    f"cutoff={cutoff} generation={generation}"
+                )
+            for sequence in range(cutoff + 1, generation + 1):
+                expected.add((exchange, sequence))
+            for deferred in request.deferred_execution_sequences.get(exchange, ()):
+                if isinstance(deferred, bool) or deferred < 1 or deferred > generation:
+                    raise ValueError("deferred execution sequence lies outside 1..generation")
+                expected.add((exchange, deferred))
+        return expected
+
+    @staticmethod
+    def _proven_pnl_timeline_execution_suffix_rows(
+        source: _PnlTimelineExecutionPrefixSource,
+        request: PnlTimelineExecutionSuffixRequest,
+    ) -> dict[tuple[str, int], tuple[Execution, Order | None, Instrument | None]]:
+        """Prove physical suffix and deferred rows before folding annulments.
+
+        Args:
+            source: Raw suffix executions and associated lineage inputs.
+            request: Suffix cutoff, generation, and deferred coordinates.
+
+        Returns:
+            Proven rows keyed by immutable ``(exchange, scope_sequence)`` coordinate.
+
+        Raises:
+            ExecutionChainError: If generation regresses below cutoff or any requested
+                coordinate is duplicated, superseded, or missing.
+        """
+        expected = SQLAlchemyRepository._expected_pnl_timeline_suffix_coordinates(request)
+        wallet_public_id = source.wallet_public_id
+        mode = source.mode
+        rows_by_coordinate: dict[tuple[str, int], tuple[Execution, Order | None, Instrument | None]]
+        rows_by_coordinate = {}
+        for execution, order, instrument in source.source_rows:
+            sequence = int(execution.scope_sequence)
+            key = (execution.exchange, sequence)
+            if key in rows_by_coordinate:
+                raise ExecutionChainError(
+                    "duplicate_execution_suffix_row: "
+                    f"scope=({wallet_public_id}, {execution.exchange}, {mode}) "
+                    f"scope_sequence={sequence}"
+                )
+            if execution.known_to != KNOWN_TO_MAX:
+                raise ExecutionChainError(
+                    "superseded_execution_row: "
+                    f"scope=({wallet_public_id}, {execution.exchange}, {mode}) "
+                    f"scope_sequence={sequence}"
+                )
+            rows_by_coordinate[key] = (execution, order, instrument)
+        missing = sorted(expected - set(rows_by_coordinate))
+        if missing:
+            raise ExecutionChainError(
+                "missing_execution_suffix_row: "
+                f"scope=({wallet_public_id}, {mode}) missing={missing}"
+            )
+        return rows_by_coordinate
+
+    @staticmethod
+    def _validate_pnl_timeline_execution_suffix(
+        source: _PnlTimelineExecutionPrefixSource,
+        request: PnlTimelineExecutionSuffixRequest,
+    ) -> PnlTimelineExecutionSuffix:
+        """Prove requested suffix coordinates and fold through the certified witness pipeline."""
+        rows_by_coordinate = SQLAlchemyRepository._proven_pnl_timeline_execution_suffix_rows(
+            source,
+            request,
+        )
+        fold = SQLAlchemyRepository._validated_execution_annulment_fold(
+            _ExecutionAnnulmentFoldRequest(
+                annulment_rows=source.annulment_rows,
+                executions_by_coordinate={
+                    coordinate: execution
+                    for coordinate, (execution, _, _) in rows_by_coordinate.items()
+                },
+                witnesses_by_execution_public_id=source.annulment_witnesses,
+            )
+        )
+        candidates = SQLAlchemyRepository._pnl_timeline_execution_candidates(
+            source,
+            rows_by_coordinate,
+            fold.annulled_public_ids,
+        )
+        shard_by_execution_public_id = SQLAlchemyRepository._resolve_pnl_timeline_execution_shards(
+            candidates,
+            source.fill_rows,
+            source.order_instrument_ids_by_scope,
+        )
+        return PnlTimelineExecutionSuffix(
+            executions=[
+                SQLAlchemyRepository._project_pnl_timeline_execution_candidate(
+                    candidate,
+                    shard_by_execution_public_id[candidate.execution.public_id],
+                )
+                for candidate in candidates
+            ],
+            annulments=fold.applied,
+        )
+
+    @staticmethod
     async def _read_pnl_timeline_annulment_manifest(
         s: AsyncSession,
         wallet_public_id: str,
@@ -22875,7 +23101,7 @@ class SQLAlchemyRepository(Repository):
         watermarks: Mapping[str, int],
         as_of: datetime,
         *,
-        fill_witness_cut: PnlTimelineFillWitnessCut | None = None,
+        fill_witness_cut: PnlTimelineFillWitnessCut | Literal["capture"] | None = None,
     ) -> PnlTimelineExecutionPrefix:
         """Certify a persisted cut while refusing to capture any newer execution."""
         normalized = dict(sorted(watermarks.items()))
@@ -22887,8 +23113,162 @@ class SQLAlchemyRepository(Repository):
                 s,
                 wallet_public_id,
                 mode,
-                _PnlTimelineExecutionCut(normalized, fill_witness_cut=fill_witness_cut),
+                _PnlTimelineExecutionCut(
+                    normalized,
+                    capture_fill_witness_cut=fill_witness_cut == "capture",
+                    fill_witness_cut=(None if fill_witness_cut == "capture" else fill_witness_cut),
+                ),
                 _resolved_knowledge_horizon(as_of),
+            )
+
+    async def _load_pnl_timeline_execution_suffix_from_full_prefix(
+        self,
+        s: AsyncSession,
+        request: PnlTimelineExecutionSuffixRequest,
+        expected_coordinates: set[tuple[str, int]],
+        horizon: _ExecutionKnowledgeHorizon,
+    ) -> PnlTimelineExecutionSuffix:
+        """Fall back to certifying the full prefix when ID-less fills are involved."""
+        full = await self._load_pnl_timeline_execution_prefix_for_watermarks(
+            s,
+            request.wallet_public_id,
+            request.mode,
+            _PnlTimelineExecutionCut(
+                request.generation_watermarks,
+                fill_witness_cut=request.fill_witness_cut,
+            ),
+            horizon,
+        )
+        return PnlTimelineExecutionSuffix(
+            executions=[
+                row
+                for row in full["executions"]
+                if (row["exchange"], row["scope_sequence"]) in expected_coordinates
+            ],
+            annulments=list(full["annulments"]),
+        )
+
+    async def _certify_pnl_timeline_execution_suffix(
+        self,
+        s: AsyncSession,
+        request: PnlTimelineExecutionSuffixRequest,
+        source_rows: list[tuple[Execution, Order | None, Instrument | None]],
+        horizon: _ExecutionKnowledgeHorizon,
+    ) -> PnlTimelineExecutionSuffix:
+        """Load lineage, fills, and manifest rows for bounded suffix validation.
+
+        Passes ``request.fill_witness_cut`` watermarks as the SQL upper bound in
+        :meth:`_read_pnl_timeline_fill_lineage` without re-verifying the
+        full-prefix witness digest against suffix-only fill rows. Boundary
+        integrity is covered by prefix verification in the checkpoint verifier
+        together with the ``uq_executions_order_exec`` and
+        ``uq_executions_order_trade`` unique constraints.
+
+        Args:
+            s: Active snapshot-pinned read session.
+            request: Suffix cutoff, generation, deferred coordinates, and cut.
+            source_rows: Loaded raw suffix and deferred execution rows.
+            horizon: Resolved knowledge horizon for the read.
+
+        Returns:
+            Certified effective suffix executions and suffix-applied annulments.
+        """
+        client_order_ids = list(
+            dict.fromkeys(
+                order.client_order_id
+                for _, order, _ in source_rows
+                if order is not None and order.client_order_id is not None
+            )
+        )
+        fill_rows = await self._read_pnl_timeline_fill_lineage(
+            s,
+            client_order_ids,
+            horizon.as_of,
+            request.fill_witness_cut,
+        )
+        order_instrument_ids_by_scope = await self._read_pnl_timeline_order_instrument_lineage(
+            s,
+            request.wallet_public_id,
+            request.mode,
+            client_order_ids,
+        )
+        symbol_public_ids = list(
+            dict.fromkeys(
+                instrument.symbol_public_id
+                for _, _, instrument in source_rows
+                if instrument is not None
+            )
+        )
+        native_symbols = await self._read_pnl_timeline_native_symbol_lineage(
+            s,
+            symbol_public_ids,
+        )
+        annulment_rows = await self._read_pnl_timeline_annulment_manifest(
+            s,
+            request.wallet_public_id,
+            request.mode,
+            horizon,
+        )
+        witnesses = await self._read_execution_annulment_contradiction_witnesses(
+            s,
+            [row.target_execution_public_id for row in annulment_rows],
+        )
+        return self._validate_pnl_timeline_execution_suffix(
+            _PnlTimelineExecutionPrefixSource(
+                wallet_public_id=request.wallet_public_id,
+                mode=request.mode,
+                watermarks=dict(request.generation_watermarks),
+                source_rows=source_rows,
+                fill_rows=fill_rows,
+                native_symbols_by_symbol_public_id=native_symbols,
+                order_instrument_ids_by_scope=order_instrument_ids_by_scope,
+                annulment_rows=annulment_rows,
+                annulment_witnesses=witnesses,
+            ),
+            request,
+        )
+
+    async def get_pnl_timeline_execution_suffix_at_watermarks(
+        self,
+        request: PnlTimelineExecutionSuffixRequest,
+    ) -> PnlTimelineExecutionSuffix:
+        """Certify only suffix and deferred rows inside one effective snapshot.
+
+        Args:
+            request: Cutoff, generation, deferred coordinates, scope, and horizon.
+
+        Returns:
+            Effective opening rows and suffix-applied annulments in coordinate order.
+        """
+        expected_coordinates = self._expected_pnl_timeline_suffix_coordinates(request)
+        horizon = _resolved_knowledge_horizon(request.as_of)
+        async with self.session() as s, s.begin():
+            await self._begin_effective_execution_snapshot(s)
+            if request.prefix_has_idless_executions:
+                return await self._load_pnl_timeline_execution_suffix_from_full_prefix(
+                    s,
+                    request,
+                    expected_coordinates,
+                    horizon,
+                )
+            if not expected_coordinates:
+                return PnlTimelineExecutionSuffix(executions=[], annulments=[])
+            source_rows = await self._read_pnl_timeline_execution_suffix(s, request)
+            if any(
+                not any(self._pnl_timeline_execution_fill_ids(execution))
+                for execution, _, _ in source_rows
+            ):
+                return await self._load_pnl_timeline_execution_suffix_from_full_prefix(
+                    s,
+                    request,
+                    expected_coordinates,
+                    horizon,
+                )
+            return await self._certify_pnl_timeline_execution_suffix(
+                s,
+                request,
+                source_rows,
+                horizon,
             )
 
     async def get_pnl_timeline_execution_prefix(
@@ -23483,6 +23863,9 @@ class SQLAlchemyRepository(Repository):
         wallet_public_id: str,
         mode: str,
         as_of: datetime,
+        *,
+        after_exclusive: datetime | None = None,
+        through: datetime | None = None,
     ) -> list[PnlTimelineAccrualRow]:
         """Retrieve a scope's funding accruals for the P&L timeline.
 
@@ -23493,21 +23876,24 @@ class SQLAlchemyRepository(Repository):
             wallet_public_id: Wallet scope to reconstruct.
             mode: Trading mode scope.
             as_of: Point-in-time and inclusive ``accrued_at`` upper bound.
+            after_exclusive: Optional exclusive lower ``accrued_at`` bound.
+            through: Optional inclusive upper ``accrued_at`` bound.
 
         Returns:
             Accrual rows ordered by ``accrued_at`` ascending.
         """
+        filters: list[ColumnElement[bool]] = [
+            AccrualLedger.wallet_public_id == wallet_public_id,
+            AccrualLedger.mode == mode,
+            AccrualLedger.accrued_at <= as_of,
+        ]
+        if after_exclusive is not None:
+            filters.append(AccrualLedger.accrued_at > after_exclusive)
+        if through is not None:
+            filters.append(AccrualLedger.accrued_at <= through)
+        filters.extend(where_active(AccrualLedger, as_of))
         async with self.session() as s:
-            stmt = (
-                select(AccrualLedger)
-                .where(
-                    AccrualLedger.wallet_public_id == wallet_public_id,
-                    AccrualLedger.mode == mode,
-                    AccrualLedger.accrued_at <= as_of,
-                    *where_active(AccrualLedger, as_of),
-                )
-                .order_by(AccrualLedger.accrued_at.asc())
-            )
+            stmt = select(AccrualLedger).where(*filters).order_by(AccrualLedger.accrued_at.asc())
             result = await s.execute(stmt)
             return [
                 {
@@ -23666,6 +24052,85 @@ class SQLAlchemyRepository(Repository):
                 await s.execute(text("SET LOCAL jit = off"))
             count, id_sum, max_id, max_ts = (await s.execute(stmt)).one()
         return self._id_aggregate_from_row(count, id_sum, max_id, max_ts)
+
+    async def get_pnl_event_fx_candle_fingerprints_by_plane(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> dict[PnlFxRatePlane, IdAggregate]:
+        """Aggregate consumed event-FX candles per ``(base, quote, exchange)`` plane.
+
+        Runs over :meth:`_scope_pnl_fx_rate_candles` batched by
+        :data:`_PNL_FX_MINUTE_BATCH`, grouping by plane and combining batch
+        aggregates per plane via :func:`_combine_id_aggregates`. Planes with no
+        matching rows are omitted from the returned map.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` FX planes of the consumed pairs.
+            open_ats: Exact 1-minute candle open timestamps to fingerprint.
+            as_of: Knowledge horizon of the replay's FX candle read.
+
+        Returns:
+            Per-plane ``IdAggregate`` map for populated planes, or ``{}`` without
+            querying when ``planes`` or ``open_ats`` is empty.
+        """
+        if not planes or not open_ats:
+            return {}
+        wanted = sorted(set(open_ats))
+        by_plane: dict[PnlFxRatePlane, IdAggregate] = {}
+        for index in range(0, len(wanted), _PNL_FX_MINUTE_BATCH):
+            batch = wanted[index : index + _PNL_FX_MINUTE_BATCH]
+            batch_by_plane = await self._pnl_fx_rate_candle_aggregates_by_plane(
+                planes, as_of, batch
+            )
+            for plane, aggregate in batch_by_plane.items():
+                previous = by_plane.get(plane)
+                by_plane[plane] = (
+                    aggregate if previous is None else _combine_id_aggregates(previous, aggregate)
+                )
+        return by_plane
+
+    async def _pnl_fx_rate_candle_aggregates_by_plane(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        as_of: datetime,
+        batch: Sequence[datetime],
+    ) -> dict[PnlFxRatePlane, IdAggregate]:
+        """Aggregate one batch of opens per FX plane over the shared candle scope.
+
+        Args:
+            planes: Pinned ``(base, quote, exchange)`` FX planes.
+            as_of: Knowledge horizon of the replay's FX candle read.
+            batch: Exact candle opens of this batch.
+
+        Returns:
+            Per-plane ``(count, id_sum, max_id, max_timestamp)`` for populated planes.
+        """
+        stmt = self._scope_pnl_fx_rate_candles(
+            select(
+                Symbol.base,
+                Symbol.quote,
+                Instrument.exchange,
+                func.count(Candle.id),
+                func.sum(Candle.id),
+                func.max(Candle.id),
+                func.max(Candle.timestamp),
+            ),
+            planes,
+            as_of,
+            Candle.open_at.in_(list(batch)),
+        ).group_by(Symbol.base, Symbol.quote, Instrument.exchange)
+        async with self.session() as s:
+            if self.dialect_name == "postgresql":
+                await s.execute(text("SET LOCAL jit = off"))
+            rows = (await s.execute(stmt)).all()
+        return {
+            (base, cast(str, quote), exchange): self._id_aggregate_from_row(
+                count, id_sum, max_id, max_ts
+            )
+            for base, quote, exchange, count, id_sum, max_id, max_ts in rows
+        }
 
     async def get_pnl_execution_prefix_counts(
         self,
