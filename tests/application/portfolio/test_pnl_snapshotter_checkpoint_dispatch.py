@@ -14,7 +14,11 @@ from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio import pnl_snapshotter_checkpoint as dispatch
 from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_from_json
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
+    CHECKPOINT_SUMMARY_EVERY_TICKS,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_metrics
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_metrics_by_scope
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import reset_checkpoint_metrics
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointResume
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
@@ -31,6 +35,7 @@ from snapper.data.pnl_correction_state import PnlOpeningCheckpointWrite
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
+from snapper.data.repository_types import PortfolioPnlAnchorRow
 from tests.application.portfolio import test_pnl_opening_checkpoint_verifier as verifier
 from tests.application.portfolio import test_pnl_snapshotter as fixtures
 
@@ -575,3 +580,245 @@ async def test_modes_commit_identical_financial_rows_on_same_quiet_scenario(
         }
         for row in expected
     ]
+
+
+def _summary_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return all INFO checkpoint summary log messages captured during a test."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "INFO"
+        and record.getMessage().startswith("checkpoint_metrics_summary")
+    ]
+
+
+async def test_periodic_summary_emits_every_n_ticks_and_separates_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Emit one deterministic INFO summary per scope every N active ticks.
+
+    Given: Two independent wallet scopes in a shadow-mode snapshotter.
+    When: ``_tick_once`` runs for ``CHECKPOINT_SUMMARY_EVERY_TICKS`` ticks with events in each scope.
+    Then: Ticks 1..N-1 emit nothing, tick N emits one cumulative line per scope, and scopes stay isolated.
+    """
+    reset_checkpoint_metrics()
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+    wallet_a = "wallet-alpha"
+    wallet_b = "wallet-beta"
+    repo = fixtures._FakeRepo(
+        credentials=[
+            fixtures._cred("kraken", wallet=wallet_a),
+            fixtures._cred("kraken", wallet=wallet_b),
+        ],
+        anchor=fixtures._anchor(),
+    )
+
+    async def anchor_for(
+        wallet: str, mode: str, ccy: str, as_of: datetime | None
+    ) -> PortfolioPnlAnchorRow:
+        """Return an active USD anchor bound to ``wallet``."""
+        del mode, ccy, as_of
+        return cast(
+            PortfolioPnlAnchorRow,
+            {**fixtures._anchor(), "wallet_public_id": wallet},
+        )
+
+    monkeypatch.setattr(repo, "get_portfolio_pnl_anchor", anchor_for)
+    snap = fixtures._snapshotter(repo, fixtures._minute(3))
+
+    async def fake_series(
+        unused_repo: object,
+        ctx: _ScopeContext,
+        chunk: ChunkWindow,
+        options: object,
+    ) -> PnlWalletSeriesResult:
+        """Return a canned series per scope without DB reads."""
+        del unused_repo, ctx, options
+        return fixtures._series(chunk.start, chunk.end, metadata=fixtures._meta(seq=4))
+
+    monkeypatch.setattr(snap, "_series", fake_series)
+
+    with caplog.at_level(logging.INFO, logger=pnl_snapshotter.__name__):
+        for _ in range(CHECKPOINT_SUMMARY_EVERY_TICKS - 1):
+            await snap._tick_once()
+        assert _summary_lines(caplog) == []
+        await snap._tick_once()
+
+    lines = _summary_lines(caplog)
+    assert len(lines) == 2
+    assert lines[0] == (
+        "checkpoint_metrics_summary "
+        f"wallet={wallet_a} mode=live ccy=USD "
+        "captures_committed=0 "
+        "capture_refusals={capture_not_permitted:1} "
+        "resumes_attempted=0 resumes_succeeded=0 "
+        "fallbacks={} invalidations_deleted=0 "
+        "shadow_comparisons=0 shadow_mismatches=0 recaptures={}"
+    )
+    assert lines[1] == (
+        "checkpoint_metrics_summary "
+        f"wallet={wallet_b} mode=live ccy=USD "
+        "captures_committed=0 "
+        "capture_refusals={capture_not_permitted:1} "
+        "resumes_attempted=0 resumes_succeeded=0 "
+        "fallbacks={} invalidations_deleted=0 "
+        "shadow_comparisons=0 shadow_mismatches=0 recaptures={}"
+    )
+    by_scope = checkpoint_metrics_by_scope()
+    assert by_scope[(wallet_a, "live", "USD")].capture_refusals == {"capture_not_permitted": 1}
+    assert by_scope[(wallet_b, "live", "USD")].capture_refusals == {"capture_not_permitted": 1}
+    assert checkpoint_metrics().capture_refusals == {"capture_not_permitted": 2}
+
+
+async def test_off_mode_emits_no_summary_lines_or_per_scope_accounting(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Skip summary logging and per-scope counter overhead when checkpoint mode is off.
+
+    Given: A snapshotter configured with ``PNL_SNAPSHOTTER_CHECKPOINT_MODE=off``.
+    When: ``_tick_once`` runs ``CHECKPOINT_SUMMARY_EVERY_TICKS`` times across a valid scope.
+    Then: Zero summary lines are logged and per-scope metrics remain empty.
+    """
+    reset_checkpoint_metrics()
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "off")
+    repo = fixtures._FakeRepo(
+        credentials=[fixtures._cred("kraken")],
+        anchor=fixtures._anchor(),
+    )
+    snap = fixtures._snapshotter(repo, fixtures._minute(3))
+
+    async def fake_series(
+        unused_repo: object,
+        ctx: _ScopeContext,
+        chunk: ChunkWindow,
+        options: object,
+    ) -> PnlWalletSeriesResult:
+        """Return a canned series without DB reads."""
+        del unused_repo, ctx, options
+        return fixtures._series(chunk.start, chunk.end, metadata=fixtures._meta(seq=4))
+
+    monkeypatch.setattr(snap, "_series", fake_series)
+
+    with caplog.at_level(logging.INFO, logger=pnl_snapshotter.__name__):
+        for _ in range(CHECKPOINT_SUMMARY_EVERY_TICKS):
+            await snap._tick_once()
+
+    assert _summary_lines(caplog) == []
+    assert checkpoint_metrics_by_scope() == {}
+    assert checkpoint_metrics().captures_committed == 0
+    assert checkpoint_metrics().capture_refusals == {}
+
+
+async def _setup_shadow_second_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    repo: fixtures._FakeRepo,
+    frontier_a: PnlCorrectionFrontier,
+    wallet_b: str,
+) -> tuple[PnlCorrectionFrontier, PnlCheckpointResume]:
+    """Seed a second wallet's frontier and stored checkpoint for shadow comparison."""
+    frontier_b = replace(frontier_a, key=replace(frontier_a.key, wallet_public_id=wallet_b))
+    repo._frontiers[frontier_b.key] = frontier_b
+    resume_b = await _resume(monkeypatch)
+    b_record = replace(
+        resume_b.record,
+        certificate=replace(
+            resume_b.record.certificate,
+            key=frontier_b.key,
+            source_generation=frontier_b.generation,
+        ),
+    )
+    repo._opening_checkpoints[frontier_b.key] = b_record
+    _permit_capture(monkeypatch)
+    return frontier_b, replace(resume_b, record=b_record)
+
+
+async def test_two_scopes_count_commits_and_resumes_independently(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Count distinct checkpoint transitions per scope and emit independent summaries.
+
+    Given: Two wallets with capture permitted, one committing and one failing shadow comparison.
+    When: ``_advance_replay`` processes each scope and a periodic summary tick fires.
+    Then: Each scope carries only its own counts, summaries reflect both, and totals sum them.
+    """
+    reset_checkpoint_metrics()
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+    _permit_capture(monkeypatch)
+    repo = fixtures._FakeRepo()
+    frontier_a = _pending(repo)
+    write_a = await _write(monkeypatch, frontier_a)
+    wallet_b = "wallet-shadow-mismatch"
+    frontier_b, resume_b = await _setup_shadow_second_scope(monkeypatch, repo, frontier_a, wallet_b)
+    snap = fixtures._snapshotter(repo, frontier_a.as_of)
+
+    async def prepare(request: PnlCheckpointResumeRequest) -> PnlCheckpointDecision:
+        """Return a prepared resume for ``wallet_b`` and delegate ``wallet_a``."""
+        if request.scope.wallet_public_id == wallet_b:
+            return PnlCheckpointDecision(resume=resume_b)
+        return await dispatch.prepare_checkpoint_resume(request)
+
+    async def replay(
+        unused_repo: Repository,
+        ctx: _ScopeContext,
+        chunk: ChunkWindow,
+        current: PnlCorrectionFrontier,
+        checkpoint: _CheckpointReplayOptions | None = None,
+    ) -> tuple[ChunkWindow, PnlWalletSeriesResult]:
+        """Stage a capture write for ``wallet_a`` and diverge on ``wallet_b`` resume."""
+        del unused_repo, current
+        checkpoint = checkpoint or _CheckpointReplayOptions()
+        result = fixtures._series(chunk.start, chunk.end, metadata=fixtures._meta(seq=4))
+        if ctx.wallet_public_id == wallet_b and checkpoint.resume is not None:
+            return chunk, replace(
+                result,
+                points=(replace(result.points[0], realized_pnl=9.0), *result.points[1:]),
+            )
+        return chunk, replace(
+            result, checkpoint_write=write_a if checkpoint.capture is not None else None
+        )
+
+    monkeypatch.setattr(pnl_snapshotter, "prepare_checkpoint_resume", prepare)
+    monkeypatch.setattr(snap, "_replay_series", replay)
+    ctx_a = _context(snap, frontier_a)
+    ctx_b = snap._build_scope_context(
+        wallet_b,
+        cast(PortfolioPnlAnchorRow, {**fixtures._anchor(), "wallet_public_id": wallet_b}),
+        frozenset({"kraken"}),
+        frontier_b.as_of,
+    )
+    await snap._advance_replay(cast(Repository, repo), ctx_a, frontier_a)
+    await snap._advance_replay(cast(Repository, repo), ctx_b, frontier_b)
+
+    by_scope = checkpoint_metrics_by_scope()
+    assert by_scope[(fixtures._WALLET, "live", "USD")].captures_committed == 1
+    assert by_scope[(fixtures._WALLET, "live", "USD")].recaptures == {"absent": 1}
+    assert by_scope[(wallet_b, "live", "USD")].shadow_comparisons == 1
+    assert by_scope[(wallet_b, "live", "USD")].shadow_mismatches == 1
+    assert by_scope[(wallet_b, "live", "USD")].invalidations_deleted == 1
+    assert checkpoint_metrics().captures_committed == 1
+    assert checkpoint_metrics().shadow_mismatches == 1
+
+    snap._checkpoint_summary_ticks = CHECKPOINT_SUMMARY_EVERY_TICKS - 1
+    with caplog.at_level(logging.INFO, logger=pnl_snapshotter.__name__):
+        await snap._tick_once()
+    lines = _summary_lines(caplog)
+    assert len(lines) == 2
+    assert lines[0] == (
+        "checkpoint_metrics_summary "
+        f"wallet={fixtures._WALLET} mode=live ccy=USD "
+        "captures_committed=1 capture_refusals={} "
+        "resumes_attempted=0 resumes_succeeded=0 "
+        "fallbacks={checkpoint_absent:1} invalidations_deleted=0 "
+        "shadow_comparisons=0 shadow_mismatches=0 recaptures={absent:1}"
+    )
+    assert lines[1] == (
+        "checkpoint_metrics_summary "
+        f"wallet={wallet_b} mode=live ccy=USD "
+        "captures_committed=0 capture_refusals={} "
+        "resumes_attempted=1 resumes_succeeded=1 "
+        "fallbacks={} invalidations_deleted=1 "
+        "shadow_comparisons=1 shadow_mismatches=1 recaptures={}"
+    )

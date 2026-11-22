@@ -53,7 +53,14 @@ _RECAPTURE_AGE: Final[timedelta] = timedelta(minutes=RECAPTURE_AGE_MINUTES)
 
 
 def checkpoint_anchor_identity(anchor: PortfolioPnlAnchorRow) -> tuple[str, str]:
-    """Return the active anchor id and a canonical digest of its complete row."""
+    """Return the active anchor id and a canonical digest of its complete row.
+
+    Args:
+        anchor: Active anchor database row.
+
+    Returns:
+        Pair of anchor public id and SHA-256 hex digest.
+    """
     payload = {
         key: value.isoformat() if isinstance(value, datetime) else value
         for key, value in anchor.items()
@@ -63,7 +70,14 @@ def checkpoint_anchor_identity(anchor: PortfolioPnlAnchorRow) -> tuple[str, str]
 
 
 def checkpoint_capture_permitted(calc_version: str) -> bool:
-    """Resolve capture permission without allowing unknown versions to escape."""
+    """Resolve capture permission without allowing unknown versions to escape.
+
+    Args:
+        calc_version: P&L calculation version string.
+
+    Returns:
+        Whether checkpoint capture is permitted for ``calc_version``.
+    """
     try:
         return pnl_engine_options_for(calc_version).capture_permitted
     except ValueError:
@@ -82,7 +96,7 @@ def _log_refusal(scope: PortfolioPnlSampleScope, reason: str) -> None:
         reason,
         extra={"checkpoint_capture_refusal": reason},
     )
-    record_checkpoint_capture_refusal(reason)
+    record_checkpoint_capture_refusal(reason, scope)
 
 
 def capture_request_for(
@@ -91,7 +105,17 @@ def capture_request_for(
     anchor: PortfolioPnlAnchorRow,
     end: datetime,
 ) -> PnlCheckpointCaptureRequest | None:
-    """Build a capture request only at a clean settling tip and isolate refusals."""
+    """Build a capture request only at a clean settling tip and isolate refusals.
+
+    Args:
+        frontier: Current durable correction frontier.
+        scope: Active anchor-bound sample scope.
+        anchor: Active anchor row for the scope.
+        end: Inclusive end minute of the chunk being replayed.
+
+    Returns:
+        Validated capture request, or ``None`` when ineligible or refused.
+    """
     if not checkpoint_capture_permitted(frontier.key.calc_version):
         _log_refusal(scope, "capture_not_permitted")
         return None
@@ -141,13 +165,19 @@ async def delete_checkpoint(
     scope: PortfolioPnlSampleScope,
     record: PnlOpeningCheckpointRecord,
 ) -> None:
-    """Retire a stored row through its source-generation fence and count deletion."""
+    """Retire a stored row through its source-generation fence and count deletion.
+
+    Args:
+        repo: Repository used for generation-fenced deletion.
+        scope: Scope owning the checkpoint row.
+        record: Stored checkpoint record being retired.
+    """
     deleted = await repo.delete_portfolio_pnl_opening_checkpoint(
         scope,
         record.certificate.source_generation,
     )
     if deleted:
-        record_checkpoint_invalidation_deleted()
+        record_checkpoint_invalidation_deleted(scope)
 
 
 def _log_fallback(
@@ -156,7 +186,7 @@ def _log_fallback(
     fallback: PnlCheckpointFallback,
 ) -> None:
     """Count and report one structured anchor fallback."""
-    record_checkpoint_fallback(fallback.reason)
+    record_checkpoint_fallback(fallback.reason, scope)
     logger.warning(
         "PortfolioPnlSnapshotter: checkpoint resume fallback; wallet=%s generation=%s "
         "reason=%s delete_required=%s",
@@ -193,7 +223,16 @@ def recapture_trigger(
     record: PnlOpeningCheckpointRecord | None,
     suffix_fills: int,
 ) -> PnlCheckpointRecaptureTrigger | None:
-    """Classify recapture triggers without database work or replay side effects."""
+    """Classify recapture triggers without database work or replay side effects.
+
+    Args:
+        frontier: Current durable correction frontier.
+        record: Stored opening checkpoint record, if any.
+        suffix_fills: Number of suffix fills after the checkpoint cutoff.
+
+    Returns:
+        Recapture trigger token, or ``None`` when verification may proceed.
+    """
     if record is None:
         return "absent"
     certificate = record.certificate
@@ -211,9 +250,12 @@ def recapture_trigger(
     return None
 
 
-def _recapture(reason: PnlCheckpointRecaptureTrigger) -> PnlCheckpointDecision:
+def _recapture(
+    scope: PortfolioPnlSampleScope,
+    reason: PnlCheckpointRecaptureTrigger,
+) -> PnlCheckpointDecision:
     """Count and return one anchor-only recapture decision."""
-    record_checkpoint_recapture(reason)
+    record_checkpoint_recapture(reason, scope)
     return PnlCheckpointDecision(recapture=reason)
 
 
@@ -242,7 +284,14 @@ async def _suffix_fills(
 async def prepare_checkpoint_resume(
     request: PnlCheckpointResumeRequest,
 ) -> PnlCheckpointDecision:
-    """Choose verified resume or anchor recapture before any replay begins."""
+    """Choose verified resume or anchor recapture before any replay begins.
+
+    Args:
+        request: Caller-bound inputs for pre-replay checkpoint verification.
+
+    Returns:
+        Decision selecting either verified suffix resume or anchor recapture.
+    """
     repo = request.repo
     scope = request.scope
     anchor = request.anchor
@@ -253,18 +302,18 @@ async def prepare_checkpoint_resume(
         return PnlCheckpointDecision(recapture="absent")
     if frontier.has_fill_gap:
         _log_fallback(scope, frontier, PnlCheckpointFallback("checkpoint_fill_gap", False))
-        return _recapture("fallback")
+        return _recapture(scope, "fallback")
     record = await repo.get_portfolio_pnl_opening_checkpoint(scope)
     initial = recapture_trigger(frontier, record, 0)
     if initial is not None:
         if initial == "absent":
             _log_fallback(scope, frontier, PnlCheckpointFallback("checkpoint_absent", False))
-        return _recapture(initial)
+        return _recapture(scope, initial)
     assert record is not None
     suffix = await _suffix_fills(repo, scope, frontier, record)
     bounded = recapture_trigger(frontier, record, suffix)
     if bounded is not None:
-        return _recapture(bounded)
+        return _recapture(scope, bounded)
     anchor_public_id, anchor_digest = checkpoint_anchor_identity(anchor)
     outcome = await verify_checkpoint_for_resume(
         repo,
@@ -291,7 +340,7 @@ async def prepare_checkpoint_resume(
     _log_fallback(scope, frontier, outcome)
     if outcome.delete_required:
         await delete_checkpoint(repo, scope, record)
-    return _recapture("fallback")
+    return _recapture(scope, "fallback")
 
 
 async def handle_resume_fallback(
@@ -301,12 +350,20 @@ async def handle_resume_fallback(
     resume: PnlCheckpointResume,
     reason: str,
 ) -> None:
-    """Count a service-detected late execution and retire the divergent row."""
+    """Count a service-detected late execution and retire the divergent row.
+
+    Args:
+        repo: Repository used to retire the stored checkpoint row.
+        scope: Scope owning the checkpoint row.
+        frontier: Current durable correction frontier.
+        resume: Verified resume state that hit a service fallback.
+        reason: Fallback reason reported by the timeline service.
+    """
     fallback = PnlCheckpointFallback("checkpoint_late_execution", True)
     if reason != "checkpoint_late_execution":
         fallback = PnlCheckpointFallback("checkpoint_payload_corrupt", True)
     _log_fallback(scope, frontier, fallback)
-    record_checkpoint_recapture("fallback")
+    record_checkpoint_recapture("fallback", scope)
     await delete_checkpoint(repo, scope, resume.record)
 
 
@@ -316,7 +373,17 @@ def certified_checkpoint_write(
     plan: PlannedPnlCorrection,
     result: PnlWalletSeriesResult,
 ) -> PnlOpeningCheckpointWrite | None:
-    """Pre-check a captured write and convert every expected error to a soft refusal."""
+    """Pre-check a captured write and convert every expected error to a soft refusal.
+
+    Args:
+        frontier: Current durable correction frontier before commit.
+        scope: Scope owning the staged checkpoint write.
+        plan: Correction plan for the chunk being committed.
+        result: Replay result carrying any staged capture or service refusal.
+
+    Returns:
+        Certified checkpoint write, or ``None`` when omitted or refused.
+    """
     refusal = result.checkpoint_capture_refusal
     if refusal is not None:
         _log_refusal(scope, refusal)

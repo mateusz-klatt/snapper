@@ -11,7 +11,9 @@ from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
+from loguru import logger as loguru_logger
 
+from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
 from snapper.application.services.settings import SettingsService
 from snapper.config.settings import AppSettings
 from snapper.server.app import _start_background_writers
@@ -53,6 +55,7 @@ class TestStartHelper:
 
             disabled = False
             interval_seconds = 60
+            checkpoint_mode = "off"
 
         def _repository(_db_url: str) -> SimpleNamespace:
             return SimpleNamespace()
@@ -150,6 +153,7 @@ class TestStartHelper:
 
             disabled = False
             interval_seconds = 60
+            checkpoint_mode = "off"
 
         def _repository(_db_url: str) -> SimpleNamespace:
             return SimpleNamespace()
@@ -167,6 +171,61 @@ class TestStartHelper:
         )
 
         assert not hasattr(app.state, "pnl_snapshotter")
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            (None, None, 60, "off"),
+            ("30", "shadow", 30, "shadow"),
+            ("120", "active", 120, "active"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_startup_logs_resolved_interval_and_checkpoint_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        case: tuple[str | None, str | None, int, str],
+    ) -> None:
+        """Log the resolved interval and checkpoint mode at INFO when started.
+
+        Given: An enabled snapshotter environment with interval and checkpoint mode.
+        When: ``_start_pnl_snapshotter`` starts and attaches the snapshotter.
+        Then: An INFO log line reports ``interval=<N>s checkpoint_mode=<mode>``.
+        """
+        interval_env, checkpoint_env, expected_interval, expected_mode = case
+        monkeypatch.setattr("snapper.server.app.get_repository", lambda _url: SimpleNamespace())
+        monkeypatch.setattr(PortfolioPnlSnapshotter, "start", AsyncMock())
+        monkeypatch.setenv("PNL_SNAPSHOTTER_ENABLED", "true")
+        if interval_env is None:
+            monkeypatch.delenv("PNL_SNAPSHOTTER_INTERVAL_SECONDS", raising=False)
+        else:
+            monkeypatch.setenv("PNL_SNAPSHOTTER_INTERVAL_SECONDS", interval_env)
+        if checkpoint_env is None:
+            monkeypatch.delenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", raising=False)
+        else:
+            monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", checkpoint_env)
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        handler_id = loguru_logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            await _start_pnl_snapshotter(
+                app,
+                db_url="sqlite+aiosqlite:///:memory:",
+                settings=_settings(),
+                settings_service=_settings_service(),
+            )
+        finally:
+            loguru_logger.remove(handler_id)
+
+        expected = (
+            f"PortfolioPnlSnapshotter started: "
+            f"interval={expected_interval}s checkpoint_mode={expected_mode}"
+        )
+        assert any(
+            record.levelname == "INFO" and record.getMessage() == expected
+            for record in caplog.records
+        )
 
 
 class TestStopHelper:

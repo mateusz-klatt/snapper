@@ -61,6 +61,12 @@ from snapper.application.portfolio.pnl_correction_planner import PnlCorrectionPl
 from snapper.application.portfolio.pnl_correction_planner import plan_correction_chunk
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import PnlCheckpointCaptureRequest
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
+    CHECKPOINT_SUMMARY_EVERY_TICKS,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
+    advance_checkpoint_summary_tick,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     record_checkpoint_capture_committed,
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
@@ -346,6 +352,7 @@ class PortfolioPnlSnapshotter:
         self._checkpoint_mode: CheckpointMode = resolve_checkpoint_mode(
             os.environ.get(CHECKPOINT_MODE_ENV_VAR)
         )
+        self._checkpoint_summary_ticks: int = 0
 
     @property
     def disabled(self) -> bool:
@@ -438,6 +445,12 @@ class PortfolioPnlSnapshotter:
             self._fx_shadow_context = None
             if context is not None:
                 await context.flush_bounded(repo)
+        self._checkpoint_summary_ticks = advance_checkpoint_summary_tick(
+            self._checkpoint_summary_ticks,
+            self._checkpoint_mode,
+            logger,
+            every_ticks=CHECKPOINT_SUMMARY_EVERY_TICKS,
+        )
 
     async def _tick_valuation(self, repo: Repository, as_of: datetime) -> None:
         """Run one tick's valuation and durable sample work before shadow flushing."""
@@ -1113,7 +1126,7 @@ class PortfolioPnlSnapshotter:
         repo, ctx, frontier = request.repo, request.ctx, request.frontier
         capture, resume = request.capture, request.resume
         if resume is not None:
-            record_checkpoint_resume_attempted()
+            record_checkpoint_resume_attempted(ctx.scope)
         chunk, result = await self._replay_series(
             repo,
             ctx,
@@ -1133,7 +1146,7 @@ class PortfolioPnlSnapshotter:
                 _CheckpointReplayOptions(capture=recapture),
             )
         elif resume is not None:
-            record_checkpoint_resume_succeeded()
+            record_checkpoint_resume_succeeded(ctx.scope)
         await self._plan_and_commit_checkpoint(request, chunk, result)
 
     async def _advance_shadow(self, request: _CheckpointDispatchRequest) -> None:
@@ -1142,7 +1155,7 @@ class PortfolioPnlSnapshotter:
         resume = request.resume
         assert resume is not None
         anchor_chunk, anchor = await self._replay_series(repo, ctx, request.chunk, frontier)
-        record_checkpoint_resume_attempted()
+        record_checkpoint_resume_attempted(ctx.scope)
         with activate_fx_shadow_context(None):
             _, resumed = await self._replay_series(
                 repo,
@@ -1155,7 +1168,7 @@ class PortfolioPnlSnapshotter:
         if fallback is not None:
             await handle_resume_fallback(repo, ctx.scope, frontier, resume, fallback)
         else:
-            record_checkpoint_resume_succeeded()
+            record_checkpoint_resume_succeeded(ctx.scope)
         evidence = await repo.get_portfolio_pnl_correction_evidence(
             ctx.scope, anchor_chunk.start, anchor_chunk.end
         )
@@ -1166,9 +1179,9 @@ class PortfolioPnlSnapshotter:
         if fallback is None:
             resumed_plan = await self._plan_chunk(repo, ctx, resumed, evidence)
             mismatch = compare_checkpoint_shadow(anchor, anchor_plan, resumed, resumed_plan)
-            record_checkpoint_shadow_comparison()
+            record_checkpoint_shadow_comparison(ctx.scope)
             if mismatch is not None:
-                record_checkpoint_shadow_mismatch()
+                record_checkpoint_shadow_mismatch(ctx.scope)
                 await delete_checkpoint(repo, ctx.scope, resume.record)
                 logger.error(
                     "checkpoint_shadow_mismatch wallet=%s generation=%s point=%s field=%s",
@@ -1228,7 +1241,7 @@ class PortfolioPnlSnapshotter:
             checkpoint=write,
         )
         if write is not None:
-            record_checkpoint_capture_committed()
+            record_checkpoint_capture_committed(ctx.scope)
         self._record_chunk_outcome(ctx.wallet_public_id, self._monotonic() - request.started, chunk)
         self._log_repair_from_lag(ctx, committed)
         self._report_withheld(ctx.wallet_public_id, plan.withheld, bool(plan.chunk.edits))
