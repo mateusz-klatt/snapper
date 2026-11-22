@@ -12,6 +12,7 @@ import pytest
 from snapper.application.portfolio import pnl_engine_options
 from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio import pnl_snapshotter_checkpoint as dispatch
+from snapper.application.portfolio import pnl_snapshotter_config
 from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_from_json
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
@@ -46,6 +47,15 @@ def _permit_capture(monkeypatch: pytest.MonkeyPatch) -> None:
         pnl_engine_options,
         "_engine_options_table",
         lambda: {PNL_SAMPLE_CALC_VERSION: PnlEngineOptions(True, False, False)},
+    )
+
+
+def _enable_checkpoint_modes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Widen code-enabled checkpoint modes inside tests exercising shadow or active."""
+    monkeypatch.setattr(
+        pnl_snapshotter_config,
+        "CHECKPOINT_MODES_ENABLED",
+        frozenset({"off", "shadow", "active"}),
     )
 
 
@@ -179,6 +189,8 @@ async def test_off_and_production_modes_never_read_a_checkpoint(
     Then: No checkpoint read occurs and only enabled modes count permission refusal.
     """
     reset_checkpoint_metrics()
+    if mode != "off":
+        _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", mode)
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -207,6 +219,7 @@ async def test_tip_capture_commits_and_service_refusal_still_commits_chunk(
     Then: Both chunks commit while only the first stores a checkpoint row.
     """
     reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -241,6 +254,7 @@ async def test_capture_gates_never_commit_a_row(
     Then: Financial progress commits without a checkpoint row.
     """
     reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -279,6 +293,7 @@ async def test_write_precheck_refusal_does_not_fail_tick(
     Then: The chunk commits with no checkpoint and the refusal is counted.
     """
     reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -336,6 +351,7 @@ async def test_shadow_match_keeps_anchor_plan_without_capture(
     Then: No deletion or capture occurs, comparison counters advance, and a row remains.
     """
     reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -365,6 +381,7 @@ async def test_shadow_mismatch_deletes_row_and_logs_error(
     Then: Fenced deletion occurs, no row survives, and ERROR is logged.
     """
     reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -402,6 +419,7 @@ async def test_active_resume_commits_resumed_result(
     Then: No anchor replay occurs and resume success is counted.
     """
     reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -432,6 +450,8 @@ async def test_service_resume_fallback_deletes_and_commits_anchor(
     Then: The old generation is deleted and an anchor capture commits instead.
     """
     reset_checkpoint_metrics()
+    if mode != "off":
+        _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", mode)
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -469,6 +489,8 @@ async def test_checkpoint_mode_prior_peak_change_rewinds_without_commit(
     Then: It rewinds without committing financial rows or a checkpoint.
     """
     reset_checkpoint_metrics()
+    if mode != "off":
+        _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", mode)
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -505,6 +527,7 @@ async def test_shadow_without_tip_capture_still_commits_matching_anchor(
     Then: Only those two paths run and the anchor plan commits.
     """
     reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     repo = fixtures._FakeRepo()
     frontier = replace(_pending(repo), tip=fixtures._minute(4))
@@ -546,6 +569,8 @@ async def test_modes_commit_identical_financial_rows_on_same_quiet_scenario(
     Then: Every financial, audit, and watermark field is identical.
     """
     reset_checkpoint_metrics()
+    if mode != "off":
+        _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", mode)
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -603,6 +628,7 @@ async def test_periodic_summary_emits_every_n_ticks_and_separates_scopes(
     Then: Ticks 1..N-1 emit nothing, tick N emits one cumulative line per scope, and scopes stay isolated.
     """
     reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     wallet_a = "wallet-alpha"
     wallet_b = "wallet-beta"
@@ -745,6 +771,7 @@ async def test_two_scopes_count_commits_and_resumes_independently(
     Then: Each scope carries only its own counts, summaries reflect both, and totals sum them.
     """
     reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     _permit_capture(monkeypatch)
     repo = fixtures._FakeRepo()

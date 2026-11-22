@@ -1118,9 +1118,11 @@ async def _start_pnl_snapshotter(
         )
     else:
         logger.info(
-            "PortfolioPnlSnapshotter started: interval={}s checkpoint_mode={}",
+            "PortfolioPnlSnapshotter started: interval={}s "
+            "checkpoint_mode={} configured_checkpoint_mode={}",
             snapshotter.interval_seconds,
             snapshotter.checkpoint_mode,
+            snapshotter.configured_checkpoint_mode,
         )
 
 

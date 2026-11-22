@@ -106,7 +106,7 @@ from snapper.application.portfolio.pnl_snapshotter_config import ENABLED_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import FX_SHADOW_PINNING_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import INTERVAL_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import CheckpointMode
-from snapper.application.portfolio.pnl_snapshotter_config import resolve_checkpoint_mode
+from snapper.application.portfolio.pnl_snapshotter_config import resolve_checkpoint_modes
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_enabled
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_interval
 from snapper.application.portfolio.pnl_timeline import PnlTimelineWorkBudgetError
@@ -349,9 +349,9 @@ class PortfolioPnlSnapshotter:
         self._repair_from_lag_logged: dict[tuple[str, str, str, str], datetime] = {}
         self._fx_shadow_pinning_enabled = resolve_enabled(os.environ.get(FX_SHADOW_PINNING_ENV_VAR))
         self._fx_shadow_context: FxShadowPinContext | None = None
-        self._checkpoint_mode: CheckpointMode = resolve_checkpoint_mode(
-            os.environ.get(CHECKPOINT_MODE_ENV_VAR)
-        )
+        checkpoint_resolution = resolve_checkpoint_modes(os.environ.get(CHECKPOINT_MODE_ENV_VAR))
+        self._configured_checkpoint_mode: CheckpointMode = checkpoint_resolution.configured
+        self._checkpoint_mode: CheckpointMode = checkpoint_resolution.effective
         self._checkpoint_summary_ticks: int = 0
 
     @property
@@ -374,12 +374,22 @@ class PortfolioPnlSnapshotter:
 
     @property
     def checkpoint_mode(self) -> CheckpointMode:
-        """Return the validated opening-checkpoint mode resolved at startup.
+        """Return the effective opening-checkpoint mode resolved at startup.
 
         Returns:
-            Configured checkpoint mode: ``"off"``, ``"shadow"``, or ``"active"``.
+            Effective checkpoint mode: ``"off"``, ``"shadow"``, or ``"active"``.
         """
         return self._checkpoint_mode
+
+    @property
+    def configured_checkpoint_mode(self) -> CheckpointMode:
+        """Return the parsed configured opening-checkpoint mode from startup env.
+
+        Returns:
+            Parsed configured mode before the kill switch:
+            ``"off"``, ``"shadow"``, or ``"active"``.
+        """
+        return self._configured_checkpoint_mode
 
     async def start(self) -> None:
         """Spawn the tick loop. No-op in disabled mode."""

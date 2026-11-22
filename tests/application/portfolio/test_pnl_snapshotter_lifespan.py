@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 from loguru import logger as loguru_logger
 
+from snapper.application.portfolio import pnl_snapshotter_config
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
 from snapper.application.services.settings import SettingsService
 from snapper.config.settings import AppSettings
@@ -56,6 +57,7 @@ class TestStartHelper:
             disabled = False
             interval_seconds = 60
             checkpoint_mode = "off"
+            configured_checkpoint_mode = "off"
 
         def _repository(_db_url: str) -> SimpleNamespace:
             return SimpleNamespace()
@@ -154,6 +156,7 @@ class TestStartHelper:
             disabled = False
             interval_seconds = 60
             checkpoint_mode = "off"
+            configured_checkpoint_mode = "off"
 
         def _repository(_db_url: str) -> SimpleNamespace:
             return SimpleNamespace()
@@ -175,9 +178,9 @@ class TestStartHelper:
     @pytest.mark.parametrize(
         "case",
         [
-            (None, None, 60, "off"),
-            ("30", "shadow", 30, "shadow"),
-            ("120", "active", 120, "active"),
+            (None, None, 60, "off", "off"),
+            ("30", "shadow", 30, "off", "shadow"),
+            ("120", "active", 120, "off", "active"),
         ],
     )
     @pytest.mark.asyncio
@@ -185,15 +188,17 @@ class TestStartHelper:
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
-        case: tuple[str | None, str | None, int, str],
+        case: tuple[str | None, str | None, int, str, str],
     ) -> None:
-        """Log the resolved interval and checkpoint mode at INFO when started.
+        """Log interval plus effective and configured checkpoint modes when started.
 
         Given: An enabled snapshotter environment with interval and checkpoint mode.
         When: ``_start_pnl_snapshotter`` starts and attaches the snapshotter.
-        Then: An INFO log line reports ``interval=<N>s checkpoint_mode=<mode>``.
+        Then: An INFO log line reports ``interval=<N>s checkpoint_mode=<effective> configured_checkpoint_mode=<configured>``.
         """
-        interval_env, checkpoint_env, expected_interval, expected_mode = case
+        interval_env, checkpoint_env, expected_interval, expected_effective, expected_configured = (
+            case
+        )
         monkeypatch.setattr("snapper.server.app.get_repository", lambda _url: SimpleNamespace())
         monkeypatch.setattr(PortfolioPnlSnapshotter, "start", AsyncMock())
         monkeypatch.setenv("PNL_SNAPSHOTTER_ENABLED", "true")
@@ -220,12 +225,83 @@ class TestStartHelper:
 
         expected = (
             f"PortfolioPnlSnapshotter started: "
-            f"interval={expected_interval}s checkpoint_mode={expected_mode}"
+            f"interval={expected_interval}s "
+            f"checkpoint_mode={expected_effective} "
+            f"configured_checkpoint_mode={expected_configured}"
         )
         assert any(
             record.levelname == "INFO" and record.getMessage() == expected
             for record in caplog.records
         )
+
+    @pytest.mark.asyncio
+    async def test_startup_logs_widened_effective_and_configured_checkpoint_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Log matching effective and configured modes when enabled in config.
+
+        Given: ``CHECKPOINT_MODES_ENABLED`` widened to permit ``shadow``.
+        When: ``_start_pnl_snapshotter`` starts with ``PNL_SNAPSHOTTER_CHECKPOINT_MODE=shadow``.
+        Then: The INFO line reports both ``checkpoint_mode=shadow`` and ``configured_checkpoint_mode=shadow``.
+        """
+        monkeypatch.setattr(
+            pnl_snapshotter_config,
+            "CHECKPOINT_MODES_ENABLED",
+            frozenset({"off", "shadow", "active"}),
+        )
+        monkeypatch.setattr("snapper.server.app.get_repository", lambda _url: SimpleNamespace())
+        monkeypatch.setattr(PortfolioPnlSnapshotter, "start", AsyncMock())
+        monkeypatch.setenv("PNL_SNAPSHOTTER_ENABLED", "true")
+        monkeypatch.setenv("PNL_SNAPSHOTTER_INTERVAL_SECONDS", "45")
+        monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        handler_id = loguru_logger.add(caplog.handler, format="{message}", level="INFO")
+        try:
+            await _start_pnl_snapshotter(
+                app,
+                db_url="sqlite+aiosqlite:///:memory:",
+                settings=_settings(),
+                settings_service=_settings_service(),
+            )
+        finally:
+            loguru_logger.remove(handler_id)
+
+        expected = (
+            "PortfolioPnlSnapshotter started: interval=45s "
+            "checkpoint_mode=shadow configured_checkpoint_mode=shadow"
+        )
+        assert any(
+            record.levelname == "INFO" and record.getMessage() == expected
+            for record in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_invalid_checkpoint_mode_is_isolated_at_server_startup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keep invalid checkpoint-mode configuration from crashing server startup.
+
+        Given: ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` set to an unrecognised token.
+        When: ``_start_pnl_snapshotter`` initializes the writer singleton.
+        Then: Startup returns cleanly without attaching ``app.state.pnl_snapshotter``.
+        """
+        monkeypatch.setattr("snapper.server.app.get_repository", lambda _url: SimpleNamespace())
+        monkeypatch.setenv("PNL_SNAPSHOTTER_ENABLED", "true")
+        monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "bogus")
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        await _start_pnl_snapshotter(
+            app,
+            db_url="sqlite+aiosqlite:///:memory:",
+            settings=_settings(),
+            settings_service=_settings_service(),
+        )
+
+        assert not hasattr(app.state, "pnl_snapshotter")
 
 
 class TestStopHelper:
