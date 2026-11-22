@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from snapper.api.schemas.pnl_timeline import PnlIncompletenessReasonData
+from snapper.application.portfolio import pnl_faithful_recovery
 from snapper.application.portfolio import pnl_timeline
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.exact_sum import ExactSum
@@ -3890,7 +3891,7 @@ class TestAdjustedTotalFallback:
             """Fail immediately if ``(a″)`` is reached after any abort."""
             raise AssertionError("adjust_flow_family must not run on budget or cap aborts")
 
-        monkeypatch.setattr(pnl_timeline, "adjust_flow_family", forbid_adjust)
+        monkeypatch.setattr(pnl_faithful_recovery, "adjust_flow_family", forbid_adjust)
 
         def zero_budget() -> FaithfulRecoveryBudget:
             """Return an exhausted budget forcing a recovery abort."""
@@ -3907,7 +3908,7 @@ class TestAdjustedTotalFallback:
         assert budget_point.total_rounding_adjusted is False
 
         monkeypatch.undo()
-        monkeypatch.setattr(pnl_timeline, "adjust_flow_family", forbid_adjust)
+        monkeypatch.setattr(pnl_faithful_recovery, "adjust_flow_family", forbid_adjust)
         u = math.ulp(1.0)
         branch_execs: list[TimelineExecution] = []
         for idx in range(12):

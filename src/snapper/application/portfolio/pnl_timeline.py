@@ -162,7 +162,6 @@ from snapper.application.portfolio.exact_sum import exact_units_of
 from snapper.application.portfolio.exact_sum import faithful_roundings
 from snapper.application.portfolio.exact_sum import project_units
 from snapper.application.portfolio.pnl_adjusted_total import AdjustedFlowProjection
-from snapper.application.portfolio.pnl_adjusted_total import adjust_flow_family
 from snapper.application.portfolio.pnl_faithful_recovery import MAX_RECOVERY_KEY_VISITS
 from snapper.application.portfolio.pnl_faithful_recovery import MAX_RECOVERY_KEYS
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowInput
@@ -2191,12 +2190,15 @@ def _adjust_flow_family(
     exact: _ExactCumulatives,
     instrument_keys: Sequence[str],
     attribution_keys: Sequence[AttributionKey],
+    recovery: _FlowRecovery,
 ) -> AdjustedFlowProjection[str, AttributionKey] | None:
-    """Run the ``(a″)`` adjusted-total fallback over one exact flow family."""
-    return adjust_flow_family(
-        exact.total.exact_units(),
-        _ordered_exact_units(exact.by_instrument, instrument_keys),
-        _ordered_exact_units(exact.by_attribution, attribution_keys),
+    """Run the ``(a″)`` adjusted-total fallback through the family's single-entry cache."""
+    return recovery.adjusted(
+        FaithfulFlowInput(
+            exact.total.exact_units(),
+            _ordered_exact_units(exact.by_instrument, instrument_keys),
+            _ordered_exact_units(exact.by_attribution, attribution_keys),
+        )
     )
 
 
@@ -2240,7 +2242,7 @@ def _resolve_unrepresentable_family(
         return recovered, None
     if not public_read or not completed:
         return None
-    adjusted = _adjust_flow_family(exact, instrument_keys, attribution_keys)
+    adjusted = _adjust_flow_family(exact, instrument_keys, attribution_keys, recovery)
     if adjusted is None:
         return None
     return (

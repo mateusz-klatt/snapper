@@ -7,8 +7,10 @@ from itertools import product
 
 import pytest
 
+from snapper.application.portfolio import pnl_faithful_recovery
 from snapper.application.portfolio.exact_sum import exact_units_of
 from snapper.application.portfolio.exact_sum import faithful_roundings
+from snapper.application.portfolio.pnl_adjusted_total import AdjustedFlowProjection
 from snapper.application.portfolio.pnl_faithful_recovery import MAX_RECOVERY_KEY_VISITS
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowInput
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowRecovery
@@ -406,3 +408,43 @@ def test_completed_refusal_distinguishes_exhaustive_failure_from_aborts() -> Non
     )
     assert full_recovery.recover(branch_capped) is None
     assert full_recovery.completed_refusal(branch_capped) is False
+
+
+def test_adjusted_reuses_the_last_identical_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Solve an unchanged cumulative family once per recovery object.
+
+    Given: A recovery object whose adjusted solver is wrapped by a call counter.
+    When: The same exact input is adjusted on several idle minutes, then a
+        different input is adjusted once.
+    Then: The solver runs once for the repeated input, every call returns the
+        cached result, and a changed input runs the solver again.
+    """
+    calls: list[int] = []
+    original = pnl_faithful_recovery.adjust_flow_family
+
+    def counting(
+        total_units: int,
+        instruments: tuple[tuple[str, int], ...],
+        attributions: tuple[tuple[str, int], ...],
+    ) -> AdjustedFlowProjection[str, str] | None:
+        """Count one solver call and delegate to the real solver.
+
+        Args:
+            total_units: Exact aggregate units.
+            instruments: Ordered instrument exact units.
+            attributions: Ordered attribution exact units.
+
+        Returns:
+            The real solver result.
+        """
+        calls.append(total_units)
+        return original(total_units, instruments, attributions)
+
+    monkeypatch.setattr(pnl_faithful_recovery, "adjust_flow_family", counting)
+    recovery = FaithfulFlowRecovery[str, str](FaithfulRecoveryBudget())
+    first = _class_i()
+    results = [recovery.adjusted(replace(first)) for _ in range(5)]
+    assert len(calls) == 1
+    assert all(result == results[0] for result in results)
+    recovery.adjusted(_class_w())
+    assert len(calls) == 2

@@ -1335,7 +1335,7 @@ allocation order, only where ``5C.5`` withheld
 ``sum``, pinned by a test) and (ii) width-independent FX conversion minutes
 (requesting every conversion minute from the conversion population and ignoring
 the invalid-event mark latch). Earlier rows stay on their version until
-recomputed; the public timeline stays ``5A.16``.
+recomputed; the public timeline is versioned separately (``5A.18``).
 
 ``5C.5`` selects the exact FX venue per valuation or event minute for the
 snapshotter. The same minute is therefore independent of replay chunk size.

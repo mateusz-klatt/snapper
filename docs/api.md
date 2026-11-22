@@ -1706,9 +1706,12 @@ nonzero inexact bucket with the finest ULP as its single absorber, checks up to
 `nextafter` steps around `cand - sum(others)` until key-ordered `sum(buckets)`
 equals the candidate identically within `4` ULPs (`u`) of the absorber's exact
 value. Exact and zero buckets stay fixed, and budget or structural aborts never
-trigger `(a″)`. Adjusted points keep `valuation_status` `complete` and disclose
-`total_rounding_adjusted`, `total_deviation_ulps`, `absorber_deviation_ulps`,
-`instrument_absorber_id`, and `attribution_absorber_key`.
+trigger `(a″)`. The fallback changes only how flows publish, never the point's
+other completeness checks: an adjusted point that is otherwise complete stays
+`complete`, and one with, for example, a missing mark stays `incomplete`. Adjusted
+points disclose `total_rounding_adjusted` (`true`; `null` on unadjusted points),
+`total_deviation_ulps`, `absorber_deviation_ulps`, `instrument_absorber_id`, and
+`attribution_absorber_key`.
 
 Existing successfully published flow bits remain unchanged. The version
 identifies the response contract; consumers requiring fresh validation must
