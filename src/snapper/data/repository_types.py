@@ -1324,8 +1324,18 @@ class PortfolioPnlAnchorWriteEvidence(TypedDict):
     execution_prefix_bundle: PnlTimelineExecutionPrefixBundle
 
 
-PNL_SAMPLE_CALC_VERSION = "5C.5"
+PNL_SAMPLE_CALC_VERSION = "5C.6"
 """Algorithm version stamped on every persisted Phase-5B sample point.
+
+``5C.6`` adds, for snapshotter samples only, (i) the compensated-total
+unrealized fallback (lazy builtin-``sum`` T1 then ``math.fsum`` T2, naive then
+compensated attribution buckets using compensated (Neumaier) summation in
+allocation order, only where ``5C.5`` withheld
+``instrument_reconciliation_failed``; depends on CPython 3.12+ compensated
+``sum``, pinned by a test) and (ii) width-independent FX conversion minutes
+(requesting every conversion minute from the conversion population and ignoring
+the invalid-event mark latch). Earlier rows stay on their version until
+recomputed; the public timeline stays ``5A.16``.
 
 ``5C.5`` selects the exact FX venue per valuation or event minute for the
 snapshotter. The same minute is therefore independent of replay chunk size.

@@ -297,14 +297,11 @@
       }
     },
     "src/snapper/application/portfolio/pnl_timeline_service.py": {
-      "_event_fx_minutes": {
-        "PLR0913": 6
-      },
       "_load_request_fx_rates": {
         "PLR0913": 6
       },
       "_mark_fx_minutes": {
-        "PLR0913": 8
+        "PLR0913": 6
       },
       "_opening_marks_from_candles": {
         "PLR0913": 7

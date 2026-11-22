@@ -463,3 +463,47 @@ def test_mixed_non_exempt_and_empty_reason_withholds_stay_repairable() -> None:
     assert result.chunk.unrepairable_withheld_minutes == ()
     assert PnlCorrectionEdit(_M1, existing_m1, None) in result.chunk.edits
     assert not _is_unrepairable_withhold(WithheldMinute(_M1, ("custom",), ()), None, None)
+
+
+def test_reconciled_m1_propagates_causal_peak_into_m2_drawdown() -> None:
+    """Propagate newly recovered M1 peak into M2 drawdown across 5C.5 -> 5C.6 (R3).
+
+    Given: A two-minute window where M1 is either withheld as
+        instrument_reconciliation_failed (5C.5) or complete with cash 2500 (5C.6),
+        followed by complete M2 with cash 1000 and an active 5C.5 M2 row at zero
+        drawdown.
+    When: plan_correction_chunk plans [M1, M2] under both valuations.
+    Then: Withheld M1 leaves M2 at drawdown 0.0 and peak 1000, whereas complete M1
+        at cash 2500 updates M2 to drawdown 0.6 and peak 2500.
+    """
+    withheld_plan = plan_correction_chunk(
+        _inputs((_minute(_M1, "instrument_reconciliation_failed"), _minute(_M2)), end=_M2)
+    )
+    (withheld_m2_edit,) = withheld_plan.chunk.edits
+    assert withheld_m2_edit.point_time == _M2
+    assert withheld_m2_edit.replacement is not None
+    assert withheld_m2_edit.replacement["drawdown"] == 0.0
+    assert withheld_plan.chunk.prior_peak == 1000.0
+
+    legacy_m2 = _complete_row(_M2)
+    legacy_m2["calc_version"] = "5C.5"
+    existing_m2 = PnlCorrectionSampleVersion(95, legacy_m2)
+    recovered_m1 = MinuteInputs(
+        fixtures._complete_point(_M1),
+        {
+            "kraken": fixtures._attempt(
+                minute=_M1,
+                balances_json='[{"currency":"USD","total":2500.0}]',
+            )
+        },
+        fixtures._crypto_evidence(),
+    )
+    recovered_plan = plan_correction_chunk(
+        _inputs((recovered_m1, _minute(_M2)), (existing_m2,), end=_M2)
+    )
+    edits_by_minute = {edit.point_time: edit for edit in recovered_plan.chunk.edits}
+    assert sorted(edits_by_minute) == [_M1, _M2]
+    m2_replacement = edits_by_minute[_M2].replacement
+    assert m2_replacement is not None
+    assert m2_replacement["drawdown"] == pytest.approx(0.6)
+    assert recovered_plan.chunk.prior_peak == 2500.0

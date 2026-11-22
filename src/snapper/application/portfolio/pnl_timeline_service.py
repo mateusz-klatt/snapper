@@ -123,6 +123,8 @@ from snapper.application.portfolio.pnl_conversion_mark_evidence import (
 from snapper.application.portfolio.pnl_conversion_mark_evidence import (
     _execution_with_conversion_mark_evidence,
 )
+from snapper.application.portfolio.pnl_engine_options import PNL_ENGINE_OPTIONS_OFF
+from snapper.application.portfolio.pnl_engine_options import pnl_engine_options_for
 from snapper.application.portfolio.pnl_fx_diagnostics import PnlFxFailure
 from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_conversion_scope
 from snapper.application.portfolio.pnl_fx_diagnostics import pnl_fx_diagnostics_active
@@ -3053,6 +3055,7 @@ class _EventFxContext:
     base_by_instrument: Mapping[str, str]
     quote_by_instrument: Mapping[str, str]
     valuation_ccy: str
+    request_all_conversion_minutes: bool = False
 
 
 def _add_fx_minute(
@@ -3243,37 +3246,103 @@ def _replay_event_fx_state(
 def _event_fx_minutes(
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
     accrual_rows: Sequence[PnlTimelineAccrualRow],
-    base_by_instrument: Mapping[str, str],
-    quote_by_instrument: Mapping[str, str],
-    valuation_ccy: str,
+    context: _EventFxContext,
     opening: TimelineOpening | None = None,
 ) -> _FxInstrumentRequirements:
-    """Collect exact rate minutes needed by prices, fees, and accruals.
+    """Collect exact rate minutes needed by publishable prices, fees, and accruals.
 
     A positive foreign execution price enters the average-cost kernel only after
     conversion at its fill minute. Requirements stop when an invalid size or an
     unknown-basis close permanently withholds that instrument, and prices that
-    cannot repair an already unknown basis do not steer peer selection. Nonzero
-    foreign fees and accruals need the same proof while their instrument remains
-    publishable; exact zero and native-currency values need no candle.
+    cannot repair an already unknown basis do not steer peer selection; nonzero
+    foreign fees and accruals need proof while their instrument remains
+    publishable. The ``5C.6`` snapshotter rule
+    (``context.request_all_conversion_minutes``) does not alter this walk; it
+    lives in ``_conversion_fx_minutes`` (requested from the conversion
+    population) and ``_mark_fx_minutes`` (where the invalid-event latch is
+    ignored). Exact zero and native-currency values need no candle.
+
+    Service FX conversion inventory (a new conversion site must add an explicit
+    FX-minute requirement or a justified exemption here):
+    - ``_to_timeline_execution`` fee -> fee minute (``_event_fx_minutes`` and,
+      under ``5C.6``, ``_conversion_fx_minutes``).
+    - ``_to_timeline_execution`` price (any size) -> price minute
+      (``_event_fx_minutes`` and, under ``5C.6``, ``_conversion_fx_minutes``).
+    - ``_to_timeline_accrual`` -> accrual minute (``_event_fx_minutes`` and,
+      under ``5C.6``, ``_conversion_fx_minutes``).
+    - ``_record_mark`` -> requested by ``_mark_fx_minutes`` at every positive
+      close while the walk holds a non-flat position, and under ``5C.6`` the
+      invalid-event latch no longer suppresses it.
+    - ``_opening_marks_from_candles`` (``convert_amount``) -> covered by
+      ``_opening_mark_requirements`` and fails closed with
+      ``PnlAnchorEvidenceError``.
+    - ``_converted_point_overlay`` (``convert_amount``) -> none needed
+      (reader-side, never persisted).
 
     Args:
         execution_rows: Trusted scope executions replayed by the kernel.
         accrual_rows: Scope accruals, whose amount carries ``amount_asset``.
-        base_by_instrument: Proven base asset of each execution instrument.
-        quote_by_instrument: Proven execution-price denominations.
-        valuation_ccy: Currency the series is valued in.
+        context: Proven base and quote denominations, the valuation currency,
+            and the ``5C.6`` conversion-minute flag consumed by
+            ``_mark_fx_minutes`` and ``_series_event_fx_minutes``.
         opening: Rebased per-shard quantities active before the suffix.
 
     Returns:
         Exact required minutes grouped by instrument and unordered currency pair.
     """
-    context = _EventFxContext(
-        base_by_instrument=base_by_instrument,
-        quote_by_instrument=quote_by_instrument,
-        valuation_ccy=valuation_ccy,
-    )
     return _replay_event_fx_state(execution_rows, accrual_rows, context, opening).requirements
+
+
+def _conversion_fx_minutes(
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    accrual_rows: Sequence[PnlTimelineAccrualRow],
+    context: _EventFxContext,
+) -> _FxInstrumentRequirements:
+    """Collect exact rate minutes consulted by service execution and accrual conversions.
+
+    Mirrors the conversion predicates in ``_to_timeline_execution`` and
+    ``_to_timeline_accrual`` across the full conversion population without
+    trust, provenance, or position-state gating.
+
+    Args:
+        execution_rows: Loaded scope executions passed to ``_to_timeline_execution``.
+        accrual_rows: Scope accruals passed to ``_to_timeline_accrual``.
+        context: Proven denominations and target valuation currency.
+
+    Returns:
+        Exact conversion minutes grouped by instrument and unordered currency pair.
+    """
+    requirements: _FxInstrumentRequirements = {}
+    for row in execution_rows:
+        instrument_public_id = row["instrument_public_id"]
+        minute = _rate_minute(row["timestamp"])
+        if math.isfinite(row["fee"]) and not _is_exact_zero(row["fee"]):
+            _add_fx_minute(
+                requirements,
+                instrument_public_id,
+                row["fee_asset"],
+                context.valuation_ccy,
+                minute,
+            )
+        quote_currency = context.quote_by_instrument.get(instrument_public_id)
+        if quote_currency is not None and is_positive_finite(row["price"]):
+            _add_fx_minute(
+                requirements,
+                instrument_public_id,
+                quote_currency,
+                context.valuation_ccy,
+                minute,
+            )
+    for accrual in accrual_rows:
+        if math.isfinite(accrual["amount"]) and not _is_exact_zero(accrual["amount"]):
+            _add_fx_minute(
+                requirements,
+                accrual["instrument_public_id"],
+                accrual["amount_asset"],
+                context.valuation_ccy,
+                _rate_minute(accrual["accrued_at"]),
+            )
+    return requirements
 
 
 type _EffectiveMarkEvent = tuple[datetime, str, int, str, float, bool]
@@ -3287,6 +3356,7 @@ class _MarkFxWindow:
     grid_start: datetime
     to_time: datetime
     regression_shadows: Sequence[tuple[datetime, datetime]]
+    ignore_invalid_event_latch: bool = False
 
 
 def _mark_event_delta(
@@ -3392,7 +3462,7 @@ def _mark_minute_is_consumed(
     window: _MarkFxWindow,
 ) -> bool:
     """Return whether one grid minute values a trusted open position."""
-    if not state.mark_eligible:
+    if not state.mark_eligible and not window.ignore_invalid_event_latch:
         return False
     if mark_minute < window.grid_start or mark_minute > window.to_time:
         return False
@@ -3482,9 +3552,7 @@ def _eligible_mark_minutes_from_state(
 def _mark_fx_minutes(
     candles: Sequence[PnlTimelineCandleRow],
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
-    base_by_instrument: Mapping[str, str],
-    quote_by_instrument: Mapping[str, str],
-    valuation_ccy: str,
+    context: _EventFxContext,
     from_time: datetime,
     to_time: datetime,
     opening: TimelineOpening | None = None,
@@ -3494,16 +3562,18 @@ def _mark_fx_minutes(
     Position quantities replay in the same per-instrument monotone-clamped event
     order as the pure builder. Global regression shadows are derived from the
     complete replay prefix, including instruments whose price identity is not
-    trusted. Candles before an opening fill, after a full close, or after a
-    known-invalid size or price are not valuation consumers, so they cannot steer
-    a shared FX plane.
+    trusted. Candles before an opening fill, after a full close, or, under the
+    default policy, after a known-invalid size or price are not valuation
+    consumers, so they cannot steer a shared FX plane. Under ``5C.6``
+    (``context.request_all_conversion_minutes``), the invalid-event latch is
+    ignored so a snap-flat invalid fill cannot suppress later non-flat mark FX
+    minutes.
 
     Args:
         candles: Raw finalized mark candles already bounded to the chart window.
         execution_rows: Complete scope fills in replay order through the chart end.
-        base_by_instrument: Proven base asset of each execution instrument.
-        quote_by_instrument: Proven denomination of each candle close.
-        valuation_ccy: Currency the series is valued in.
+        context: Proven base and quote denominations, target valuation currency,
+            and whether ``5C.6`` ignores the invalid-event mark latch.
         from_time: Requested chart start whose minute floor anchors the grid.
         to_time: Inclusive requested chart end.
         opening: Rebased durable shard pools active at t0, when present.
@@ -3513,8 +3583,8 @@ def _mark_fx_minutes(
     """
     effective_events, regression_shadows = _effective_mark_events(
         execution_rows,
-        base_by_instrument,
-        quote_by_instrument,
+        context.base_by_instrument,
+        context.quote_by_instrument,
     )
     needed: _FxInstrumentRequirements = {}
     opening_quantities = _opening_pool_quantities(opening)
@@ -3522,10 +3592,11 @@ def _mark_fx_minutes(
         grid_start=from_time.replace(second=0, microsecond=0),
         to_time=to_time,
         regression_shadows=regression_shadows,
+        ignore_invalid_event_latch=context.request_all_conversion_minutes,
     )
     for instrument_public_id, instrument_candles in _candles_by_instrument(candles).items():
         events = sorted(effective_events.get(instrument_public_id, []))
-        quote_currency = quote_by_instrument[instrument_public_id]
+        quote_currency = context.quote_by_instrument[instrument_public_id]
         for mark_minute in _eligible_mark_minutes(
             instrument_public_id,
             instrument_candles,
@@ -3537,7 +3608,7 @@ def _mark_fx_minutes(
                 needed,
                 instrument_public_id,
                 quote_currency,
-                valuation_ccy,
+                context.valuation_ccy,
                 mark_minute,
             )
     return needed
@@ -3592,6 +3663,7 @@ class _MarkCarryRequest:
 
     candles: Sequence[PnlTimelineCandleRow]
     execution_rows: Sequence[PnlTimelineOpeningExecutionRow]
+    fx_context: _EventFxContext
     base_by_instrument: Mapping[str, str]
     quote_by_instrument: Mapping[str, str]
     refs: Sequence[InstrumentSymbolRefRow]
@@ -3655,11 +3727,7 @@ def _capture_walk_states(
         event_state = _replay_event_fx_state(
             trusted_replayed_rows,
             replay.accrual_rows,
-            _EventFxContext(
-                base_by_instrument=mark_request.base_by_instrument,
-                quote_by_instrument=mark_request.quote_by_instrument,
-                valuation_ccy=mark_request.valuation_ccy,
-            ),
+            mark_request.fx_context,
             mark_request.opening,
         )
         request.set_walk_states(
@@ -3678,16 +3746,13 @@ def _resume_event_requirements(
 ) -> _FxInstrumentRequirements:
     """Walk only suffix event inputs from the verified carried event state."""
     state = event_walk_state_to_replay(resume.bundle.event_walk_state)
-    return _replay_event_fx_state(
+    event_requirements = _replay_event_fx_state(
         trusted_replayed_rows,
         replay.accrual_rows,
-        _EventFxContext(
-            base_by_instrument=request.base_by_instrument,
-            quote_by_instrument=request.quote_by_instrument,
-            valuation_ccy=request.valuation_ccy,
-        ),
+        request.fx_context,
         initial_state=state,
     ).requirements
+    return _with_conversion_fx_minutes(event_requirements, replay, request.fx_context)
 
 
 def _resume_mark_requirements(
@@ -3708,6 +3773,7 @@ def _resume_mark_requirements(
         grid_start=request.from_time.replace(second=0, microsecond=0),
         to_time=request.to_time,
         regression_shadows=(*prefix_shadows, *suffix_shadows),
+        ignore_invalid_event_latch=request.fx_context.request_all_conversion_minutes,
     )
     needed: _FxInstrumentRequirements = {}
     for instrument_public_id, candles in _candles_by_instrument(request.candles).items():
@@ -3757,19 +3823,15 @@ def _series_requirements_for_replay(
     mark = _mark_fx_minutes(
         request.candles,
         replay.loaded_execution_rows,
-        request.base_by_instrument,
-        request.quote_by_instrument,
-        request.valuation_ccy,
+        request.fx_context,
         request.from_time,
         request.to_time,
         opening,
     )
-    event = _event_fx_minutes(
+    event = _series_event_fx_minutes(
         trusted_replayed_rows,
-        replay.accrual_rows,
-        request.base_by_instrument,
-        request.quote_by_instrument,
-        request.valuation_ccy,
+        replay,
+        request.fx_context,
         opening,
     )
     return mark, event
@@ -5881,9 +5943,12 @@ async def _derive_anchor_candidate(
     event_requirements = _event_fx_minutes(
         execution_rows,
         (),
-        base_by_instrument,
-        quote_by_instrument,
-        valuation_ccy,
+        _EventFxContext(
+            base_by_instrument,
+            quote_by_instrument,
+            valuation_ccy,
+            request_all_conversion_minutes=PNL_ENGINE_OPTIONS_OFF.request_all_conversion_minutes,
+        ),
     )
     mark_requirements = _opening_mark_requirements(
         mark_candles,
@@ -7363,6 +7428,59 @@ def _series_instrument_ids(
     return opening_instrument_ids, instrument_ids
 
 
+def _with_conversion_fx_minutes(
+    event_requirements: _FxInstrumentRequirements,
+    replay: _SeriesReplayInputs,
+    context: _EventFxContext,
+) -> _FxInstrumentRequirements:
+    """Add every stateless conversion minute when the calculation version requests it.
+
+    Args:
+        event_requirements: Causal requirements from the ordinary or resumed event walk.
+        replay: Loaded suffix execution and accrual inputs for the series read.
+        context: Proven denominations, valuation currency, and ``5C.6`` flag.
+
+    Returns:
+        The unchanged causal requirements or their union with all conversion minutes.
+    """
+    if not context.request_all_conversion_minutes:
+        return event_requirements
+    return _merge_instrument_fx_minutes(
+        event_requirements,
+        _conversion_fx_minutes(
+            replay.loaded_execution_rows,
+            replay.accrual_rows,
+            context,
+        ),
+    )
+
+
+def _series_event_fx_minutes(
+    trusted_replayed_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    replay: _SeriesReplayInputs,
+    context: _EventFxContext,
+    opening: TimelineOpening,
+) -> _FxInstrumentRequirements:
+    """Collect causal event FX minutes and, under 5C.6, all conversion minutes.
+
+    Args:
+        trusted_replayed_rows: Price-provenance-trusted rows through ``to_time``.
+        replay: Loaded suffix execution and accrual inputs for the series read.
+        context: Proven denominations, valuation currency, and ``5C.6`` flag.
+        opening: Rebased durable shard pools active before the suffix.
+
+    Returns:
+        Exact event FX minutes grouped by instrument and unordered currency pair.
+    """
+    event_requirements = _event_fx_minutes(
+        trusted_replayed_rows,
+        replay.accrual_rows,
+        context,
+        opening,
+    )
+    return _with_conversion_fx_minutes(event_requirements, replay, context)
+
+
 async def _offload_series_valuation(
     valuation: Callable[[], tuple[PnlTimelineResult, tuple[PnlFxRateSource, ...]]],
 ) -> tuple[PnlTimelineResult, tuple[PnlFxRateSource, ...]]:
@@ -7534,6 +7652,11 @@ async def build_wallet_pnl_series(
     """
     with pnl_read_phase("series_anchor"):
         _validate_frozen_replay_policy(options, policy, to_time, as_of)
+        engine_options = (
+            pnl_engine_options_for(_PNL_SAMPLE_CALC_VERSION)
+            if options.pointwise_exact_fx
+            else PNL_ENGINE_OPTIONS_OFF
+        )
         capture_request = _activate_checkpoint_capture(options, to_time)
         wallet_public_id = normalize_portfolio_pnl_wallet_public_id(wallet_public_id)
         _enforce_total_work_budget(from_time, to_time, 0)
@@ -7659,6 +7782,12 @@ async def build_wallet_pnl_series(
             ),
         )
         display_identities = _instrument_display_identities(display_activity_spans, refs)
+        fx_context = _EventFxContext(
+            base_by_instrument=base_by_instrument,
+            quote_by_instrument=quote_by_instrument,
+            valuation_ccy=valuation_ccy,
+            request_all_conversion_minutes=engine_options.request_all_conversion_minutes,
+        )
         (
             mark_requirements,
             event_requirements,
@@ -7672,6 +7801,7 @@ async def build_wallet_pnl_series(
                 mark_request=_MarkCarryRequest(
                     candles=mark_candles,
                     execution_rows=replay.loaded_execution_rows,
+                    fx_context=fx_context,
                     base_by_instrument=base_by_instrument,
                     quote_by_instrument=quote_by_instrument,
                     refs=trusted_refs,
@@ -7772,6 +7902,7 @@ async def build_wallet_pnl_series(
                 valuation_ccy=valuation_ccy,
                 recovery_budget_per_point=options.replay_generation_tip is not None,
                 capture_checkpoint=(capture_request is not None and capture_request.active),
+                compensated_unrealized_fallback=engine_options.compensated_unrealized_fallback,
             )
             result = _timed_build_pnl_timeline(
                 executions,

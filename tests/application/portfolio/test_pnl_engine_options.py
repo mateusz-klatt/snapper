@@ -144,7 +144,18 @@ def test_pnl_engine_options_for_5c5_returns_expected_flags() -> None:
     )
 
 
-@pytest.mark.parametrize("calc_version", ["", "5C.4", "5C.6", "5A.16"])
+def test_pnl_engine_options_for_5c6_returns_expected_flags() -> None:
+    """Resolve ``"5C.6"`` with capture and both valuation completeness flags enabled.
+
+    Given: The first calculation version proven independent of checkpoint chunk width.
+    When: ``pnl_engine_options_for("5C.6")`` is called.
+    Then: It returns ``(capture_permitted=True, compensated_unrealized_fallback=True,
+        request_all_conversion_minutes=True)``.
+    """
+    assert pnl_engine_options_for("5C.6") == PnlEngineOptions(True, True, True)
+
+
+@pytest.mark.parametrize("calc_version", ["", "5C.4", "5C.7", "5A.16"])
 def test_pnl_engine_options_for_unknown_version_raises(calc_version: str) -> None:
     """Reject unknown calculation versions rather than guessing engine flags.
 

@@ -434,7 +434,7 @@ class _CaptureRepo(fixtures.FakeRepo):
 
 
 def _permit_capture(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Permit the synthetic calculation version through the test-only seam.
+    """Permit the synthetic capture version and retain the current pointwise profile.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
@@ -442,7 +442,12 @@ def _permit_capture(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         pnl_engine_options,
         "_engine_options_table",
-        lambda: {_CAPTURE_VERSION: pnl_engine_options.PnlEngineOptions(True, False, False)},
+        lambda: {
+            _CAPTURE_VERSION: pnl_engine_options.PnlEngineOptions(True, False, False),
+            fixtures.PNL_SAMPLE_CALC_VERSION: pnl_engine_options.PnlEngineOptions(
+                True, True, True
+            ),
+        },
     )
 
 

@@ -1,4 +1,8 @@
-"""Single-producer resolver for P&L engine valuation and checkpoint options."""
+"""Single-producer resolver for P&L engine valuation and checkpoint options.
+
+``5C.6`` is the first calculation version proven independent of checkpoint chunk
+width. Earlier versions remain checkpoint-capture disabled.
+"""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -31,6 +35,7 @@ PNL_ENGINE_OPTIONS_OFF: Final[PnlEngineOptions] = PnlEngineOptions(False, False,
 _ENGINE_OPTIONS_BY_CALC_VERSION: Final[Mapping[str, PnlEngineOptions]] = MappingProxyType(
     {
         "5C.5": PNL_ENGINE_OPTIONS_OFF,
+        "5C.6": PnlEngineOptions(True, True, True),
     }
 )
 """Registered calculation-version engine option profiles."""
@@ -46,7 +51,8 @@ def pnl_engine_options_for(calc_version: str) -> PnlEngineOptions:
 
     This function is the only producer of engine valuation options in the
     codebase. Checkpoint capture is permitted only for calculation versions
-    proven independent of chunk width, and 5C.5 is not.
+    proven independent of chunk width. ``5C.6`` is the first such version;
+    ``5C.5`` is not.
 
     Args:
         calc_version: Target P&L calculation version string.

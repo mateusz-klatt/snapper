@@ -456,7 +456,7 @@ def test_checkpoint_write_refusal_returns_none_at_valid_boundary() -> None:
             "key_mismatch",
             {},
             {},
-            {"key": replace(_KEY, calc_version="5C.6")},
+            {"key": replace(_KEY, calc_version="5C.0")},
         ),
         (
             "deferred_tail_too_long",
@@ -553,7 +553,7 @@ def test_checkpoint_write_refusal_evaluates_reasons_in_exact_precedence_order() 
         checkpoint_write_refusal(
             frontier_base,
             _chunk(),
-            replace(_certificate(), key=replace(_KEY, calc_version="5C.6")),
+            replace(_certificate(), key=replace(_KEY, calc_version="5C.0")),
         )
         == "cut_mismatch"
     )
@@ -561,7 +561,7 @@ def test_checkpoint_write_refusal_evaluates_reasons_in_exact_precedence_order() 
         checkpoint_write_refusal(
             frontier_base,
             _chunk(),
-            replace(cert_base, key=replace(_KEY, calc_version="5C.6")),
+            replace(cert_base, key=replace(_KEY, calc_version="5C.0")),
         )
         == "key_mismatch"
     )

@@ -9,6 +9,7 @@ import json
 import math
 from collections import Counter
 from collections.abc import AsyncIterator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import replace
@@ -19,11 +20,13 @@ from pathlib import Path
 from typing import Literal
 from typing import Never
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine
 
 from snapper.application.portfolio import pnl_timeline_service
+from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
 from snapper.application.portfolio.basket_valuation import value_currency
 from snapper.application.portfolio.execution_chain import ExecutionChainError
@@ -62,15 +65,18 @@ from snapper.application.portfolio.pnl_timeline_service import PnlSignalMarker
 from snapper.application.portfolio.pnl_timeline_service import _build_equity_overlay
 from snapper.application.portfolio.pnl_timeline_service import _build_execution_lineage
 from snapper.application.portfolio.pnl_timeline_service import _ceil_to_minute
+from snapper.application.portfolio.pnl_timeline_service import _conversion_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _convert_equity_overlay
 from snapper.application.portfolio.pnl_timeline_service import _covered_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _derive_series_replay_metadata
 from snapper.application.portfolio.pnl_timeline_service import _EquityOverlayRequest
 from snapper.application.portfolio.pnl_timeline_service import _EquityOverlayResult
 from snapper.application.portfolio.pnl_timeline_service import _event_fx_minutes
+from snapper.application.portfolio.pnl_timeline_service import _EventFxContext
 from snapper.application.portfolio.pnl_timeline_service import _execution_rows_with_effective_time
 from snapper.application.portfolio.pnl_timeline_service import _finalize_wallet_pnl_series
 from snapper.application.portfolio.pnl_timeline_service import _mark_fx_minutes
+from snapper.application.portfolio.pnl_timeline_service import _merge_instrument_fx_minutes
 from snapper.application.portfolio.pnl_timeline_service import _opening_mark_requirements
 from snapper.application.portfolio.pnl_timeline_service import _opening_marks_from_candles
 from snapper.application.portfolio.pnl_timeline_service import _opening_nonflat_instruments
@@ -6139,9 +6145,7 @@ class TestAnchorEvidenceDefenses:
         requirements = _mark_fx_minutes(
             [_candle(_m(-1), 100.0)],
             [_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
-            {_I1: "BTC"},
-            {_I1: "EUR"},
-            "USD",
+            _EventFxContext({_I1: "BTC"}, {_I1: "EUR"}, "USD"),
             _T0,
             _T0,
         )
@@ -6155,9 +6159,7 @@ class TestAnchorEvidenceDefenses:
                 _accrual_row(_I1, -1, 3.0, "EUR"),
                 _accrual_row(_I1, 1, 4.0, "EUR"),
             ],
-            {_I1: "BTC"},
-            {_I1: "USD"},
-            "USD",
+            _EventFxContext({_I1: "BTC"}, {_I1: "USD"}, "USD"),
         )
         assert requirements == {_I1: {("EUR", "USD"): {_m(-1)}}}
 
@@ -7864,3 +7866,520 @@ class TestClosingCheckpointForwarding:
         finalized_refused = await _finalize_wallet_pnl_series(repo, refused, assembly)
         assert finalized_refused.closing_checkpoint is None
         assert finalized_refused.closing_checkpoint_refusal == "global_withhold"
+
+
+_I3_5C6 = "00000000-0000-7000-8000-000000000b06"
+
+
+def _conversion_minute_replay_fixture() -> tuple[
+    list[PnlTimelineOpeningExecutionRow],
+    list[PnlTimelineAccrualRow],
+    dict[str, str],
+    dict[str, str],
+]:
+    """Build executions and accruals covering every trust and basis early return."""
+    executions = [
+        _exec_row(_I1, 1, 1, "buy", 2.0, 100.0, 0.5, "GBP"),
+        _exec_row(_I1, 2, 3, "sell", 1.0, 0.0, 0.25, "GBP"),
+        _exec_row(_I1, 3, 4, "buy", 1.0, 110.0, 0.4, "GBP"),
+        _exec_row(_I2, 1, 7, "buy", 0.0, 95.0, 0.0, "GBP"),
+        _exec_row(_I2, 2, 8, "buy", 1.0, 0.0, 0.0, "GBP"),
+        _exec_row(_I2, 3, 9, "buy", 1.0, 105.0, 0.0, "GBP"),
+    ]
+    accruals = [
+        _accrual_row(_I1, 2, 3.0, "CHF"),
+        _accrual_row(_I1, 5, 4.0, "CHF"),
+        _accrual_row(_I1, 6, 0.0, "CHF"),
+    ]
+    return executions, accruals, {_I1: "BTC", _I2: "BTC"}, {_I1: "EUR", _I2: "EUR"}
+
+
+def _flatten_fx_requirements(
+    requirements: Mapping[str, Mapping[tuple[str, str], set[datetime]]],
+) -> set[tuple[str, tuple[str, str], datetime]]:
+    """Flatten nested instrument FX requirements into comparable triples."""
+    return {
+        (instrument_public_id, pair, minute)
+        for instrument_public_id, pair_map in requirements.items()
+        for pair, minutes in pair_map.items()
+        for minute in minutes
+    }
+
+
+def _expected_event_conversion_queries(
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    accrual_rows: Sequence[PnlTimelineAccrualRow],
+    quotes: Mapping[str, str],
+    valuation_ccy: str,
+) -> set[tuple[str, tuple[str, str], datetime]]:
+    """Compute exact (instrument, pair, minute) queries for execution and accrual sites."""
+    expected: set[tuple[str, tuple[str, str], datetime]] = set()
+    for row in execution_rows:
+        instrument = row["instrument_public_id"]
+        minute = row["timestamp"].replace(second=0, microsecond=0)
+        fee = row["fee"]
+        if math.isfinite(fee) and fee != 0.0 and row["fee_asset"] != valuation_ccy:
+            expected.add((instrument, currency_pair_key(row["fee_asset"], valuation_ccy), minute))
+        quote_currency = quotes.get(instrument)
+        if (
+            quote_currency is not None
+            and quote_currency != valuation_ccy
+            and math.isfinite(row["price"])
+            and row["price"] > 0.0
+        ):
+            expected.add((instrument, currency_pair_key(quote_currency, valuation_ccy), minute))
+    for accrual in accrual_rows:
+        amount = accrual["amount"]
+        if math.isfinite(amount) and amount != 0.0 and accrual["amount_asset"] != valuation_ccy:
+            expected.add(
+                (
+                    accrual["instrument_public_id"],
+                    currency_pair_key(accrual["amount_asset"], valuation_ccy),
+                    accrual["accrued_at"].replace(second=0, microsecond=0),
+                )
+            )
+    return expected
+
+
+def _is_nonflat_at_mark(
+    instrument: str,
+    mark_minute: datetime,
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+) -> bool:
+    """Return whether any shard of ``instrument`` is non-flat at ``mark_minute``."""
+    pools: dict[str, float] = {}
+    for row in execution_rows:
+        if row["instrument_public_id"] != instrument or row["timestamp"] > mark_minute:
+            continue
+        size = row["size"]
+        if not math.isfinite(size) or size < 0.0:
+            continue
+        delta = size if row["side"] == "buy" else -size
+        updated = pools.get(row["shard_key"], 0.0) + delta
+        pools[row["shard_key"]] = 0.0 if abs(updated) < FLAT_EPSILON else updated
+    return any(abs(quantity) >= FLAT_EPSILON for quantity in pools.values())
+
+
+def _expected_nonflat_mark_queries(
+    candles: Sequence[PnlTimelineCandleRow],
+    execution_rows: Sequence[PnlTimelineOpeningExecutionRow],
+    quotes: Mapping[str, str],
+    window_bounds: tuple[datetime, datetime],
+    valuation_ccy: str,
+) -> set[tuple[str, tuple[str, str], datetime]]:
+    """Compute exact mark FX queries for positive closes while non-flat, ignoring latches."""
+    expected: set[tuple[str, tuple[str, str], datetime]] = set()
+    start_time, end_time = window_bounds
+    for candle in candles:
+        instrument = candle["instrument_public_id"]
+        quote_currency = quotes.get(instrument)
+        close = candle["close"]
+        mark_minute = candle["open_at"] + timedelta(minutes=1)
+        if (
+            quote_currency is None
+            or quote_currency == valuation_ccy
+            or close is None
+            or not math.isfinite(close)
+            or close <= 0.0
+            or not (start_time <= mark_minute <= end_time)
+        ):
+            continue
+        if _is_nonflat_at_mark(instrument, mark_minute, execution_rows):
+            expected.add(
+                (instrument, currency_pair_key(quote_currency, valuation_ccy), mark_minute)
+            )
+    return expected
+
+
+class TestSnapshotter5C6ServiceWiring:
+    """Cover 5C.6 conversion-minute requests, engine fallback wiring, and anchor parity."""
+
+    def test_event_fx_minutes_flag_false_preserves_trust_and_basis_exclusions(self) -> None:
+        """Keep _event_fx_minutes trust and basis exclusions invariant across flag values.
+
+        Given executions with an invalid-price foreign-fee close, a later foreign-fee fill on
+            the untrusted instrument, a post-untrusted foreign accrual, a basis-unknown
+            increasing fill, and a zero-size foreign-priced fill.
+        When _event_fx_minutes runs with request_all_conversion_minutes omitted, False, or True.
+        Then all three calls return identical requirement sets excluding all five non-publishable
+            or non-entering conversion minutes.
+        """
+        executions, accruals, bases, quotes = _conversion_minute_replay_fixture()
+        expected = {
+            _I1: {
+                ("EUR", "USD"): {_m(1)},
+                ("GBP", "USD"): {_m(1)},
+                ("CHF", "USD"): {_m(2)},
+            }
+        }
+        omitted = _event_fx_minutes(executions, accruals, _EventFxContext(bases, quotes, "USD"))
+        explicit_false = _event_fx_minutes(
+            executions,
+            accruals,
+            _EventFxContext(bases, quotes, "USD", request_all_conversion_minutes=False),
+        )
+        explicit_true = _event_fx_minutes(
+            executions,
+            accruals,
+            _EventFxContext(bases, quotes, "USD", request_all_conversion_minutes=True),
+        )
+        assert omitted == expected
+        assert explicit_false == expected
+        assert explicit_true == expected
+
+    def test_event_fx_minutes_flag_true_requests_every_service_conversion_minute(self) -> None:
+        """Request every finite nonzero fee, positive-price, and accrual minute for 5C.6.
+
+        Given untrusted, basis-unknown, zero-size, untrusted-provenance, zero-amount, and
+            non-finite execution and accrual rows.
+        When _conversion_fx_minutes runs over the full conversion population.
+        Then the requirements include every finite nonzero foreign fee minute (including on an
+            untrusted-provenance instrument), every quoted positive-price minute, and every
+            finite nonzero foreign accrual minute while excluding zero, non-finite, or unquoted
+            conversions and covering the _event_fx_minutes baseline.
+        """
+        executions, accruals, bases, quotes = _conversion_minute_replay_fixture()
+        context = _EventFxContext(bases, quotes, "USD", request_all_conversion_minutes=True)
+        baseline = _event_fx_minutes(executions, accruals, context)
+        full_executions = [
+            *executions,
+            _exec_row(_I3_5C6, 1, 10, "buy", 1.0, 120.0, 0.75, "GBP"),
+            _exec_row(_I1, 4, 11, "buy", 1.0, 0.0, math.nan, "GBP"),
+        ]
+        full_accruals = [
+            *accruals,
+            _accrual_row(_I1, 12, math.nan, "CHF"),
+        ]
+        all_conversions = _conversion_fx_minutes(full_executions, full_accruals, context)
+        assert all_conversions == {
+            _I1: {
+                ("EUR", "USD"): {_m(1), _m(4)},
+                ("GBP", "USD"): {_m(1), _m(3), _m(4)},
+                ("CHF", "USD"): {_m(2), _m(5)},
+            },
+            _I2: {
+                ("EUR", "USD"): {_m(7), _m(9)},
+            },
+            _I3_5C6: {
+                ("GBP", "USD"): {_m(10)},
+            },
+        }
+        for instrument, pairs in baseline.items():
+            for pair, minutes in pairs.items():
+                assert minutes <= all_conversions[instrument][pair]
+
+    async def test_series_wires_snapshotter_conversion_minutes_and_unrealized_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Enable conversion-minute completeness and compensated fallback only for pointwise FX.
+
+        Given PNL_SAMPLE_CALC_VERSION == "5C.6", a wallet series repository, and spies wrapping
+            _mark_fx_minutes, _event_fx_minutes, _conversion_fx_minutes, and
+            _timed_build_pnl_timeline.
+        When build_wallet_pnl_series runs once with pointwise_exact_fx=True and once with
+            pointwise_exact_fx=False.
+        Then the pointwise read passes True on the FX context, calls _conversion_fx_minutes
+            once, and enables compensated_unrealized_fallback, while the non-pointwise read
+            passes False and never calls _conversion_fx_minutes.
+        """
+        assert PNL_SAMPLE_CALC_VERSION == "5C.6"
+        repo = FakeRepo(
+            executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(-1), 100.0), _candle(_m(0), 105.0)],
+        )
+        mark_spy = Mock(wraps=_mark_fx_minutes)
+        event_spy = Mock(wraps=_event_fx_minutes)
+        conversion_spy = Mock(wraps=_conversion_fx_minutes)
+        timeline_spy = Mock(wraps=pnl_timeline_service._timed_build_pnl_timeline)
+        monkeypatch.setattr(pnl_timeline_service, "_mark_fx_minutes", mark_spy)
+        monkeypatch.setattr(pnl_timeline_service, "_event_fx_minutes", event_spy)
+        monkeypatch.setattr(pnl_timeline_service, "_conversion_fx_minutes", conversion_spy)
+        monkeypatch.setattr(pnl_timeline_service, "_timed_build_pnl_timeline", timeline_spy)
+
+        await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+            options=PnlSeriesReplayOptions(pointwise_exact_fx=True),
+        )
+        await build_wallet_pnl_series(
+            repo,
+            _W1,
+            "live",
+            _T0,
+            _T0,
+            "1m",
+            _T0,
+            options=PnlSeriesReplayOptions(pointwise_exact_fx=False),
+        )
+
+        mark_contexts = [call.args[2] for call in mark_spy.call_args_list]
+        assert all(isinstance(context, _EventFxContext) for context in mark_contexts)
+        assert [
+            context.request_all_conversion_minutes
+            for context in mark_contexts
+            if isinstance(context, _EventFxContext)
+        ] == [True, False]
+        contexts = [call.args[2] for call in event_spy.call_args_list]
+        assert all(isinstance(context, _EventFxContext) for context in contexts)
+        assert [
+            context.request_all_conversion_minutes
+            for context in contexts
+            if isinstance(context, _EventFxContext)
+        ] == [True, False]
+        assert len(conversion_spy.call_args_list) == 1
+        conversion_context = conversion_spy.call_args_list[0].args[2]
+        assert isinstance(conversion_context, _EventFxContext)
+        assert conversion_context.request_all_conversion_minutes is True
+        windows = [call.args[3] for call in timeline_spy.call_args_list]
+        assert all(isinstance(window, TimelineWindow) for window in windows)
+        assert [
+            window.compensated_unrealized_fallback
+            for window in windows
+            if isinstance(window, TimelineWindow)
+        ] == [True, False]
+
+    async def test_anchor_derivation_keeps_event_fx_conversion_flag_disabled(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keep activation-anchor FX-minute derivation unchanged under 5C.6.
+
+        Given an unanchored wallet with a pre-activation foreign-fee execution and spies on
+            _event_fx_minutes and _conversion_fx_minutes.
+        When ensure_wallet_pnl_anchor derives and records the activation anchor.
+        Then _event_fx_minutes receives request_all_conversion_minutes False and
+            _conversion_fx_minutes is never called.
+        """
+        execution = _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.5, "EUR", shard_key="shard-a")
+        repo = FakeRepo(
+            executions=[execution],
+            refs=[_ref(_I1, "BTC-USD", "USD")],
+            candles=[_candle(_m(0), 110.0)],
+            fx_rows=[_fx_row("EUR", "USD", 0, 1.25)],
+            has_anchor=False,
+        )
+        event_spy = Mock(wraps=_event_fx_minutes)
+        conversion_spy = Mock(wraps=_conversion_fx_minutes)
+        monkeypatch.setattr(pnl_timeline_service, "_event_fx_minutes", event_spy)
+        monkeypatch.setattr(pnl_timeline_service, "_conversion_fx_minutes", conversion_spy)
+
+        await ensure_wallet_pnl_anchor(repo, _W1, "live", "USD", _m(1), _m(2))
+
+        assert len(event_spy.call_args_list) == 1
+        anchor_context = event_spy.call_args_list[0].args[2]
+        assert isinstance(anchor_context, _EventFxContext)
+        assert anchor_context.request_all_conversion_minutes is False
+        assert conversion_spy.call_args_list == []
+
+    async def test_pointwise_series_mark_latch_repro_is_chunk_width_independent(self) -> None:
+        """Keep M2 complete after a snap-flat invalid fill across [M2, M2] and [M2, M3].
+
+        Given a 1e-13 BTC buy at price 0 at M0 that snaps flat, a 1 BTC buy at EUR 100 at M1,
+            a zero-size EUR-priced fill at M2+30s, BTC-EUR mark 105 at M2, and EUR/USD 1.25 at
+            M1 and M2 (plus an isolated variant without the M2+30s fill).
+        When build_wallet_pnl_series runs with pointwise_exact_fx=True over [M2, M2], [M2, M3],
+            and the isolated [M2, M2] book.
+        Then M2 is complete with no incompleteness reasons and $6.25 unrealized P&L in every
+            read, and the isolated mark walk requests M2's FX candle directly.
+        """
+        dust_zero_price = _exec_row(_I1, 1, 0, "buy", 1e-13, 0.0, 0.0, "USD")
+        valid_buy = _exec_row(_I1, 2, 1, "buy", 1.0, 100.0, 0.0, "USD")
+        later_zero_size: PnlTimelineOpeningExecutionRow = {
+            **_exec_row(_I1, 3, 2, "buy", 0.0, 100.0, 0.0, "USD"),
+            "timestamp": _m(2) + timedelta(seconds=30),
+        }
+        refs = [_ref(_I1, "BTC-EUR", "EUR")]
+        candles = [_candle(_m(1), 105.0, _I1), _candle(_m(2), 105.0, _I1)]
+        fx_rows = [
+            _fx_row("EUR", "USD", 1, 1.25),
+            _fx_row("EUR", "USD", 2, 1.25),
+            _fx_row("EUR", "USD", 3, 1.25),
+        ]
+        pointwise = PnlSeriesReplayOptions(pointwise_exact_fx=True)
+        narrow_repo = FakeRepo(
+            executions=[dust_zero_price, valid_buy, later_zero_size],
+            refs=refs,
+            candles=candles,
+            fx_rows=fx_rows,
+        )
+        wide_repo = FakeRepo(
+            executions=[dust_zero_price, valid_buy, later_zero_size],
+            refs=refs,
+            candles=candles,
+            fx_rows=fx_rows,
+        )
+        narrow = await build_wallet_pnl_series(
+            narrow_repo,
+            _W1,
+            "live",
+            _m(2),
+            _m(2),
+            "1m",
+            _m(3),
+            options=pointwise,
+        )
+        wide = await build_wallet_pnl_series(
+            wide_repo,
+            _W1,
+            "live",
+            _m(2),
+            _m(3),
+            "1m",
+            _m(3),
+            options=pointwise,
+        )
+        assert narrow.points[0].valuation_status == "complete"
+        assert narrow.points[0].incompleteness_reasons == ()
+        assert narrow.points[0].unrealized_pnl == pytest.approx(6.25)
+        assert narrow.points[0] == wide.points[0]
+
+        mark_only_repo = FakeRepo(
+            executions=[dust_zero_price, valid_buy],
+            refs=refs,
+            candles=[_candle(_m(1), 105.0, _I1)],
+            fx_rows=[_fx_row("EUR", "USD", 1, 1.25), _fx_row("EUR", "USD", 2, 1.25)],
+        )
+        mark_only = await build_wallet_pnl_series(
+            mark_only_repo,
+            _W1,
+            "live",
+            _m(2),
+            _m(2),
+            "1m",
+            _m(2),
+            options=pointwise,
+        )
+        assert mark_only.points[0].valuation_status == "complete"
+        assert mark_only.points[0].incompleteness_reasons == ()
+        assert mark_only.points[0].unrealized_pnl == pytest.approx(6.25)
+        requested_opens = {
+            open_at for _, opens in mark_only_repo.fx_exact_minute_calls for open_at in opens
+        }
+        assert _m(1) in requested_opens
+
+    async def test_pointwise_series_untrusted_provenance_fee_requests_exact_fx(self) -> None:
+        """Convert foreign fees on price-provenance-untrusted fills during pointwise reads.
+
+        Given a buy at M1 with a EUR 0.50 fee, no symbol ref (excluding the instrument from
+            quote_by_instrument and trusted_replayed_rows), and exact EUR/USD 1.25 at M1.
+        When build_wallet_pnl_series runs with pointwise_exact_fx=True over [M1, M1], with and
+            without a same-minute EUR accrual.
+        Then the FX read loads M1's candle open, M1 never carries fx_conversion_unproven, and
+            its incompleteness reasons match the accrual-pinned run.
+        """
+        execution = _exec_row(_I1, 1, 1, "buy", 1.0, 100.0, 0.5, "EUR")
+        fx_rows = [_fx_row("EUR", "USD", 1, 1.25)]
+        pointwise = PnlSeriesReplayOptions(pointwise_exact_fx=True)
+        fee_only_repo = FakeRepo(executions=[execution], refs=[], fx_rows=fx_rows)
+        accrual_repo = FakeRepo(
+            executions=[execution],
+            accruals=[_accrual_row(_I1, 1, 2.0, "EUR")],
+            refs=[],
+            fx_rows=fx_rows,
+        )
+
+        fee_only = await build_wallet_pnl_series(
+            fee_only_repo,
+            _W1,
+            "live",
+            _m(1),
+            _m(1),
+            "1m",
+            _m(1),
+            options=pointwise,
+        )
+        with_accrual = await build_wallet_pnl_series(
+            accrual_repo,
+            _W1,
+            "live",
+            _m(1),
+            _m(1),
+            "1m",
+            _m(1),
+            options=pointwise,
+        )
+
+        requested_opens = {
+            open_at for _, opens in fee_only_repo.fx_exact_minute_calls for open_at in opens
+        }
+        assert _m(0) in requested_opens
+        assert _reason_rows(fee_only.points[0]) == [
+            ("execution_price_provenance_unproven", "untrusted", "instrument", _I1)
+        ]
+        expected_reasons = with_accrual.points[0].incompleteness_reasons
+        assert fee_only.points[0].incompleteness_reasons == expected_reasons
+
+    def test_flag_on_requirement_union_covers_every_conversion_site(self) -> None:
+        """Cover all four service conversion sites under the 5C.6 requirement union.
+
+        Given one constellation combining an untrusted-provenance row with a foreign fee, an
+            invalid-price snap-flat fill followed by a valid position and a positive foreign
+            mark, a zero-size foreign-priced fill, and a foreign accrual after an invalid fill.
+        When building the expected (instrument, pair, minute) queries from the four conversion
+            predicates and comparing them to the flag-on requirement union.
+        Then _mark_fx_minutes union _event_fx_minutes union _conversion_fx_minutes covers every
+            expected query, whereas the flag-off union omits all four 5C.6 edge cases.
+        """
+        bases = {_I1: "BTC", _I2: "BTC"}
+        quotes = {_I1: "EUR", _I2: "EUR"}
+        loaded_executions = [
+            _exec_row(_I1, 1, 0, "buy", 1e-13, 0.0, 0.0, "USD"),
+            _exec_row(_I1, 2, 1, "buy", 1.0, 100.0, 0.0, "USD"),
+            _exec_row(_I2, 1, 3, "buy", 0.0, 95.0, 0.0, "USD"),
+            _exec_row(_I2, 2, 4, "buy", -1.0, 0.0, 0.0, "USD"),
+            _exec_row(_I3_5C6, 1, 6, "buy", 1.0, 120.0, 0.5, "GBP"),
+        ]
+        trusted_replayed_rows = [
+            row for row in loaded_executions if row["instrument_public_id"] in quotes
+        ]
+        accruals = [_accrual_row(_I2, 5, 4.0, "CHF")]
+        candles = [
+            _candle(_m(-1), 102.0, _I1),
+            _candle(_m(1), 105.0, _I1),
+        ]
+        event_queries = _expected_event_conversion_queries(
+            loaded_executions,
+            accruals,
+            quotes,
+            "USD",
+        )
+        mark_queries = _expected_nonflat_mark_queries(
+            candles,
+            loaded_executions,
+            quotes,
+            (_m(0), _m(6)),
+            "USD",
+        )
+        expected_queries = event_queries | mark_queries
+        assert expected_queries == {
+            (_I1, ("EUR", "USD"), _m(1)),
+            (_I1, ("EUR", "USD"), _m(2)),
+            (_I2, ("EUR", "USD"), _m(3)),
+            (_I2, ("CHF", "USD"), _m(5)),
+            (_I3_5C6, ("GBP", "USD"), _m(6)),
+        }
+
+        flag_on = _EventFxContext(bases, quotes, "USD", request_all_conversion_minutes=True)
+        flag_on_union = _merge_instrument_fx_minutes(
+            _mark_fx_minutes(candles, loaded_executions, flag_on, _m(0), _m(6)),
+            _merge_instrument_fx_minutes(
+                _event_fx_minutes(trusted_replayed_rows, accruals, flag_on),
+                _conversion_fx_minutes(loaded_executions, accruals, flag_on),
+            ),
+        )
+        assert expected_queries <= _flatten_fx_requirements(flag_on_union)
+        assert _flatten_fx_requirements(flag_on_union) == expected_queries
+
+        flag_off = _EventFxContext(bases, quotes, "USD", request_all_conversion_minutes=False)
+        flag_off_union = _merge_instrument_fx_minutes(
+            _mark_fx_minutes(candles, loaded_executions, flag_off, _m(0), _m(6)),
+            _event_fx_minutes(trusted_replayed_rows, accruals, flag_off),
+        )
+        assert _flatten_fx_requirements(flag_off_union) == {(_I1, ("EUR", "USD"), _m(1))}
