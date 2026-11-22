@@ -21,6 +21,7 @@ from snapper.data.plan_settlement_reads import lock_active_execution_plans
 from snapper.data.plan_settlement_reads import lock_child_create_commands
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ExecutionPlanInsertRow
+from snapper.data.repository_types import OrderInsertRow
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import VenueEventInsertRow
 
@@ -193,10 +194,10 @@ async def test_lock_helpers_handle_empty_sqlite_and_duplicate_open_rows(
 async def test_session_plan_settlement_reader_executes_all_queries_on_bound_session(
     sqlite_repo: SQLAlchemyRepository,
 ) -> None:
-    """Read plans, child commands, lifecycle events, fills, and timestamps on one session.
+    """Read plans, commands, Order ids, lifecycle events, and fills on one session.
 
-    Given: Seeded actionable and completed plans, a child command, lifecycle and
-        fill venue events in SQLite, plus a mocked duplicate-command session.
+    Given: Seeded actionable and completed plans, a child command and Order,
+        lifecycle and fill venue events, plus a mocked duplicate-command session.
     When: `SessionPlanSettlementReader` methods execute across empty, normal,
         chunked (`> 300` ids), status-filtered, and duplicate-command inputs.
     Then: Every query returns exact typed rows on the bound session and raises
@@ -247,6 +248,23 @@ async def test_session_plan_settlement_reader_executes_all_queries_on_bound_sess
         "plan_public_id": active_pid,
     }
     await sqlite_repo.insert_trade_command(cmd_insert)
+    order_insert: OrderInsertRow = {
+        "instrument_public_id": _INSTRUMENT_ID,
+        "client_order_id": "cid-read-1",
+        "exchange_order_id": "EX-READ-1",
+        "created_at": _T0,
+        "side": "buy",
+        "order_type": "market",
+        "price": None,
+        "size": 8.0,
+        "status": "filled",
+        "session_id": "s-read",
+        "sequence_id": 4,
+        "timestamp": _T0,
+        "wallet_public_id": _WALLET_ID,
+        "plan_public_id": active_pid,
+    }
+    await sqlite_repo.insert_order(**order_insert)
 
     fill_event: VenueEventInsertRow = {
         "event_type": "fill_observed",
@@ -285,6 +303,15 @@ async def test_session_plan_settlement_reader_executes_all_queries_on_bound_sess
         )
         assert found_cmd is not None and found_cmd["client_order_id"] == "cid-read-1"
         assert missing_cmd is None
+
+        exchange_order_id = await reader.get_exchange_order_id_for_client_order_id(
+            "cid-read-1", datetime.now(UTC)
+        )
+        missing_exchange_order_id = await reader.get_exchange_order_id_for_client_order_id(
+            "cid-missing", datetime.now(UTC)
+        )
+        assert exchange_order_id == "EX-READ-1"
+        assert missing_exchange_order_id is None
 
         assert await reader.get_order_lifecycle_events([]) == []
         many_ids = [f"cid-pad-{idx}" for idx in range(305)] + ["cid-read-1"]

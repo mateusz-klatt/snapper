@@ -36,11 +36,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.core.types import ExecutionPlanStatusEnum
 from snapper.data.models import ExecutionPlan
+from snapper.data.models import Order
 from snapper.data.models import TemporalMixin
 from snapper.data.models import TradeCommand
 from snapper.data.models import VenueEvent
 from snapper.data.models import is_open_ended_version
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import where_active
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
@@ -266,6 +268,33 @@ class SessionPlanSettlementReader:
                 f"Multiple active create/submit commands for {exchange}:{client_order_id}"
             )
         return self._repository._trade_command_to_row(rows[0])
+
+    async def get_exchange_order_id_for_client_order_id(
+        self,
+        client_order_id: str,
+        as_of: datetime,
+    ) -> str | None:
+        """Return the active Order venue id using the settlement transaction.
+
+        Args:
+            client_order_id: Child client order id recorded on the plan.
+            as_of: Temporal point for active-version selection.
+
+        Returns:
+            Venue order id, or None when no acknowledged Order version exists.
+        """
+        result = await self._session.execute(
+            select(Order.exchange_order_id)
+            .where(
+                Order.client_order_id == client_order_id,
+                Order.exchange_order_id.is_not(None),
+                *where_active(Order, as_of),
+            )
+            .order_by(Order.created_at.desc(), Order.id.desc())
+            .limit(1)
+        )
+        row = result.first()
+        return None if row is None else row[0]
 
     async def get_order_lifecycle_events(
         self,

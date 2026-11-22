@@ -17,9 +17,10 @@ binding, and locked SCD2 status-transition builder defined here:
   `order_rejected` event, preserving reconciliation resurrection of false
   venue rejections.
 - `failed` children settle to `failed` (in both `active` and
-  `cancel_requested` plans) only when a pre-venue `order_breaker_open` or
-  `order_interlock_blocked` refusal event exists and zero `order_accepted` or
-  `fill_observed` events exist.
+  `cancel_requested` plans) only when every lifecycle event is a pre-venue
+  `order_breaker_open` or `order_interlock_blocked` refusal. For
+  `cancel_requested` plans, both the child command and active Order must also
+  lack a venue order id.
 - Plans in `cancel_requested` settle only when durable evidence confirms no
   live venue order remains (venue-evidenced `cancelled`, `filled`, or
   `expired` via `target_end_time`, pre-dispatch outbox TTL expiry without live
@@ -36,6 +37,7 @@ import sys
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
@@ -143,6 +145,21 @@ class PlanSettlementReader(VenueEventTimeReader, Protocol):
 
         Returns:
             Active command row, or None when absent.
+        """
+
+    async def get_exchange_order_id_for_client_order_id(
+        self,
+        client_order_id: str,
+        as_of: datetime,
+    ) -> str | None:
+        """Return the active Order's venue id for a child client order id.
+
+        Args:
+            client_order_id: Child client order id recorded on the plan.
+            as_of: Temporal point for active-version selection.
+
+        Returns:
+            Venue order id, or None when no acknowledged Order version exists.
         """
 
     async def get_order_lifecycle_events(
@@ -463,17 +480,16 @@ def _has_post_rejection_live_evidence(events: Sequence[VenueEventRow]) -> bool:
 
 
 def _has_pre_venue_refusal_only(events: Sequence[VenueEventRow]) -> bool:
-    """Return True when local breaker/interlock refused before any live venue event.
+    """Return True when lifecycle history contains only local venue refusals.
 
     Args:
         events: Lifecycle venue events for the child client order id.
 
     Returns:
-        True when a pre-venue refusal event exists and no live venue event exists.
+        True only when at least one breaker/interlock refusal exists and every
+        lifecycle event is such a refusal.
     """
-    has_refusal = any(row["event_type"] in _PRE_VENUE_REFUSAL_EVENTS for row in events)
-    has_live = any(row["event_type"] in _LIVE_EVIDENCE_EVENTS for row in events)
-    return has_refusal and not has_live
+    return bool(events) and all(row["event_type"] in _PRE_VENUE_REFUSAL_EVENTS for row in events)
 
 
 def _latest_matching_event_id(
@@ -618,12 +634,22 @@ async def _inspect_child_command(
             "false_rejection_pending_resurrection",
             f"child {client_order_id} has live venue evidence after rejection",
         )
-    if status == TradeCommandStatusEnum.FAILED and not _has_pre_venue_refusal_only(events):
-        return _skipped(
-            plan,
-            "unconfirmed_failed_child",
-            f"child {client_order_id} is failed without pre-venue refusal or has live evidence",
-        )
+    if status == TradeCommandStatusEnum.FAILED:
+        unconfirmed = not _has_pre_venue_refusal_only(events)
+        if plan["status"] == ExecutionPlanStatusEnum.CANCEL_REQUESTED:
+            order_exchange_order_id = await reader.get_exchange_order_id_for_client_order_id(
+                client_order_id, datetime.now(UTC)
+            )
+            unconfirmed = unconfirmed or bool(
+                command.get("exchange_order_id") or order_exchange_order_id
+            )
+        if unconfirmed:
+            return _skipped(
+                plan,
+                "unconfirmed_failed_child",
+                f"child {client_order_id} lacks exclusive pre-venue refusal evidence "
+                "or still has a venue order id",
+            )
     if plan[
         "status"
     ] == ExecutionPlanStatusEnum.CANCEL_REQUESTED and not await _cancel_requested_child_confirmed(
@@ -669,7 +695,9 @@ def _derive_target_transition(
     if statuses == {TradeCommandStatusEnum.FILLED}:
         return ExecutionPlanStatusEnum.COMPLETED, resolved_fill, None
     if TradeCommandStatusEnum.FAILED in statuses or TradeCommandStatusEnum.REJECTED in statuses:
-        first_error = next((item.last_error for item in outcomes if item.last_error), None)
+        first_error = plan.get("last_error") or next(
+            (item.last_error for item in outcomes if item.last_error), None
+        )
         default_error = (
             "venue rejected"
             if TradeCommandStatusEnum.REJECTED in statuses

@@ -107,6 +107,7 @@ def _command_row(
     status: str = "filled",
     plan_public_id: str | None = "01960000-0000-7000-8000-000000000010",
     last_error: str | None = None,
+    exchange_order_id: str | None = "EX-1",
 ) -> TradeCommandRow:
     """Build a synthetic `TradeCommandRow` for pure inspection tests.
 
@@ -115,6 +116,7 @@ def _command_row(
         status: Command status string.
         plan_public_id: Linked execution plan public id.
         last_error: Optional error message on the command.
+        exchange_order_id: Venue order id stored on the command.
 
     Returns:
         Typed `TradeCommandRow` dictionary.
@@ -132,7 +134,7 @@ def _command_row(
         "strategy_id": "manual_once",
         "client_order_id": client_order_id,
         "venue_client_id": client_order_id,
-        "exchange_order_id": "EX-1",
+        "exchange_order_id": exchange_order_id,
         "side": "buy",
         "order_type": "market",
         "quantity": 10.0,
@@ -216,6 +218,7 @@ def _mock_reader(
     events: list[VenueEventRow] | None = None,
     fill_event: VenueEventRow | None = None,
     latest_event_at: datetime | None = None,
+    order_exchange_order_id: str | None = None,
 ) -> MagicMock:
     """Construct a typed mock `PlanSettlementReader`.
 
@@ -224,6 +227,7 @@ def _mock_reader(
         events: Lifecycle venue events returned for the child.
         fill_event: Cumulative fill venue event returned for the child.
         latest_event_at: Timestamp returned by `get_latest_venue_event_received_at`.
+        order_exchange_order_id: Venue id returned by the active Order lookup.
 
     Returns:
         Configured `MagicMock` reader.
@@ -231,6 +235,9 @@ def _mock_reader(
     reader = MagicMock()
     reader.get_active_execution_plans = AsyncMock(return_value=[])
     reader.get_active_create_command_by_client_order_id = AsyncMock(return_value=command)
+    reader.get_exchange_order_id_for_client_order_id = AsyncMock(
+        return_value=order_exchange_order_id
+    )
     reader.get_order_lifecycle_events = AsyncMock(return_value=events or [])
     reader.get_max_cumulative_fill_venue_event = AsyncMock(return_value=fill_event)
     reader.get_latest_venue_event_received_at = AsyncMock(return_value=latest_event_at)
@@ -508,12 +515,14 @@ async def test_inspect_maps_active_plan_terminal_children_and_evidence_ids() -> 
         ),
         plan,
     )
+    failed_default_plan = _plan_row()
+    failed_default_plan["last_error"] = "order_interlock_blocked"
     failed_default_err = await inspect_plan_settlement(
         _mock_reader(
             command=_command_row(status="failed", last_error=None),
             events=[_venue_event_row(event_id=8, event_type="order_interlock_blocked")],
         ),
-        plan,
+        failed_default_plan,
     )
     cancelled_cand = await inspect_plan_settlement(
         _mock_reader(
@@ -551,7 +560,7 @@ async def test_inspect_maps_active_plan_terminal_children_and_evidence_ids() -> 
     assert failed_long_err.last_error == "x" * 1024
     assert failed_long_err.children[0].terminal_venue_event_id == 7
     assert isinstance(failed_default_err, PlanSettlementCandidate)
-    assert failed_default_err.last_error == "child command failed"
+    assert failed_default_err.last_error == "order_interlock_blocked"
     assert isinstance(cancelled_cand, PlanSettlementCandidate)
     assert cancelled_cand.target_status == "cancelled"
     assert cancelled_cand.children[0].terminal_venue_event_id == 10
@@ -665,7 +674,11 @@ async def test_inspect_cancel_requested_preserves_g2b_target_confirmation() -> N
     )
     interlock_failed = await inspect_plan_settlement(
         _mock_reader(
-            command=_command_row(status="failed", last_error="order_interlock_blocked"),
+            command=_command_row(
+                status="failed",
+                last_error="order_interlock_blocked",
+                exchange_order_id=None,
+            ),
             events=[_venue_event_row(event_id=1, event_type="order_interlock_blocked")],
         ),
         plan,
@@ -697,6 +710,63 @@ async def test_inspect_cancel_requested_preserves_g2b_target_confirmation() -> N
     assert unconfirmed_failed.skip_code == "unconfirmed_failed_child"
     assert isinstance(rejected_cancel_req, PlanSettlementSkipped)
     assert rejected_cancel_req.skip_code == "cancel_requested_unconfirmed_target"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event_type", ["order_accepted", "fill_observed", "order_submit_unknown", "order_rejected"]
+)
+async def test_inspect_failed_requires_exclusive_pre_venue_refusals(event_type: str) -> None:
+    """Reject failed-child settlement when any non-refusal lifecycle event exists.
+
+    Given: A failed child with an interlock refusal and one parametrized other event.
+    When: `inspect_plan_settlement` classifies the child.
+    Then: It returns `unconfirmed_failed_child` instead of a settlement candidate.
+    """
+    decision = await inspect_plan_settlement(
+        _mock_reader(
+            command=_command_row(status="failed"),
+            events=[
+                _venue_event_row(event_id=1, event_type="order_interlock_blocked"),
+                _venue_event_row(event_id=2, event_type=event_type),
+            ],
+        ),
+        _plan_row(),
+    )
+
+    assert isinstance(decision, PlanSettlementSkipped)
+    assert decision.skip_code == "unconfirmed_failed_child"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command_exchange_order_id", "order_exchange_order_id"),
+    [("EX-COMMAND", None), (None, "EX-ORDER")],
+)
+async def test_inspect_cancel_requested_failed_rejects_either_venue_id(
+    command_exchange_order_id: str | None,
+    order_exchange_order_id: str | None,
+) -> None:
+    """Reject cancel recovery settlement when either durable venue id exists.
+
+    Given: An interlock-only failed child with an id on its command or Order.
+    When: `inspect_plan_settlement` classifies the cancel-requested plan.
+    Then: It returns `unconfirmed_failed_child`.
+    """
+    decision = await inspect_plan_settlement(
+        _mock_reader(
+            command=_command_row(
+                status="failed",
+                exchange_order_id=command_exchange_order_id,
+            ),
+            events=[_venue_event_row(event_id=1, event_type="order_interlock_blocked")],
+            order_exchange_order_id=order_exchange_order_id,
+        ),
+        _plan_row(status="cancel_requested"),
+    )
+
+    assert isinstance(decision, PlanSettlementSkipped)
+    assert decision.skip_code == "unconfirmed_failed_child"
 
 
 @pytest.mark.asyncio
