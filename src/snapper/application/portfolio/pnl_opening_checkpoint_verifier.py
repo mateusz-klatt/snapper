@@ -13,6 +13,9 @@ from snapper.application.portfolio.execution_chain import execution_chain_genesi
 from snapper.application.portfolio.pnl_engine_options import pnl_engine_options_for
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlCheckpointStateBundle
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_from_json
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import (
+    is_unsupported_bundle_version,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     event_fx_exchanges_digest,
 )
@@ -40,6 +43,7 @@ PnlCheckpointFallbackReason = Literal[
     "checkpoint_absent",
     "checkpoint_ineligible",
     "checkpoint_version_mismatch",
+    "checkpoint_bundle_version",
     "checkpoint_fill_gap",
     "checkpoint_payload_corrupt",
     "checkpoint_verify_error",
@@ -56,7 +60,7 @@ PnlCheckpointFallbackReason = Literal[
     "checkpoint_price_provenance_changed",
     "checkpoint_event_fx_exchanges_changed",
     "checkpoint_event_fx_candles_changed",
-    "checkpoint_fx_venue_changed",
+    "checkpoint_fx_election_changed",
     "checkpoint_late_execution",
 ]
 """Closed fallback vocabulary for checkpoint resume refusal."""
@@ -65,6 +69,7 @@ _SERVICE_FALLBACK_REASONS: dict[str, PnlCheckpointFallbackReason] = {
     "checkpoint_absent": "checkpoint_absent",
     "checkpoint_ineligible": "checkpoint_ineligible",
     "checkpoint_version_mismatch": "checkpoint_version_mismatch",
+    "checkpoint_bundle_version": "checkpoint_bundle_version",
     "checkpoint_fill_gap": "checkpoint_fill_gap",
     "checkpoint_payload_corrupt": "checkpoint_payload_corrupt",
     "checkpoint_verify_error": "checkpoint_verify_error",
@@ -81,13 +86,14 @@ _SERVICE_FALLBACK_REASONS: dict[str, PnlCheckpointFallbackReason] = {
     "checkpoint_price_provenance_changed": "checkpoint_price_provenance_changed",
     "checkpoint_event_fx_exchanges_changed": "checkpoint_event_fx_exchanges_changed",
     "checkpoint_event_fx_candles_changed": "checkpoint_event_fx_candles_changed",
-    "checkpoint_fx_venue_changed": "checkpoint_fx_venue_changed",
+    "checkpoint_fx_election_changed": "checkpoint_fx_election_changed",
     "checkpoint_late_execution": "checkpoint_late_execution",
 }
 """Exact lookup mapping closed service fallback strings back to typed literals."""
 
 _DELETE_REASONS: frozenset[str] = frozenset(
     {
+        "checkpoint_bundle_version",
         "checkpoint_payload_corrupt",
         "checkpoint_anchor_mismatch",
         "checkpoint_execution_counts_changed",
@@ -102,7 +108,7 @@ _DELETE_REASONS: frozenset[str] = frozenset(
         "checkpoint_price_provenance_changed",
         "checkpoint_event_fx_exchanges_changed",
         "checkpoint_event_fx_candles_changed",
-        "checkpoint_fx_venue_changed",
+        "checkpoint_fx_election_changed",
         "checkpoint_late_execution",
     }
 )
@@ -531,6 +537,8 @@ def _decode_and_bind_bundle(
     certificate = record.certificate
     if not _certificate_matches_scope(certificate, scope):
         return _fallback("checkpoint_payload_corrupt")
+    if is_unsupported_bundle_version(record.state_json):
+        return _fallback("checkpoint_bundle_version")
     try:
         bundle = bundle_from_json(record.state_json)
     except (ValueError, TypeError, KeyError):

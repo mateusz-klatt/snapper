@@ -549,15 +549,15 @@ async def test_bundle_engine_header_mismatch_returns_corrupt_with_delete(
     assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
 
 
-async def test_legacy_bundle_version_1_payload_fails_closed_as_corrupt(
+async def test_legacy_bundle_version_1_payload_refused_with_bundle_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reject an old bundle_version=1 payload without embedded identity.
+    """Refuse an old bundle_version=1 payload without embedded identity as bundle version.
 
     Given: A captured checkpoint whose ``state_json`` is downgraded to
         ``bundle_version=1`` without an ``identity`` block.
     When: ``verify_checkpoint_for_resume`` verifies the record.
-    Then: It fails closed with ``checkpoint_payload_corrupt`` and ``delete_required=True``.
+    Then: It fails closed with ``checkpoint_bundle_version`` and ``delete_required=True``.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
@@ -574,7 +574,7 @@ async def test_legacy_bundle_version_1_payload_fails_closed_as_corrupt(
         _RESUMING_AS_OF,
         _eligibility(request),
     )
-    assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
+    assert outcome == PnlCheckpointFallback("checkpoint_bundle_version", delete_required=True)
 
 
 async def test_verifier_refuses_manifest_and_prefix_assignment_drift_against_live_generation(
@@ -815,22 +815,25 @@ async def test_newer_suffix_witness_does_not_change_certified_prefix(
     assert isinstance(outcome, PnlCheckpointResume)
 
 
-async def test_legacy_bundle_version_2_payload_fails_closed_as_corrupt(
+@pytest.mark.parametrize("legacy_version", [2, 3])
+async def test_legacy_bundle_version_payload_refused_with_checkpoint_bundle_version(
     monkeypatch: pytest.MonkeyPatch,
+    legacy_version: int,
 ) -> None:
-    """Reject a legacy bundle_version=2 payload under the bumped bundle schema.
+    """Refuse legacy bundle_version 2 and 3 payloads with ``checkpoint_bundle_version``.
 
     Given: A valid captured checkpoint whose serialized payload is downgraded to
-        ``bundle_version=2``.
+        ``bundle_version=2`` or ``bundle_version=3``.
     When: ``verify_checkpoint_for_resume`` verifies the record.
-    Then: It fails closed with ``checkpoint_payload_corrupt`` and ``delete_required=True``.
+    Then: It refuses with ``checkpoint_bundle_version`` and ``delete_required=True``.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
+        legacy_version: Downgraded bundle schema version under test.
     """
     record, request, repo = await _valid_capture(monkeypatch)
     payload = cast(dict[str, object], json.loads(record.state_json))
-    payload["bundle_version"] = 2
+    payload["bundle_version"] = legacy_version
     legacy = replace(record, state_json=json.dumps(payload))
     outcome = await verify_checkpoint_for_resume(
         repo,
@@ -839,4 +842,4 @@ async def test_legacy_bundle_version_2_payload_fails_closed_as_corrupt(
         _RESUMING_AS_OF,
         _eligibility(request),
     )
-    assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
+    assert outcome == PnlCheckpointFallback("checkpoint_bundle_version", delete_required=True)

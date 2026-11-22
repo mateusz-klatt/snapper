@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from snapper.application.portfolio import pnl_engine_options
+from snapper.application.portfolio import pnl_opening_checkpoint_verifier as verifier_service
 from snapper.application.portfolio import pnl_timeline_service as service
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
@@ -1330,7 +1331,7 @@ async def test_resume_falls_back_when_prefix_accrual_instrument_gains_identity_p
         and a deferred first fill at m(6), while kraken also quotes EUR/USD.
     When: Checkpoint capture runs at C=m(4) using shared kraken for the accrual,
         then resume runs over (C, T] where the deferred fill enters trusted_refs.
-    Then: Resume falls back with ``checkpoint_fx_venue_changed``, matching anchor's
+    Then: Resume falls back with ``checkpoint_fx_election_changed``, matching anchor's
         canonical rate sources and exact accrual points.
 
     Args:
@@ -1372,7 +1373,7 @@ async def test_resume_falls_back_when_prefix_accrual_instrument_gains_identity_p
         policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
         options=replace(options, checkpoint_resume=None),
     )
-    assert resumed.checkpoint_resume_fallback == "checkpoint_fx_venue_changed"
+    assert resumed.checkpoint_resume_fallback == "checkpoint_fx_election_changed"
     assert resumed.rate_sources == anchor.rate_sources
     checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
 
@@ -1478,7 +1479,7 @@ async def test_deferred_clamped_first_fill_fee_matches_5c6_cold_capture_and_anch
     When: Cold read and capture run at C=m(4), verification runs at T=m(8), and
         suffix resume runs over (C, T].
     Then: Capture matches cold read at C on kraken with m(2) carried, and suffix
-        resume falls back with ``checkpoint_fx_venue_changed`` to walutomat matching
+        resume falls back with ``checkpoint_fx_election_changed`` to walutomat matching
         the cold anchor read bit for bit.
 
     Args:
@@ -1563,7 +1564,7 @@ async def test_deferred_clamped_first_fill_fee_matches_5c6_cold_capture_and_anch
         policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
         options=replace(options, checkpoint_resume=None),
     )
-    assert resumed.checkpoint_resume_fallback == "checkpoint_fx_venue_changed"
+    assert resumed.checkpoint_resume_fallback == "checkpoint_fx_election_changed"
     assert [source.exchange for source in anchor.rate_sources] == ["walutomat"]
     assert resumed.rate_sources == anchor.rate_sources
     checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
@@ -1577,7 +1578,7 @@ async def test_resume_allows_prefix_proven_and_fresh_suffix_identity_plane_instr
     Given: A prefix-proven EUR-USD instrument continuing into the suffix alongside
         a fresh suffix-only EUR-USD instrument with no prior prefix FX requirements.
     When: Checkpoint capture runs at C and suffix resume runs over (C, T].
-    Then: Neither triggers ``checkpoint_fx_venue_changed`` and resume matches anchor.
+    Then: Neither triggers ``checkpoint_fx_election_changed`` and resume matches anchor.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
@@ -1703,7 +1704,7 @@ async def test_resume_falls_back_when_conversion_only_instrument_gains_identity_
     Given: An unproven EUR-USD instrument whose prefix carried only a non-causal
         ``conversion_requirements`` entry before its deferred first fill in suffix.
     When: Suffix resume gives that instrument its canonical identity plane.
-    Then: ``_validate_resume_fx_venues`` falls back with ``checkpoint_fx_venue_changed``.
+    Then: ``_validate_resume_fx_election`` falls back with ``checkpoint_fx_election_changed``.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
@@ -1733,7 +1734,7 @@ async def test_resume_falls_back_when_conversion_only_instrument_gains_identity_
         policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
         options=options,
     )
-    assert resumed.checkpoint_resume_fallback == "checkpoint_fx_venue_changed"
+    assert resumed.checkpoint_resume_fallback == "checkpoint_fx_election_changed"
 
 
 def _build_5c6_prefix_conversion_repo(*, include_suffix: bool) -> _ResumeRepo:
@@ -1979,7 +1980,7 @@ async def test_resume_refuses_identity_plane_for_unproven_opening_pool_span(
         the reference that proves walutomat on a cold replay (``-3.0``).
     When: Checkpoint capture runs without the suffix fill and resume runs after the suffix
         fill lands.
-    Then: Resume falls back with ``checkpoint_fx_venue_changed`` and returns bit-identical
+    Then: Resume falls back with ``checkpoint_fx_election_changed`` and returns bit-identical
         points and rate sources to the cold anchor replay.
 
     Args:
@@ -2022,7 +2023,390 @@ async def test_resume_refuses_identity_plane_for_unproven_opening_pool_span(
         options=replace(options, checkpoint_resume=None),
     )
     assert anchor.points[-1].accrual_pnl == pytest.approx(-3.0)
-    assert resumed.checkpoint_resume_fallback == "checkpoint_fx_venue_changed"
+    assert resumed.checkpoint_resume_fallback == "checkpoint_fx_election_changed"
     assert resumed.points[-1].accrual_pnl == pytest.approx(-3.0)
+    assert resumed.rate_sources == anchor.rate_sources
+    checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
+
+
+def _reclassified_span_repo(*, include_suffix: bool) -> _ResumeRepo:
+    """Build Case A: opening span proven by walutomat at C, reclassified to kraken at T.
+
+    Args:
+        include_suffix: Whether the suffix fill inside the kraken ref window is visible.
+
+    Returns:
+        Configured fake repository exercising span reclassification between C and T.
+    """
+    repo = _ResumeRepo()
+    shard_key = f"walutomat:live:{fixtures._I2}:untagged"
+    anchor = fixtures._empty_anchor(
+        fixtures._W1,
+        "live",
+        "USD",
+        watermarks={"walutomat": 1},
+    )
+    anchor["unrealized_pnl"] = 0.5
+    anchor["opening_basket_json"] = fixtures._canonical_test_json(
+        {
+            "schema_version": 3,
+            "pools": [
+                fixtures._test_anchor_pool(
+                    instrument_public_id=fixtures._I2,
+                    shard_key=shard_key,
+                    exchange="walutomat",
+                    position_qty=1.0,
+                    historical_entry_price=1.0,
+                    t0_mark=1.5,
+                    opening_unrealized_value=0.5,
+                )
+            ],
+            "annulments": [],
+            "native_basket": {fixtures._I2: 1.0},
+        }
+    )
+    anchor["contributions_json"] = fixtures._canonical_test_json(
+        {
+            "schema_version": 3,
+            "pools": [
+                fixtures._test_anchor_contribution(
+                    instrument_public_id=fixtures._I2,
+                    shard_key=shard_key,
+                    exchange="walutomat",
+                    quantity=1.0,
+                )
+            ],
+        }
+    )
+    repo._anchor = anchor
+    repo._executions = [
+        fixtures._exec_row(
+            fixtures._I2,
+            1,
+            -1,
+            "buy",
+            1.0,
+            1.0,
+            0.0,
+            "USD",
+            exchange="walutomat",
+        ),
+        *(
+            [
+                fixtures._exec_row(
+                    fixtures._I2,
+                    2,
+                    7,
+                    "buy",
+                    1.0,
+                    1.5,
+                    0.0,
+                    "USD",
+                    exchange="walutomat",
+                )
+            ]
+            if include_suffix
+            else []
+        ),
+    ]
+    repo._accruals = [fixtures._accrual_row(fixtures._I2, 3, 1.0, "EUR")]
+    repo._refs = [
+        fixtures._ref(
+            fixtures._I2,
+            "EUR-USD",
+            "USD",
+            exchange="walutomat",
+            instrument_exchange="walutomat",
+            valid_from=fixtures._EMPTY_ANCHOR_T0,
+            valid_to=fixtures._m(6),
+        ),
+        fixtures._ref(
+            fixtures._I2,
+            "EUR-USD",
+            "USD",
+            exchange="kraken",
+            instrument_exchange="walutomat",
+            valid_from=fixtures._m(6),
+        ),
+    ]
+    repo._candles = [
+        fixtures._candle(fixtures._m(minute), 1.5, fixtures._I2) for minute in range(9)
+    ]
+    repo._lineage = [
+        fixtures._lineage_row(row["order_public_id"], "rest") for row in repo._executions
+    ]
+    repo._fx_rows = [
+        *[fixtures._fx_row("EUR", "USD", minute, 2.0, exchange="kraken") for minute in range(1, 9)],
+        *[
+            fixtures._fx_row("EUR", "USD", minute, 3.0, exchange="walutomat")
+            for minute in range(1, 9)
+        ],
+    ]
+    repo._execution_watermarks = {"walutomat": len(repo._executions)}
+    return repo
+
+
+def _shared_plane_move_repo(*, include_suffix: bool) -> _ResumeRepo:
+    """Build Case B: shared EUR/USD tie-break at C moves to sole complete venue at T.
+
+    Args:
+        include_suffix: Whether the suffix fill at m(6) with walutomat-only FX is present.
+
+    Returns:
+        Configured fake repository with primary fee instrument and peer accrual instrument.
+    """
+    peer_instrument = "00000000-0000-7000-8000-000000000b06"
+    repo = _ResumeRepo()
+    repo._executions = [
+        fixtures._exec_row(fixtures._I1, 1, 2, "buy", 1.0, 100.0, 1.0, "EUR"),
+        *(
+            [fixtures._exec_row(fixtures._I1, 2, 6, "buy", 1.0, 100.0, 1.0, "EUR")]
+            if include_suffix
+            else []
+        ),
+    ]
+    repo._accruals = [fixtures._accrual_row(peer_instrument, 3, 1.0, "EUR")]
+    repo._refs = [
+        fixtures._ref(fixtures._I1, "BTC-USD", "USD"),
+        fixtures._ref(peer_instrument, "ETH-USD", "USD"),
+    ]
+    repo._candles = [
+        fixtures._candle(fixtures._m(minute), 100.0, instrument)
+        for minute in range(9)
+        for instrument in (fixtures._I1, peer_instrument)
+    ]
+    repo._lineage = [
+        fixtures._lineage_row(row["order_public_id"], "rest") for row in repo._executions
+    ]
+    repo._fx_rows = [
+        fixtures._fx_row("EUR", "USD", 2, 2.0, exchange="kraken"),
+        fixtures._fx_row("EUR", "USD", 3, 2.0, exchange="kraken"),
+        fixtures._fx_row("EUR", "USD", 2, 3.0, exchange="walutomat"),
+        fixtures._fx_row("EUR", "USD", 3, 3.0, exchange="walutomat"),
+        fixtures._fx_row("EUR", "USD", 6, 3.0, exchange="walutomat"),
+    ]
+    repo._execution_watermarks = {"kraken": len(repo._executions)}
+    return repo
+
+
+async def test_resume_refuses_span_proven_at_c_reclassified_to_suffix_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse when an opening span proven at C by walutomat reclassifies to kraken at T.
+
+    Given: An opening EUR-USD pool whose walutomat ref covers ``[t0, C]`` while a second
+        known ref on kraken starts after ``C`` and covers a suffix fill at ``m(7)``.
+    When: Capture runs at ``C`` electing walutomat (``-3.0`` accrual) and suffix resume runs
+        at ``T`` alongside the cold anchor replay (which installs kraken, ``-2.0`` accrual).
+    Then: Election stability refuses resume and returns the cold-equal anchor result.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for profile flags.
+    """
+    repo = _reclassified_span_repo(include_suffix=False)
+    resume = await _capture_and_verify_profile(
+        monkeypatch,
+        repo,
+        {"walutomat": 1},
+        PnlEngineOptions(True, True, True),
+    )
+    full_repo = _reclassified_span_repo(include_suffix=True)
+    repo._executions = list(full_repo._executions)
+    repo._lineage = list(full_repo._lineage)
+    repo._execution_watermarks = {"walutomat": 2}
+    options = replace(_resume_options(resume), frozen_execution_watermarks={"walutomat": 2})
+    resumed = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    anchor = await build_wallet_pnl_series(
+        cast(Repository, full_repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    assert anchor.points[-1].accrual_pnl == pytest.approx(-2.0)
+    assert resumed.checkpoint_resume_fallback == "checkpoint_fx_election_changed"
+    assert resumed.points[-1].accrual_pnl == pytest.approx(-2.0)
+    assert resumed.rate_sources == anchor.rate_sources
+    checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
+
+
+async def test_resume_refuses_shared_plane_move_including_peer_via_election_stability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse when window-wide shared FX election moves prefix fee and peer to walutomat.
+
+    Given: A prefix EUR fee and peer EUR accrual tie-broken to kraken at capture, plus a
+        suffix EUR fee at ``m(6)`` printed only by walutomat under window-wide election.
+    When: The window-wide election policy runs capture at ``C`` and resume vs cold at ``T``.
+    Then: Election stability detects that both prefix consumer minutes moved to walutomat,
+        refuses with ``checkpoint_fx_election_changed``, and matches the cold anchor.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for profile flags and window-wide election seam.
+    """
+    monkeypatch.setattr(
+        service,
+        "_checkpoint_read_profile_supported",
+        lambda options, policy: not policy.carry_valuation,
+    )
+    monkeypatch.setattr(
+        verifier_service,
+        "_checkpoint_ineligible",
+        lambda record, elig: False,
+    )
+    _permit_profile(monkeypatch, PnlEngineOptions(True, True, True))
+    monkeypatch.setattr(
+        service,
+        "_series_engine_options",
+        lambda options: PnlEngineOptions(True, True, True),
+    )
+    repo = _shared_plane_move_repo(include_suffix=False)
+    request = replace(capture._request(), raw_execution_watermarks={"kraken": 1})
+    capture_options = replace(
+        capture._options(request, pointwise_exact_fx=False),
+        replay_generation_tip=_C,
+    )
+    capture_result = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(0),
+        _C,
+        "1m",
+        capture._AS_OF,
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=capture_options,
+    )
+    assert capture_result.checkpoint_write is not None
+    write = capture_result.checkpoint_write
+    record = PnlOpeningCheckpointRecord(write.certificate, write.state_json, fixtures._m(10))
+    eligibility = replace(
+        verifier._eligibility(request),
+        pointwise_exact_fx=False,
+        from_time=fixtures._m(5),
+        frontier_tip=_T,
+        replay_generation_tip=_T,
+    )
+    outcome = await verify_checkpoint_for_resume(
+        cast(Repository, repo),
+        record,
+        verifier._scope(request),
+        fixtures._m(10),
+        eligibility,
+    )
+    assert isinstance(outcome, PnlCheckpointResume)
+    repo.forbid_prefix = True
+    full_repo = _shared_plane_move_repo(include_suffix=True)
+    repo._executions = list(full_repo._executions)
+    repo._lineage = list(full_repo._lineage)
+    repo._execution_watermarks = {"kraken": 2}
+    options = replace(
+        _resume_options(outcome),
+        pointwise_exact_fx=False,
+        frozen_execution_watermarks={"kraken": 2},
+    )
+    resumed = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    anchor = await build_wallet_pnl_series(
+        cast(Repository, full_repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    assert anchor.points[-1].fee_pnl == pytest.approx(-6.0)
+    assert anchor.points[-1].accrual_pnl == pytest.approx(-3.0)
+    assert resumed.checkpoint_resume_fallback == "checkpoint_fx_election_changed"
+    assert resumed.points[-1].fee_pnl == pytest.approx(-6.0)
+    assert resumed.points[-1].accrual_pnl == pytest.approx(-3.0)
+    assert resumed.rate_sources == anchor.rate_sources
+    checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
+
+
+async def test_resume_accepts_unchanged_shared_and_identity_elections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accept direct resume without fallback when shared and identity elections stay stable.
+
+    Given: A prefix EUR fee tie-broken to kraken plus a peer EUR accrual, followed by a
+        suffix EUR fee covered only by walutomat under the active pointwise profile.
+    When: Capture runs at ``C`` and pointwise resume runs at ``T``.
+    Then: Elections for every prefix conversion remain unchanged, resume succeeds without
+        reloading the prefix or falling back, and points match anchor bit for bit.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for profile flags.
+    """
+    repo = _shared_plane_move_repo(include_suffix=False)
+    resume = await _capture_and_verify_profile(
+        monkeypatch,
+        repo,
+        {"kraken": 1},
+        PnlEngineOptions(True, True, True),
+    )
+    full_repo = _shared_plane_move_repo(include_suffix=True)
+    repo._executions = list(full_repo._executions)
+    repo._lineage = list(full_repo._lineage)
+    repo._execution_watermarks = {"kraken": 2}
+    options = replace(_resume_options(resume), frozen_execution_watermarks={"kraken": 2})
+    resumed = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    anchor = await build_wallet_pnl_series(
+        cast(Repository, full_repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    assert resumed.checkpoint_resume_fallback is None
+    assert resumed.points[-1].fee_pnl == pytest.approx(-5.0)
+    assert resumed.points[-1].accrual_pnl == pytest.approx(-2.0)
     assert resumed.rate_sources == anchor.rate_sources
     checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)

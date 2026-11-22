@@ -599,6 +599,10 @@ async def test_settling_series_builds_valid_write_and_complete_envelope(
     assert bundle.event_walk_state.requirements
     assert bundle.mark_walk_state.instruments
     assert bundle.event_fx_candles_by_plane
+    assert bundle.bundle_version == 4
+    assert bundle.prefix_fx_elections
+    assert bundle.prefix_ref_bindings
+    assert bundle.prefix_fx_coverage
 
 
 async def test_capture_fingerprints_precede_each_replay_domain_read(
