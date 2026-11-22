@@ -3,20 +3,25 @@
 import asyncio
 import os
 import resource
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import asyncpg
 import pytest
+from sqlalchemy import event
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import Session
@@ -35,8 +40,10 @@ from snapper.data.pnl_correction_state import PnlCorrectionKey
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
+from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from tests.application.portfolio import test_pnl_snapshotter_checkpoint_e2e as e2e
 from tests.application.portfolio import test_pnl_snapshotter_lower_id_rewind as idless
+from tests.data import test_pnl_opening_checkpoint_repository as checkpoint_repository
 from tests.data import test_pnl_timeline_execution_prefix_repository as prefix
 from tests.data import test_pnl_timeline_sample_repository as samples
 
@@ -742,11 +749,60 @@ class _FakeAsyncpgState:
 _FAKE_PG_STATIC_RESPONSES: tuple[tuple[str, list[tuple[object, ...]]], ...] = (
     ("version()", [("PostgreSQL 16.2",)]),
     ("current_schema", [("public",)]),
+    ("transaction isolation level", [("read committed",)]),
     ("standard_conforming_strings", [("on",)]),
     ("transaction_read_only", [("on",)]),
     ("lock_timeout", [("1s",)]),
     ("idle_in_transaction_session_timeout", [("10s",)]),
 )
+
+
+def _split_top_level_commas(projection: str) -> list[str]:
+    """Split a SQL projection list on depth-0 commas."""
+    columns: list[str] = []
+    start = 0
+    depth = 0
+    for index, ch in enumerate(projection):
+        if ch in "()":
+            depth += 1 if ch == "(" else -1
+        elif ch == "," and depth == 0:
+            columns.append(projection[start:index].strip())
+            start = index + 1
+    columns.append(projection[start:].strip())
+    return columns
+
+
+def _select_column_names(sql: str) -> list[str]:
+    """Extract top-level SQLAlchemy projection aliases for fake asyncpg column metadata."""
+    collapsed = " ".join(sql.split())
+    upper = collapsed.upper()
+    depth = 0
+    select_end = -1
+    from_start = len(collapsed)
+    for index, ch in enumerate(collapsed):
+        if ch in "()":
+            depth += 1 if ch == "(" else -1
+            continue
+        if depth == 0 and select_end == -1 and upper.startswith("SELECT ", index):
+            select_end = index + 7
+        elif depth == 0 and select_end != -1 and upper.startswith(" FROM ", index):
+            from_start = index
+            break
+    if select_end == -1:
+        return ["col"]
+    projection = collapsed[select_end:from_start].strip()
+    if projection.upper().startswith("DISTINCT "):
+        projection = projection[9:].strip()
+    return [
+        (
+            col.rsplit(" AS ", 1)[-1].rsplit(" as ", 1)[-1]
+            if " AS " in col.upper()
+            else col.rsplit(".", 1)[-1]
+        )
+        .strip()
+        .strip('"')
+        for col in _split_top_level_commas(projection)
+    ]
 
 
 class _FakeAsyncpgPrepared:
@@ -764,7 +820,10 @@ class _FakeAsyncpgPrepared:
                 SimpleNamespace(name="table_name", type=SimpleNamespace(oid=25)),
                 SimpleNamespace(name="privilege", type=SimpleNamespace(oid=25)),
             ]
-        return [SimpleNamespace(name="col", type=SimpleNamespace(oid=25))]
+        return [
+            SimpleNamespace(name=col_name, type=SimpleNamespace(oid=701))
+            for col_name in _select_column_names(self._sql)
+        ]
 
     def get_parameters(self) -> list[object]:
         """Return empty parameter descriptors."""
@@ -779,12 +838,15 @@ class _FakeAsyncpgPrepared:
         self._state.queries.append(self._sql)
         if "has_table_privilege" in self._sql:
             return [("candles", "DELETE")] if self._state.role_can_write else []
-        if "statement_timeout" in self._sql:
+        if "statement_timeout" in self._sql and "set_config" not in self._sql:
             return [(self._state.statement_timeout,)]
+        lowered = self._sql.lower()
+        if "count(" in lowered and "sum(" in lowered and "group by" not in lowered:
+            return [(0, None, None, None)]
         for pattern, rows in _FAKE_PG_STATIC_RESPONSES:
             if pattern in self._sql:
                 return rows
-        return [("1",)]
+        return [("1",)] if self._sql.strip() == "SELECT 1" else []
 
 
 class _FakeAsyncpgConn:
@@ -1674,3 +1736,545 @@ def test_pg_override_url_passes_readonly_role_without_override_and_warns_when_un
     fallback_ro_io = capsys.readouterr()
     assert sum(1 for line in fallback_ro_io.out.splitlines() if line.startswith("WARNING:")) == 1
     assert fallback_ro_io.out.strip().splitlines()[-1] == "RESULT: FAIL no_frontier"
+
+
+async def _record_pg_production_read_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    """Execute production P&L read paths on fake asyncpg and collect all SQL emitted."""
+    state = _FakeAsyncpgState(statement_timeout="30s")
+
+    async def _fake_connect(*_args: object, **_kwargs: object) -> _FakeAsyncpgConn:
+        """Return a fake asyncpg connection bound to ``state``."""
+        return _FakeAsyncpgConn(state)
+
+    monkeypatch.setattr(asyncpg, "connect", _fake_connect)
+    dsn = "postgresql+asyncpg://snapper_ro:rosec@db.internal:5432/snapper"
+    pg_engine = probe._build_probe_engine(dsn, 30_000)
+    repo = SQLAlchemyRepository(dsn)
+    default_engine = repo.engine
+    repo.engine = pg_engine
+    repo.session_factory = probe.async_sessionmaker(
+        pg_engine, expire_on_commit=False, class_=probe.AsyncSession
+    )
+    scope = _sample_frontier().key
+    sample_scope = PortfolioPnlSampleScope(
+        wallet_public_id=scope.wallet_public_id,
+        mode=scope.mode,
+        valuation_ccy=scope.valuation_ccy,
+        epoch_public_id=scope.epoch_public_id,
+        anchor_point_time=samples._T0,
+    )
+    t1, t2 = samples._T0 + _MINUTE, samples._T0 + 2 * _MINUTE
+    cut: PnlTimelineFillWitnessCut = {"watermarks": {"kraken": 1}, "digest": "a" * 64}
+    try:
+        await default_engine.dispose()
+        await repo.get_portfolio_pnl_anchor(scope.wallet_public_id, scope.mode, "USD", None)
+        await repo.get_portfolio_pnl_correction_frontier(sample_scope)
+        await repo.get_pnl_execution_prefix_counts(scope.wallet_public_id, "live", {"kraken": 1})
+        await repo.get_pnl_timeline_execution_prefix(
+            scope.wallet_public_id, "live", t2, capture_fill_witness_cut=True
+        )
+        await repo.get_pnl_timeline_execution_prefix_at_watermarks(
+            scope.wallet_public_id, "live", {}, t2
+        )
+        await repo.pnl_timeline_scope_has_fill_gap(scope.wallet_public_id, "live", t2)
+        await repo.get_accruals_for_pnl(scope.wallet_public_id, "live", t2)
+        await repo.get_pnl_accrual_prefix_fingerprint(
+            scope.wallet_public_id, "live", samples._T0, t1, t2
+        )
+        await repo.get_instrument_symbol_refs([prefix._INSTRUMENT], t2)
+        await repo.get_pnl_timeline_candles(
+            [
+                {
+                    "instrument_public_id": prefix._INSTRUMENT,
+                    "native_symbol": "BTC/USD",
+                    "exchange": "kraken",
+                    "instrument_exchange": "kraken",
+                    "base_currency": "BTC",
+                    "quote_currency": "USD",
+                    "valid_from": samples._T0,
+                    "valid_to": t2,
+                }
+            ],
+            t1,
+            t2,
+            t2,
+        )
+        await repo.get_pnl_fx_rate_exchanges([("EUR", "USD")], t1, t2, t2)
+        await repo.get_pnl_fx_rate_exchanges_at([("EUR", "USD")], [t1], t2)
+        await repo.get_pnl_fx_rate_candles([("EUR", "USD", "kraken")], t1, t2, t2)
+        await repo.get_pnl_fx_rate_candles_at([("EUR", "USD", "kraken")], [t1], t2)
+        await repo.get_pnl_event_fx_candle_fingerprint([("EUR", "USD", "kraken")], [t1], t2)
+        await repo.get_pnl_event_fx_candle_fingerprints_by_plane(
+            [("EUR", "USD", "kraken")], [t1], t2
+        )
+        await repo.get_pnl_timeline_execution_lineage([prefix._ORDER], t2)
+        await repo.get_spot_execution_chain_tip(
+            scope.wallet_public_id, "kraken", "live", 0, "0" * 64, 0
+        )
+        assert cut["digest"]
+    finally:
+        await pg_engine.dispose()
+    return list(state.queries)
+
+
+async def test_bound_pg_timeout_set_config_and_production_read_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow exact ``_bound_pnl_correction_transaction`` SQL and verify all probe reads pass guard.
+
+    Given: Exact production ``set_config`` timeout SQL, tampered/over-cap variants, and live
+        SQLite + PostgreSQL-dialect production read paths exercised against an SQL recorder.
+    When: ``_assert_read_only_sql`` checks every direct case and every recorded statement.
+    Then: Exact ``_bound_pnl_correction_transaction`` SQL passes within caps, over-cap or
+        tampered ``set_config`` refuses cleanly, and every recorded read statement passes.
+
+    Args:
+        tmp_path: Pytest directory for the temporary SQLite probe database.
+        monkeypatch: Pytest fixture patching fake asyncpg for PG SQL recording.
+    """
+    pg_bound_sql = (
+        "SELECT set_config('statement_timeout', CASE WHEN "
+        "current_setting('statement_timeout')::interval = interval '0' OR "
+        "current_setting('statement_timeout')::interval > interval '20 seconds' "
+        "THEN '20s' ELSE current_setting('statement_timeout') END, true), "
+        "set_config('lock_timeout', CASE WHEN "
+        "current_setting('lock_timeout')::interval = interval '0' OR "
+        "current_setting('lock_timeout')::interval > interval '1 second' "
+        "THEN '1s' ELSE current_setting('lock_timeout') END, true)"
+    )
+    probe._assert_read_only_sql(pg_bound_sql, statement_timeout_ms=30_000)
+
+    with pytest.raises(probe.CheckpointResumeProbeError, match="write_or_unbounded_sql:set_config"):
+        probe._assert_read_only_sql(pg_bound_sql, statement_timeout_ms=15_000)
+    with pytest.raises(probe.CheckpointResumeProbeError, match="write_or_unbounded_sql:set_config"):
+        probe._assert_read_only_sql(pg_bound_sql.replace("'20s'", "'15s'"))
+    with pytest.raises(probe.CheckpointResumeProbeError, match="write_or_unbounded_sql:set_config"):
+        probe._assert_read_only_sql(pg_bound_sql.replace("'20 seconds'", "'1 minute'"))
+    for bad_set_config in (
+        pg_bound_sql.replace(", true)", ", false)"),
+        pg_bound_sql.replace("'statement_timeout'", "'work_mem'"),
+        "SELECT set_config('statement_timeout', '20s', true)",
+        "WITH c AS (" + pg_bound_sql + ") SELECT * FROM c",
+    ):
+        with pytest.raises(
+            probe.CheckpointResumeProbeError, match="write_sql_refused:forbidden_function"
+        ):
+            probe._assert_read_only_sql(bad_set_config)
+
+    url, scope = await _seed_and_catchup(tmp_path / "audit.db", monkeypatch)
+    async with idless._repository(url) as sqlite_repo:
+        async with sqlite_repo.session() as session:
+            session.add(
+                checkpoint_repository._accrual_orm(
+                    samples._T0 + _MINUTE, 1, scope=(scope.wallet_public_id, scope.mode)
+                )
+            )
+            await session.commit()
+        recorded_sqlite: list[str] = []
+        event.listen(
+            sqlite_repo.engine.sync_engine,
+            "before_cursor_execute",
+            lambda _c, _cur, stmt, *_r: recorded_sqlite.append(stmt),
+        )
+        await probe.probe_with_repository(
+            sqlite_repo,
+            probe.CheckpointResumeProbeConfig(
+                wallet_public_id=scope.wallet_public_id, window_minutes=4
+            ),
+        )
+        assert recorded_sqlite
+        for sql in recorded_sqlite:
+            probe._assert_read_only_sql(sql)
+
+    recorded_pg = await _record_pg_production_read_queries(monkeypatch)
+    assert any("set_config('statement_timeout'" in sql for sql in recorded_pg)
+    assert any("SET LOCAL jit = off" in sql for sql in recorded_pg)
+    assert any("REPEATABLE READ, READ ONLY" in sql for sql in recorded_pg)
+    assert any("WITH pnl_fx_candidate_instruments" in sql for sql in recorded_pg)
+    for sql in recorded_pg:
+        probe._assert_read_only_sql(sql, statement_timeout_ms=30_000)
+
+
+def test_accrual_candle_and_cut_moved_caps_refuse_with_exit_three(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse oversized accruals, candles, or moved capture cuts with exit code 3.
+
+    Given: Valid and zero cap configs, seeded accruals/candles, and a capture cut that grows
+        beyond ``max_executions`` between precheck and fresh capture.
+    When: Probe validation and execution evaluate caps and cut stability.
+    Then: Zero caps fail validation cleanly, accrual/candle caps return exit code 3
+        ``RESULT: REFUSED caps_exceeded:<kind>``, and moved cuts return exit code 3
+        ``RESULT: REFUSED cut_moved``.
+
+    Args:
+        tmp_path: Pytest isolated directory for temporary SQLite fixture.
+        monkeypatch: Pytest fixture patching CLI/cut growth scenarios.
+    """
+    url, scope = asyncio.run(_seed_and_catchup(tmp_path / "caps.db", monkeypatch))
+
+    async def _seed_accruals_and_check_invalid() -> None:
+        """Validate zero-cap failures, seed accruals, and verify empty witness count."""
+        async with idless._repository(url) as repo:
+            for bad_cfg, expected in (
+                (
+                    probe.CheckpointResumeProbeConfig(
+                        wallet_public_id=scope.wallet_public_id, max_accruals=0
+                    ),
+                    "invalid_max_accruals:0",
+                ),
+                (
+                    probe.CheckpointResumeProbeConfig(
+                        wallet_public_id=scope.wallet_public_id, max_candles=0
+                    ),
+                    "invalid_max_candles:0",
+                ),
+            ):
+                with pytest.raises(probe.CheckpointResumeProbeError, match=expected):
+                    await probe.probe_with_repository(repo, bad_cfg)
+
+            async with repo.session() as session:
+                for row_id in (1, 2):
+                    session.add(
+                        checkpoint_repository._accrual_orm(
+                            samples._T0 + row_id * _MINUTE,
+                            row_id,
+                            scope=(scope.wallet_public_id, scope.mode),
+                        )
+                    )
+                await session.commit()
+
+            assert await probe._count_witness_fill_events(repo, scope, {}) == 0
+
+    asyncio.run(_seed_accruals_and_check_invalid())
+
+    assert (
+        probe.main(
+            [
+                "--wallet",
+                scope.wallet_public_id,
+                "--window-minutes",
+                "4",
+                "--db-url",
+                url,
+                "--max-accruals",
+                "1",
+            ]
+        )
+        == 3
+    )
+    assert (
+        probe.main(
+            [
+                "--wallet",
+                scope.wallet_public_id,
+                "--window-minutes",
+                "4",
+                "--db-url",
+                url,
+                "--max-candles",
+                "1",
+            ]
+        )
+        == 3
+    )
+
+    async def _check_cut_moved() -> None:
+        """Verify typed cap errors and ``cut_moved`` refusal when captured prefix expands."""
+        async with idless._repository(url) as repo:
+            with pytest.raises(probe.CheckpointResumeProbeError, match="^caps_exceeded:accruals$"):
+                await probe.probe_with_repository(
+                    repo,
+                    probe.CheckpointResumeProbeConfig(
+                        wallet_public_id=scope.wallet_public_id, window_minutes=4, max_accruals=1
+                    ),
+                )
+            with pytest.raises(probe.CheckpointResumeProbeError, match="^caps_exceeded:candles$"):
+                await probe.probe_with_repository(
+                    repo,
+                    probe.CheckpointResumeProbeConfig(
+                        wallet_public_id=scope.wallet_public_id, window_minutes=4, max_candles=1
+                    ),
+                )
+
+            orig_get_prefix = repo.get_pnl_timeline_execution_prefix
+
+            async def _grown_cut_prefix(
+                wallet_id: str,
+                mode: str,
+                as_of: datetime | None,
+                *,
+                capture_fill_witness_cut: bool = False,
+            ) -> object:
+                """Commit a new matched execution + fill via raw sqlite3 outside ORM guards."""
+                with closing(sqlite3.connect(tmp_path / "caps.db")) as raw_conn:
+                    raw_conn.row_factory = sqlite3.Row
+                    ex_row = dict(
+                        raw_conn.execute(
+                            "SELECT * FROM executions WHERE scope_sequence = 2"
+                        ).fetchone()
+                    )
+                    ex_row.pop("id")
+                    ex_row.update(
+                        scope_sequence=4,
+                        public_id="00000000-0000-7000-8000-000000000904",
+                        exec_id="exec-kraken-4",
+                        trade_id="trade-kraken-4",
+                        sequence_id=4,
+                        timestamp=ex_row["timestamp"],
+                    )
+                    ex_cols = ", ".join(ex_row.keys())
+                    ex_q = ", ".join("?" for _ in ex_row)
+                    raw_conn.execute(
+                        f"INSERT INTO executions ({ex_cols}) VALUES ({ex_q})",
+                        tuple(ex_row.values()),
+                    )
+                    ve_row = dict(
+                        raw_conn.execute(
+                            "SELECT * FROM venue_events WHERE exec_id = 'exec-kraken-2'"
+                        ).fetchone()
+                    )
+                    ve_row.pop("id")
+                    ve_row.update(
+                        public_id="00000000-0000-7000-8000-000000000914",
+                        exec_id="exec-kraken-4",
+                        trade_id="trade-kraken-4",
+                        sequence_id=4,
+                    )
+                    ve_cols = ", ".join(ve_row.keys())
+                    ve_q = ", ".join("?" for _ in ve_row)
+                    raw_conn.execute(
+                        f"INSERT INTO venue_events ({ve_cols}) VALUES ({ve_q})",
+                        tuple(ve_row.values()),
+                    )
+                    raw_conn.commit()
+                return await orig_get_prefix(
+                    wallet_id, mode, as_of, capture_fill_witness_cut=capture_fill_witness_cut
+                )
+
+            monkeypatch.setattr(repo, "get_pnl_timeline_execution_prefix", _grown_cut_prefix)
+            with pytest.raises(probe.CheckpointResumeProbeError, match="^cut_moved$") as cut_exc:
+                await probe.probe_with_repository(
+                    repo,
+                    probe.CheckpointResumeProbeConfig(
+                        wallet_public_id=scope.wallet_public_id, window_minutes=4, max_executions=3
+                    ),
+                )
+            assert probe._classify_failure(cut_exc.value) == (3, "RESULT: REFUSED cut_moved")
+
+    asyncio.run(_check_cut_moved())
+
+
+def test_argparse_error_and_exit_redact_dsn_and_multiline_collapse(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Redact DSNs on mistyped CLI flags/parser exits and collapse multi-line DB errors.
+
+    Given: Mistyped CLI arguments bearing credentials, direct parser ``exit`` calls, and
+        multi-line / empty exception messages.
+    When: Parsing arguments fails or ``_classify_failure`` / ``main`` formats errors.
+    Then: Parser ``error`` and ``exit`` scrub credentials, multi-line DB errors collapse into a
+        single terminal ``RESULT:`` line, and empty exceptions report their class name cleanly.
+
+    Args:
+        monkeypatch: Pytest fixture patching CLI execution results.
+        capsys: Stdout/stderr capture inspecting parser stderr and final stdout line.
+    """
+    with pytest.raises(SystemExit) as parse_exit:
+        probe.main(
+            [
+                "--wallet",
+                prefix._WALLET,
+                "--db-url",
+                "postgresql+asyncpg://ro:argvsec@db.prod:5432/snapper",
+                "--bogus=postgresql+asyncpg://ro:flagsec@db.prod:5432/snapper",
+            ]
+        )
+    assert parse_exit.value.code == 2
+    parse_io = capsys.readouterr()
+    assert "argvsec" not in parse_io.err
+    assert "flagsec" not in parse_io.err
+    assert "postgresql+asyncpg://***:***@db.prod:5432/snapper" in parse_io.err
+
+    parser = probe.build_parser()
+    with pytest.raises(SystemExit) as msg_exit:
+        parser.exit(2, "fatal postgresql+asyncpg://ro:exitsec@db.prod:5432/snapper\n")
+    assert msg_exit.value.code == 2
+    exit_io = capsys.readouterr()
+    assert "exitsec" not in exit_io.err
+    assert "postgresql+asyncpg://***:***@db.prod:5432/snapper" in exit_io.err
+
+    with pytest.raises(SystemExit) as quiet_exit:
+        parser.exit(0)
+    assert quiet_exit.value.code == 0
+
+    monkeypatch.setattr(
+        probe,
+        "probe_wallet_checkpoint_resume",
+        AsyncMock(
+            side_effect=SQLAlchemyError(
+                "line1 postgresql+asyncpg://ro:linesec@db.prod:5432/snapper\n[SQL: SELECT 1]\nline3"
+            )
+        ),
+    )
+    assert (
+        probe.main(
+            [
+                "--wallet",
+                prefix._WALLET,
+                "--db-url",
+                "postgresql+asyncpg://ro:linesec@db.prod:5432/snapper",
+            ]
+        )
+        == 2
+    )
+    multiline_io = capsys.readouterr()
+    assert multiline_io.err == ""
+    assert "linesec" not in multiline_io.out
+    lines = multiline_io.out.strip().splitlines()
+    assert len(lines) == 1
+    assert (
+        lines[-1]
+        == "RESULT: FAIL line1 postgresql+asyncpg://***:***@db.prod:5432/snapper [SQL: SELECT 1] line3"
+    )
+    assert probe._classify_failure(ValueError()) == (2, "RESULT: FAIL ValueError")
+    assert probe._classify_failure(probe.CheckpointResumeProbeError("timeout")) == (
+        2,
+        "RESULT: FAIL timeout",
+    )
+
+
+async def _provision_and_seed_pg_db(
+    target_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> PortfolioPnlSampleScope:
+    """Create schema, seed a 10-minute wallet with matched fills, and catch up in off mode."""
+    monkeypatch.setattr(pnl_snapshotter, "MAX_CORRECTION_CHUNK_MINUTES", 2)
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "off")
+    monkeypatch.delenv("PNL_FX_SHADOW_PINNING_ENABLED", raising=False)
+    scope = await idless._seed(target_url, complete=False)
+    async with idless._repository(target_url) as repo:
+        await e2e._add_valuation_minutes(repo, 6, 10)
+        async with repo.session() as session:
+            for sequence, minute, side in ((2, 7, "buy"), (3, 9, "sell")):
+                execution, fill_event = e2e._matched_execution(sequence, minute, side)
+                fill_event.id = 100 + sequence
+                session.add_all((execution, fill_event))
+            await session.commit()
+        as_of = samples._T0 + 12 * _MINUTE
+        for _ in range(5):
+            snap = PortfolioPnlSnapshotter(repo=repo, disabled=False, clock=lambda: as_of)
+            await snap._tick_once()
+    return scope
+
+
+async def _pg_create_ro_db_and_seed(
+    urls: tuple[str, str],
+    creds: tuple[str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> PortfolioPnlSampleScope:
+    """Create temporary Postgres DB and dedicated read-only role, then seed scope."""
+    async_base, target_async = urls
+    db_name, role_name, role_pw = creds
+    maintenance = SQLAlchemyRepository(async_base)
+    try:
+        async with maintenance.engine.connect() as conn:
+            admin = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await admin.exec_driver_sql(f'CREATE DATABASE "{db_name}"')
+            await admin.exec_driver_sql(f"CREATE ROLE \"{role_name}\" LOGIN PASSWORD '{role_pw}'")
+            await admin.exec_driver_sql(f'GRANT CONNECT ON DATABASE "{db_name}" TO "{role_name}"')
+    finally:
+        await maintenance.engine.dispose()
+    scope = await _provision_and_seed_pg_db(target_async, monkeypatch)
+    grant_repo = SQLAlchemyRepository(target_async)
+    try:
+        async with grant_repo.engine.begin() as conn:
+            await conn.exec_driver_sql(f'GRANT USAGE ON SCHEMA public TO "{role_name}"')
+            await conn.exec_driver_sql(
+                f'GRANT SELECT ON ALL TABLES IN SCHEMA public TO "{role_name}"'
+            )
+            await conn.exec_driver_sql(
+                f'ALTER ROLE "{role_name}" SET default_transaction_read_only = on'
+            )
+    finally:
+        await grant_repo.engine.dispose()
+    return scope
+
+
+async def _pg_drop_ro_db(async_base: str, db_name: str, role_name: str) -> None:
+    """Drop disposable Postgres database and temporary read-only role."""
+    maintenance = SQLAlchemyRepository(async_base)
+    try:
+        async with maintenance.engine.connect() as conn:
+            admin = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await admin.exec_driver_sql(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
+            await admin.exec_driver_sql(f'DROP ROLE IF EXISTS "{role_name}"')
+    finally:
+        await maintenance.engine.dispose()
+
+
+def test_opt_in_real_postgres_probe_e2e(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Run ``main()`` against an isolated real PostgreSQL database when ``PNL_TEST_POSTGRES_URL`` is set.
+
+    Given: An opt-in ``PNL_TEST_POSTGRES_URL`` PostgreSQL server URL with isolated database
+        and dedicated ``snapper_ro``-style read-only test role.
+    When: Seeding a small caught-up wallet and running ``probe.main()`` against the DB.
+    Then: Probe passes read-only preflight, ``_bound_pnl_correction_transaction``, and FX/mark
+        replay, returning exit code 0 and ``RESULT: PASS`` with zero persisted checkpoints.
+
+    Args:
+        monkeypatch: Pytest fixture setting ``off`` catch-up mode for seeding.
+        capsys: Stdout/stderr capture asserting ``RESULT: PASS``.
+    """
+    raw_pg = os.environ.get("PNL_TEST_POSTGRES_URL", "").strip()
+    if not raw_pg:
+        pytest.skip("PNL_TEST_POSTGRES_URL is not set; skipping opt-in Postgres probe e2e test")
+    parsed = make_url(raw_pg)
+    assert parsed.get_backend_name() == "postgresql"
+    async_base = parsed.set(drivername="postgresql+asyncpg").render_as_string(hide_password=False)
+    db_name = f"pnl_probe_e2e_{uuid4().hex}"
+    role_name = f"pnl_probe_ro_{uuid4().hex[:12]}"
+    role_pw = f"probe_{uuid4().hex}"
+    target_async = parsed.set(drivername="postgresql+asyncpg", database=db_name).render_as_string(
+        hide_password=False
+    )
+    ro_async = parsed.set(
+        drivername="postgresql+asyncpg",
+        database=db_name,
+        username=role_name,
+        password=role_pw,
+    ).render_as_string(hide_password=False)
+    try:
+        scope = asyncio.run(
+            _pg_create_ro_db_and_seed(
+                (async_base, target_async), (db_name, role_name, role_pw), monkeypatch
+            )
+        )
+        rc = probe.main(
+            [
+                "--wallet",
+                scope.wallet_public_id,
+                "--mode",
+                scope.mode,
+                "--valuation-ccy",
+                scope.valuation_ccy,
+                "--window-minutes",
+                "4",
+                "--db-url",
+                ro_async,
+            ]
+        )
+        assert rc == 0
+        io = capsys.readouterr()
+        assert role_pw not in io.out
+        assert io.out.strip().splitlines()[-1] == "RESULT: PASS"
+    finally:
+        asyncio.run(_pg_drop_ro_db(async_base, db_name, role_name))

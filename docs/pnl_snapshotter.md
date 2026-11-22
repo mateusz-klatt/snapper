@@ -347,7 +347,10 @@ Mode semantics:
 
 Rollout and rollback:
 
-1. **Pre-flight probe**: run the read-only probe script
+1. **Pre-flight probe**: the deployed environment must **not** set
+    `PNL_SNAPSHOTTER_CHECKPOINT_MODE` (leave it unset so default `off`
+    applies) until the operator's shadow call. First run the read-only probe
+    script
     `PYTHONPATH=src python scripts/pnl_checkpoint_resume_probe.py --wallet <ID> --mode live --valuation-ccy USD`
     against a replica or production read path to compare cold anchor replay vs.
     in-memory capture and suffix resume bit-for-bit before enabling writes.

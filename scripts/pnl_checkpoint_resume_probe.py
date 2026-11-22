@@ -44,12 +44,15 @@ from dataclasses import is_dataclass
 from datetime import datetime
 from datetime import timedelta
 from typing import Final
+from typing import NoReturn
 from typing import Protocol
 from typing import cast
 from weakref import WeakKeyDictionary
 
+from sqlalchemy import and_
 from sqlalchemy import event
 from sqlalchemy import func
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -89,12 +92,15 @@ from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_
 from snapper.config.settings import get_bootstrap_settings
 from snapper.core.json_types import JsonValue
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import AccrualLedger
+from snapper.data.models import Candle
 from snapper.data.models import VenueEvent
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import where_active
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PortfolioPnlAnchorRow
@@ -107,6 +113,8 @@ IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS: Final[int] = 10_000
 DEFAULT_MAX_RUNTIME_SECONDS: Final[float] = 120.0
 MAX_RUNTIME_SECONDS: Final[float] = 600.0
 DEFAULT_MAX_EXECUTIONS: Final[int] = 200_000
+DEFAULT_MAX_ACCRUALS: Final[int] = 200_000
+DEFAULT_MAX_CANDLES: Final[int] = 2_000_000
 DEFAULT_MAX_RSS_MB: Final[int] = 2048
 PROBE_APPLICATION_NAME: Final[str] = "pnl_checkpoint_resume_probe"
 PROBE_DB_URL_ENV_VAR: Final[str] = "PNL_PROBE_DB_URL"
@@ -120,18 +128,33 @@ _SQL_STRING_RE = re.compile(r"'(?:''|[^'])*'")
 _LIT_TOKEN_RE = re.compile(r"'__LIT_(\d+)__'")
 _FOR_LOCK_RE = re.compile(r"\bFOR\s+(?:(?:NO\s+KEY\s+)?UPDATE|(?:KEY\s+)?SHARE)\b")
 _FORBIDDEN_SQL_CALL_RE = re.compile(r"\b(?:SET_CONFIG\s*\(|PG_SLEEP(?:_FOR|_UNTIL)?\b)")
+_BOUND_TX_CONFIG_RE = re.compile(
+    r"^SELECT\s+set_config\('statement_timeout',\s*CASE\s+WHEN\s+"
+    r"current_setting\('statement_timeout'\)::interval\s*=\s*interval\s*'0'\s+OR\s+"
+    r"current_setting\('statement_timeout'\)::interval\s*>\s*interval\s*('[^']+')\s+"
+    r"THEN\s+('[^']+')\s+ELSE\s+current_setting\('statement_timeout'\)\s+END,\s*true\),\s*"
+    r"set_config\('lock_timeout',\s*CASE\s+WHEN\s+"
+    r"current_setting\('lock_timeout'\)::interval\s*=\s*interval\s*'0'\s+OR\s+"
+    r"current_setting\('lock_timeout'\)::interval\s*>\s*interval\s*('[^']+')\s+"
+    r"THEN\s+('[^']+')\s+ELSE\s+current_setting\('lock_timeout'\)\s+END,\s*true\)$",
+    re.IGNORECASE,
+)
 _LOCAL_TIMEOUT_STMT_RE = re.compile(
     r"^SET\s+LOCAL\s+(STATEMENT_TIMEOUT|LOCK_TIMEOUT)\b(?:\s*(?:=|TO)\s*(.*))?$",
     re.IGNORECASE,
 )
 _LOCAL_TIMEOUT_VAL_RE = re.compile(
-    r"^(?:(\d+)|'(\d+)\s*(ms|s|min)?')$",
+    r"^(?:(\d+)|'(\d+)\s*(ms|seconds?|s|minutes?|min)?')$",
     re.IGNORECASE,
 )
 _LOCAL_TIMEOUT_UNITS: Final[dict[str, int]] = {
     "ms": 1,
     "s": 1_000,
+    "second": 1_000,
+    "seconds": 1_000,
     "min": 60_000,
+    "minute": 60_000,
+    "minutes": 60_000,
 }
 _PG_DURATION_TOKEN_RE = re.compile(r"(?:(\d+)\s*(ms|s|min|h))\s*")
 _PG_UNIT_MS: Final[dict[str, int]] = {
@@ -200,6 +223,7 @@ _WRITE_KEYWORDS = frozenset(
 )
 _CLOSED_REFUSAL_EXACT = frozenset(
     {
+        "cut_moved",
         "frontier_has_fill_gap",
         "frontier_incomplete_cut",
         "frontier_window_too_short",
@@ -208,6 +232,7 @@ _CLOSED_REFUSAL_EXACT = frozenset(
     }
 )
 _CLOSED_REFUSAL_PREFIXES: Final[tuple[str, ...]] = (
+    "caps_exceeded:",
     "checkpoint_capture_refused:",
     "checkpoint_verify_fallback:",
     "checkpoint_resume_fallback:",
@@ -271,6 +296,8 @@ class CheckpointResumeProbeConfig:
     statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS
     max_runtime_seconds: float = DEFAULT_MAX_RUNTIME_SECONDS
     max_executions: int = DEFAULT_MAX_EXECUTIONS
+    max_accruals: int = DEFAULT_MAX_ACCRUALS
+    max_candles: int = DEFAULT_MAX_CANDLES
     max_rss_mb: int = DEFAULT_MAX_RSS_MB
     allow_writable_role: bool = False
 
@@ -442,6 +469,42 @@ def _assert_read_only_set(
         raise CheckpointResumeProbeError("write_sql_refused:SET")
 
 
+def _allow_bound_pg_timeout_select(raw_fragment: str, statement_timeout_ms: int) -> bool:
+    """Allow only ``_bound_pnl_correction_transaction`` when intervals stay within caps.
+
+    Args:
+        raw_fragment: Whitespace-collapsed literal-restored SQL fragment.
+        statement_timeout_ms: Probe configured statement-timeout ceiling in milliseconds.
+
+    Returns:
+        ``True`` when the fragment matches the exact timeout clamp query within bounds, else ``False``.
+
+    Raises:
+        CheckpointResumeProbeError: When the exact query specifies invalid or over-cap limits.
+    """
+    match = _BOUND_TX_CONFIG_RE.fullmatch(raw_fragment)
+    if match is None:
+        return False
+    stmt_cmp = _parse_local_timeout_ms(match.group(1))
+    stmt_then = _parse_local_timeout_ms(match.group(2))
+    lock_cmp = _parse_local_timeout_ms(match.group(3))
+    lock_then = _parse_local_timeout_ms(match.group(4))
+    if (
+        stmt_cmp is None
+        or stmt_then is None
+        or lock_cmp is None
+        or lock_then is None
+        or stmt_cmp != stmt_then
+        or lock_cmp != lock_then
+        or stmt_then <= 0
+        or stmt_then > statement_timeout_ms
+        or lock_then <= 0
+        or lock_then > LOCK_TIMEOUT_MS
+    ):
+        raise CheckpointResumeProbeError("write_or_unbounded_sql:set_config_timeout")
+    return True
+
+
 def _assert_fragment_read_only(
     fragment: str,
     literals: Sequence[str],
@@ -457,6 +520,9 @@ def _assert_fragment_read_only(
     Raises:
         CheckpointResumeProbeError: When the fragment violates read-only or timeout invariants.
     """
+    raw_fragment = " ".join(_unstash_literals(fragment, literals).split())
+    if _allow_bound_pg_timeout_select(raw_fragment, statement_timeout_ms):
+        return
     normalized = " ".join(fragment.split()).upper()
     if _FORBIDDEN_SQL_CALL_RE.search(normalized):
         raise CheckpointResumeProbeError("write_sql_refused:forbidden_function")
@@ -844,6 +910,8 @@ def _validate_runtime_bounds(config: CheckpointResumeProbeConfig) -> None:
         f"invalid_max_runtime_seconds:{config.max_runtime_seconds}",
     )
     _require(config.max_executions >= 1, f"invalid_max_executions:{config.max_executions}")
+    _require(config.max_accruals >= 1, f"invalid_max_accruals:{config.max_accruals}")
+    _require(config.max_candles >= 1, f"invalid_max_candles:{config.max_candles}")
     _require(config.max_rss_mb >= 1, f"invalid_max_rss_mb:{config.max_rss_mb}")
 
 
@@ -900,6 +968,106 @@ async def _enforce_max_executions(
     _require(fill_count <= max_executions, f"max_executions_exceeded:{fill_count}>{max_executions}")
 
 
+async def _count_scope_accruals(
+    repo: SQLAlchemyRepository,
+    scope: PortfolioPnlSampleScope,
+    as_of: datetime,
+) -> int:
+    """Count active accruals read across prefix and window before loading full history."""
+    stmt = select(func.count(AccrualLedger.id)).where(
+        AccrualLedger.wallet_public_id == scope.wallet_public_id,
+        AccrualLedger.mode == scope.mode,
+        AccrualLedger.accrued_at <= as_of,
+        *where_active(AccrualLedger, as_of),
+    )
+    async with repo.session() as session:
+        count = (await session.execute(stmt)).scalar_one()
+    return int(count)
+
+
+async def _count_scope_candles(
+    repo: SQLAlchemyRepository,
+    scope: PortfolioPnlSampleScope,
+    frontier: PnlCorrectionFrontier,
+) -> int:
+    """Count active 1m candles across ``[t0, frontier.tip]`` before loading mark/FX candles."""
+    stmt = select(func.count(Candle.id)).where(
+        Candle.timeframe == "1m",
+        Candle.open_at >= scope.anchor_point_time,
+        Candle.open_at <= frontier.tip,
+        Candle.complete.is_(True),
+        *where_active(Candle, frontier.as_of),
+    )
+    async with repo.session() as session:
+        count = (await session.execute(stmt)).scalar_one()
+    return int(count)
+
+
+async def _enforce_scope_caps(
+    repo: SQLAlchemyRepository,
+    scope: PortfolioPnlSampleScope,
+    frontier: PnlCorrectionFrontier,
+    config: CheckpointResumeProbeConfig,
+) -> None:
+    """Enforce execution, fill, accrual, and candle row caps before running replays."""
+    await _enforce_max_executions(repo, scope, frontier, config.max_executions)
+    accrual_count = await _count_scope_accruals(repo, scope, frontier.as_of)
+    _require(accrual_count <= config.max_accruals, "caps_exceeded:accruals")
+    candle_count = await _count_scope_candles(repo, scope, frontier)
+    _require(candle_count <= config.max_candles, "caps_exceeded:candles")
+
+
+async def _count_witness_fill_events(
+    repo: SQLAlchemyRepository,
+    scope: PortfolioPnlSampleScope,
+    witness_watermarks: dict[str, int],
+) -> int:
+    """Count active ``fill_observed`` witness rows inside captured shard watermarks."""
+    if not witness_watermarks:
+        return 0
+    shard_bounds = or_(
+        *(
+            and_(VenueEvent.shard_key == shard_key, VenueEvent.id <= max_event_id)
+            for shard_key, max_event_id in witness_watermarks.items()
+        )
+    )
+    stmt = select(func.count(VenueEvent.id)).where(
+        VenueEvent.event_type == "fill_observed",
+        VenueEvent.wallet_public_id == scope.wallet_public_id,
+        VenueEvent.mode == scope.mode,
+        VenueEvent.known_to == KNOWN_TO_MAX,
+        shard_bounds,
+    )
+    async with repo.session() as session:
+        count = (await session.execute(stmt)).scalar_one()
+    return int(count)
+
+
+async def _enforce_captured_cut_within_caps(
+    repo: SQLAlchemyRepository,
+    scope: PortfolioPnlSampleScope,
+    capture_prefix: PnlTimelineExecutionPrefix,
+    max_executions: int,
+) -> None:
+    """Refuse with ``cut_moved`` if fresh capture watermarks/witnesses exceed execution caps."""
+    witness = capture_prefix.get("fill_witness_cut")
+    assert witness is not None
+    captured_counts = await repo.get_pnl_execution_prefix_counts(
+        scope.wallet_public_id,
+        scope.mode,
+        capture_prefix["watermarks"],
+    )
+    captured_execs = max(
+        sum(count for count, _max_seq in captured_counts.values()),
+        len(capture_prefix["executions"]) + len(capture_prefix["annulments"]),
+    )
+    captured_fills = await _count_witness_fill_events(repo, scope, witness["watermarks"])
+    _require(
+        captured_execs <= max_executions and captured_fills <= max_executions,
+        "cut_moved",
+    )
+
+
 async def _load_prepared_scope(
     repo: SQLAlchemyRepository,
     config: CheckpointResumeProbeConfig,
@@ -937,7 +1105,7 @@ async def _load_prepared_scope(
         and frontier.fill_witness_digest is not None,
         "frontier_incomplete_cut",
     )
-    await _enforce_max_executions(repo, scope, frontier, config.max_executions)
+    await _enforce_scope_caps(repo, scope, frontier, config)
     earliest_checkpoint = t0 + _MINUTE
     checkpoint_minute = max(
         earliest_checkpoint,
@@ -976,7 +1144,7 @@ async def _capture_and_verify_in_memory(
     repo: SQLAlchemyRepository,
     prepared: _PreparedScope,
     read_policy: PnlSeriesReadPolicy,
-    max_rss_mb: int,
+    config: CheckpointResumeProbeConfig,
 ) -> tuple[PnlCheckpointResume, float, float]:
     """Capture a checkpoint at C purely in memory and verify it against frontier T.
 
@@ -984,7 +1152,7 @@ async def _capture_and_verify_in_memory(
         repo: Guarded read-only repository.
         prepared: Prepared scope, frontier, and window bounds.
         read_policy: Read policy with ``allow_anchor_creation=False``.
-        max_rss_mb: Memory ceiling checked between capture and verification phases.
+        config: Operator configuration holding RSS and execution bounds.
 
     Returns:
         Tuple of verified resume state, capture seconds, and verification seconds.
@@ -1008,6 +1176,7 @@ async def _capture_and_verify_in_memory(
     witness = capture_prefix.get("fill_witness_cut")
     _require(witness is not None, "missing_capture_fill_witness_cut")
     assert witness is not None
+    await _enforce_captured_cut_within_caps(repo, scope, capture_prefix, config.max_executions)
     assert frontier.expected_venues is not None
     anchor_public_id, anchor_digest = checkpoint_anchor_identity(anchor)
     capture_request = PnlCheckpointCaptureRequest(
@@ -1049,7 +1218,7 @@ async def _capture_and_verify_in_memory(
         capture_result.checkpoint_write is not None,
         f"checkpoint_capture_refused:{capture_result.checkpoint_capture_refusal}",
     )
-    _check_rss_mb(max_rss_mb)
+    _check_rss_mb(config.max_rss_mb)
     assert capture_result.checkpoint_write is not None
     write = capture_result.checkpoint_write
     record = PnlOpeningCheckpointRecord(
@@ -1082,7 +1251,7 @@ async def _capture_and_verify_in_memory(
     verify_seconds = time.perf_counter() - verify_started
     if isinstance(verified, PnlCheckpointFallback):
         raise CheckpointResumeProbeError(f"checkpoint_verify_fallback:{verified.reason}")
-    _check_rss_mb(max_rss_mb)
+    _check_rss_mb(config.max_rss_mb)
     return verified, capture_seconds, verify_seconds
 
 
@@ -1290,7 +1459,7 @@ async def _execute_probe_pipeline(
         sa_repo,
         prepared,
         policy,
-        config.max_rss_mb,
+        config,
     )
     resumed_result, resume_seconds = await _run_window_series(
         sa_repo,
@@ -1416,10 +1585,12 @@ def _classify_failure(failure: Exception) -> tuple[int, str]:
         failure: Runtime error, closed refusal, timeout, or interrupt.
 
     Returns:
-        Pair of CLI exit code (2 for errors, 3 for closed refusals) and redacted RESULT line.
+        Pair of CLI exit code (2 for errors, 3 for closed refusals) and single-line redacted RESULT.
     """
-    reason = _redact_secrets(str(failure))
-    if isinstance(failure, TimeoutError) or reason == "timeout":
+    if isinstance(failure, TimeoutError):
+        return 2, "RESULT: FAIL timeout"
+    reason = " ".join(_redact_secrets(str(failure)).split()) or type(failure).__name__
+    if reason == "timeout":
         return 2, "RESULT: FAIL timeout"
     if reason == "no_frontier":
         return 2, "RESULT: FAIL no_frontier"
@@ -1463,13 +1634,26 @@ def _format_report(report: CheckpointResumeProbeReport) -> str:
     )
 
 
+class _RedactingArgumentParser(argparse.ArgumentParser):
+    """Argument parser that scrubs credentials from all ``error()`` and ``exit()`` output."""
+
+    def exit(self, status: int = 0, message: str | None = None) -> NoReturn:
+        """Exit CLI cleanly after redacting any secrets from ``message``."""
+        redacted = _redact_secrets(message) if message is not None else None
+        super().exit(status, redacted)
+
+    def error(self, message: str) -> NoReturn:
+        """Abort parsing cleanly after redacting any secrets from ``message``."""
+        super().error(_redact_secrets(message))
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser for the read-only checkpoint resume probe.
 
     Returns:
         Configured argument parser accepting wallet, scope, window, bounds, and role flags.
     """
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = _RedactingArgumentParser(description=__doc__)
     parser.add_argument("--wallet", required=True, help="Wallet public ID to probe.")
     parser.add_argument("--mode", default="live", choices=("live", "paper"))
     parser.add_argument("--valuation-ccy", default="USD")
@@ -1495,6 +1679,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overall probe runtime wall-clock ceiling in seconds (0 < s <= 600).",
     )
     parser.add_argument("--max-executions", type=int, default=DEFAULT_MAX_EXECUTIONS)
+    parser.add_argument("--max-accruals", type=int, default=DEFAULT_MAX_ACCRUALS)
+    parser.add_argument("--max-candles", type=int, default=DEFAULT_MAX_CANDLES)
     parser.add_argument("--max-rss-mb", type=int, default=DEFAULT_MAX_RSS_MB)
     role_group = parser.add_mutually_exclusive_group()
     role_group.add_argument(
@@ -1532,6 +1718,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         statement_timeout_ms=arguments.statement_timeout_ms,
         max_runtime_seconds=arguments.max_runtime_seconds,
         max_executions=arguments.max_executions,
+        max_accruals=arguments.max_accruals,
+        max_candles=arguments.max_candles,
         max_rss_mb=arguments.max_rss_mb,
         allow_writable_role=bool(arguments.allow_writable_role),
     )
