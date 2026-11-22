@@ -1117,7 +1117,13 @@ async def _start_pnl_snapshotter(
             "PortfolioPnlSnapshotter attached in disabled mode (PNL_SNAPSHOTTER_ENABLED unset)"
         )
     else:
-        logger.info("PortfolioPnlSnapshotter started (interval={}s)", snapshotter.interval_seconds)
+        logger.info(
+            "PortfolioPnlSnapshotter started: interval={}s "
+            "checkpoint_mode={} configured_checkpoint_mode={}",
+            snapshotter.interval_seconds,
+            snapshotter.checkpoint_mode,
+            snapshotter.configured_checkpoint_mode,
+        )
 
 
 async def _stop_pnl_snapshotter(app: FastAPI) -> None:

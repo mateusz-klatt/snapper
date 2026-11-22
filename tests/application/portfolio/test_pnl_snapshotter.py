@@ -17,6 +17,7 @@ from sqlalchemy.exc import DBAPIError
 
 from snapper.application.portfolio import pnl_correction_planner
 from snapper.application.portfolio import pnl_snapshotter
+from snapper.application.portfolio import pnl_snapshotter_config
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     checkpoint_write_refusal,
 )
@@ -1077,15 +1078,26 @@ class TestConstructorAndProperties:
     def test_checkpoint_mode_resolves_configured_value(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Configured valid checkpoint modes strip whitespace and normalize case.
+        """Configured valid checkpoint modes parse cleanly while gated by the kill switch.
 
         Given: ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` set to ``" Shadow "``.
-        When: ``PortfolioPnlSnapshotter`` is constructed.
-        Then: ``checkpoint_mode`` resolves to ``"shadow"``.
+        When: ``PortfolioPnlSnapshotter`` is constructed under default and widened flags.
+        Then: ``configured_checkpoint_mode`` is ``"shadow"`` while ``checkpoint_mode``
+            stays ``"off"`` until ``CHECKPOINT_MODES_ENABLED`` permits ``"shadow"``.
         """
         monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", " Shadow ")
-        snap = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()))
-        assert snap.checkpoint_mode == "shadow"
+        gated = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()))
+        assert gated.configured_checkpoint_mode == "shadow"
+        assert gated.checkpoint_mode == "off"
+
+        monkeypatch.setattr(
+            pnl_snapshotter_config,
+            "CHECKPOINT_MODES_ENABLED",
+            frozenset({"off", "shadow", "active"}),
+        )
+        enabled = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()))
+        assert enabled.configured_checkpoint_mode == "shadow"
+        assert enabled.checkpoint_mode == "shadow"
 
     def test_checkpoint_mode_rejects_invalid_value_at_startup(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1099,6 +1111,48 @@ class TestConstructorAndProperties:
         monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "bogus")
         with pytest.raises(ValueError, match="PNL_SNAPSHOTTER_CHECKPOINT_MODE"):
             PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()))
+
+    @pytest.mark.asyncio
+    async def test_shadow_env_under_kill_switch_reads_no_checkpoint_and_plans_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Shadow env under the kill switch matches off: zero checkpoint reads, one plan.
+
+        Given: ``PNL_SNAPSHOTTER_CHECKPOINT_MODE=shadow`` with default ``CHECKPOINT_MODES_ENABLED``.
+        When: ``_tick_once`` replays and commits a chunk against a spied repository.
+        Then: ``get_portfolio_pnl_opening_checkpoint`` is unawaited, ``_plan_chunk`` runs once,
+            and committed rows including ``sequence_id`` match an ``off`` run.
+        """
+        monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "off")
+        off_repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        off_snap = _snapshotter(off_repo, _minute(3))
+        with _patched_series(seq=4):
+            await off_snap._tick_once()
+
+        monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+        shadow_repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
+        checkpoint_read = mock.AsyncMock(wraps=shadow_repo.get_portfolio_pnl_opening_checkpoint)
+        monkeypatch.setattr(shadow_repo, "get_portfolio_pnl_opening_checkpoint", checkpoint_read)
+        shadow_snap = _snapshotter(shadow_repo, _minute(3))
+        plan_spy = mock.AsyncMock(wraps=shadow_snap._plan_chunk)
+        monkeypatch.setattr(shadow_snap, "_plan_chunk", plan_spy)
+
+        with _patched_series(seq=4):
+            await shadow_snap._tick_once()
+
+        assert shadow_snap.checkpoint_mode == "off"
+        assert shadow_snap.configured_checkpoint_mode == "shadow"
+        checkpoint_read.assert_not_awaited()
+        assert plan_spy.await_count == 1
+        assert len(shadow_repo.committed_chunks) == 1
+        ignored = frozenset({"public_id", "session_id", "timestamp"})
+        off_rows = [
+            {k: v for k, v in row.items() if k not in ignored} for row in off_repo.persisted
+        ]
+        shadow_rows = [
+            {k: v for k, v in row.items() if k not in ignored} for row in shadow_repo.persisted
+        ]
+        assert shadow_rows == off_rows
 
     @pytest.mark.asyncio
     async def test_fake_repo_matches_checkpoint_read_signatures(self) -> None:

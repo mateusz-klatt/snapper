@@ -310,6 +310,11 @@ Migration `0071` adds the `portfolio_pnl_opening_checkpoints` sidecar table
 keyed by `(wallet_public_id, mode, valuation_ccy, epoch_public_id, calc_version)`
 without changing existing financial sample rows or altering `candles`. Leaving
 `PNL_SNAPSHOTTER_CHECKPOINT_MODE` at its default `off` preserves existing
-anchor-replay behavior. The snapshotter validates the setting at startup, but
-does not yet read or write checkpoints, so every value currently behaves as
-`off`.
+anchor-replay behavior. `shadow` and `active` are currently disabled in code
+(`CHECKPOINT_MODES_ENABLED = frozenset({"off"})` in
+`pnl_snapshotter_config.py`) and resolve to an effective mode of `off`, logging
+a once-per-process warning naming both the configured and effective modes until
+checkpoint capture is enabled; startup info logs both `checkpoint_mode` and
+`configured_checkpoint_mode`. Consequently, the snapshotter performs no
+checkpoint reads or writes and plans once per chunk even when `shadow` or
+`active` is configured.

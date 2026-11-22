@@ -4,11 +4,15 @@ Split out from :mod:`snapper.application.portfolio.pnl_snapshotter` so the share
 ``env_contract`` allowlist can import this subsystem's ``ENV_VARS`` without
 dragging the snapshotter's infrastructure dependencies (the venue-capability
 registry) into the config-load import graph. This module imports nothing beyond
-the standard library and never performs I/O.
+the standard library and never reads env or performs I/O at import time.
 """
 
+import logging
+from dataclasses import dataclass
 from typing import Final
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_SECONDS: Final[int] = 60
 INTERVAL_MIN_SECONDS: Final[int] = 10
@@ -19,6 +23,13 @@ FX_SHADOW_PINNING_ENV_VAR: Final[str] = "PNL_FX_SHADOW_PINNING_ENABLED"
 CHECKPOINT_MODE_ENV_VAR: Final[str] = "PNL_SNAPSHOTTER_CHECKPOINT_MODE"
 type CheckpointMode = Literal["off", "shadow", "active"]
 DEFAULT_CHECKPOINT_MODE: Final[CheckpointMode] = "off"
+CHECKPOINT_MODES_ENABLED: Final[frozenset[str]] = frozenset({"off"})
+"""Opening-checkpoint modes currently enabled in code.
+
+``shadow`` and ``active`` remain disabled until checkpoint capture and shadow
+equivalence paths are sound; any parsed mode outside this set resolves to
+``"off"`` with one process-wide warning.
+"""
 _TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes"})
 ENV_VARS: Final[frozenset[str]] = frozenset(
     {
@@ -33,6 +44,29 @@ ENV_VARS: Final[frozenset[str]] = frozenset(
 Consumed by :mod:`snapper.config.env_contract` to validate ``.env`` keys against
 the union of every subsystem's contract.
 """
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedCheckpointMode:
+    """Configured and effective opening-checkpoint modes resolved from env config.
+
+    Attributes:
+        configured: Canonical lowercase mode parsed from the env value.
+        effective: Runtime mode gated by :data:`CHECKPOINT_MODES_ENABLED`.
+    """
+
+    configured: CheckpointMode
+    effective: CheckpointMode
+
+
+@dataclass
+class _KillSwitchWarningState:
+    """Process-local latch ensuring the disabled-mode warning logs once per process."""
+
+    logged: bool = False
+
+
+_KILL_SWITCH_WARNING_STATE: Final[_KillSwitchWarningState] = _KillSwitchWarningState()
 
 
 def resolve_interval(env_value: str | None) -> int:
@@ -83,13 +117,8 @@ def resolve_enabled(env_value: str | None) -> bool:
     return env_value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
-def resolve_checkpoint_mode(env_value: str | None) -> CheckpointMode:
+def _parse_checkpoint_mode(env_value: str | None) -> CheckpointMode:
     """Parse ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` into ``off``, ``shadow``, or ``active``.
-
-    Unset, empty, or whitespace-only values default to ``"off"``. Surrounding
-    whitespace is stripped and matching is case-insensitive. Any other token
-    raises ``ValueError`` naming ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` so invalid
-    configuration fails loud at startup.
 
     Args:
         env_value: Raw env-var value, or ``None`` when unset.
@@ -113,3 +142,53 @@ def resolve_checkpoint_mode(env_value: str | None) -> CheckpointMode:
     raise ValueError(
         f"{CHECKPOINT_MODE_ENV_VAR}={env_value!r} must be one of 'off', 'shadow', or 'active'"
     )
+
+
+def resolve_checkpoint_modes(env_value: str | None) -> ResolvedCheckpointMode:
+    """Resolve both configured and kill-switch-gated checkpoint modes from env config.
+
+    Unset, empty, or whitespace-only values default to ``"off"``. Surrounding
+    whitespace is stripped and matching is case-insensitive. Invalid tokens still
+    raise ``ValueError`` naming ``PNL_SNAPSHOTTER_CHECKPOINT_MODE``. Any parsed
+    mode outside :data:`CHECKPOINT_MODES_ENABLED` resolves to ``"off"`` and emits
+    one warning per process naming both modes.
+
+    Args:
+        env_value: Raw env-var value, or ``None`` when unset.
+
+    Returns:
+        Configured and effective :data:`CheckpointMode` values.
+
+    Raises:
+        ValueError: When ``env_value`` is non-empty and not one of ``off``,
+            ``shadow``, or ``active``.
+    """
+    configured = _parse_checkpoint_mode(env_value)
+    if configured in CHECKPOINT_MODES_ENABLED:
+        return ResolvedCheckpointMode(configured=configured, effective=configured)
+    if not _KILL_SWITCH_WARNING_STATE.logged:
+        _KILL_SWITCH_WARNING_STATE.logged = True
+        logger.warning(
+            "%s configured=%s resolved to effective=%s; "
+            "checkpoint modes are disabled until capture is enabled",
+            CHECKPOINT_MODE_ENV_VAR,
+            configured,
+            DEFAULT_CHECKPOINT_MODE,
+        )
+    return ResolvedCheckpointMode(configured=configured, effective=DEFAULT_CHECKPOINT_MODE)
+
+
+def resolve_checkpoint_mode(env_value: str | None) -> CheckpointMode:
+    """Resolve the effective ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` value.
+
+    Args:
+        env_value: Raw env-var value, or ``None`` when unset.
+
+    Returns:
+        The effective :data:`CheckpointMode` literal after the kill switch.
+
+    Raises:
+        ValueError: When ``env_value`` is non-empty and not one of ``off``,
+            ``shadow``, or ``active``.
+    """
+    return resolve_checkpoint_modes(env_value).effective

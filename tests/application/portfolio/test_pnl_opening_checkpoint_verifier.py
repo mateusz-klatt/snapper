@@ -1,8 +1,11 @@
 """Tests for ordered checkpoint resume eligibility and evidence verification."""
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import replace
+from datetime import datetime
+from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
 
@@ -21,6 +24,7 @@ from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
 from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import PortfolioPnlSampleScope
+from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from tests.application.portfolio import test_pnl_opening_checkpoint_capture as capture
 from tests.application.portfolio import test_pnl_timeline_service as fixtures
@@ -665,3 +669,53 @@ async def test_invalid_walk_state_or_span_bundle_returns_corrupt_with_delete(
         _eligibility(request),
     )
     assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
+
+
+async def test_newer_suffix_witness_does_not_change_certified_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bind verification to the certificate cut instead of newer suffix witnesses.
+
+    Given: A valid checkpoint and a newer suffix fill witness at the resuming horizon.
+    When: Verification reads the prefix with its own fenced witness cut.
+    Then: Resume succeeds; the PR-C1 fresh-capture call would diverge and fail.
+
+    Args:
+        monkeypatch: Repository witness-read regression control.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    original = repo.get_pnl_timeline_execution_prefix_at_watermarks
+
+    async def read_with_suffix_witness(
+        wallet_public_id: str,
+        mode: str,
+        watermarks: Mapping[str, int],
+        as_of: datetime,
+        *,
+        fill_witness_cut: PnlTimelineFillWitnessCut | Literal["capture"] | None = None,
+    ) -> PnlTimelineExecutionPrefix:
+        """Simulate the real repository's newer suffix witness under fresh capture."""
+        prefix = await original(
+            wallet_public_id,
+            mode,
+            watermarks,
+            as_of,
+            fill_witness_cut=fill_witness_cut,
+        )
+        if fill_witness_cut == "capture":
+            prefix["fill_witness_cut"] = {"watermarks": {"kraken:spot": 11}, "digest": "f" * 64}
+        return prefix
+
+    monkeypatch.setattr(
+        repo,
+        "get_pnl_timeline_execution_prefix_at_watermarks",
+        read_with_suffix_witness,
+    )
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert isinstance(outcome, PnlCheckpointResume)

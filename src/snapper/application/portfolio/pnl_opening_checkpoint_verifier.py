@@ -216,7 +216,10 @@ async def _verify_execution_prefix(
         scope.mode,
         certificate.cutoff_execution_watermarks,
         frontier_as_of,
-        fill_witness_cut="capture",
+        fill_witness_cut={
+            "watermarks": dict(certificate.prefix_venue_event_watermarks),
+            "digest": certificate.prefix_fill_witness_digest,
+        },
     )
     if (
         prefix_annulment_digest(
