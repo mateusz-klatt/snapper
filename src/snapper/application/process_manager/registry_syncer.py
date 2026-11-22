@@ -30,8 +30,8 @@ from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessRoleEnum
-from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
+from snapper.data.models import is_open_ended_version
 from snapper.data.repository import Repository
 from snapper.data.repository import Scd2UpsertSpec
 from snapper.data.repository import begin_scd2_write
@@ -349,13 +349,16 @@ class ProcessRegistrySyncer:
                     (
                         await session.execute(
                             select(Setting)
-                            .where(Setting.key == config_key, Setting.known_to == KNOWN_TO_MAX)
+                            .where(Setting.key == config_key, Setting.known_to > datetime.now(UTC))
+                            .order_by(Setting.known_to.desc())
                             .limit(1)
                         )
                     )
                     .scalars()
                     .first()
                 )
+                if active_row is not None and not is_open_ended_version(active_row.known_to):
+                    active_row = None
                 if active_row is None:
                     if return_if_deleted:
                         return None

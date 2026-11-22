@@ -182,8 +182,8 @@ from snapper.data.archiver import EventArchiver
 from snapper.data.archiver import ExportResult
 from snapper.data.archiver import StateArchiver
 from snapper.data.backtest_repository import BacktestRepository
-from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
+from snapper.data.models import is_open_ended_version
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import Scd2UpsertSpec
 from snapper.data.repository import assert_scd2_write_reserved
@@ -1391,13 +1391,16 @@ async def _upsert_setting_rotation(
                 (
                     await session.execute(
                         sa.select(Setting)
-                        .where(Setting.key == key, Setting.known_to == KNOWN_TO_MAX)
+                        .where(Setting.key == key, Setting.known_to > datetime.now(UTC))
+                        .order_by(Setting.known_to.desc())
                         .limit(1)
                     )
                 )
                 .scalars()
                 .first()
             )
+            if active_row is not None and not is_open_ended_version(active_row.known_to):
+                active_row = None
             if active_row is None:
                 return "unchanged"
             current_bus_time = max(current_bus_time, active_row.timestamp)
