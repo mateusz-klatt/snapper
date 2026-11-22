@@ -6,7 +6,7 @@ from datetime import timedelta
 from loguru import logger
 
 from snapper.application.notify.rules.base import AlertRule
-from snapper.application.notify.rules.dedup import check_dedup_window
+from snapper.application.notify.rules.dedup import check_dedup_since
 from snapper.core.json_types import JsonValue
 from snapper.core.types import HealthStatusEnum
 from snapper.data.repository import Repository
@@ -18,15 +18,13 @@ from snapper.messaging.schemas.messages import parse_message
 _CONSECUTIVE_WARNING_THRESHOLD = 3
 _ROLLING_WINDOW_SECONDS = 600
 
-_ROLLING_COOLDOWN_SECONDS = 3600
-"""In-memory minimum spacing between fires for one component instance.
+_EPISODE_REMINDER_SECONDS = 86400
+"""Minimum spacing between pages for one still-degraded component instance.
 
-The hour-bucket dedup key alone is CLOCK-bucketed, not rolling: a fire
-at 12:59:59 and another at 13:00:01 land in different buckets and page
-twice within seconds. This in-memory gate enforces a true rolling hour
-cheaply; the DB check additionally probes the PREVIOUS hour's bucket
-key through the time-windowed dedup helper, so the rolling guarantee
-survives a sidecar restart that wipes this dict."""
+A degradation episode pages once when it opens and, while it persists, at
+most once per this interval. The in-memory gate is cheap; the per-user
+``alert_events`` lookup with the stable episode key enforces the same bound
+across a sidecar restart that wipes the in-memory state."""
 _PERMISSION_FOR_FAN_OUT = "read:system_status"
 
 
@@ -43,10 +41,12 @@ class CriticalSystemErrorRule(AlertRule):
     ongoing, which is the intentional trade-off (minor alert spam on
     deploy cycles vs the complexity of persisted window state).
 
-    Deduplication is hour-bucketed: ``dedup_key`` =
-    ``f"sys_error.{component}.{name}.{hour_bucket}"`` so at most one
-    alert fires per ``(component, name)`` per hour even if the
-    3-warning gate keeps firing.
+    Deduplication is per degradation episode: ``dedup_key`` =
+    ``f"sys_error.{component}.{name}"``. A chronic WARNING pages once and
+    then at most once per ``_EPISODE_REMINDER_SECONDS`` (24 h), instead of
+    every hour. A HEALTHY heartbeat after a page closes the episode in
+    memory, so a later degradation pages again at once; after a restart,
+    with that memory gone, the 24 h bound from ``alert_events`` applies.
 
     Fan-out: one ``AlertEventInsertRow`` per active user whose role
     grants ``Permission.READ_SYSTEM_STATUS`` (per
@@ -58,12 +58,40 @@ class CriticalSystemErrorRule(AlertRule):
     priority = "high"
     is_safety_critical = False
     thread_key_prefix = "snapper.system"
-    suppression_window_seconds = 3600
+    suppression_window_seconds = _EPISODE_REMINDER_SECONDS
 
     def __init__(self) -> None:
         """Start with an empty per-``(component, name)`` rolling window."""
         self._rolling_window: dict[tuple[str, str], list[tuple[datetime, str]]] = {}
         self._last_fired: dict[tuple[str, str], datetime] = {}
+        self._episode_closed_at: dict[tuple[str, str], datetime] = {}
+
+    def _close_episode(self, state_key: tuple[str, str], now: datetime) -> None:
+        """Reset the rolling window and close a paged episode on HEALTHY.
+
+        Args:
+            state_key: ``(component, name)`` identity of the instance.
+            now: Timestamp of the HEALTHY heartbeat.
+        """
+        self._rolling_window.pop(state_key, None)
+        if self._last_fired.pop(state_key, None) is not None:
+            self._episode_closed_at[state_key] = now
+
+    def _episode_since(self, state_key: tuple[str, str], now: datetime) -> datetime:
+        """Return the lower bound for the per-user episode dedup lookup.
+
+        Args:
+            state_key: ``(component, name)`` identity of the instance.
+            now: Timestamp of the heartbeat that opened the gate.
+
+        Returns:
+            ``now - 24 h``, or the later in-memory episode close time.
+        """
+        since = now - timedelta(seconds=_EPISODE_REMINDER_SECONDS)
+        closed_at = self._episode_closed_at.get(state_key)
+        if closed_at is not None and closed_at > since:
+            return closed_at
+        return since
 
     async def evaluate(
         self,
@@ -110,7 +138,7 @@ class CriticalSystemErrorRule(AlertRule):
             return []
         state_key = (component, name)
         if data.status == HealthStatusEnum.HEALTHY:
-            self._rolling_window.pop(state_key, None)
+            self._close_episode(state_key, now)
             return []
         window = self._rolling_window.setdefault(state_key, [])
         cutoff = now - timedelta(seconds=_ROLLING_WINDOW_SECONDS)
@@ -123,15 +151,11 @@ class CriticalSystemErrorRule(AlertRule):
             return []
         last_fired = self._last_fired.get(state_key)
         if last_fired is not None and (now - last_fired) < timedelta(
-            seconds=_ROLLING_COOLDOWN_SECONDS
+            seconds=_EPISODE_REMINDER_SECONDS
         ):
             return []
-        hour_bucket = now.replace(minute=0, second=0, microsecond=0).isoformat()
-        dedup_key = f"sys_error.{component}.{name}.{hour_bucket}"
-        prev_bucket = (
-            (now - timedelta(hours=1)).replace(minute=0, second=0, microsecond=0).isoformat()
-        )
-        prev_dedup_key = f"sys_error.{component}.{name}.{prev_bucket}"
+        dedup_key = f"sys_error.{component}.{name}"
+        since = self._episode_since(state_key, now)
         admin_user_ids = await repo.list_users_with_permission(_PERMISSION_FOR_FAN_OUT)
         if not admin_user_ids:
             logger.info(
@@ -143,18 +167,11 @@ class CriticalSystemErrorRule(AlertRule):
             return []
         rows: list[AlertEventInsertRow] = []
         for admin_user_id in admin_user_ids:
-            if await check_dedup_window(
+            if await check_dedup_since(
                 repo=repo,
                 user_public_id=admin_user_id,
                 dedup_key=dedup_key,
-                window_seconds=self.suppression_window_seconds,
-                now=now,
-            ) or await check_dedup_window(
-                repo=repo,
-                user_public_id=admin_user_id,
-                dedup_key=prev_dedup_key,
-                window_seconds=self.suppression_window_seconds,
-                now=now,
+                since=since,
             ):
                 continue
             body_args: list[JsonValue] = [
