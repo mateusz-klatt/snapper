@@ -4994,16 +4994,16 @@ class TestStrandedCancelNeverPlacedTarget:
                 sequence_id=60,
                 exchange_order_id="ex-command-only",
             )
-            original_update = repo.update_trade_command_status
+            original_hydrate = repo.advance_trade_command_lifecycle
 
             async def _hydration_error(**_kwargs: object) -> None:
                 raise RuntimeError("hydration failed")
 
-            repo.update_trade_command_status = _hydration_error
+            repo.advance_trade_command_lifecycle = _hydration_error
             try:
                 await PlanExecutorService()._recover_plans()
             finally:
-                repo.update_trade_command_status = original_update
+                repo.advance_trade_command_lifecycle = original_hydrate
 
             unresolved = await repo.get_pending_cancel_command_for_client_order_id(
                 "cid-1", datetime.now(UTC)
@@ -5189,6 +5189,77 @@ class TestStrandedCancelNeverPlacedTarget:
 
             await _assert_stranded_reemitted(repo, plan_pid, "cid-live")
             await _assert_stranded_reemitted(repo, plan_pid, "cid-safe")
+        finally:
+            await repo.engine.dispose()
+
+    @pytest.mark.asyncio
+    @patch("snapper.application.plans.service.get_settings")
+    @patch("snapper.application.plans.service.get_repository")
+    async def test_hydration_cas_does_not_revert_dispatched_cancel(
+        self, mock_repo_fn: MagicMock, mock_settings: MagicMock, tmp_path: Path
+    ) -> None:
+        """Leave DISPATCHED unchanged when hydration loses its CREATED CAS.
+
+        Given: An unresolved cancel and a newly available command-only id,
+        When: Dispatch wins immediately before hydration,
+        Then: The hydration CAS returns False and the row remains DISPATCHED.
+        """
+        repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'hydration_cas_race.db'}")
+        await repo.create_all()
+        mock_repo_fn.return_value = repo
+        mock_settings.return_value.plan_recovery_auto_settle_enabled = False
+        try:
+            await _seed_stranded_recovery_plan(
+                repo,
+                [
+                    _StrandedChildSpec(
+                        client_order_id="cid-1",
+                        status="dispatched",
+                        event_types=("order_submit_unknown",),
+                    )
+                ],
+            )
+            await PlanExecutorService()._recover_plans()
+            pending = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert pending is not None
+            create = await repo.get_active_create_command_by_client_order_id("cid-1", "kraken")
+            assert create is not None
+            await repo.advance_trade_command_lifecycle(
+                public_id=create["public_id"],
+                expected_status="dispatched",
+                new_status="dispatched",
+                bus_time=datetime.now(UTC),
+                session_id="s1",
+                sequence_id=60,
+                exchange_order_id="ex-hydration-race",
+            )
+            original_advance = repo.advance_trade_command_lifecycle
+
+            async def _dispatch_before_hydration(**kwargs: object) -> bool:
+                bus_time = _cast(datetime, kwargs["bus_time"])
+                await repo.update_trade_command_status(
+                    public_id=_cast(str, kwargs["public_id"]),
+                    new_status="dispatched",
+                    bus_time=bus_time,
+                    session_id=_cast(str, kwargs["session_id"]),
+                    sequence_id=_cast(int, kwargs["sequence_id"]),
+                    dispatched_at=bus_time,
+                )
+                return await original_advance(**kwargs)
+
+            repo.advance_trade_command_lifecycle = _dispatch_before_hydration
+            try:
+                await PlanExecutorService()._recover_plans()
+            finally:
+                repo.advance_trade_command_lifecycle = original_advance
+
+            raced = await repo.get_pending_cancel_command_for_client_order_id(
+                "cid-1", datetime.now(UTC)
+            )
+            assert raced is not None and raced["status"] == "dispatched"
+            assert raced["exchange_order_id"] is None
         finally:
             await repo.engine.dispose()
 

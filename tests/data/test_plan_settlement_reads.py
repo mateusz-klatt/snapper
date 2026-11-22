@@ -88,6 +88,19 @@ async def test_begin_plan_settlement_transaction_handles_supported_and_unknown_d
     pg_stmt = str(pg_session.execute.await_args_list[0].args[0])
     assert pg_stmt == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
 
+    serializable_session = AsyncMock()
+    await begin_plan_settlement_transaction(
+        serializable_session,
+        dialect_name="postgresql",
+        isolation_level="SERIALIZABLE",
+    )
+    serializable_stmt = str(serializable_session.execute.await_args_list[0].args[0])
+    assert serializable_stmt == "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+    with pytest.raises(ValueError, match="unsupported PostgreSQL isolation"):
+        await begin_plan_settlement_transaction(
+            AsyncMock(), dialect_name="postgresql", isolation_level="REPEATABLE READ"
+        )
+
     with pytest.raises(NotImplementedError, match="dialect=mysql"):
         await begin_plan_settlement_transaction(AsyncMock(), dialect_name="mysql")
 

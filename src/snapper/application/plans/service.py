@@ -966,6 +966,48 @@ class PlanExecutorService(RegisterableProcess):
         )
         return not unresolved, pending if unresolved else None
 
+    async def _hydrate_unresolved_cancel(
+        self,
+        plan: ExecutionPlanRow,
+        child_client_order_id: str,
+        cancel: TradeCommandRow,
+        exchange_order_id: str,
+    ) -> None:
+        """CAS-hydrate a CREATED cancel without reverting a dispatch winner.
+
+        Args:
+            plan: Parent cancel-requested plan.
+            child_client_order_id: Child whose cancel is hydrated.
+            cancel: Unresolved CREATED cancel row.
+            exchange_order_id: Newly resolved venue identity.
+        """
+        try:
+            hydrated = await cast(
+                SQLAlchemyRepository, self.repository
+            ).advance_trade_command_lifecycle(
+                public_id=cancel["public_id"],
+                expected_status=TradeCommandStatusEnum.CREATED,
+                new_status=TradeCommandStatusEnum.CREATED,
+                bus_time=datetime.now(UTC),
+                session_id=self.tracker.session_id,
+                sequence_id=self.tracker.next_sequence("plan_stranded_cancels"),
+                exchange_order_id=exchange_order_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "Stranded cancel identity hydration failed for plan {} child {}: {}",
+                plan["public_id"],
+                child_client_order_id,
+                exc,
+            )
+            return
+        if not hydrated:
+            logger.info(
+                "PlanExecutorService: cancel hydration lost dispatch race for plan {} child {}",
+                plan["public_id"],
+                child_client_order_id,
+            )
+
     async def _reemit_single_stranded_cancel(
         self,
         plan: ExecutionPlanRow,
@@ -1029,22 +1071,9 @@ class PlanExecutorService(RegisterableProcess):
             exchange_order_id = None
         if unresolved_cancel is not None:
             if exchange_order_id:
-                try:
-                    await cast(SQLAlchemyRepository, self.repository).update_trade_command_status(
-                        public_id=unresolved_cancel["public_id"],
-                        new_status=TradeCommandStatusEnum.CREATED,
-                        bus_time=datetime.now(UTC),
-                        session_id=self.tracker.session_id,
-                        sequence_id=self.tracker.next_sequence("plan_stranded_cancels"),
-                        exchange_order_id=exchange_order_id,
-                    )
-                except Exception as exc:
-                    logger.error(
-                        "Stranded cancel identity hydration failed for plan {} child {}: {}",
-                        plan["public_id"],
-                        child_client_order_id,
-                        exc,
-                    )
+                await self._hydrate_unresolved_cancel(
+                    plan, child_client_order_id, unresolved_cancel, exchange_order_id
+                )
             return
         session_id = self.tracker.session_id
         sequence_id = self.tracker.next_sequence("plan_stranded_cancels")

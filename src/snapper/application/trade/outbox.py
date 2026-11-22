@@ -28,6 +28,7 @@ PublishFn = Callable[[TradeCommandRow], Awaitable[None]]
 ExpireFn = Callable[[TradeCommandRow], Awaitable[None]]
 
 _EXPIRABLE_COMMAND_TYPES: tuple[str, ...] = ("create", "submit")
+_DEFAULT_MAX_SCAN_ROWS_PER_TICK = 1000
 """Command types subject to the dispatch TTL.
 
 Cancels (and replaces) are exempt: expiring a stale cancel strands a
@@ -322,62 +323,87 @@ class OutboxDispatcher:
             return False
         return True
 
-    async def _dispatch_batch(self) -> None:
-        """Fetch and dispatch one batch of undispatched commands.
+    async def _dispatch_command(self, cmd: TradeCommandRow) -> TradeCommandDispatchUpdate | None:
+        """Publish or hold one command and return its dispatch update on success.
 
-        Publishes each command sequentially (ZMQ broker ordering is
-        preserved), then commits the success-set's CREATED -> DISPATCHED
-        SCD2 transitions in a single bulk call. Per-row revert path
-        (publish failed) still uses ``update_trade_command_status`` —
-        bulk-write blow-up only risks the success path, not the
-        error-recovery path.
+        Args:
+            cmd: Candidate command from the current stable pagination window.
+
+        Returns:
+            CREATED-to-DISPATCHED update, or None when held or failed.
+        """
+        if not await self._material_permits_dispatch(cmd):
+            return None
+        if await self._expire_if_stale(cmd):
+            return None
+        try:
+            if not await self._publish_or_hold(cmd):
+                return None
+        except Exception:
+            logger.exception(f"OutboxDispatcher: failed to dispatch command {cmd['public_id']}")
+            try:
+                await self._repo.update_trade_command_status(
+                    public_id=cmd["public_id"],
+                    new_status=TradeCommandStatusEnum.CREATED,
+                    bus_time=datetime.now(UTC),
+                    session_id=cmd["session_id"],
+                    sequence_id=cmd["sequence_id"],
+                    attempt_count=cmd["attempt_count"] + 1,
+                    last_error="dispatch failed",
+                )
+            except Exception:
+                logger.exception(
+                    f"OutboxDispatcher: failed to update command {cmd['public_id']} status"
+                )
+            return None
+        bus_time = datetime.now(UTC)
+        return TradeCommandDispatchUpdate(
+            public_id=cmd["public_id"],
+            bus_time=bus_time,
+            session_id=cmd["session_id"],
+            sequence_id=cmd["sequence_id"],
+            dispatched_at=bus_time,
+            attempt_count=cmd["attempt_count"] + 1,
+        )
+
+    async def _dispatch_batch(self) -> None:
+        """Dispatch a bounded batch while paging past unresolved held cancels.
+
+        Successful rows stay CREATED until the final bulk commit, keeping the
+        offset window stable throughout this tick. The scan cap bounds held-row
+        backlogs while still allowing later creates and identified cancels to run.
         """
         now = datetime.now(UTC)
-        commands = await self._fetch_owned_batch(now)
         success_updates: list[TradeCommandDispatchUpdate] = []
-        published_pids: list[str] = []
-        for cmd in commands:
-            if not await self._material_permits_dispatch(cmd):
-                continue
-            if await self._expire_if_stale(cmd):
-                continue
-            try:
-                if not await self._publish_or_hold(cmd):
+        scan_cap = max(
+            self._max_scan_rows or _DEFAULT_MAX_SCAN_ROWS_PER_TICK,
+            self._batch_size,
+        )
+        page_size = max(self._batch_size * 4, 20)
+        scanned = 0
+        while scanned < scan_cap and len(success_updates) < self._batch_size:
+            page = await self._repo.get_undispatched_commands(
+                as_of=now,
+                limit=min(page_size, scan_cap - scanned),
+                offset=scanned,
+            )
+            if not page:
+                break
+            scanned += len(page)
+            for cmd in page:
+                if self._ownership is not None and not self._ownership.owns(cmd["shard_key"]):
                     continue
-                bus_time = datetime.now(UTC)
-                success_updates.append(
-                    TradeCommandDispatchUpdate(
-                        public_id=cmd["public_id"],
-                        bus_time=bus_time,
-                        session_id=cmd["session_id"],
-                        sequence_id=cmd["sequence_id"],
-                        dispatched_at=bus_time,
-                        attempt_count=cmd["attempt_count"] + 1,
-                    )
-                )
-                published_pids.append(cmd["public_id"])
-            except Exception:
-                logger.exception(f"OutboxDispatcher: failed to dispatch command {cmd['public_id']}")
-                try:
-                    await self._repo.update_trade_command_status(
-                        public_id=cmd["public_id"],
-                        new_status=TradeCommandStatusEnum.CREATED,
-                        bus_time=datetime.now(UTC),
-                        session_id=cmd["session_id"],
-                        sequence_id=cmd["sequence_id"],
-                        attempt_count=cmd["attempt_count"] + 1,
-                        last_error="dispatch failed",
-                    )
-                except Exception:
-                    logger.exception(
-                        f"OutboxDispatcher: failed to update command {cmd['public_id']} status"
-                    )
+                update = await self._dispatch_command(cmd)
+                if update is not None:
+                    success_updates.append(update)
+                if len(success_updates) >= self._batch_size:
+                    break
         if not success_updates:
             return
         try:
             await self._repo.bulk_dispatch_trade_commands(success_updates)
-            for pid in published_pids:
-                logger.debug(f"OutboxDispatcher: dispatched command {pid}")
+            for update in success_updates:
+                logger.debug(f"OutboxDispatcher: dispatched command {update['public_id']}")
         except Exception:
             logger.exception(
                 "OutboxDispatcher: bulk dispatch DB write failed for "

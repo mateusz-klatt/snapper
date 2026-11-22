@@ -1061,7 +1061,9 @@ async def settle_single_recovered_plan(
     Locks the child `TradeCommand` rows and active `ExecutionPlan` row `FOR
     UPDATE` (`BEGIN IMMEDIATE` on SQLite) and re-runs `inspect_plan_settlement`
     on the bound session before writing, aborting if either the plan version or
-    child/venue evidence changed since initial inspection.
+    child/venue evidence changed since initial inspection. PostgreSQL uses
+    SERIALIZABLE because process startup only provides a bounded async grace
+    period, not proof that venue writers remain stopped until recovery ends.
 
     Args:
         repository: Target SQLAlchemy repository.
@@ -1075,7 +1077,11 @@ async def settle_single_recovered_plan(
     """
     child_orders = [(candidate.exchange, child.client_order_id) for child in candidate.children]
     async with repository.session() as session:
-        await begin_plan_settlement_transaction(session, dialect_name=repository.dialect_name)
+        await begin_plan_settlement_transaction(
+            session,
+            dialect_name=repository.dialect_name,
+            isolation_level="SERIALIZABLE",
+        )
         await lock_child_create_commands(session, child_orders=child_orders)
         locked_plans = await lock_active_execution_plans(
             session,

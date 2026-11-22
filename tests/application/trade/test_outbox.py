@@ -6,11 +6,13 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.application.trade.outbox import OutboxDispatcher
+from snapper.core.command_material import TradeCommandMaterialChangedError
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository_types import TradeCommandRow
 
@@ -88,7 +90,7 @@ async def test_dispatch_publishes_and_updates_status() -> None:
     repo = AsyncMock()
     returned_once = False
 
-    async def _get_cmds(as_of: datetime, limit: int = 10) -> list[TradeCommandRow]:
+    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
         nonlocal returned_once
         if not returned_once:
             returned_once = True
@@ -130,7 +132,7 @@ async def test_dispatch_handles_publish_failure() -> None:
     repo = AsyncMock()
     returned_once = False
 
-    async def _get_cmds(as_of: datetime, limit: int = 10) -> list[TradeCommandRow]:
+    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
         nonlocal returned_once
         if not returned_once:
             returned_once = True
@@ -176,6 +178,113 @@ async def test_dispatch_holds_unresolved_cancel_without_status_mutation() -> Non
 
 
 @pytest.mark.asyncio
+async def test_dispatch_pages_past_held_cancels_in_same_tick() -> None:
+    """Prevent unresolved cancels from starving later commands at the batch head.
+
+    Given: Eleven held id-less cancels before one create and one identified cancel,
+    When: One outbox tick runs with batch size ten,
+    Then: Both later commands publish and are marked dispatched in that tick.
+    """
+    held: list[TradeCommandRow] = []
+    for index in range(11):
+        row = _make_cmd_row(f"held-{index}")
+        row["command_type"] = "cancel"
+        row["exchange_order_id"] = None
+        held.append(row)
+    create = _make_cmd_row("create-later")
+    identified = _make_cmd_row("cancel-identified")
+    identified["command_type"] = "cancel"
+    identified["exchange_order_id"] = "ex-identified"
+    rows = [*held, create, identified]
+    repo = AsyncMock()
+
+    async def _get_commands(
+        as_of: datetime, limit: int = 10, offset: int = 0
+    ) -> list[TradeCommandRow]:
+        return rows[offset : offset + limit]
+
+    repo.get_undispatched_commands = AsyncMock(side_effect=_get_commands)
+    repo.bulk_dispatch_trade_commands = AsyncMock(return_value=2)
+    published: list[str] = []
+
+    async def _publish(cmd: TradeCommandRow) -> None:
+        if cmd["command_type"] == "cancel" and not cmd["exchange_order_id"]:
+            raise CancelTargetUnresolvedError("unresolved")
+        published.append(cmd["public_id"])
+
+    dispatcher = OutboxDispatcher(repository=repo, publish_fn=_publish, batch_size=10)
+
+    await dispatcher._dispatch_batch()
+
+    assert published == ["create-later", "cancel-identified"]
+    updates = repo.bulk_dispatch_trade_commands.await_args.args[0]
+    assert [update["public_id"] for update in updates] == published
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_material_barrier_without_publishing() -> None:
+    """Hold a materially conflicted create while leaving the row unchanged.
+
+    Given: A create whose material consistency check raises,
+    When: One dispatch batch runs,
+    Then: No publish or dispatch update occurs.
+    """
+    repo = AsyncMock()
+    repo.get_undispatched_commands = AsyncMock(return_value=[_make_cmd_row()])
+    repo.require_consistent_trade_command_material = AsyncMock(
+        side_effect=TradeCommandMaterialChangedError("cmd-1", ("price",))
+    )
+    publish_fn = AsyncMock()
+    dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn)
+
+    await dispatcher._dispatch_batch()
+
+    publish_fn.assert_not_awaited()
+    repo.bulk_dispatch_trade_commands.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_paginated_dispatch_skips_foreign_rows_and_stops_at_batch_size() -> None:
+    """Skip foreign rows and stop as soon as the owned dispatch batch is full.
+
+    Given: One foreign row followed by two owned rows and batch size one,
+    When: Paginated dispatch runs,
+    Then: Only the first owned command publishes and the loop breaks immediately.
+    """
+    foreign = _make_cmd_row("foreign")
+    foreign["shard_key"] = "kraken.FOREIGN.live"
+    owned = _make_cmd_row("owned-1")
+    owned["shard_key"] = "kraken.MINE.live"
+    extra = _make_cmd_row("owned-2")
+    extra["shard_key"] = "kraken.MINE.live"
+    rows = [foreign, owned, extra]
+    repo = AsyncMock()
+
+    async def _get_commands(
+        as_of: datetime, limit: int = 10, offset: int = 0
+    ) -> list[TradeCommandRow]:
+        return rows[offset : offset + limit]
+
+    repo.get_undispatched_commands = AsyncMock(side_effect=_get_commands)
+    repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
+    publish_fn = AsyncMock()
+    ownership = MagicMock()
+    ownership.owns.side_effect = lambda shard_key: shard_key == "kraken.MINE.live"
+    dispatcher = OutboxDispatcher(
+        repository=repo,
+        publish_fn=publish_fn,
+        batch_size=1,
+        ownership=ownership,
+    )
+
+    await dispatcher._dispatch_batch()
+
+    publish_fn.assert_awaited_once_with(owned)
+    updates = repo.bulk_dispatch_trade_commands.await_args.args[0]
+    assert [update["public_id"] for update in updates] == ["owned-1"]
+
+
+@pytest.mark.asyncio
 async def test_notify_wakes_dispatcher() -> None:
     """Notify signal wakes the dispatcher before the poll interval.
 
@@ -186,7 +295,7 @@ async def test_notify_wakes_dispatcher() -> None:
     cmd = _make_cmd_row()
     call_count = 0
 
-    async def _get_cmds(as_of: datetime, limit: int = 10) -> list[TradeCommandRow]:
+    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -243,7 +352,7 @@ async def test_no_publish_fn_skips_publish() -> None:
     repo = AsyncMock()
     returned_once = False
 
-    async def _get_cmds(as_of: datetime, limit: int = 10) -> list[TradeCommandRow]:
+    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
         nonlocal returned_once
         if not returned_once:
             returned_once = True
@@ -301,7 +410,7 @@ async def test_dispatch_post_publish_db_failure_no_revert() -> None:
     repo = AsyncMock()
     returned_once = False
 
-    async def _get_cmds(as_of: datetime, limit: int = 10) -> list[TradeCommandRow]:
+    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
         nonlocal returned_once
         if not returned_once:
             returned_once = True
@@ -337,7 +446,7 @@ async def test_dispatch_revert_db_failure_logged() -> None:
     repo = AsyncMock()
     returned_once = False
 
-    async def _get_cmds(as_of: datetime, limit: int = 10) -> list[TradeCommandRow]:
+    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
         nonlocal returned_once
         if not returned_once:
             returned_once = True
