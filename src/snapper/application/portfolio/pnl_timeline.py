@@ -787,6 +787,9 @@ class TimelineWindow:
             allowance and terminal state, independent of the replay chunk.
         capture_checkpoint: Capture the engine's carried replay state after
             valuing ``to_time`` and return it on :attr:`PnlTimelineResult.closing_checkpoint`.
+        faithful_overflow_recovery: Enable bounded overflow recovery beyond the
+            12-branch cap. Reserved for public ``5A.17`` timeline reads; sample
+            replay, anchor, and backfill paths leave this disabled.
     """
 
     from_time: datetime
@@ -795,6 +798,7 @@ class TimelineWindow:
     valuation_ccy: str
     recovery_budget_per_point: bool = False
     capture_checkpoint: bool = False
+    faithful_overflow_recovery: bool = False
 
 
 @dataclass(frozen=True)
@@ -1890,13 +1894,15 @@ type _FlowRecoveries = tuple[_FlowRecovery, _FlowRecovery, _FlowRecovery]
 def _new_flow_recoveries(
     reserve_shared: Callable[[int], None] | None = None,
 ) -> _FlowRecoveries:
-    """Give three families separate terminal entries and one shared allowance."""
+    """Give three families separate terminal entries and isolated recovery allowances."""
     budget = FaithfulRecoveryBudget()
     budget.reserve_shared = reserve_shared
+    overflow_budget = FaithfulRecoveryBudget()
+    overflow_budget.reserve_shared = reserve_shared
     return (
-        FaithfulFlowRecovery[str, AttributionKey](budget),
-        FaithfulFlowRecovery[str, AttributionKey](budget),
-        FaithfulFlowRecovery[str, AttributionKey](budget),
+        FaithfulFlowRecovery[str, AttributionKey](budget, overflow_budget=overflow_budget),
+        FaithfulFlowRecovery[str, AttributionKey](budget, overflow_budget=overflow_budget),
+        FaithfulFlowRecovery[str, AttributionKey](budget, overflow_budget=overflow_budget),
     )
 
 
@@ -1949,6 +1955,7 @@ class _PointValuationContext:
     mark_carried_inputs: MarkCarriedInputMap
     carried_event_inputs: Collection[PnlCarriedInput]
     widen_unrealized_absorber: bool = False
+    faithful_overflow_recovery: bool = False
 
 
 @dataclass(frozen=True)
@@ -2107,6 +2114,8 @@ def _recover_flow_family(
     instrument_keys: Sequence[str],
     attribution_keys: Sequence[AttributionKey],
     recovery: _FlowRecovery,
+    *,
+    faithful_overflow_recovery: bool = False,
 ) -> _PublishedFlowFamily | None:
     """Try faithful recovery only after the complete historical family search."""
     if len(instrument_keys) + len(attribution_keys) > MAX_RECOVERY_KEYS:
@@ -2116,7 +2125,9 @@ def _recover_flow_family(
         _ordered_exact_units(exact.by_instrument, instrument_keys),
         _ordered_exact_units(exact.by_attribution, attribution_keys),
     )
-    if exceeds_branch_limit(request.instruments) or exceeds_branch_limit(request.attributions):
+    if faithful_overflow_recovery and (
+        exceeds_branch_limit(request.instruments) or exceeds_branch_limit(request.attributions)
+    ):
         projection = recovery.recover_overflow(request)
     else:
         projection = recovery.recover(request)
@@ -2131,6 +2142,8 @@ def _published_point_flows(
     cumulatives: _PointCumulatives,
     instrument_keys: Sequence[str],
     attribution_keys: Sequence[AttributionKey],
+    *,
+    faithful_overflow_recovery: bool = False,
 ) -> tuple[_PublishedFlowFamily, _PublishedFlowFamily, _PublishedFlowFamily] | (
     PnlIncompletenessReason
 ):
@@ -2144,6 +2157,8 @@ def _published_point_flows(
         cumulatives: The point's cumulative snapshot with exact families.
         instrument_keys: Deterministic instrument publication order.
         attribution_keys: Deterministic attribution publication order.
+        faithful_overflow_recovery: Whether bounded overflow recovery is permitted
+            for dimensions exceeding the 12-branch cap.
 
     Returns:
         The three chosen projections in ``(realized, fee, accrual)`` order, or
@@ -2158,7 +2173,11 @@ def _published_point_flows(
             if family not in ("instrument_sum_unrepresentable", "attribution_sum_unrepresentable"):
                 return family
             recovered = _recover_flow_family(
-                exact, instrument_keys, attribution_keys, cumulatives.flow_recoveries[index]
+                exact,
+                instrument_keys,
+                attribution_keys,
+                cumulatives.flow_recoveries[index],
+                faithful_overflow_recovery=faithful_overflow_recovery,
             )
             if recovered is None:
                 return family
@@ -2238,7 +2257,12 @@ def _prepare_point_valuation(
                 )
             },
         )
-    published = _published_point_flows(context.cumulatives, context.seen, attribution_keys)
+    published = _published_point_flows(
+        context.cumulatives,
+        context.seen,
+        attribution_keys,
+        faithful_overflow_recovery=context.faithful_overflow_recovery,
+    )
     if isinstance(published, str):
         return _context_untrusted_point(
             context,
@@ -2833,6 +2857,7 @@ class _TimelineBuildEvidence:
     mark_incompleteness_reasons: MarkIncompletenessReasonMap
     mark_carried_inputs: MarkCarriedInputMap
     widen_unrealized_absorber: bool
+    faithful_overflow_recovery: bool
     replay_recovery_work: _ReplayRecoveryWork | None
 
 
@@ -2921,7 +2946,7 @@ def _resolved_build_evidence(
     untrusted_price_reasons_by_instrument: Mapping[str, Collection[PnlIncompletenessReason]] | None,
     mark_evidence: TimelineMarkEvidence | None,
     *,
-    recovery_budget_per_point: bool,
+    window: TimelineWindow,
 ) -> _TimelineBuildEvidence:
     """Resolve optional caller evidence to immutable empty mappings."""
     resolved_mark_evidence = TimelineMarkEvidence() if mark_evidence is None else mark_evidence
@@ -2936,9 +2961,10 @@ def _resolved_build_evidence(
         mark_incompleteness_reasons=resolved_mark_evidence.incompleteness_reasons,
         mark_carried_inputs=resolved_mark_evidence.carried_inputs,
         widen_unrealized_absorber=resolved_mark_evidence.widen_unrealized_absorber,
+        faithful_overflow_recovery=window.faithful_overflow_recovery,
         replay_recovery_work=(
             _ReplayRecoveryWork(MAX_REPLAY_RECOVERY_KEY_VISITS)
-            if recovery_budget_per_point
+            if window.recovery_budget_per_point
             else None
         ),
     )
@@ -3691,6 +3717,7 @@ def _point_valuation_context(
         mark_carried_inputs=evidence.mark_carried_inputs,
         carried_event_inputs=state.carried_event_inputs,
         widen_unrealized_absorber=evidence.widen_unrealized_absorber,
+        faithful_overflow_recovery=evidence.faithful_overflow_recovery,
     )
 
 
@@ -3950,7 +3977,7 @@ def build_pnl_timeline(
         lineage,
         untrusted_price_reasons_by_instrument,
         mark_evidence,
-        recovery_budget_per_point=window.recovery_budget_per_point,
+        window=window,
     )
     state = _initialize_timeline_state(opening)
     _validate_timeline_execution_scopes(state, executions)

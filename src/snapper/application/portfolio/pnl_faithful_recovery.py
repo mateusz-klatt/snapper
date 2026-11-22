@@ -10,6 +10,7 @@ import math
 from collections.abc import Callable
 from collections.abc import Hashable
 from dataclasses import dataclass
+from dataclasses import field
 from itertools import product
 from typing import Final
 
@@ -309,6 +310,8 @@ class _BoundedDimensionSearch[KeyT: Hashable]:
         if self.steps >= MAX_OVERFLOW_STEPS or self.nodes >= MAX_OVERFLOW_NODES:
             self.exhausted = True
             return None
+        if not self.budget.reserve(1):
+            raise _RecoveryBudgetExhaustedError
         self.nodes += 1
         if self._pruned(depth, current_units):
             return None
@@ -347,8 +350,6 @@ def _project_dimension_bounded[KeyT: Hashable](
             tuple((key, value) for (key, _), value in zip(keyed_units, base_values, strict=True)),
             True,
         )
-    if not branches:
-        return None, True
     bounds = _overflow_bounds(branches, total, max_abs)
     runner = _BoundedDimensionSearch(
         keyed_units=keyed_units,
@@ -363,19 +364,35 @@ def _project_dimension_bounded[KeyT: Hashable](
     return matched, not runner.exhausted
 
 
+def _project_overflow_dimension[KeyT: Hashable](
+    keyed_units: tuple[tuple[KeyT, int], ...],
+    choices: tuple[tuple[float, ...], ...] | None,
+    total: float,
+    budget: FaithfulRecoveryBudget,
+) -> tuple[tuple[tuple[KeyT, float], ...] | None, bool]:
+    """Use Cartesian search up to the branch cap and bounded DFS above it."""
+    if choices is not None:
+        return _project_dimension(keyed_units, choices, total, budget), True
+    return _project_dimension_bounded(keyed_units, total, budget)
+
+
 def _search_overflow[InstrumentKeyT: Hashable, AttributionKeyT: Hashable](
     request: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT],
     budget: FaithfulRecoveryBudget,
 ) -> tuple[FaithfulFlowProjection[InstrumentKeyT, AttributionKeyT] | None, bool]:
-    """Search overflow dimensions for a shared faithful total."""
+    """Search overflow dimensions per-dimension for a shared faithful total."""
+    instrument_choices = _choices(request.instruments)
+    attribution_choices = _choices(request.attributions)
     completed = True
     for total in faithful_roundings(request.total_units):
-        instruments, inst_complete = _project_dimension_bounded(request.instruments, total, budget)
+        instruments, inst_complete = _project_overflow_dimension(
+            request.instruments, instrument_choices, total, budget
+        )
         completed = completed and inst_complete
         if instruments is None:
             continue
-        attributions, attr_complete = _project_dimension_bounded(
-            request.attributions, total, budget
+        attributions, attr_complete = _project_overflow_dimension(
+            request.attributions, attribution_choices, total, budget
         )
         completed = completed and attr_complete
         if attributions is not None:
@@ -389,12 +406,20 @@ class FaithfulFlowRecovery[InstrumentKeyT: Hashable, AttributionKeyT: Hashable]:
 
     A completed failure is reusable. An interrupted or structurally ineligible
     search never replaces this entry; callers retain their saved legacy reason.
+    Overflow recovery owns an isolated allowance and separate terminal/cap cache
+    entries so overflow attempts never starve or pollute ``recover()``.
     Immutable values, rather than live accumulator identities, define reuse.
     """
 
     budget: FaithfulRecoveryBudget
+    overflow_budget: FaithfulRecoveryBudget = field(default_factory=FaithfulRecoveryBudget)
     _previous_input: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT] | None = None
     _previous_projection: FaithfulFlowProjection[InstrumentKeyT, AttributionKeyT] | None = None
+    _previous_overflow_input: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT] | None = None
+    _previous_overflow_projection: (
+        FaithfulFlowProjection[InstrumentKeyT, AttributionKeyT] | None
+    ) = None
+    _previous_capped_input: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT] | None = None
 
     def recover(
         self, request: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT]
@@ -436,20 +461,27 @@ class FaithfulFlowRecovery[InstrumentKeyT: Hashable, AttributionKeyT: Hashable]:
 
         Returns:
             A coherent faithful projection, or ``None`` when no bounded split is
-            found. Completed searches cache terminal reuse at zero visit cost;
-            budget- or limit-interrupted searches leave cached state unchanged.
+            found. Completed and deterministic cap outcomes cache independently of
+            ``recover()`` at zero repeat cost; budget-interrupted searches remain
+            nonterminal and leave cached state unchanged.
         """
         if not _valid_input(request):
             return None
-        if request == self._previous_input:
-            return self._previous_projection
-        if self.budget.remaining_key_visits < len(request.instruments) + len(request.attributions):
+        if request == self._previous_overflow_input:
+            return self._previous_overflow_projection
+        if request == self._previous_capped_input:
+            return None
+        if self.overflow_budget.remaining_key_visits < len(request.instruments) + len(
+            request.attributions
+        ):
             return None
         try:
-            projection, completed = _search_overflow(request, self.budget)
+            projection, completed = _search_overflow(request, self.overflow_budget)
         except _RecoveryBudgetExhaustedError:
             return None
         if completed:
-            self._previous_input = request
-            self._previous_projection = projection
+            self._previous_overflow_input = request
+            self._previous_overflow_projection = projection
+        else:
+            self._previous_capped_input = request
         return projection

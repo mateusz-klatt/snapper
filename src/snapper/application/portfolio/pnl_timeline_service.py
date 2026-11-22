@@ -7476,6 +7476,21 @@ async def _load_wallet_series_fx(
     )
 
 
+def _public_overflow_recovery_enabled(options: PnlSeriesReplayOptions) -> bool:
+    """Enable overflow recovery only on public 5A.17 timeline reads, not 5C.x samples."""
+    return (
+        options.baseline_watermarks is None
+        and options.previous_replay_as_of is None
+        and options.frozen_execution_watermarks is None
+        and options.replay_generation_tip is None
+        and not options.verify_replay_probe
+        and not options.pointwise_exact_fx
+        and not options.metadata_only
+        and options.checkpoint_capture is None
+        and options.checkpoint_resume is None
+    )
+
+
 @pnl_read_stage("series")
 async def build_wallet_pnl_series(
     repo: Repository,
@@ -7778,6 +7793,7 @@ async def build_wallet_pnl_series(
                 valuation_ccy=valuation_ccy,
                 recovery_budget_per_point=options.replay_generation_tip is not None,
                 capture_checkpoint=(capture_request is not None and capture_request.active),
+                faithful_overflow_recovery=_public_overflow_recovery_enabled(options),
             )
             result = _timed_build_pnl_timeline(
                 executions,
