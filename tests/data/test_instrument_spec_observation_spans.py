@@ -946,6 +946,81 @@ class TestPersistedSpansAndRevisions:
         finally:
             await repo.engine.dispose()
 
+    async def test_underlying_updater_yaml_fallback_skips_when_concurrent_writer_sets_kind(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """YAML fallback aborts as unchanged if locked spec already gained ``instrument_kind``.
+
+        Given: Version R1 with ``instrument_kind=None`` pre-read before another writer commits
+            ``instrument_kind="perpetual"`` ahead of YAML lock acquisition.
+        When: ``UnderlyingUpdater._apply_yaml_spec_fallbacks`` evaluates ``_decide_fallback``.
+        Then: ``_build_fallback_spec`` returns ``None``, leaving the concurrent revision intact.
+        """
+        db_url = f"sqlite+aiosqlite:///{tmp_path / 'yaml-fallback-unchanged.db'}"
+        repo = SQLAlchemyRepository(db_url)
+        await repo.create_all()
+        t0, t1, now = _at(0), _at(1), _at(2)
+        seed_sess, concurrent_sess, yaml_sess = str(uuid4()), str(uuid4()), str(uuid4())
+        try:
+            yaml_inst = str(uuid4())
+            r1_input = InstrumentSpecInput(
+                **{
+                    **_spec_input(
+                        t0,
+                        spec_source="kraken:catalog",
+                        spec_version="v1:yaml",
+                    ).__dict__,
+                    "instrument_kind": None,
+                }
+            )
+            await repo.revise_instrument_spec(yaml_inst, seed_sess, 1, t0, r1_input)
+            real_get_spec = repo.get_instrument_spec
+            raced = False
+
+            async def _get_spec_then_commit_kind(
+                instrument_public_id: str,
+                as_of: datetime,
+            ) -> InstrumentSpecRow | None:
+                nonlocal raced
+                pre = await real_get_spec(instrument_public_id, as_of)
+                if not raced and instrument_public_id == yaml_inst:
+                    raced = True
+                    await repo.revise_instrument_spec(
+                        yaml_inst,
+                        concurrent_sess,
+                        1,
+                        t1,
+                        InstrumentSpecInput(
+                            **{
+                                **r1_input.__dict__,
+                                "instrument_kind": "perpetual",
+                                "spec_observed_at": t1,
+                            }
+                        ),
+                    )
+                return pre
+
+            monkeypatch.setattr(repo, "get_instrument_spec", _get_spec_then_commit_kind)
+
+            yaml_updater = UnderlyingUpdater(db_url=db_url)
+            yaml_updater._repo = repo
+            desired = {
+                yaml_inst: _MatchResult(
+                    underlying_ticker="BTC",
+                    relationship_type=RelationshipTypeEnum.EXACT,
+                    contract_family=None,
+                    instrument_type=InstrumentKindEnum.FUTURE,
+                    expiry_override=None,
+                )
+            }
+            assert await yaml_updater._apply_yaml_spec_fallbacks(desired, yaml_sess, now) == 0
+            assert raced is True
+            current = await real_get_spec(yaml_inst, now)
+            assert current is not None
+            assert current["instrument_kind"] == "perpetual"
+        finally:
+            await repo.engine.dispose()
+
     async def test_symbol_updater_preserved_metadata_carries_latest_span_observation(
         self, tmp_path: Path
     ) -> None:

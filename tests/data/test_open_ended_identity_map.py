@@ -42,6 +42,7 @@ from snapper.data.models import TradeCommand
 from snapper.data.models import VenueAccountState
 from snapper.data.models import Wallet
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import begin_scd2_write
 from tests.helpers.unit_admission import AdmissionScenario
 from tests.helpers.unit_admission import admission_id
 from tests.helpers.unit_admission import seed_admission_scenario
@@ -326,6 +327,7 @@ async def test_financial_policy_writer_lock_uses_actual_current_revision(
         successor_id = await _close_from_independent_session(
             scenario.repository, cached, with_successor
         )
+        await begin_scd2_write(reader)
         await _prove_cached_end_disagrees_with_database(reader, cached)
         actual = await _lock_reserved_policy(reader)
         assert cached.known_to == KNOWN_TO_MAX

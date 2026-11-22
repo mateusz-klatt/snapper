@@ -19,6 +19,7 @@ from uuid import UUID
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import Index
 from sqlalchemy import and_
 from sqlalchemy import event
 from sqlalchemy import insert
@@ -27,7 +28,10 @@ from sqlalchemy import update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import Session as SyncSession
+from sqlalchemy.orm import mapped_column
 from sqlalchemy.sql import Executable
 
 import snapper.cli.app as cli_app
@@ -2451,3 +2455,302 @@ async def test_upsert_market_snapshots_defers_caller_dict_mutation_until_commit(
     monkeypatch.setattr(AsyncSession, "commit", original_commit)
     assert "public_id" not in row_commit_fail
     assert "known_to" not in row_commit_fail
+
+
+class _IsolatedBase(DeclarativeBase):
+    """Standalone declarative base for testing unconditional unique indexes."""
+
+
+class _PlainUniqueModel(_IsolatedBase):
+    """Test model declaring a full unique index without an active-only predicate."""
+
+    __tablename__ = "plain_unique_models"
+    __table_args__ = (Index("ix_plain_unique_code", "code", unique=True),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[int]
+
+
+@pytest.mark.asyncio
+async def test_begin_scd2_write_and_sync_validation_guards(
+    sync_repo: DatabaseRepository,
+) -> None:
+    """Verify sqlite3 connection checks, SQLite unique-column parser guards, and decide_async guard."""
+    bad_sqlite_session = MagicMock(spec=AsyncSession)
+    bad_sqlite_session.get_bind.return_value = SimpleNamespace(
+        dialect=SimpleNamespace(name="sqlite")
+    )
+    bad_sqlite_session.in_transaction.return_value = False
+    bad_conn = SimpleNamespace(
+        get_raw_connection=AsyncMock(return_value=SimpleNamespace(driver_connection=None))
+    )
+    bad_sqlite_session.connection = AsyncMock(return_value=bad_conn)
+    with pytest.raises(TypeError, match="sqlite3 connection"):
+        await begin_scd2_write(bad_sqlite_session)
+
+    assert active_partial_unique_indexes(_PlainUniqueModel) == ()
+
+    target = _resolve_target_unique_index(
+        Setting, "settings", [Setting.key == "k"], allow_insert=True
+    )
+    assert target is not None
+    malformed_messages = (
+        "constraint failed without prefix",
+        "UNIQUE constraint failed: key",
+        "UNIQUE constraint failed: other_table.key",
+        "UNIQUE constraint failed: settings.",
+    )
+    for msg in malformed_messages:
+        exc = IntegrityError(
+            "insert",
+            {},
+            _FakeDbApiError(sqlite_errorcode=2067, args=(msg,)),
+        )
+        assert _is_unique_violation(exc) is True
+        assert _matches_target_unique_index(exc, "settings", target) is False
+
+    async def _async_decide(_existing: Setting | None) -> None:
+        return None
+
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        with pytest.raises(ValueError, match="decide_async is only supported by upsert_scd2"):
+            upsert_scd2_sync(
+                session,
+                Scd2UpsertSpec(
+                    model=Setting,
+                    match_filters=[Setting.key == "sync_async_err"],
+                    bus_time=_T0,
+                    decide=lambda _row: None,
+                    decide_async=_async_decide,
+                ),
+            )
+
+
+def test_close_and_insert_existing_sync_happy_path_and_same_winner_guard(
+    sync_repo: DatabaseRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify ``close_and_insert_existing_sync`` succeeds on active rows and rejects stagnant winners."""
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        close_and_insert_sync(
+            session,
+            Setting,
+            [Setting.key == "close_sync_happy"],
+            _setting_payload("close_sync_happy", "v1", 1),
+            _T0,
+        )
+        session.commit()
+
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        updated = close_and_insert_existing_sync(
+            session,
+            Setting,
+            [Setting.key == "close_sync_happy"],
+            _setting_payload("close_sync_happy", "v2", 2),
+            _T1,
+        )
+        assert updated.value == "v2"
+        session.commit()
+
+    stagnant_winner = Setting(
+        id=888,
+        **_setting_payload("stagnant_k", "v1", 1),
+        timestamp=_T0,
+        known_to=KNOWN_TO_MAX,
+    )
+
+    def _fail_flush(session: SyncSession) -> None:
+        if any(isinstance(obj, Setting) and obj.key == "stagnant_k" for obj in session.new):
+            raise IntegrityError(
+                "insert",
+                {},
+                sqlite3.IntegrityError("UNIQUE constraint failed: settings.key"),
+            )
+
+    def _same_winner_execute(stmt: object) -> SimpleNamespace:
+        if not getattr(stmt, "is_select", False):
+            return SimpleNamespace(rowcount=1)
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: stagnant_winner))
+
+    monkeypatch.setattr(SyncSession, "flush", _fail_flush)
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        monkeypatch.setattr(session, "execute", _same_winner_execute)
+        with pytest.raises(IntegrityError):
+            upsert_scd2_sync(
+                session,
+                Scd2UpsertSpec(
+                    model=Setting,
+                    match_filters=[Setting.key == "stagnant_k"],
+                    bus_time=_T1,
+                    decide=lambda _row: _setting_payload("stagnant_k", "v2", 2),
+                ),
+            )
+
+
+@pytest.mark.asyncio
+async def test_registry_syncer_skips_existing_create_and_finite_future_closed_row(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+) -> None:
+    """Verify ``_create_process_config_in_db`` and ``_sync_existing_process`` no-op edge paths."""
+    repo, db_path = file_async_repo
+    syncer = ProcessRegistrySyncer(
+        AppSettings(
+            BootstrapSettingsLoader(DB_URL=f"sqlite+aiosqlite:///{db_path}"), settings_service=None
+        )
+    )
+    entry = _make_sync_entry()
+    future_closed_at = datetime.now(UTC) + timedelta(minutes=10)
+
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "process_existing_worker"],
+                bus_time=_T0,
+                decide=lambda _row: {
+                    "key": "process_existing_worker",
+                    "value": json.dumps({"class": "seed.Existing", "enabled": True}),
+                    "category": "process",
+                    "session_id": str(uuid4()),
+                    "sequence_id": 1,
+                },
+            ),
+        )
+        session.add(
+            Setting(
+                public_id=str(uuid4()),
+                key="process_future_closed",
+                value=json.dumps({"class": "old.Closed", "enabled": False}),
+                category="process_config",
+                description="Closed in future",
+                is_encrypted=False,
+                session_id=str(uuid4()),
+                sequence_id=1,
+                updated_by="seed",
+                timestamp=_T0,
+                known_to=future_closed_at,
+            )
+        )
+        await session.commit()
+
+    with patch(
+        "snapper.application.process_manager.registry_syncer.get_repository",
+        return_value=repo,
+    ):
+        await syncer._create_process_config_in_db(
+            "existing_worker",
+            entry.class_path,
+            entry.method,
+            syncer._get_defaults_from_entry(entry),
+        )
+
+    await syncer._sync_existing_process("future_closed", entry, repo)
+
+    async with repo.session() as session:
+        existing_row = (
+            await session.execute(
+                select(Setting).where(
+                    Setting.key == "process_existing_worker", Setting.known_to == KNOWN_TO_MAX
+                )
+            )
+        ).scalar_one()
+        assert json.loads(existing_row.value)["class"] == "seed.Existing"
+
+
+@pytest.mark.asyncio
+async def test_cli_rotate_skips_concurrently_unencrypted_and_finite_future_closed_setting(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+) -> None:
+    """Verify rotation skips rows that became unencrypted or hold only finite future ends."""
+    repo, _ = file_async_repo
+    old_service = SettingsEncryptionService("old-master-password")
+    new_service = SettingsEncryptionService("new-master-password")
+    tracker = SequenceTracker()
+    future_closed_at = datetime.now(UTC) + timedelta(minutes=10)
+
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "rotate_plain_now"],
+                bus_time=_T0,
+                decide=lambda _row: {
+                    "key": "rotate_plain_now",
+                    "value": "plain-text",
+                    "category": "general",
+                    "description": "Unencrypted",
+                    "is_encrypted": False,
+                    "session_id": str(uuid4()),
+                    "sequence_id": 1,
+                    "updated_by": "ops",
+                },
+            ),
+        )
+        session.add(
+            Setting(
+                public_id=str(uuid4()),
+                key="rotate_future_closed",
+                value=old_service.encrypt("retired"),
+                category="credentials",
+                description="Retired with future known_to",
+                is_encrypted=True,
+                session_id=str(uuid4()),
+                sequence_id=1,
+                updated_by="ops",
+                timestamp=_T0,
+                known_to=future_closed_at,
+            )
+        )
+        await session.commit()
+
+    stale_plain = Setting(
+        id=901,
+        public_id=str(uuid4()),
+        key="rotate_plain_now",
+        value=old_service.encrypt("stale"),
+        category="general",
+        description="Was encrypted",
+        is_encrypted=True,
+        session_id="stale",
+        sequence_id=1,
+        updated_by="ops",
+        timestamp=_T0,
+        known_to=KNOWN_TO_MAX,
+    )
+    future_closed_snapshot = Setting(
+        id=902,
+        public_id=str(uuid4()),
+        key="rotate_future_closed",
+        value=old_service.encrypt("retired"),
+        category="credentials",
+        description="Retired with future known_to",
+        is_encrypted=True,
+        session_id="stale",
+        sequence_id=1,
+        updated_by="ops",
+        timestamp=_T0,
+        known_to=future_closed_at,
+    )
+
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        assert (
+            await cli_app._rotate_single_setting(
+                stale_plain, old_service, new_service, False, session, tracker
+            )
+            is False
+        )
+        assert (
+            await cli_app._rotate_single_setting(
+                future_closed_snapshot, old_service, new_service, False, session, tracker
+            )
+            is False
+        )

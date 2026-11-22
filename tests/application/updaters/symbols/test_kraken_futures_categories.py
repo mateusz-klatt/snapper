@@ -27,6 +27,7 @@ from snapper.data.models import InstrumentSpec
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.infrastructure.exchanges.schemas.kraken_futures import KrakenFuturesInstrumentSchema
 
 _CATEGORIES = (
@@ -254,6 +255,7 @@ def test_category_correction_revises_symbol_class_without_replacing_durable_iden
     """
     updater = KrakenFuturesSymbolUpdaterService()
     legacy = KrakenFuturesInstrumentSchema.model_validate({**raw, "category": None})
+    begin_scd2_write_sync(catalog_session)
     symbol_id = updater._persist_instrument_schema(catalog_session, legacy, _OBSERVED_AT)
     catalog_session.commit()
     before = catalog_session.execute(select(Instrument)).scalar_one()
@@ -264,7 +266,9 @@ def test_category_correction_revises_symbol_class_without_replacing_durable_iden
             SymbolAlias.id
         )
     ).all()
+    catalog_session.commit()
     refreshed_at = _OBSERVED_AT + timedelta(seconds=1)
+    begin_scd2_write_sync(catalog_session)
     resolved_id = updater._persist_instrument_schema(
         catalog_session, KrakenFuturesInstrumentSchema.model_validate(raw), refreshed_at
     )
