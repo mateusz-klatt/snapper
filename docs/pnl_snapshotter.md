@@ -361,3 +361,53 @@ Rollout and rollback:
     to `off`) and restart the service. No schema rollback is needed;
     correction-invalidation deletes during frontier writes continue to retire any
     previously persisted opening checkpoint invalidated by a rewrite.
+
+## Running the probe in production
+
+Create a dedicated least-privilege PostgreSQL role (`snapper_ro`) with read-only
+transaction defaults (replace every `<...>` placeholder before running):
+
+```sql
+CREATE ROLE snapper_ro LOGIN PASSWORD '<set-me>';
+GRANT CONNECT ON DATABASE <database> TO snapper_ro;
+GRANT USAGE ON SCHEMA public TO snapper_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO snapper_ro;
+ALTER ROLE snapper_ro SET default_transaction_read_only = on;
+```
+
+Pass the `snapper_ro` connection string via `--db-url` (or `PNL_PROBE_DB_URL`
+as the environment fallback). This overrides only the probe's isolated engine
+without modifying the application's `DB_URL`, passes the default writable-role
+check without `--allow-writable-role-with-readonly-session`, and redacts
+credentials across all outputs. If neither `--db-url` nor `PNL_PROBE_DB_URL` is
+set, the probe prints one `WARNING` line recommending the dedicated read-only
+role and continues with its existing checks:
+
+```bash
+PYTHONPATH=src python scripts/pnl_checkpoint_resume_probe.py \
+    --wallet <WALLET_PUBLIC_ID> \
+    --mode live \
+    --valuation-ccy USD \
+    --window-minutes 60 \
+    --db-url 'postgresql+asyncpg://snapper_ro:<set-me>@<host>:5432/<database>'
+```
+
+Equivalent run using `PNL_PROBE_DB_URL`:
+
+```bash
+PNL_PROBE_DB_URL='postgresql+asyncpg://snapper_ro:<set-me>@<host>:5432/<database>' \
+    PYTHONPATH=src python scripts/pnl_checkpoint_resume_probe.py \
+    --wallet <WALLET_PUBLIC_ID> --mode live --valuation-ccy USD --window-minutes 60
+```
+
+Exit codes:
+
+- `0`: `RESULT: PASS` — cold replay and checkpoint-resumed replay matched
+    bit-for-bit.
+- `1`: `RESULT: FAIL <mismatch_detail>` — cold vs. resumed points or rate
+    sources diverged.
+- `2`: `RESULT: FAIL <reason>` — missing anchor or `no_frontier`, safety/cap or
+    writable-role refusal, `timeout`, `interrupted`, or configuration/DB error.
+- `3`: `RESULT: REFUSED <reason>` — closed checkpoint or frontier refusal (for
+    example `frontier_has_fill_gap`, `capture_fill_gap`, or
+    `checkpoint_verify_fallback:...`).

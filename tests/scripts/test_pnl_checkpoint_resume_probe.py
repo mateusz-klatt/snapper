@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import resource
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -13,8 +14,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import asyncpg
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import Session
 
 from scripts import pnl_checkpoint_resume_probe as probe
@@ -40,16 +44,21 @@ _MINUTE = timedelta(minutes=1)
 
 
 class _RecordingCursor:
-    """Minimal DBAPI cursor recording executed read-only session setup SQL."""
+    """Minimal DBAPI cursor recording executed SQL and returning mapped rows."""
 
-    def __init__(self) -> None:
-        """Initialize an empty SQL command log and close state."""
+    def __init__(self, row_map: Mapping[str, tuple[object, ...] | None] | None = None) -> None:
+        """Initialize an empty SQL command log, close state, and fetch lookup."""
         self.commands: list[str] = []
         self.closed = False
+        self._row_map = row_map or {}
 
     def execute(self, statement: str) -> None:
         """Record one executed SQL statement."""
         self.commands.append(statement)
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        """Return mapped row for the most recently executed query."""
+        return self._row_map.get(self.commands[-1]) if self.commands else None
 
     def close(self) -> None:
         """Mark the cursor closed."""
@@ -59,9 +68,9 @@ class _RecordingCursor:
 class _RecordingConnection:
     """Minimal DBAPI connection yielding a recording cursor."""
 
-    def __init__(self) -> None:
+    def __init__(self, row_map: Mapping[str, tuple[object, ...] | None] | None = None) -> None:
         """Create one reusable recording cursor."""
-        self.cursor_obj = _RecordingCursor()
+        self.cursor_obj = _RecordingCursor(row_map)
 
     def cursor(self) -> _RecordingCursor:
         """Return the recording cursor."""
@@ -69,14 +78,18 @@ class _RecordingConnection:
 
 
 class _ScalarResult:
-    """Minimal SQLAlchemy scalar result stub for preflight dialect tests."""
+    """Minimal SQLAlchemy result stub supporting ``scalar_one`` and ``first``."""
 
     def __init__(self, value: object) -> None:
-        """Store the single preflight query scalar value."""
+        """Store the configured result payload."""
         self._value = value
 
     def scalar_one(self) -> object:
         """Return the configured scalar value."""
+        return self._value
+
+    def first(self) -> object:
+        """Return the configured row tuple or ``None``."""
         return self._value
 
 
@@ -307,10 +320,12 @@ def test_cli_main_and_subprocess_succeed_on_real_sqlite(
     assert "bit_identical=True" in captured.out
     assert "cold_seconds=" in captured.out
     assert "resume_seconds=" in captured.out
+    assert not any(line.startswith("WARNING:") for line in captured.out.splitlines())
     assert captured.out.strip().splitlines()[-1] == "RESULT: PASS"
 
     repo_root = Path(probe.__file__).resolve().parents[1]
     env = dict(os.environ)
+    env.pop("PNL_PROBE_DB_URL", None)
     env["PYTHONPATH"] = str(repo_root / "src")
     proc = subprocess.run(
         [
@@ -376,6 +391,10 @@ def test_postgres_shaped_statement_allowlist_and_duration_parsing() -> None:
         "PRAGMA busy_timeout = 5000",
         "SELECT * FROM orders FOR UPDATE",
         "SELECT * FROM orders FOR SHARE",
+        "SELECT set_config('statement_timeout', '0', true)",
+        "SELECT set_config ('lock_timeout', '0', true)",
+        "SELECT pg_sleep(5)",
+        "WITH s AS (SELECT pg_sleep(1)) SELECT * FROM s",
         "WITH x AS (SELECT * FROM orders FOR UPDATE) SELECT * FROM x",
     ):
         with pytest.raises(probe.CheckpointResumeProbeError, match="write_sql_refused"):
@@ -478,6 +497,7 @@ def test_read_only_sql_dialect_and_orm_guards_reject_every_mutation() -> None:
     sqlite_conn = _RecordingConnection()
     probe._enforce_connection_read_only(sqlite_conn, "sqlite")
     assert sqlite_conn.cursor_obj.commands == [
+        "PRAGMA foreign_keys = ON",
         "PRAGMA query_only = ON",
         "PRAGMA busy_timeout = 1000",
     ]
@@ -489,14 +509,39 @@ def test_read_only_sql_dialect_and_orm_guards_reject_every_mutation() -> None:
         "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
         "SET SESSION statement_timeout = 15000",
         "SET SESSION lock_timeout = 1000",
+        "SET SESSION idle_in_transaction_session_timeout = 10000",
     ]
     assert pg_conn.cursor_obj.closed is True
 
     with pytest.raises(probe.CheckpointResumeProbeError, match="invalid_statement_timeout_ms:0"):
         probe._enforce_connection_read_only(_RecordingConnection(), "postgresql", 0)
+    with pytest.raises(
+        probe.CheckpointResumeProbeError, match="invalid_statement_timeout_ms:60001"
+    ):
+        probe._enforce_connection_read_only(_RecordingConnection(), "postgresql", 60_001)
 
     with pytest.raises(probe.CheckpointResumeProbeError, match="unsupported_dialect:mysql"):
         probe._enforce_connection_read_only(_RecordingConnection(), "mysql")
+
+    sqlite_check_conn = _RecordingConnection(
+        {"PRAGMA query_only": (1,), "PRAGMA busy_timeout": (1000,)}
+    )
+    probe._verify_dbapi_checkout_state(sqlite_check_conn, "sqlite", 30_000)
+    assert sqlite_check_conn.cursor_obj.closed is True
+
+    pg_check_conn = _RecordingConnection(
+        {
+            "SHOW transaction_read_only": ("on",),
+            "SHOW statement_timeout": ("25s",),
+            "SHOW lock_timeout": ("1s",),
+            "SHOW idle_in_transaction_session_timeout": ("10s",),
+        }
+    )
+    probe._verify_dbapi_checkout_state(pg_check_conn, "postgresql", 25_000)
+    with pytest.raises(probe.CheckpointResumeProbeError, match="database_write_would_commit"):
+        probe._verify_dbapi_checkout_state(_RecordingConnection(), "sqlite", 30_000)
+    with pytest.raises(probe.CheckpointResumeProbeError, match="unsupported_dialect:mysql"):
+        probe._verify_dbapi_checkout_state(_RecordingConnection(), "mysql", 30_000)
 
     probe._guard_session_write(object())
     sync_session = Session()
@@ -597,55 +642,64 @@ async def test_sqlite_preflight_and_runtime_guards_refuse_mutations(
 
 
 async def test_postgresql_and_unsupported_dialect_preflight_guards() -> None:
-    """Verify PostgreSQL read-only and timeout preflight accepts valid sessions and rejects others.
+    """Verify PostgreSQL read-only, timeout, and role preflight accepts valid sessions and rejects others.
 
-    Given: Simulated PostgreSQL sessions with valid or mismatched read-only/timeout settings
-        and an unsupported MySQL dialect.
+    Given: Simulated PostgreSQL sessions with valid or mismatched read-only/timeout settings,
+        writable vs read-only role privileges, and an unsupported MySQL dialect.
     When: ``_preflight_read_only`` inspects each repository under read-only guards.
-    Then: Valid PostgreSQL read-only + timeouts pass, while writable or mismatched timeouts refuse.
+    Then: Valid PostgreSQL read-only + timeouts pass, writable roles require explicit opt-in,
+        and mismatched read-only or timeout settings refuse cleanly.
     """
     policy = PnlSeriesReadPolicy(allow_anchor_creation=False)
-    pg_ok = _DialectProbeRepo(
-        "postgresql",
-        {
-            "SHOW transaction_read_only": "on",
-            "SHOW statement_timeout": "30s",
-            "SHOW lock_timeout": "1s",
-        },
-    )
+    role_sql = str(probe._ROLE_PRIVILEGE_QUERY)
+    base_pg: dict[str, object] = {
+        "SHOW transaction_read_only": "on",
+        "SHOW statement_timeout": "30s",
+        "SHOW lock_timeout": "1s",
+        "SHOW idle_in_transaction_session_timeout": "10s",
+        role_sql: None,
+    }
+    pg_ok = _DialectProbeRepo("postgresql", base_pg)
     try:
         with probe._read_only_guards(pg_ok):
             await probe._preflight_read_only(pg_ok, policy)
     finally:
         await pg_ok.engine.dispose()
 
+    pg_writable_role = _DialectProbeRepo(
+        "postgresql",
+        {**base_pg, role_sql: ("executions", "INSERT")},
+    )
+    try:
+        with (
+            probe._read_only_guards(pg_writable_role),
+            pytest.raises(
+                probe.CheckpointResumeProbeError,
+                match="writable_role_refused:executions:INSERT",
+            ),
+        ):
+            await probe._preflight_read_only(pg_writable_role, policy, allow_writable_role=False)
+        with probe._read_only_guards(pg_writable_role):
+            await probe._preflight_read_only(pg_writable_role, policy, allow_writable_role=True)
+    finally:
+        await pg_writable_role.engine.dispose()
+
     bad_cases: tuple[tuple[str, dict[str, object], str], ...] = (
         (
             "postgresql",
-            {
-                "SHOW transaction_read_only": "off",
-                "SHOW statement_timeout": "30s",
-                "SHOW lock_timeout": "1s",
-            },
+            {**base_pg, "SHOW transaction_read_only": "off"},
             "database_write_would_commit",
         ),
         (
             "postgresql",
-            {
-                "SHOW transaction_read_only": "on",
-                "SHOW statement_timeout": "10s",
-                "SHOW lock_timeout": "1s",
-            },
+            {**base_pg, "SHOW statement_timeout": "10s"},
             "database_statement_timeout_mismatch",
         ),
+        ("postgresql", {**base_pg, "SHOW lock_timeout": "5s"}, "database_lock_timeout_mismatch"),
         (
             "postgresql",
-            {
-                "SHOW transaction_read_only": "on",
-                "SHOW statement_timeout": "30s",
-                "SHOW lock_timeout": "5s",
-            },
-            "database_lock_timeout_mismatch",
+            {**base_pg, "SHOW idle_in_transaction_session_timeout": "0"},
+            "database_idle_timeout_mismatch",
         ),
         ("mysql", {}, "unsupported_dialect:mysql"),
     )
@@ -661,39 +715,282 @@ async def test_postgresql_and_unsupported_dialect_preflight_guards() -> None:
             await repo.engine.dispose()
 
 
-async def test_probe_enforces_max_runtime_seconds_and_validates_bounds(
+class _FakeAsyncpgTx:
+    """Minimal asyncpg transaction stub."""
+
+    async def start(self) -> None:
+        """Start fake transaction."""
+
+    async def commit(self) -> None:
+        """Commit fake transaction."""
+
+    async def rollback(self) -> None:
+        """Roll back fake transaction."""
+
+
+class _FakeAsyncpgState:
+    """Shared recorder and dynamic role flag for fake asyncpg driver connections."""
+
+    def __init__(self, *, statement_timeout: str = "25s") -> None:
+        """Initialize empty connect/query logs, timeout value, and read-only role state."""
+        self.connects: list[dict[str, object]] = []
+        self.queries: list[str] = []
+        self.role_can_write = False
+        self.statement_timeout = statement_timeout
+
+
+_FAKE_PG_STATIC_RESPONSES: tuple[tuple[str, list[tuple[object, ...]]], ...] = (
+    ("version()", [("PostgreSQL 16.2",)]),
+    ("current_schema", [("public",)]),
+    ("standard_conforming_strings", [("on",)]),
+    ("transaction_read_only", [("on",)]),
+    ("lock_timeout", [("1s",)]),
+    ("idle_in_transaction_session_timeout", [("10s",)]),
+)
+
+
+class _FakeAsyncpgPrepared:
+    """Minimal asyncpg prepared statement stub."""
+
+    def __init__(self, sql: str, state: _FakeAsyncpgState) -> None:
+        """Bind query text and shared driver state."""
+        self._sql = sql
+        self._state = state
+
+    def get_attributes(self) -> list[SimpleNamespace]:
+        """Return typed column attribute descriptors."""
+        if "has_table_privilege" in self._sql:
+            return [
+                SimpleNamespace(name="table_name", type=SimpleNamespace(oid=25)),
+                SimpleNamespace(name="privilege", type=SimpleNamespace(oid=25)),
+            ]
+        return [SimpleNamespace(name="col", type=SimpleNamespace(oid=25))]
+
+    def get_parameters(self) -> list[object]:
+        """Return empty parameter descriptors."""
+        return []
+
+    def get_statusmsg(self) -> str:
+        """Return status command tag."""
+        return "SELECT 1"
+
+    async def fetch(self, *_args: object) -> list[tuple[object, ...]]:
+        """Return query-specific PG metadata, SHOW settings, and privilege rows."""
+        self._state.queries.append(self._sql)
+        if "has_table_privilege" in self._sql:
+            return [("candles", "DELETE")] if self._state.role_can_write else []
+        if "statement_timeout" in self._sql:
+            return [(self._state.statement_timeout,)]
+        for pattern, rows in _FAKE_PG_STATIC_RESPONSES:
+            if pattern in self._sql:
+                return rows
+        return [("1",)]
+
+
+class _FakeAsyncpgConn:
+    """Minimal fake asyncpg connection capturing startup ``server_settings``."""
+
+    def __init__(self, state: _FakeAsyncpgState, **kwargs: object) -> None:
+        """Record connect keyword arguments."""
+        state.connects.append(kwargs)
+        self._state = state
+        self.closed = False
+
+    async def set_type_codec(self, *_a: object, **_kw: object) -> None:
+        """Accept codec registration."""
+
+    async def set_builtin_type_codec(self, *_a: object, **_kw: object) -> None:
+        """Accept builtin codec registration."""
+
+    def is_closed(self) -> bool:
+        """Report open/closed state."""
+        return self.closed
+
+    def transaction(self, **_kw: object) -> _FakeAsyncpgTx:
+        """Create a transaction stub."""
+        return _FakeAsyncpgTx()
+
+    async def prepare(self, sql: str, **_kw: object) -> _FakeAsyncpgPrepared:
+        """Prepare a statement stub."""
+        return _FakeAsyncpgPrepared(sql, self._state)
+
+    async def fetchrow(self, _sql: str) -> None:
+        """Support SQLAlchemy ``pool_pre_ping`` connectivity check."""
+        return None
+
+    async def close(self, timeout: float | None = None) -> None:
+        """Mark connection closed."""
+        del timeout
+        self.closed = True
+
+    def terminate(self) -> None:
+        """Force-close connection."""
+        self.closed = True
+
+    def add_termination_listener(self, _fn: object) -> None:
+        """Accept termination listener."""
+
+    def remove_termination_listener(self, _fn: object) -> None:
+        """Remove termination listener."""
+
+
+async def test_fake_asyncpg_records_startup_server_settings_and_verifies_checkouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify probe builds its own PG engine with startup ``server_settings`` and checks every checkout.
+
+    Given: A fake asyncpg driver recording ``connect`` kwargs and answering PG queries.
+    When: ``_build_probe_engine`` connects and checks out sessions repeatedly under guards.
+    Then: Startup ``server_settings`` pin read-only, timeouts, and application name on connect,
+        and every pooled checkout verifies read-only mode, timeouts, and role privileges.
+
+    Args:
+        monkeypatch: Pytest fixture patching ``asyncpg.connect``.
+    """
+    state = _FakeAsyncpgState()
+
+    async def _fake_connect(*_args: object, **kwargs: object) -> _FakeAsyncpgConn:
+        """Construct a fake asyncpg connection."""
+        return _FakeAsyncpgConn(state, **kwargs)
+
+    monkeypatch.setattr(asyncpg, "connect", _fake_connect)
+    dsn = "postgresql+asyncpg://probe_ro:secret@127.0.0.1:5432/snapper"
+    probe_engine = probe._build_probe_engine(dsn, 25_000)
+    repo = SQLAlchemyRepository(dsn)
+    default_engine = repo.engine
+    repo.engine = probe_engine
+    repo.session_factory = probe.async_sessionmaker(
+        probe_engine,
+        expire_on_commit=False,
+        class_=probe.AsyncSession,
+    )
+    policy = PnlSeriesReadPolicy(allow_anchor_creation=False)
+    try:
+        await default_engine.dispose()
+        with probe._read_only_guards(repo, statement_timeout_ms=25_000):
+            await probe._preflight_read_only(
+                repo,
+                policy,
+                statement_timeout_ms=25_000,
+                allow_writable_role=False,
+            )
+            async with repo.session() as second_checkout:
+                assert (await second_checkout.execute(text("SELECT 1"))).scalar_one() == "1"
+            state.role_can_write = True
+            with pytest.raises(
+                probe.CheckpointResumeProbeError,
+                match="writable_role_refused:candles:DELETE",
+            ):
+                await probe._preflight_read_only(
+                    repo,
+                    policy,
+                    statement_timeout_ms=25_000,
+                    allow_writable_role=False,
+                )
+    finally:
+        await probe_engine.dispose()
+
+    assert len(state.connects) == 1
+    assert state.connects[0]["server_settings"] == {
+        "timezone": "UTC",
+        "default_transaction_read_only": "on",
+        "statement_timeout": "25000",
+        "lock_timeout": "1000",
+        "idle_in_transaction_session_timeout": "10000",
+        "application_name": "pnl_checkpoint_resume_probe",
+    }
+    assert sum(1 for sql in state.queries if sql == "SHOW transaction_read_only") >= 3
+
+
+async def test_probe_enforces_hard_bounds_max_executions_and_memory_caps(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Enforce ``statement_timeout_ms`` and ``max_runtime_seconds`` bounds on every probe run.
+    """Enforce hard timeout caps, max executions, memory caps, and ``RLIMIT_AS`` setup.
 
-    Given: Out-of-bounds timeout configs and a slow series call exceeding ``max_runtime_seconds``.
-    When: ``probe_with_repository`` evaluates the config or runs under ``asyncio.timeout``.
-    Then: Invalid bounds fail immediately and over-budget execution raises
-        ``probe_max_runtime_exceeded``.
+    Given: Out-of-bounds timeout/cap configs, oversized scope counts, RSS bounds, and timeouts.
+    When: ``probe_with_repository`` and memory helpers enforce limits.
+    Then: Invalid/upper-capped bounds fail immediately, oversized history refuses before
+        buffering, RSS/RLIMIT helpers cover darwin/linux cleanly, and stalled execution times out.
 
     Args:
         tmp_path: Pytest isolated directory for temporary SQLite fixture.
-        monkeypatch: Pytest fixture injecting a slow series delay.
+        monkeypatch: Pytest fixture patching counts, platform, rlimit, and runtime sleep.
     """
     url, scope = await _seed_and_catchup(tmp_path / "timeout.db", monkeypatch)
     async with idless._repository(url) as repo:
-        with pytest.raises(
-            probe.CheckpointResumeProbeError, match="invalid_statement_timeout_ms:0"
-        ):
+        bad_configs = (
+            (
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=scope.wallet_public_id, statement_timeout_ms=0
+                ),
+                "invalid_statement_timeout_ms:0",
+            ),
+            (
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=scope.wallet_public_id, statement_timeout_ms=60_001
+                ),
+                "invalid_statement_timeout_ms:60001",
+            ),
+            (
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=scope.wallet_public_id, max_runtime_seconds=0.0
+                ),
+                "invalid_max_runtime_seconds:0",
+            ),
+            (
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=scope.wallet_public_id, max_runtime_seconds=601.0
+                ),
+                "invalid_max_runtime_seconds:601.0",
+            ),
+            (
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=scope.wallet_public_id, max_executions=0
+                ),
+                "invalid_max_executions:0",
+            ),
+            (
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=scope.wallet_public_id, max_rss_mb=0
+                ),
+                "invalid_max_rss_mb:0",
+            ),
+        )
+        for bad_config, expected_error in bad_configs:
+            with pytest.raises(probe.CheckpointResumeProbeError, match=expected_error):
+                await probe.probe_with_repository(repo, bad_config)
+
+        monkeypatch.setattr(probe, "_current_rss_mb", lambda: 5000.0)
+        with pytest.raises(probe.CheckpointResumeProbeError, match="max_rss_exceeded:5000.0>2048"):
+            await probe.probe_with_repository(
+                repo,
+                probe.CheckpointResumeProbeConfig(wallet_public_id=scope.wallet_public_id),
+            )
+        monkeypatch.undo()
+
+        orig_counts = repo.get_pnl_execution_prefix_counts
+        monkeypatch.setattr(
+            repo,
+            "get_pnl_execution_prefix_counts",
+            AsyncMock(return_value={"kraken": (5, 5)}),
+        )
+        with pytest.raises(probe.CheckpointResumeProbeError, match="max_executions_exceeded:5>2"):
             await probe.probe_with_repository(
                 repo,
                 probe.CheckpointResumeProbeConfig(
                     wallet_public_id=scope.wallet_public_id,
-                    statement_timeout_ms=0,
+                    max_executions=2,
                 ),
             )
-        with pytest.raises(probe.CheckpointResumeProbeError, match="invalid_max_runtime_seconds:0"):
+        monkeypatch.setattr(repo, "get_pnl_execution_prefix_counts", orig_counts)
+
+        with pytest.raises(probe.CheckpointResumeProbeError, match="max_executions_exceeded:3>2"):
             await probe.probe_with_repository(
                 repo,
                 probe.CheckpointResumeProbeConfig(
                     wallet_public_id=scope.wallet_public_id,
-                    max_runtime_seconds=0.0,
+                    max_executions=2,
                 ),
             )
 
@@ -703,10 +1000,7 @@ async def test_probe_enforces_max_runtime_seconds_and_validates_bounds(
             return _sample_result(())
 
         monkeypatch.setattr(probe, "build_wallet_pnl_series", slow_series)
-        with pytest.raises(
-            probe.CheckpointResumeProbeError,
-            match="probe_max_runtime_exceeded:0.02",
-        ):
+        with pytest.raises(probe.CheckpointResumeProbeError, match="^timeout$"):
             await probe.probe_with_repository(
                 repo,
                 probe.CheckpointResumeProbeConfig(
@@ -715,6 +1009,30 @@ async def test_probe_enforces_max_runtime_seconds_and_validates_bounds(
                     max_runtime_seconds=0.02,
                 ),
             )
+
+    monkeypatch.setattr(probe.sys, "platform", "darwin")
+    darwin_rss = probe._current_rss_mb()
+    probe._apply_address_space_limit(1024)
+    monkeypatch.setattr(probe.sys, "platform", "linux")
+    assert probe._current_rss_mb() > darwin_rss
+    rlimit_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, resource.RLIM_INFINITY))
+    monkeypatch.setattr(
+        probe.resource, "setrlimit", lambda _kind, bounds: rlimit_calls.append(bounds)
+    )
+    probe._apply_address_space_limit(256)
+    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, 64 * 1024 * 1024))
+    probe._apply_address_space_limit(256)
+    assert rlimit_calls == [
+        (256 * 1024 * 1024, resource.RLIM_INFINITY),
+        (64 * 1024 * 1024, 64 * 1024 * 1024),
+    ]
+    monkeypatch.setattr(
+        probe.resource,
+        "setrlimit",
+        lambda _kind, _bounds: (_ for _ in ()).throw(ValueError("not supported")),
+    )
+    probe._apply_address_space_limit(256)
 
 
 async def test_probe_refuses_invalid_configs_and_incomplete_frontiers(
@@ -749,7 +1067,7 @@ async def test_probe_refuses_invalid_configs_and_incomplete_frontiers(
                     window_minutes=0,
                 ),
             )
-        with pytest.raises(probe.CheckpointResumeProbeError, match="missing_active_anchor"):
+        with pytest.raises(probe.CheckpointResumeProbeError, match="no_anchor"):
             await probe.probe_with_repository(
                 repo,
                 probe.CheckpointResumeProbeConfig(
@@ -764,7 +1082,7 @@ async def test_probe_refuses_invalid_configs_and_incomplete_frontiers(
         monkeypatch.setattr(
             repo, "get_portfolio_pnl_correction_frontier", AsyncMock(return_value=None)
         )
-        with pytest.raises(probe.CheckpointResumeProbeError, match="missing_correction_frontier"):
+        with pytest.raises(probe.CheckpointResumeProbeError, match="no_frontier"):
             await probe.probe_with_repository(repo, base_config)
 
         monkeypatch.setattr(
@@ -901,21 +1219,12 @@ async def test_probe_refuses_capture_verification_and_resume_fallbacks(
             await probe.probe_with_repository(repo, base_config)
 
 
-def test_canonical_sequence_comparison_and_cli_exit_codes(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Cover NaN/signed-zero canonicalization, mismatch detection, and CLI status codes.
+def test_canonical_and_sequence_comparison() -> None:
+    """Cover NaN/signed-zero canonicalization and sequence mismatch detection.
 
     Given: Scalar/float/datetime/dataclass inputs and cold vs resumed series pairs.
-    When: ``_canonical``, ``_compare_series``, and ``main`` evaluate equality, NaN, -0.0,
-        rate-source divergence, mismatches, and raised errors.
-    Then: Bit-level differences are pinpointed, unsupported objects raise ``TypeError``, and
-        ``main`` returns 1 on mismatch and 2 on probe error.
-
-    Args:
-        monkeypatch: Pytest fixture patching CLI coroutine results.
-        capsys: Stdout/stderr capture verifying error and mismatch output.
+    When: ``_canonical`` and ``_compare_series`` evaluate equality, NaN, -0.0, and rate sources.
+    Then: Bit-level differences are pinpointed and unsupported objects raise ``TypeError``.
     """
     t1 = samples._T0 + _MINUTE
     assert probe._canonical(None) is None
@@ -962,6 +1271,24 @@ def test_canonical_sequence_comparison_and_cli_exit_codes(
         == "rate_sources[0]"
     )
 
+
+def test_cli_exit_codes_and_result_lines(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify exact CLI exit codes 1/2/3, RESULT formatting, and single-line DSN redaction.
+
+    Given: Mismatch report, closed refusals, missing frontier, timeout, interrupt, and DSN error.
+    When: ``main`` executes each outcome path.
+    Then: Exit codes and ``RESULT:`` lines match contract with credentials redacted everywhere.
+
+    Args:
+        monkeypatch: Pytest fixture patching CLI coroutine results.
+        capsys: Stdout/stderr capture verifying error and mismatch output.
+    """
+    monkeypatch.delenv("PNL_PROBE_DB_URL", raising=False)
+    t1 = samples._T0 + _MINUTE
+
     mismatch_report = probe.CheckpointResumeProbeReport(
         wallet_public_id=prefix._WALLET,
         mode="live",
@@ -995,12 +1322,13 @@ def test_canonical_sequence_comparison_and_cli_exit_codes(
             )
         ),
     )
-    assert probe.main(["--wallet", prefix._WALLET]) == 2
+    assert probe.main(["--wallet", prefix._WALLET, "--require-readonly-role"]) == 3
     refusal_io = capsys.readouterr()
-    assert "checkpoint resume probe refused:" in refusal_io.err
+    assert refusal_io.err == ""
+    assert sum(1 for line in refusal_io.out.splitlines() if line.startswith("WARNING:")) == 1
     assert (
         refusal_io.out.strip().splitlines()[-1]
-        == "RESULT: PASS(refused:checkpoint_verify_fallback:checkpoint_late_execution)"
+        == "RESULT: REFUSED checkpoint_verify_fallback:checkpoint_late_execution"
     )
 
     monkeypatch.setattr(
@@ -1008,17 +1336,341 @@ def test_canonical_sequence_comparison_and_cli_exit_codes(
         "probe_wallet_checkpoint_resume",
         AsyncMock(side_effect=probe.CheckpointResumeProbeError("capture_fill_gap")),
     )
-    assert probe.main(["--wallet", prefix._WALLET]) == 2
-    assert (
-        capsys.readouterr().out.strip().splitlines()[-1] == "RESULT: PASS(refused:capture_fill_gap)"
-    )
+    assert probe.main(["--wallet", prefix._WALLET]) == 3
+    assert capsys.readouterr().out.strip().splitlines()[-1] == "RESULT: REFUSED capture_fill_gap"
 
     monkeypatch.setattr(
         probe,
         "probe_wallet_checkpoint_resume",
-        AsyncMock(side_effect=probe.CheckpointResumeProbeError("database_write_would_commit")),
+        AsyncMock(side_effect=probe.CheckpointResumeProbeError("no_frontier")),
     )
     assert probe.main(["--wallet", prefix._WALLET]) == 2
-    fail_io = capsys.readouterr()
-    assert "checkpoint resume probe refused: database_write_would_commit" in fail_io.err
-    assert fail_io.out.strip().splitlines()[-1] == "RESULT: FAIL database_write_would_commit"
+    assert capsys.readouterr().out.strip().splitlines()[-1] == "RESULT: FAIL no_frontier"
+
+    monkeypatch.setattr(
+        probe,
+        "probe_wallet_checkpoint_resume",
+        AsyncMock(side_effect=TimeoutError()),
+    )
+    assert probe.main(["--wallet", prefix._WALLET]) == 2
+    assert capsys.readouterr().out.strip().splitlines()[-1] == "RESULT: FAIL timeout"
+
+    monkeypatch.setattr(
+        probe,
+        "probe_wallet_checkpoint_resume",
+        AsyncMock(side_effect=KeyboardInterrupt()),
+    )
+    assert probe.main(["--wallet", prefix._WALLET]) == 2
+    assert capsys.readouterr().out.strip().splitlines()[-1] == "RESULT: FAIL interrupted"
+
+    monkeypatch.setattr(
+        probe,
+        "probe_wallet_checkpoint_resume",
+        AsyncMock(
+            side_effect=SQLAlchemyError(
+                "connect failed postgresql+asyncpg://alice:supersecret@db.internal:5432/prod password=topsecret"
+            )
+        ),
+    )
+    assert (
+        probe.main(["--wallet", prefix._WALLET, "--allow-writable-role-with-readonly-session"]) == 2
+    )
+    secret_io = capsys.readouterr()
+    assert secret_io.err == ""
+    assert "supersecret" not in secret_io.out
+    assert "topsecret" not in secret_io.out
+    assert (
+        secret_io.out.strip().splitlines()[-1]
+        == "RESULT: FAIL connect failed postgresql+asyncpg://***:***@db.internal:5432/prod password=***"
+    )
+
+
+async def test_dsn_redaction_engine_errors_and_interrupt_dispose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redact credentials everywhere and dispose both engines on Ctrl-C or startup failure.
+
+    Given: DSN/password strings, failing bootstrap settings, malformed/unsupported URLs,
+        and an interrupted probe execution.
+    When: ``_redact_secrets``, ``_build_probe_engine``, and ``probe_wallet_checkpoint_resume`` run.
+    Then: Credentials never appear unredacted and engines are disposed cleanly even on interrupt.
+
+    Args:
+        monkeypatch: Pytest fixture injecting bootstrap/repo failures and interrupts.
+    """
+    monkeypatch.delenv("PNL_PROBE_DB_URL", raising=False)
+    redacted = probe._redact_secrets(
+        "postgresql+asyncpg://alice:s3cr3t@10.0.1.5:5432/prod "
+        "host=db password=topsecret token='abc def'"
+    )
+    assert "s3cr3t" not in redacted
+    assert "topsecret" not in redacted
+    assert "abc def" not in redacted
+    assert "postgresql+asyncpg://***:***@10.0.1.5:5432/prod" in redacted
+    assert "password=*** token=***" in redacted
+
+    monkeypatch.setattr(
+        probe,
+        "get_bootstrap_settings",
+        lambda: (_ for _ in ()).throw(
+            ValueError("Unknown key in .env: postgresql://bob:envsecret@localhost:5432/db")
+        ),
+    )
+    with pytest.raises(probe.CheckpointResumeProbeError) as boot_exc:
+        await probe.probe_wallet_checkpoint_resume(
+            probe.CheckpointResumeProbeConfig(wallet_public_id=prefix._WALLET)
+        )
+    assert "envsecret" not in str(boot_exc.value)
+    assert "***:***@localhost:5432/db" in str(boot_exc.value)
+
+    with pytest.raises(probe.CheckpointResumeProbeError, match="invalid_database_url"):
+        probe._build_probe_engine("not-a-valid-url", 30_000)
+    with pytest.raises(probe.CheckpointResumeProbeError) as driver_exc:
+        probe._build_probe_engine("postgresql+missingdriver://snapper_ro:s3cr3t@h/d", 30_000)
+    assert "s3cr3t" not in str(driver_exc.value)
+    assert "invalid_database_url:" in str(driver_exc.value)
+    with pytest.raises(probe.CheckpointResumeProbeError, match="unsupported_dialect:mysql"):
+        probe._build_probe_engine("mysql+aiomysql://u:pw@h/d", 30_000)
+
+    mem_engine = probe._build_probe_engine("sqlite+aiosqlite:///:memory:", 30_000)
+    await mem_engine.dispose()
+
+    disposed_ids: list[int] = []
+    orig_dispose = AsyncEngine.dispose
+
+    async def track_dispose(engine: AsyncEngine) -> None:
+        """Record disposed async engine identities cleanly."""
+        disposed_ids.append(id(engine))
+        await orig_dispose(engine)
+
+    monkeypatch.setattr(AsyncEngine, "dispose", track_dispose)
+    probe_engine = probe._build_probe_engine("sqlite+aiosqlite:///:memory:", 30_000)
+    monkeypatch.setattr(probe, "_build_probe_engine", lambda _u, _t: probe_engine)
+
+    def fail_repo(_url: str) -> SQLAlchemyRepository:
+        """Simulate failure before ``default_engine`` assignment."""
+        raise SQLAlchemyError("postgresql+asyncpg://u:pw@h/d")
+
+    monkeypatch.setattr(probe, "SQLAlchemyRepository", fail_repo)
+    with pytest.raises(SQLAlchemyError):
+        await probe.probe_wallet_checkpoint_resume(
+            probe.CheckpointResumeProbeConfig(
+                wallet_public_id=prefix._WALLET,
+                db_url="sqlite+aiosqlite:///:memory:",
+            )
+        )
+    assert disposed_ids == [id(probe_engine)]
+
+    disposed_ids.clear()
+    probe_engine2 = probe._build_probe_engine("sqlite+aiosqlite:///:memory:", 30_000)
+    monkeypatch.setattr(probe, "_build_probe_engine", lambda _u, _t: probe_engine2)
+    monkeypatch.setattr(probe, "SQLAlchemyRepository", SQLAlchemyRepository)
+    monkeypatch.setattr(probe, "probe_with_repository", AsyncMock(side_effect=KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        await probe.probe_wallet_checkpoint_resume(
+            probe.CheckpointResumeProbeConfig(
+                wallet_public_id=prefix._WALLET,
+                db_url="sqlite+aiosqlite:///:memory:",
+            )
+        )
+    assert id(probe_engine2) in disposed_ids
+    assert len(disposed_ids) == 2
+
+
+def test_db_url_flag_and_env_override_app_url_and_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify ``--db-url`` and ``PNL_PROBE_DB_URL`` override app DB_URL with warning control.
+
+    Given: A seeded SQLite scope, app ``DB_URL``, ``PNL_PROBE_DB_URL``, and ``--db-url``.
+    When: Running CLI ``main`` with ``--db-url`` overriding env, with ``PNL_PROBE_DB_URL``
+        overriding app ``DB_URL``, and with neither set.
+    Then: Override precedence is ``--db-url > PNL_PROBE_DB_URL > DB_URL``, app ``DB_URL`` env stays
+        unchanged, no warning prints when overridden, and exactly one ``WARNING`` line prints
+        before continuing when neither override is set.
+
+    Args:
+        tmp_path: Pytest isolated directory for the SQLite scope database.
+        monkeypatch: Pytest fixture controlling environment variables and bootstrap settings.
+        capsys: Stdout/stderr capture checking warnings and RESULT verdicts.
+    """
+    url, scope = asyncio.run(_seed_and_catchup(tmp_path / "override.db", monkeypatch))
+    monkeypatch.setenv("DB_URL", "postgresql+asyncpg://app_rw:appsecret@app-db:5432/app")
+    monkeypatch.setattr(
+        probe,
+        "get_bootstrap_settings",
+        lambda: (_ for _ in ()).throw(AssertionError("app DB_URL should not be loaded")),
+    )
+
+    monkeypatch.setenv("PNL_PROBE_DB_URL", "postgresql+asyncpg://env_ro:envpass@127.0.0.1:1/wrong")
+    assert (
+        probe.main(["--wallet", scope.wallet_public_id, "--window-minutes", "4", "--db-url", url])
+        == 0
+    )
+    cli_io = capsys.readouterr()
+    assert cli_io.err == ""
+    assert not any(line.startswith("WARNING:") for line in cli_io.out.splitlines())
+    assert cli_io.out.strip().splitlines()[-1] == "RESULT: PASS"
+    assert os.environ["DB_URL"] == "postgresql+asyncpg://app_rw:appsecret@app-db:5432/app"
+
+    monkeypatch.setenv("PNL_PROBE_DB_URL", url)
+    assert probe.main(["--wallet", scope.wallet_public_id, "--window-minutes", "4"]) == 0
+    env_io = capsys.readouterr()
+    assert env_io.err == ""
+    assert not any(line.startswith("WARNING:") for line in env_io.out.splitlines())
+    assert env_io.out.strip().splitlines()[-1] == "RESULT: PASS"
+
+    monkeypatch.setenv("PNL_PROBE_DB_URL", "   ")
+    monkeypatch.setattr(probe, "get_bootstrap_settings", lambda: SimpleNamespace(db_url=url))
+    assert probe.main(["--wallet", scope.wallet_public_id, "--window-minutes", "4"]) == 0
+    warn_io = capsys.readouterr()
+    assert warn_io.err == ""
+    warning_lines = [line for line in warn_io.out.splitlines() if line.startswith("WARNING:")]
+    assert len(warning_lines) == 1
+    assert "snapper_ro" in warning_lines[0]
+    assert warn_io.out.strip().splitlines()[-1] == "RESULT: PASS"
+
+
+def test_db_url_flag_and_env_errors_redact_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify invalid driver errors and connect exceptions redact ``--db-url`` and env DSNs.
+
+    Given: Credentialed ``--db-url`` and ``PNL_PROBE_DB_URL`` values triggering driver/connect errors.
+    When: Running CLI ``main`` for bad drivers and failing ``asyncpg.connect`` calls.
+    Then: No password or secret token appears unredacted in stdout or stderr.
+
+    Args:
+        monkeypatch: Pytest fixture patching environment variables and ``asyncpg.connect``.
+        capsys: Stdout/stderr capture verifying redacted failure output.
+    """
+    monkeypatch.delenv("PNL_PROBE_DB_URL", raising=False)
+    assert (
+        probe.build_parser().parse_args(["--wallet", prefix._WALLET]).allow_writable_role is False
+    )
+    bad_driver_dsn = "postgresql+missing://snapper_ro:driversec@prod.internal:5432/snapper"
+    assert probe.main(["--wallet", prefix._WALLET, "--db-url", bad_driver_dsn]) == 2
+    bad_driver_io = capsys.readouterr()
+    assert "driversec" not in bad_driver_io.out
+    assert "invalid_database_url:" in bad_driver_io.out
+
+    bad_flag_dsn = "postgresql+asyncpg://snapper_ro:flagsecret@prod.internal:5432/snapper"
+
+    async def _fail_flag_connect(*_args: object, **_kwargs: object) -> object:
+        """Raise an exception containing the flag DSN and password parameter."""
+        raise OSError(f"connect failed {bad_flag_dsn} password=qsecret")
+
+    monkeypatch.setattr(asyncpg, "connect", _fail_flag_connect)
+    assert probe.main(["--wallet", prefix._WALLET, "--db-url", bad_flag_dsn]) == 2
+    bad_flag_io = capsys.readouterr()
+    assert bad_flag_io.err == ""
+    assert "flagsecret" not in bad_flag_io.out
+    assert "qsecret" not in bad_flag_io.out
+    assert "postgresql+asyncpg://***:***@prod.internal:5432/snapper" in bad_flag_io.out
+    assert "password=***" in bad_flag_io.out
+
+    bad_env_dsn = "postgresql+asyncpg://snapper_ro:envsecret@prod.internal:5432/snapper"
+
+    async def _fail_env_connect(*_args: object, **_kwargs: object) -> object:
+        """Raise an exception containing the environment override DSN."""
+        raise OSError(f"connect failed {bad_env_dsn}")
+
+    monkeypatch.setattr(asyncpg, "connect", _fail_env_connect)
+    monkeypatch.setenv("PNL_PROBE_DB_URL", bad_env_dsn)
+    assert probe.main(["--wallet", prefix._WALLET]) == 2
+    bad_env_io = capsys.readouterr()
+    assert bad_env_io.err == ""
+    assert "envsecret" not in bad_env_io.out
+    assert "postgresql+asyncpg://***:***@prod.internal:5432/snapper" in bad_env_io.out
+
+
+def test_pg_override_url_passes_readonly_role_without_override_and_warns_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Verify PG role check passes cleanly under ``snapper_ro`` override and warns when unset.
+
+    Given: A fake PostgreSQL asyncpg driver simulating ``snapper_ro`` vs a writable role.
+    When: Invoking ``main`` with ``--db-url``, with ``PNL_PROBE_DB_URL``, and without either.
+    Then: Overrides pass the writable-role preflight with no override flag under ``snapper_ro``,
+        refuse writable roles without the override flag, and emit one ``WARNING`` before running
+        all existing checks when neither override is set.
+
+    Args:
+        monkeypatch: Pytest fixture patching asyncpg, bootstrap settings, and scope load.
+        capsys: Stdout/stderr capture checking warnings and RESULT lines.
+    """
+    state = _FakeAsyncpgState(statement_timeout="30s")
+
+    async def _fake_connect(*_args: object, **_kwargs: object) -> _FakeAsyncpgConn:
+        """Return a fake asyncpg connection bound to ``state``."""
+        return _FakeAsyncpgConn(state)
+
+    monkeypatch.setattr(asyncpg, "connect", _fake_connect)
+    monkeypatch.setattr(
+        probe,
+        "_load_prepared_scope",
+        AsyncMock(side_effect=probe.CheckpointResumeProbeError("no_frontier")),
+    )
+    monkeypatch.setattr(
+        probe,
+        "get_bootstrap_settings",
+        lambda: (_ for _ in ()).throw(AssertionError("app DB_URL should not be called")),
+    )
+
+    ro_dsn = "postgresql+asyncpg://snapper_ro:rosecret@db.internal:5432/snapper"
+    assert probe.main(["--wallet", prefix._WALLET, "--db-url", ro_dsn]) == 2
+    flag_io = capsys.readouterr()
+    assert flag_io.err == ""
+    assert not any(line.startswith("WARNING:") for line in flag_io.out.splitlines())
+    assert flag_io.out.strip().splitlines()[-1] == "RESULT: FAIL no_frontier"
+    assert any("has_table_privilege" in sql for sql in state.queries)
+
+    state.queries.clear()
+    monkeypatch.setenv("PNL_PROBE_DB_URL", ro_dsn)
+    assert probe.main(["--wallet", prefix._WALLET]) == 2
+    env_io = capsys.readouterr()
+    assert env_io.err == ""
+    assert not any(line.startswith("WARNING:") for line in env_io.out.splitlines())
+    assert env_io.out.strip().splitlines()[-1] == "RESULT: FAIL no_frontier"
+    assert any("has_table_privilege" in sql for sql in state.queries)
+
+    state.role_can_write = True
+    assert probe.main(["--wallet", prefix._WALLET]) == 2
+    writable_io = capsys.readouterr()
+    assert (
+        writable_io.out.strip().splitlines()[-1]
+        == "RESULT: FAIL writable_role_refused:candles:DELETE"
+    )
+    assert (
+        probe.main(["--wallet", prefix._WALLET, "--allow-writable-role-with-readonly-session"]) == 2
+    )
+    override_io = capsys.readouterr()
+    assert override_io.out.strip().splitlines()[-1] == "RESULT: FAIL no_frontier"
+
+    monkeypatch.delenv("PNL_PROBE_DB_URL", raising=False)
+    monkeypatch.setattr(
+        probe,
+        "get_bootstrap_settings",
+        lambda: SimpleNamespace(
+            db_url="postgresql+asyncpg://app_rw:appsecret@db.internal:5432/snapper"
+        ),
+    )
+    assert probe.main(["--wallet", prefix._WALLET]) == 2
+    fallback_writable_io = capsys.readouterr()
+    assert (
+        sum(1 for line in fallback_writable_io.out.splitlines() if line.startswith("WARNING:")) == 1
+    )
+    assert (
+        fallback_writable_io.out.strip().splitlines()[-1]
+        == "RESULT: FAIL writable_role_refused:candles:DELETE"
+    )
+
+    state.role_can_write = False
+    assert probe.main(["--wallet", prefix._WALLET]) == 2
+    fallback_ro_io = capsys.readouterr()
+    assert sum(1 for line in fallback_ro_io.out.splitlines() if line.startswith("WARNING:")) == 1
+    assert fallback_ro_io.out.strip().splitlines()[-1] == "RESULT: FAIL no_frontier"

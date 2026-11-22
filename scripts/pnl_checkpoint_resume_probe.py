@@ -4,15 +4,35 @@ Usage:
     PYTHONPATH=src python scripts/pnl_checkpoint_resume_probe.py \
         --wallet <WALLET_PUBLIC_ID> --mode live --valuation-ccy USD --window-minutes 60
 
-Executes exclusively over read paths with SQLite ``PRAGMA query_only = ON`` and
-PostgreSQL ``READ ONLY`` session characteristics, SQL DML/DDL statement checks,
-and ORM flush/commit guards so no database write can ever commit.
+Safety architecture:
+    * Builds its own isolated engine before any query executes. On PostgreSQL,
+      asyncpg sets ``default_transaction_read_only='on'``, ``statement_timeout``,
+      ``lock_timeout='1000'``, ``idle_in_transaction_session_timeout='10000'``,
+      and ``application_name='pnl_checkpoint_resume_probe'`` at connection startup.
+      On SQLite, ``PRAGMA query_only = ON`` and ``PRAGMA busy_timeout = 1000``
+      are applied on connect.
+    * Verifies read-only mode and timeout bounds on every pooled checkout.
+    * Recommends running as a least-privilege read-only DB role; enforces
+      ``has_table_privilege`` read-only checks on key P&L tables by default
+      (override only via ``--allow-writable-role-with-readonly-session``).
+    * Note: ``lock_timeout`` (1 s) bounds lock acquisition only; statement execution
+      and idle lock retention are bounded by ``statement_timeout``,
+      ``idle_in_transaction_session_timeout``, and ``--max-runtime-seconds``.
+    * Redacts credentials/DSNs from all error and CLI output.
+
+Exit codes:
+    * ``0``: ``RESULT: PASS`` (cold and resumed outputs match bit-for-bit)
+    * ``1``: ``RESULT: FAIL <mismatch_detail>`` (divergence detected)
+    * ``2``: ``RESULT: FAIL <reason>`` (error, missing state, safety/cap refusal, timeout, interrupt)
+    * ``3``: ``RESULT: REFUSED <reason>`` (closed checkpoint/scope refusal)
 """
 
 import argparse
 import asyncio
 import math
+import os
 import re
+import resource
 import sys
 import time
 from collections.abc import Iterator
@@ -29,11 +49,18 @@ from typing import cast
 from weakref import WeakKeyDictionary
 
 from sqlalchemy import event
+from sqlalchemy import func
+from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from snapper.application.portfolio.fx_conversion_shadow import POINTWISE_FX_ELECTION_POLICY_VERSION
 from snapper.application.portfolio.pnl_anchor_identity import normalize_portfolio_pnl_valuation_ccy
@@ -61,6 +88,8 @@ from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesRe
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.config.settings import get_bootstrap_settings
 from snapper.core.json_types import JsonValue
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import VenueEvent
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import PortfolioPnlSampleScope
@@ -72,12 +101,25 @@ from snapper.data.repository_types import PortfolioPnlAnchorRow
 
 _MINUTE = timedelta(minutes=1)
 DEFAULT_STATEMENT_TIMEOUT_MS: Final[int] = 30_000
+MAX_STATEMENT_TIMEOUT_MS: Final[int] = 60_000
 LOCK_TIMEOUT_MS: Final[int] = 1_000
+IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS: Final[int] = 10_000
 DEFAULT_MAX_RUNTIME_SECONDS: Final[float] = 120.0
+MAX_RUNTIME_SECONDS: Final[float] = 600.0
+DEFAULT_MAX_EXECUTIONS: Final[int] = 200_000
+DEFAULT_MAX_RSS_MB: Final[int] = 2048
+PROBE_APPLICATION_NAME: Final[str] = "pnl_checkpoint_resume_probe"
+PROBE_DB_URL_ENV_VAR: Final[str] = "PNL_PROBE_DB_URL"
+READONLY_ROLE_WARNING: Final[str] = (
+    "WARNING: neither --db-url nor PNL_PROBE_DB_URL is set; using app DB_URL. "
+    "Running under a dedicated read-only role (e.g. snapper_ro) is recommended."
+)
+
 _SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*[\s\S]*?\*/")
 _SQL_STRING_RE = re.compile(r"'(?:''|[^'])*'")
 _LIT_TOKEN_RE = re.compile(r"'__LIT_(\d+)__'")
 _FOR_LOCK_RE = re.compile(r"\bFOR\s+(?:(?:NO\s+KEY\s+)?UPDATE|(?:KEY\s+)?SHARE)\b")
+_FORBIDDEN_SQL_CALL_RE = re.compile(r"\b(?:SET_CONFIG\s*\(|PG_SLEEP(?:_FOR|_UNTIL)?\b)")
 _LOCAL_TIMEOUT_STMT_RE = re.compile(
     r"^SET\s+LOCAL\s+(STATEMENT_TIMEOUT|LOCK_TIMEOUT)\b(?:\s*(?:=|TO)\s*(.*))?$",
     re.IGNORECASE,
@@ -98,6 +140,28 @@ _PG_UNIT_MS: Final[dict[str, int]] = {
     "min": 60_000,
     "h": 3_600_000,
 }
+_DSN_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^\s'\"/@]+)(@)")
+_SECRET_KV_RE = re.compile(
+    r"(?i)(\b(?:password|passwd|pwd|secret|token|api_key)\s*=\s*)(?:'[^']*'|\"[^\"]*\"|[^\s&'\",;)]+)"
+)
+_KEY_PNL_TABLES: Final[tuple[str, ...]] = (
+    "portfolio_pnl_points",
+    "portfolio_pnl_correction_frontiers",
+    "portfolio_pnl_opening_checkpoints",
+    "executions",
+    "execution_annulments",
+    "venue_events",
+    "accrual_ledger",
+    "candles",
+)
+_WRITE_PRIVILEGES: Final[tuple[str, ...]] = ("INSERT", "UPDATE", "DELETE")
+_ROLE_PRIVILEGE_QUERY = text(
+    "SELECT checks.table_name, checks.privilege "
+    "FROM (VALUES "
+    + ", ".join(f"('{table}', '{priv}')" for table in _KEY_PNL_TABLES for priv in _WRITE_PRIVILEGES)
+    + ") AS checks(table_name, privilege) "
+    "WHERE has_table_privilege(current_user, checks.table_name, checks.privilege)"
+)
 _READ_ONLY_VERBS = frozenset(
     {
         "SHOW",
@@ -136,8 +200,6 @@ _WRITE_KEYWORDS = frozenset(
 )
 _CLOSED_REFUSAL_EXACT = frozenset(
     {
-        "missing_active_anchor",
-        "missing_correction_frontier",
         "frontier_has_fill_gap",
         "frontier_incomplete_cut",
         "frontier_window_too_short",
@@ -153,14 +215,18 @@ _CLOSED_REFUSAL_PREFIXES: Final[tuple[str, ...]] = (
 
 
 class CheckpointResumeProbeError(RuntimeError):
-    """Explicit failure when read-only invariants or resume equivalence fail."""
+    """Explicit failure when read-only invariants, bounds, or resume equivalence fail."""
 
 
 class _CursorProtocol(Protocol):
-    """Minimal DBAPI cursor surface used for read-only connection setup."""
+    """Minimal DBAPI cursor surface used for connection initialization and verification."""
 
     def execute(self, statement: str) -> object:
-        """Execute a session read-only statement on the connection."""
+        """Execute a session read-only or verification statement on the connection."""
+        ...
+
+    def fetchone(self) -> Sequence[object] | None:
+        """Fetch a single verification scalar row returned by ``execute``."""
         ...
 
     def close(self) -> object:
@@ -172,7 +238,7 @@ class _DbapiConnectionProtocol(Protocol):
     """Minimal DBAPI connection surface providing a cursor."""
 
     def cursor(self) -> _CursorProtocol:
-        """Open a DBAPI cursor for connection initialization."""
+        """Open a DBAPI cursor for connection initialization or checkout checks."""
         ...
 
 
@@ -195,7 +261,7 @@ _CURSOR_GUARDS: WeakKeyDictionary[Engine, _CursorExecuteHook] = WeakKeyDictionar
 
 @dataclass(frozen=True)
 class CheckpointResumeProbeConfig:
-    """Operator parameters selecting one wallet/scope window and repository URL."""
+    """Operator parameters selecting one wallet/scope window and resource bounds."""
 
     wallet_public_id: str
     mode: str = "live"
@@ -204,6 +270,9 @@ class CheckpointResumeProbeConfig:
     db_url: str | None = None
     statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS
     max_runtime_seconds: float = DEFAULT_MAX_RUNTIME_SECONDS
+    max_executions: int = DEFAULT_MAX_EXECUTIONS
+    max_rss_mb: int = DEFAULT_MAX_RSS_MB
+    allow_writable_role: bool = False
 
 
 @dataclass(frozen=True)
@@ -238,18 +307,31 @@ class _PreparedScope:
     capture_as_of: datetime
 
 
+def _redact_secrets(raw_text: str) -> str:
+    """Redact DSN userinfo and key-value passwords from diagnostic strings.
+
+    Args:
+        raw_text: Untrusted error, exception, or DSN-bearing diagnostic text.
+
+    Returns:
+        Text with URL credentials and password/token values replaced by ``***``.
+    """
+    redacted = _DSN_USERINFO_RE.sub(r"\1***:***\3", raw_text)
+    return _SECRET_KV_RE.sub(r"\1***", redacted)
+
+
 def _require(condition: bool, reason: str) -> None:
-    """Raise ``CheckpointResumeProbeError`` unless ``condition`` holds.
+    """Raise ``CheckpointResumeProbeError`` with redacted ``reason`` unless ``condition`` holds.
 
     Args:
         condition: Invariant condition required for safe probing.
-        reason: Stable failure code included in the raised exception.
+        reason: Failure code or message to surface when ``condition`` is ``False``.
 
     Raises:
         CheckpointResumeProbeError: When ``condition`` evaluates to ``False``.
     """
     if not condition:
-        raise CheckpointResumeProbeError(reason)
+        raise CheckpointResumeProbeError(_redact_secrets(reason))
 
 
 def _is_read_only_pragma(normalized: str) -> bool:
@@ -269,6 +351,7 @@ def _is_read_only_pragma(normalized: str) -> bool:
         "PRAGMAQUERY_ONLY=1",
         "PRAGMAQUERY_ONLY=TRUE",
         f"PRAGMABUSY_TIMEOUT={LOCK_TIMEOUT_MS}",
+        "PRAGMAFOREIGN_KEYS=ON",
     }
 
 
@@ -303,7 +386,7 @@ def _parse_local_timeout_ms(raw_value: str) -> int | None:
         raw_value: Original unmasked right-hand side of a ``SET LOCAL`` timeout statement.
 
     Returns:
-        Positive or zero milliseconds when syntax matches valid units, else ``None``.
+        Non-negative milliseconds when syntax matches valid units, else ``None``.
     """
     match = _LOCAL_TIMEOUT_VAL_RE.fullmatch(raw_value.strip())
     if match is None:
@@ -375,6 +458,8 @@ def _assert_fragment_read_only(
         CheckpointResumeProbeError: When the fragment violates read-only or timeout invariants.
     """
     normalized = " ".join(fragment.split()).upper()
+    if _FORBIDDEN_SQL_CALL_RE.search(normalized):
+        raise CheckpointResumeProbeError("write_sql_refused:forbidden_function")
     tokens = re.findall(r"[A-Z_]+", normalized)
     if not tokens:
         return
@@ -435,6 +520,13 @@ def _parse_pg_duration_ms(raw: str) -> int | None:
     return sum(int(qty) * _PG_UNIT_MS[unit] for qty, unit in _PG_DURATION_TOKEN_RE.findall(cleaned))
 
 
+def _apply_sqlite_connection_pragmas(cursor: _CursorProtocol) -> None:
+    """Enable SQLite foreign keys, query-only read enforcement, and lock busy timeout."""
+    cursor.execute("PRAGMA foreign_keys = ON")
+    cursor.execute("PRAGMA query_only = ON")
+    cursor.execute(f"PRAGMA busy_timeout = {LOCK_TIMEOUT_MS}")
+
+
 def _enforce_connection_read_only(
     dbapi_connection: object,
     dialect_name: str,
@@ -454,16 +546,84 @@ def _enforce_connection_read_only(
     cursor = conn.cursor()
     try:
         if dialect_name == "sqlite":
-            cursor.execute("PRAGMA query_only = ON")
-            cursor.execute(f"PRAGMA busy_timeout = {LOCK_TIMEOUT_MS}")
+            _apply_sqlite_connection_pragmas(cursor)
         elif dialect_name == "postgresql":
             _require(
-                statement_timeout_ms >= 1,
+                1 <= statement_timeout_ms <= MAX_STATEMENT_TIMEOUT_MS,
                 f"invalid_statement_timeout_ms:{statement_timeout_ms}",
             )
             cursor.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
             cursor.execute(f"SET SESSION statement_timeout = {int(statement_timeout_ms)}")
             cursor.execute(f"SET SESSION lock_timeout = {LOCK_TIMEOUT_MS}")
+            cursor.execute(
+                "SET SESSION idle_in_transaction_session_timeout = "
+                f"{IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS}"
+            )
+        else:
+            raise CheckpointResumeProbeError(f"unsupported_dialect:{dialect_name}")
+    finally:
+        cursor.close()
+
+
+def _scalar_from_cursor(cursor: _CursorProtocol, query: str) -> object:
+    """Execute one single-row query on a raw DBAPI cursor and return column zero."""
+    cursor.execute(query)
+    row = cursor.fetchone()
+    return None if row is None else row[0]
+
+
+def _verify_sqlite_cursor_state(cursor: _CursorProtocol) -> None:
+    """Verify read-only mode and lock timeout on one checked-out SQLite connection."""
+    _require(_scalar_from_cursor(cursor, "PRAGMA query_only") == 1, "database_write_would_commit")
+    _require(
+        _scalar_from_cursor(cursor, "PRAGMA busy_timeout") == LOCK_TIMEOUT_MS,
+        "database_lock_timeout_mismatch",
+    )
+
+
+def _verify_postgres_cursor_state(
+    cursor: _CursorProtocol,
+    statement_timeout_ms: int,
+) -> None:
+    """Verify read-only mode and timeout bounds on one checked-out Postgres connection."""
+    read_only = _scalar_from_cursor(cursor, "SHOW transaction_read_only")
+    _require(str(read_only).lower() == "on", "database_write_would_commit")
+    stmt_raw = _scalar_from_cursor(cursor, "SHOW statement_timeout")
+    _require(
+        _parse_pg_duration_ms(str(stmt_raw)) == statement_timeout_ms,
+        "database_statement_timeout_mismatch",
+    )
+    lock_raw = _scalar_from_cursor(cursor, "SHOW lock_timeout")
+    _require(
+        _parse_pg_duration_ms(str(lock_raw)) == LOCK_TIMEOUT_MS,
+        "database_lock_timeout_mismatch",
+    )
+    idle_raw = _scalar_from_cursor(cursor, "SHOW idle_in_transaction_session_timeout")
+    _require(
+        _parse_pg_duration_ms(str(idle_raw)) == IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS,
+        "database_idle_timeout_mismatch",
+    )
+
+
+def _verify_dbapi_checkout_state(
+    dbapi_connection: object,
+    dialect_name: str,
+    statement_timeout_ms: int,
+) -> None:
+    """Verify read-only mode and timeouts on every pooled DBAPI connection checkout.
+
+    Args:
+        dbapi_connection: Checked-out DBAPI connection handle.
+        dialect_name: Target SQLAlchemy dialect name.
+        statement_timeout_ms: Expected PostgreSQL ``statement_timeout`` in milliseconds.
+    """
+    conn = cast(_DbapiConnectionProtocol, dbapi_connection)
+    cursor = conn.cursor()
+    try:
+        if dialect_name == "sqlite":
+            _verify_sqlite_cursor_state(cursor)
+        elif dialect_name == "postgresql":
+            _verify_postgres_cursor_state(cursor, statement_timeout_ms)
         else:
             raise CheckpointResumeProbeError(f"unsupported_dialect:{dialect_name}")
     finally:
@@ -516,8 +676,10 @@ def _read_only_guards(
         _connection_record: object,
         _connection_proxy: object,
     ) -> None:
-        """Re-assert DBAPI read-only mode and timeout bounds on pooled checkout."""
-        _enforce_connection_read_only(dbapi_connection, dialect_name, statement_timeout_ms)
+        """Enforce and verify read-only mode and timeout bounds on every pooled checkout."""
+        if dialect_name == "sqlite":
+            _enforce_connection_read_only(dbapi_connection, dialect_name, statement_timeout_ms)
+        _verify_dbapi_checkout_state(dbapi_connection, dialect_name, statement_timeout_ms)
 
     def _on_cursor_execute(
         _conn: object,
@@ -550,7 +712,7 @@ async def _verify_connection_state(
     dialect_name: str,
     statement_timeout_ms: int,
 ) -> None:
-    """Verify read-only mode, ``statement_timeout``, and ``lock_timeout`` on a live session.
+    """Verify read-only mode and timeout bounds via ``AsyncSession`` queries.
 
     Args:
         session: Open async session checked out under read-only hooks.
@@ -579,8 +741,28 @@ async def _verify_connection_state(
             _parse_pg_duration_ms(str(lock_raw)) == LOCK_TIMEOUT_MS,
             "database_lock_timeout_mismatch",
         )
+        idle_raw = (
+            await session.execute(text("SHOW idle_in_transaction_session_timeout"))
+        ).scalar_one()
+        _require(
+            _parse_pg_duration_ms(str(idle_raw)) == IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS,
+            "database_idle_timeout_mismatch",
+        )
         return
     raise CheckpointResumeProbeError(f"unsupported_dialect:{dialect_name}")
+
+
+async def _verify_postgres_role_privileges(
+    session: AsyncSession,
+    *,
+    allow_writable_role: bool,
+) -> None:
+    """Refuse PostgreSQL roles with write privileges unless explicitly overridden."""
+    if allow_writable_role:
+        return
+    writable = (await session.execute(_ROLE_PRIVILEGE_QUERY)).first()
+    if writable is not None:
+        raise CheckpointResumeProbeError(f"writable_role_refused:{writable[0]}:{writable[1]}")
 
 
 async def _preflight_read_only(
@@ -588,13 +770,15 @@ async def _preflight_read_only(
     policy: PnlSeriesReadPolicy,
     *,
     statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
+    allow_writable_role: bool = False,
 ) -> None:
-    """Verify read policy, SQL/ORM hooks, and live connection read-only/timeout state.
+    """Verify read policy, SQL/ORM hooks, session settings, and DB role privileges.
 
     Args:
         repo: Guarded SQLAlchemy repository instance.
         policy: Series read policy that will govern all probe service calls.
         statement_timeout_ms: Expected PostgreSQL ``statement_timeout`` in milliseconds.
+        allow_writable_role: Skip PostgreSQL table write-privilege refusal when ``True``.
 
     Raises:
         CheckpointResumeProbeError: When any write hazard or missing guard is detected.
@@ -610,18 +794,57 @@ async def _preflight_read_only(
     )
     async with repo.session() as session:
         await _verify_connection_state(session, repo.dialect_name, statement_timeout_ms)
+        if repo.dialect_name == "postgresql":
+            await _verify_postgres_role_privileges(
+                session,
+                allow_writable_role=allow_writable_role,
+            )
+
+
+def _current_rss_mb() -> float:
+    """Return process peak/resident memory usage in MiB for macOS and Linux."""
+    rss_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    divisor = 1024.0 * 1024.0 if sys.platform == "darwin" else 1024.0
+    return float(rss_raw) / divisor
+
+
+def _check_rss_mb(max_rss_mb: int) -> None:
+    """Abort the probe if process memory exceeds ``max_rss_mb``.
+
+    Args:
+        max_rss_mb: Configured RSS memory ceiling in MiB.
+    """
+    rss_mb = _current_rss_mb()
+    _require(rss_mb <= max_rss_mb, f"max_rss_exceeded:{rss_mb:.1f}>{max_rss_mb}")
+
+
+def _apply_address_space_limit(max_rss_mb: int) -> None:
+    """Apply ``RLIMIT_AS`` on platforms where POSIX virtual-memory limits are enforceable."""
+    limit_bytes = max_rss_mb * 1024 * 1024
+    rlimit_as = getattr(resource, "RLIMIT_AS", None)
+    if rlimit_as is None or sys.platform == "darwin":
+        return
+    try:
+        _soft, hard = resource.getrlimit(rlimit_as)
+        capped = limit_bytes if hard == resource.RLIM_INFINITY else min(limit_bytes, hard)
+        resource.setrlimit(rlimit_as, (capped, hard))
+    except (ValueError, OSError):
+        return
 
 
 def _validate_runtime_bounds(config: CheckpointResumeProbeConfig) -> None:
-    """Validate timeout and runtime ceiling bounds before opening connections."""
+    """Validate hard timeout, execution, and memory bounds before opening connections."""
     _require(
-        config.statement_timeout_ms >= 1,
+        1 <= config.statement_timeout_ms <= MAX_STATEMENT_TIMEOUT_MS,
         f"invalid_statement_timeout_ms:{config.statement_timeout_ms}",
     )
     _require(
-        math.isfinite(config.max_runtime_seconds) and config.max_runtime_seconds > 0,
+        math.isfinite(config.max_runtime_seconds)
+        and 0.0 < config.max_runtime_seconds <= MAX_RUNTIME_SECONDS,
         f"invalid_max_runtime_seconds:{config.max_runtime_seconds}",
     )
+    _require(config.max_executions >= 1, f"invalid_max_executions:{config.max_executions}")
+    _require(config.max_rss_mb >= 1, f"invalid_max_rss_mb:{config.max_rss_mb}")
 
 
 def _validate_config(config: CheckpointResumeProbeConfig) -> tuple[str, str, str]:
@@ -641,11 +864,47 @@ def _validate_config(config: CheckpointResumeProbeConfig) -> tuple[str, str, str
     return wallet, config.mode, ccy
 
 
+async def _count_scope_fill_events(
+    repo: SQLAlchemyRepository,
+    scope: PortfolioPnlSampleScope,
+) -> int:
+    """Execute a cheap indexed count of active fill events for ``scope``."""
+    stmt = select(func.count(VenueEvent.id)).where(
+        VenueEvent.event_type == "fill_observed",
+        VenueEvent.wallet_public_id == scope.wallet_public_id,
+        VenueEvent.mode == scope.mode,
+        VenueEvent.known_to == KNOWN_TO_MAX,
+    )
+    async with repo.session() as session:
+        count = (await session.execute(stmt)).scalar_one()
+    return int(count)
+
+
+async def _enforce_max_executions(
+    repo: SQLAlchemyRepository,
+    scope: PortfolioPnlSampleScope,
+    frontier: PnlCorrectionFrontier,
+    max_executions: int,
+) -> None:
+    """Reject large scopes before buffering executions or venue-event fills in memory."""
+    watermarks = frontier.raw_execution_watermarks
+    assert watermarks is not None
+    counts = await repo.get_pnl_execution_prefix_counts(
+        scope.wallet_public_id,
+        scope.mode,
+        watermarks,
+    )
+    exec_count = sum(count for count, _max_seq in counts.values())
+    _require(exec_count <= max_executions, f"max_executions_exceeded:{exec_count}>{max_executions}")
+    fill_count = await _count_scope_fill_events(repo, scope)
+    _require(fill_count <= max_executions, f"max_executions_exceeded:{fill_count}>{max_executions}")
+
+
 async def _load_prepared_scope(
     repo: SQLAlchemyRepository,
     config: CheckpointResumeProbeConfig,
 ) -> _PreparedScope:
-    """Load and validate anchor, correction frontier, and window bounds for probing.
+    """Load and validate anchor, correction frontier, history size, and window bounds.
 
     Args:
         repo: Guarded read-only repository.
@@ -656,7 +915,7 @@ async def _load_prepared_scope(
     """
     wallet, mode, ccy = _validate_config(config)
     anchor = await repo.get_portfolio_pnl_anchor(wallet, mode, ccy, None)
-    _require(anchor is not None, "missing_active_anchor")
+    _require(anchor is not None, "no_anchor")
     assert anchor is not None
     t0 = anchor["point_time"]
     scope = PortfolioPnlSampleScope(
@@ -667,7 +926,7 @@ async def _load_prepared_scope(
         anchor_point_time=t0,
     )
     frontier = await repo.get_portfolio_pnl_correction_frontier(scope)
-    _require(frontier is not None, "missing_correction_frontier")
+    _require(frontier is not None, "no_frontier")
     assert frontier is not None
     _require(frontier.has_fill_gap is False, "frontier_has_fill_gap")
     _require(
@@ -678,6 +937,7 @@ async def _load_prepared_scope(
         and frontier.fill_witness_digest is not None,
         "frontier_incomplete_cut",
     )
+    await _enforce_max_executions(repo, scope, frontier, config.max_executions)
     earliest_checkpoint = t0 + _MINUTE
     checkpoint_minute = max(
         earliest_checkpoint,
@@ -716,6 +976,7 @@ async def _capture_and_verify_in_memory(
     repo: SQLAlchemyRepository,
     prepared: _PreparedScope,
     read_policy: PnlSeriesReadPolicy,
+    max_rss_mb: int,
 ) -> tuple[PnlCheckpointResume, float, float]:
     """Capture a checkpoint at C purely in memory and verify it against frontier T.
 
@@ -723,6 +984,7 @@ async def _capture_and_verify_in_memory(
         repo: Guarded read-only repository.
         prepared: Prepared scope, frontier, and window bounds.
         read_policy: Read policy with ``allow_anchor_creation=False``.
+        max_rss_mb: Memory ceiling checked between capture and verification phases.
 
     Returns:
         Tuple of verified resume state, capture seconds, and verification seconds.
@@ -787,6 +1049,7 @@ async def _capture_and_verify_in_memory(
         capture_result.checkpoint_write is not None,
         f"checkpoint_capture_refused:{capture_result.checkpoint_capture_refusal}",
     )
+    _check_rss_mb(max_rss_mb)
     assert capture_result.checkpoint_write is not None
     write = capture_result.checkpoint_write
     record = PnlOpeningCheckpointRecord(
@@ -819,6 +1082,7 @@ async def _capture_and_verify_in_memory(
     verify_seconds = time.perf_counter() - verify_started
     if isinstance(verified, PnlCheckpointFallback):
         raise CheckpointResumeProbeError(f"checkpoint_verify_fallback:{verified.reason}")
+    _check_rss_mb(max_rss_mb)
     return verified, capture_seconds, verify_seconds
 
 
@@ -931,23 +1195,102 @@ def _compare_series(
     return _compare_sequences("rate_sources", cold.rate_sources, resumed.rate_sources)
 
 
+def _postgres_connect_args(statement_timeout_ms: int) -> dict[str, dict[str, str]]:
+    """Build startup ``server_settings`` so asyncpg transaction #1 starts read-only and bounded."""
+    return {
+        "server_settings": {
+            "timezone": "UTC",
+            "default_transaction_read_only": "on",
+            "statement_timeout": str(int(statement_timeout_ms)),
+            "lock_timeout": str(LOCK_TIMEOUT_MS),
+            "idle_in_transaction_session_timeout": str(IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS),
+            "application_name": PROBE_APPLICATION_NAME,
+        }
+    }
+
+
+def _build_probe_engine(db_url: str, statement_timeout_ms: int) -> AsyncEngine:
+    """Construct the probe's dedicated read-only SQLAlchemy async engine.
+
+    Args:
+        db_url: Target database URL.
+        statement_timeout_ms: PostgreSQL statement timeout cap in milliseconds.
+
+    Returns:
+        Dedicated ``AsyncEngine`` with startup read-only and timeout settings.
+
+    Raises:
+        CheckpointResumeProbeError: When the URL dialect is unsupported or malformed.
+    """
+    try:
+        backend = make_url(db_url).get_backend_name()
+        if backend == "postgresql":
+            return create_async_engine(
+                db_url,
+                connect_args=_postgres_connect_args(statement_timeout_ms),
+                future=True,
+                pool_pre_ping=True,
+                pool_recycle=3600,
+            )
+        if backend == "sqlite":
+            if ":memory:" in db_url:
+                engine = create_async_engine(
+                    db_url,
+                    connect_args={"timeout": 1, "check_same_thread": False},
+                    future=True,
+                    pool_pre_ping=True,
+                    pool_recycle=3600,
+                    poolclass=StaticPool,
+                )
+            else:
+                engine = create_async_engine(
+                    db_url,
+                    connect_args={"timeout": 1, "check_same_thread": False},
+                    future=True,
+                    pool_pre_ping=True,
+                    pool_recycle=3600,
+                )
+
+            def _sqlite_startup(dbapi_connection: object, _record: object) -> None:
+                """Pin ``PRAGMA query_only = ON`` and lock timeout at SQLite connect time."""
+                conn = cast(_DbapiConnectionProtocol, dbapi_connection)
+                cursor = conn.cursor()
+                try:
+                    _apply_sqlite_connection_pragmas(cursor)
+                finally:
+                    cursor.close()
+
+            event.listen(engine.sync_engine, "connect", _sqlite_startup)
+            return engine
+    except (SQLAlchemyError, ValueError, ImportError) as exc:
+        raise CheckpointResumeProbeError(
+            _redact_secrets(f"invalid_database_url:{type(exc).__name__}:{exc}")
+        ) from None
+    raise CheckpointResumeProbeError(f"unsupported_dialect:{backend}")
+
+
 async def _execute_probe_pipeline(
     sa_repo: SQLAlchemyRepository,
     config: CheckpointResumeProbeConfig,
     policy: PnlSeriesReadPolicy,
 ) -> CheckpointResumeProbeReport:
     """Run guarded preflight, cold replay, in-memory capture, resume, and compare."""
+    _check_rss_mb(config.max_rss_mb)
     await _preflight_read_only(
         sa_repo,
         policy,
         statement_timeout_ms=config.statement_timeout_ms,
+        allow_writable_role=config.allow_writable_role,
     )
     prepared = await _load_prepared_scope(sa_repo, config)
+    _check_rss_mb(config.max_rss_mb)
     cold_result, cold_seconds = await _run_window_series(sa_repo, prepared, policy, None)
+    _check_rss_mb(config.max_rss_mb)
     verified, capture_seconds, verify_seconds = await _capture_and_verify_in_memory(
         sa_repo,
         prepared,
         policy,
+        config.max_rss_mb,
     )
     resumed_result, resume_seconds = await _run_window_series(
         sa_repo,
@@ -959,6 +1302,7 @@ async def _execute_probe_pipeline(
         resumed_result.checkpoint_resume_fallback is None,
         f"checkpoint_resume_fallback:{resumed_result.checkpoint_resume_fallback}",
     )
+    _check_rss_mb(config.max_rss_mb)
     mismatch = _compare_series(cold_result, resumed_result)
     return CheckpointResumeProbeReport(
         wallet_public_id=prepared.scope.wallet_public_id,
@@ -988,14 +1332,14 @@ async def probe_with_repository(
 
     Args:
         repo: Database repository (must be ``SQLAlchemyRepository``).
-        config: Operator wallet, mode, currency, suffix-window, and timeout parameters.
+        config: Operator wallet, mode, currency, suffix-window, and safety limits.
         read_policy: Optional override read policy (defaults to non-mutating policy).
 
     Returns:
         Probe timings and bit-exact comparison report.
 
     Raises:
-        CheckpointResumeProbeError: When any read-only check, timeout, capture, or resume refuses.
+        CheckpointResumeProbeError: When any read-only check, cap, capture, or resume refuses.
     """
     _validate_runtime_bounds(config)
     policy = read_policy or PnlSeriesReadPolicy(
@@ -1007,15 +1351,36 @@ async def probe_with_repository(
             async with asyncio.timeout(config.max_runtime_seconds):
                 return await _execute_probe_pipeline(sa_repo, config, policy)
         except TimeoutError as exc:
-            raise CheckpointResumeProbeError(
-                f"probe_max_runtime_exceeded:{config.max_runtime_seconds}"
-            ) from exc
+            raise CheckpointResumeProbeError("timeout") from exc
+
+
+def _has_probe_db_override(explicit_url: str | None) -> bool:
+    """Return ``True`` when ``--db-url`` or non-empty ``PNL_PROBE_DB_URL`` is supplied."""
+    if explicit_url is not None:
+        return True
+    env_url = os.environ.get(PROBE_DB_URL_ENV_VAR)
+    return bool(env_url and env_url.strip())
+
+
+def _resolve_database_url(explicit_url: str | None) -> str:
+    """Resolve ``--db-url``, ``PNL_PROBE_DB_URL`` fallback, or bootstrap ``DB_URL``."""
+    if explicit_url is not None:
+        return explicit_url
+    env_url = os.environ.get(PROBE_DB_URL_ENV_VAR)
+    if env_url is not None and env_url.strip():
+        return env_url.strip()
+    try:
+        return str(get_bootstrap_settings().db_url)
+    except Exception as exc:
+        raise CheckpointResumeProbeError(
+            _redact_secrets(f"bootstrap_config_error:{type(exc).__name__}:{exc}")
+        ) from None
 
 
 async def probe_wallet_checkpoint_resume(
     config: CheckpointResumeProbeConfig,
 ) -> CheckpointResumeProbeReport:
-    """Open an isolated repository for ``config`` and run the read-only resume probe.
+    """Build the probe's isolated read-only engine and run the resume probe.
 
     Args:
         config: Operator probe parameters including optional explicit database URL.
@@ -1023,29 +1388,46 @@ async def probe_wallet_checkpoint_resume(
     Returns:
         Probe timings and bit-exact comparison report.
     """
-    url = config.db_url or get_bootstrap_settings().db_url
-    repo = SQLAlchemyRepository(url)
+    _validate_runtime_bounds(config)
+    url = _resolve_database_url(config.db_url)
+    probe_engine = _build_probe_engine(url, config.statement_timeout_ms)
+    repo: SQLAlchemyRepository | None = None
+    default_engine: AsyncEngine | None = None
     try:
+        repo = SQLAlchemyRepository(url)
+        default_engine = repo.engine
+        repo.engine = probe_engine
+        repo.session_factory = async_sessionmaker(
+            probe_engine,
+            expire_on_commit=False,
+            class_=AsyncSession,
+        )
         return await probe_with_repository(repo, config)
     finally:
-        await repo.engine.dispose()
+        await asyncio.shield(probe_engine.dispose())
+        if default_engine is not None:
+            await asyncio.shield(default_engine.dispose())
 
 
-def _format_failure_result(failure: Exception) -> str:
-    """Format an exit-2 refusal or failure as a closed ``RESULT:`` status line.
+def _classify_failure(failure: Exception) -> tuple[int, str]:
+    """Map an exception caught by ``main`` to ``(exit_code, RESULT line)`` cleanly.
 
     Args:
-        failure: Exception caught by the CLI boundary.
+        failure: Runtime error, closed refusal, timeout, or interrupt.
 
     Returns:
-        ``RESULT: PASS(refused:<reason>)`` for closed refusals or ``RESULT: FAIL <reason>``.
+        Pair of CLI exit code (2 for errors, 3 for closed refusals) and redacted RESULT line.
     """
-    reason = str(failure)
+    reason = _redact_secrets(str(failure))
+    if isinstance(failure, TimeoutError) or reason == "timeout":
+        return 2, "RESULT: FAIL timeout"
+    if reason == "no_frontier":
+        return 2, "RESULT: FAIL no_frontier"
     if isinstance(failure, CheckpointResumeProbeError) and (
         reason in _CLOSED_REFUSAL_EXACT or reason.startswith(_CLOSED_REFUSAL_PREFIXES)
     ):
-        return f"RESULT: PASS(refused:{reason})"
-    return f"RESULT: FAIL {reason}"
+        return 3, f"RESULT: REFUSED {reason}"
+    return 2, f"RESULT: FAIL {reason}"
 
 
 def _format_report(report: CheckpointResumeProbeReport) -> str:
@@ -1085,27 +1467,60 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser for the read-only checkpoint resume probe.
 
     Returns:
-        Configured argument parser accepting wallet, scope, window, timeouts, and optional URL.
+        Configured argument parser accepting wallet, scope, window, bounds, and role flags.
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wallet", required=True, help="Wallet public ID to probe.")
     parser.add_argument("--mode", default="live", choices=("live", "paper"))
     parser.add_argument("--valuation-ccy", default="USD")
     parser.add_argument("--window-minutes", type=int, default=60)
-    parser.add_argument("--db-url", default=None)
-    parser.add_argument("--statement-timeout-ms", type=int, default=DEFAULT_STATEMENT_TIMEOUT_MS)
-    parser.add_argument("--max-runtime-seconds", type=float, default=DEFAULT_MAX_RUNTIME_SECONDS)
+    parser.add_argument(
+        "--db-url",
+        default=None,
+        help=(
+            "Database URL overriding PNL_PROBE_DB_URL and app DB_URL for the probe's own "
+            "engine only (recommended: dedicated read-only role snapper_ro)."
+        ),
+    )
+    parser.add_argument(
+        "--statement-timeout-ms",
+        type=int,
+        default=DEFAULT_STATEMENT_TIMEOUT_MS,
+        help="Per-statement timeout in ms (1..60000; lock_timeout stays 1000ms for acquisition).",
+    )
+    parser.add_argument(
+        "--max-runtime-seconds",
+        type=float,
+        default=DEFAULT_MAX_RUNTIME_SECONDS,
+        help="Overall probe runtime wall-clock ceiling in seconds (0 < s <= 600).",
+    )
+    parser.add_argument("--max-executions", type=int, default=DEFAULT_MAX_EXECUTIONS)
+    parser.add_argument("--max-rss-mb", type=int, default=DEFAULT_MAX_RSS_MB)
+    role_group = parser.add_mutually_exclusive_group()
+    role_group.add_argument(
+        "--require-readonly-role",
+        action="store_false",
+        dest="allow_writable_role",
+        help="Require non-writable DB role on key P&L tables (recommended & default).",
+    )
+    role_group.add_argument(
+        "--allow-writable-role-with-readonly-session",
+        action="store_true",
+        dest="allow_writable_role",
+        help="Permit a writable DB role while relying only on read-only session settings.",
+    )
+    parser.set_defaults(allow_writable_role=False)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the read-only checkpoint resume probe CLI and print timings and verdict.
+    """Run the read-only checkpoint resume probe CLI and print timings and RESULT status.
 
     Args:
         argv: Optional command-line arguments overriding ``sys.argv[1:]``.
 
     Returns:
-        Zero when cold and resumed results match bit-for-bit, one on mismatch, two on error.
+        0 on match, 1 on mismatch, 2 on error/timeout/interrupt, 3 on closed refusal.
     """
     arguments = build_parser().parse_args(list(argv) if argv is not None else None)
     config = CheckpointResumeProbeConfig(
@@ -1116,13 +1531,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         db_url=arguments.db_url,
         statement_timeout_ms=arguments.statement_timeout_ms,
         max_runtime_seconds=arguments.max_runtime_seconds,
+        max_executions=arguments.max_executions,
+        max_rss_mb=arguments.max_rss_mb,
+        allow_writable_role=bool(arguments.allow_writable_role),
     )
+    if not _has_probe_db_override(config.db_url):
+        print(READONLY_ROLE_WARNING)
     try:
+        _apply_address_space_limit(config.max_rss_mb)
         report = asyncio.run(probe_wallet_checkpoint_resume(config))
-    except (CheckpointResumeProbeError, ValueError, OSError, SQLAlchemyError) as failure:
-        print(f"checkpoint resume probe refused: {failure}", file=sys.stderr)
-        print(_format_failure_result(failure))
+    except KeyboardInterrupt:
+        print("RESULT: FAIL interrupted")
         return 2
+    except Exception as exc:
+        code, result_line = _classify_failure(exc)
+        print(result_line)
+        return code
     print(_format_report(report))
     return 0 if report.matched else 1
 
