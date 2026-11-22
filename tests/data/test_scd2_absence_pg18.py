@@ -1057,11 +1057,10 @@ async def test_pg18_race_market_snapshot_mixed_shape_deadlock_free(
 
 
 @pytest.mark.asyncio
-async def test_pg18_race_market_snapshot_mixed_shape_skewed_chunk_size(
+async def test_pg18_race_market_snapshot_mixed_shape_skewed_active_timestamps(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mixed batches remain deadlock-free with chunk_size=1 and skewed active timestamps."""
+    """Mixed batches remain deadlock-free with skewed active timestamps."""
     async_repo, _ = pg_repos
     _, inst_1 = await _seed_symbol_instrument_pg(async_repo, f"SNPSK1-{uuid4().hex[:6]}-USD")
     _, inst_2 = await _seed_symbol_instrument_pg(async_repo, f"SNPSK2-{uuid4().hex[:6]}-USD")
@@ -1076,7 +1075,6 @@ async def test_pg18_race_market_snapshot_mixed_shape_skewed_chunk_size(
         == 2
     )
 
-    monkeypatch.setattr("snapper.data.repository._SNAPSHOT_LOOKUP_CHUNK_SIZE", 1)
     start_barrier = asyncio.Barrier(2)
 
     async def _run_batch(batch: list[MarketSnapshotUpsertRow]) -> int:
@@ -1110,6 +1108,61 @@ async def test_pg18_race_market_snapshot_mixed_shape_skewed_chunk_size(
         async_repo, MarketSnapshot, MarketSnapshot.instrument_public_id == skew_b
     )
     assert active_a[0].timestamp == _T2
+    assert active_b[0].timestamp == _T1
+
+
+@pytest.mark.asyncio
+async def test_pg18_race_market_snapshot_all_unique_reverse_order_skewed(
+    pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+) -> None:
+    """All-unique ``[A,B]`` and ``[B,A]`` writes cannot form a 40P01 lock cycle."""
+    async_repo, _ = pg_repos
+    _, inst_1 = await _seed_symbol_instrument_pg(async_repo, f"SNPU1-{uuid4().hex[:6]}-USD")
+    _, inst_2 = await _seed_symbol_instrument_pg(async_repo, f"SNPU2-{uuid4().hex[:6]}-USD")
+    inst_a, inst_b = sorted((inst_1, inst_2))
+    assert (
+        await async_repo.upsert_market_snapshots(
+            [
+                {**_snapshot_row(inst_a, 1, 10.0), "timestamp": _T2},
+                {**_snapshot_row(inst_b, 2, 20.0), "timestamp": _T0},
+            ]
+        )
+        == 2
+    )
+
+    older_than_b = _T0 - timedelta(seconds=10)
+    newer_than_a = _T2 + timedelta(seconds=10)
+    start_barrier = asyncio.Barrier(2)
+
+    async def _run_batch(batch: list[MarketSnapshotUpsertRow]) -> int:
+        await start_barrier.wait()
+        return await async_repo.upsert_market_snapshots(batch)
+
+    counts = await asyncio.wait_for(
+        asyncio.gather(
+            _run_batch(
+                [
+                    {**_snapshot_row(inst_a, 3, 11.0), "timestamp": _T1},
+                    {**_snapshot_row(inst_b, 4, 21.0), "timestamp": _T1},
+                ]
+            ),
+            _run_batch(
+                [
+                    {**_snapshot_row(inst_b, 5, 22.0), "timestamp": older_than_b},
+                    {**_snapshot_row(inst_a, 6, 12.0), "timestamp": newer_than_a},
+                ]
+            ),
+        ),
+        timeout=_WAIT_TIMEOUT_S,
+    )
+    assert counts == [2, 2]
+    active_a = await _assert_single_active(
+        async_repo, MarketSnapshot, MarketSnapshot.instrument_public_id == inst_a
+    )
+    active_b = await _assert_single_active(
+        async_repo, MarketSnapshot, MarketSnapshot.instrument_public_id == inst_b
+    )
+    assert active_a[0].timestamp == newer_than_a
     assert active_b[0].timestamp == _T1
 
 

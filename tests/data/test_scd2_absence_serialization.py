@@ -364,17 +364,21 @@ async def test_sqlite_savepoint_unique_violation_preserves_outer_tx_work(
 
 
 @pytest.mark.asyncio
-async def test_sqlite_bulk_market_snapshots_fallback_on_unique_conflict(
+async def test_sqlite_market_snapshots_per_row_unique_conflict_recovers(
     file_async_repo: tuple[SQLAlchemyRepository, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bulk snapshot flush failure falls back per-row cleanly inside one BEGIN IMMEDIATE."""
+    """Per-row snapshot conflict re-reads the active winner and retries cleanly."""
     repo, _ = file_async_repo
     _, inst_pid = await _seed_symbol_and_instrument(repo)
+    seeded = await repo.upsert_market_snapshots(
+        [{**_snapshot_row(inst_pid, 0, 98.5), "timestamp": _T2}]
+    )
+    assert seeded == 1
     original_flush = AsyncSession.flush
     tripped = False
 
-    async def _fail_bulk_once(session: AsyncSession) -> None:
+    async def _fail_flush_once(session: AsyncSession) -> None:
         nonlocal tripped
         pending_snaps = [obj for obj in session.new if isinstance(obj, MarketSnapshot)]
         if pending_snaps and not tripped:
@@ -388,7 +392,7 @@ async def test_sqlite_bulk_market_snapshots_fallback_on_unique_conflict(
             )
         await original_flush(session)
 
-    monkeypatch.setattr(AsyncSession, "flush", _fail_bulk_once)
+    monkeypatch.setattr(AsyncSession, "flush", _fail_flush_once)
     written = await repo.upsert_market_snapshots([_snapshot_row(inst_pid, 1, 99.5)])
     assert tripped is True
     assert written == 1
@@ -1655,9 +1659,8 @@ async def test_registry_syncer_rereads_active_config_on_lock_wake_miss(
 @pytest.mark.asyncio
 async def test_upsert_market_snapshots_preserves_finite_known_to_across_batch_shapes(
     file_async_repo: tuple[SQLAlchemyRepository, Path],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Snapshot expiry stays identical across unique, duplicate-key, and conflict-fallback batches."""
+    """Snapshot expiry stays identical across unique and duplicate-key batches."""
     repo, _ = file_async_repo
     async with repo.session() as session:
         await begin_scd2_write(session)
@@ -1681,11 +1684,11 @@ async def test_upsert_market_snapshots_preserves_finite_known_to_across_batch_sh
                 session_id="seed",
                 sequence_id=idx,
             )
-            for idx, ex in enumerate(("kraken", "binance", "coinbase"), start=1)
+            for idx, ex in enumerate(("kraken", "binance"), start=1)
         ]
         session.add_all(inst_rows)
         await session.commit()
-        inst_u, inst_d, inst_f = [row.public_id for row in inst_rows]
+        inst_u, inst_d = [row.public_id for row in inst_rows]
 
     unique_batch: list[MarketSnapshotUpsertRow] = [
         {**_snapshot_row(inst_u, 1, 10.0), "timestamp": _T0, "known_to": _T1}
@@ -1700,37 +1703,6 @@ async def test_upsert_market_snapshots_preserves_finite_known_to_across_batch_sh
     assert await repo.upsert_market_snapshots(dup_batch) == 2
     assert dup_batch[0]["known_to"] == _T1
     assert dup_batch[1]["known_to"] == _T2
-
-    fallback_batch: list[MarketSnapshotUpsertRow] = [
-        {**_snapshot_row(inst_f, 1, 30.0), "timestamp": _T0, "known_to": _T1}
-    ]
-    original_flush = AsyncSession.flush
-    tripped = False
-
-    async def _fail_bulk_once(session: AsyncSession) -> None:
-        nonlocal tripped
-        if not tripped and any(isinstance(obj, MarketSnapshot) for obj in session.new):
-            tripped = True
-            raise IntegrityError(
-                "stmt",
-                {},
-                _FakeDbApiError(
-                    sqlite_errorcode=2067,
-                    args=("UNIQUE constraint failed: market_snapshots.instrument_public_id",),
-                ),
-            )
-        await original_flush(session)
-
-    monkeypatch.setattr(AsyncSession, "flush", _fail_bulk_once)
-    with patch.object(
-        SQLAlchemyRepository,
-        "_upsert_snapshot_row",
-        wraps=repo._upsert_snapshot_row,
-    ) as spy_row:
-        assert await repo.upsert_market_snapshots(fallback_batch) == 1
-    assert tripped is True
-    spy_row.assert_awaited_once()
-    assert fallback_batch[0]["known_to"] == _T1
 
     async with repo.session() as session:
         saved = (
@@ -1749,7 +1721,6 @@ async def test_upsert_market_snapshots_preserves_finite_known_to_across_batch_sh
             by_inst.setdefault(row.instrument_public_id, []).append(row.known_to)
         assert by_inst[inst_u] == [_T1]
         assert by_inst[inst_d] == [_T1, _T2]
-        assert by_inst[inst_f] == [_T1]
 
 
 @pytest.mark.asyncio
@@ -2042,42 +2013,18 @@ async def _seed_sorted_instruments(
 
 
 @pytest.mark.asyncio
-async def test_upsert_market_snapshots_orders_locks_fallback_and_avoids_rollback_mutation(
+async def test_upsert_market_snapshots_orders_fallback_and_avoids_rollback_mutation(
     file_async_repo: tuple[SQLAlchemyRepository, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Snapshot batch locks, fallback retries, and rollback avoid shape bias or dict leakage."""
+    """Snapshot fallback retries stay ordered and rollback avoids caller dict leakage."""
     repo, _ = file_async_repo
     inst_lo, inst_hi = await _seed_sorted_instruments(repo)
-
-    captured_sql: list[str] = []
-
-    def _capture_snapshot_lock_sql(
-        _conn: object,
-        _cursor: object,
-        statement: str,
-        _parameters: object,
-        _context: object,
-        _executemany: bool,
-    ) -> None:
-        upper = statement.upper()
-        if "FROM MARKET_SNAPSHOTS" in upper and "ORDER BY" in upper:
-            captured_sql.append(statement)
-
-    event.listen(repo.engine.sync_engine, "before_cursor_execute", _capture_snapshot_lock_sql)
-    try:
-        reverse_batch: list[MarketSnapshotUpsertRow] = [
-            {**_snapshot_row(inst_hi, 1, 20.0), "timestamp": _T0, "known_to": _T1},
-            {**_snapshot_row(inst_lo, 2, 10.0), "timestamp": _T0, "known_to": _T1},
-        ]
-        assert await repo.upsert_market_snapshots(reverse_batch) == 2
-    finally:
-        event.remove(repo.engine.sync_engine, "before_cursor_execute", _capture_snapshot_lock_sql)
-
-    assert captured_sql
-    assert "ORDER BY market_snapshots.instrument_public_id ASC, market_snapshots.id ASC" in (
-        captured_sql[0]
-    )
+    reverse_batch: list[MarketSnapshotUpsertRow] = [
+        {**_snapshot_row(inst_hi, 1, 20.0), "timestamp": _T0, "known_to": KNOWN_TO_MAX},
+        {**_snapshot_row(inst_lo, 2, 10.0), "timestamp": _T2, "known_to": KNOWN_TO_MAX},
+    ]
+    assert await repo.upsert_market_snapshots(reverse_batch) == 2
 
     fallback_order: list[tuple[str, datetime]] = []
     original_flush = AsyncSession.flush
@@ -2107,7 +2054,7 @@ async def test_upsert_market_snapshots_orders_locks_fallback_and_avoids_rollback
         {**_snapshot_row(inst_lo, 4, 15.0), "timestamp": _T1, "known_to": KNOWN_TO_MAX},
     ]
     monkeypatch.setattr(AsyncSession, "flush", _fail_unique_once)
-    with patch.object(SQLAlchemyRepository, "_upsert_snapshot_row", new=_record_fallback):
+    with patch.object(repo, "_upsert_snapshot_row", new=_record_fallback):
         assert await repo.upsert_market_snapshots(fallback_batch) == 2
 
     assert tripped_unique is True
@@ -2283,10 +2230,34 @@ def _snapshot_statement_events(
 
 
 @pytest.mark.asyncio
+async def test_upsert_market_snapshots_all_unique_uses_ordered_all_path(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+) -> None:
+    """All-unique batches use globally ordered per-row writes without a bulk prelock."""
+    repo, _ = file_async_repo
+    inst_a, inst_b = await _seed_sorted_instruments(repo)
+    observed_order: list[tuple[str, datetime]] = []
+    original_row_upsert = repo._upsert_snapshot_row
+
+    async def _track_order(session: AsyncSession, row: MarketSnapshotUpsertRow) -> None:
+        observed_order.append((row["instrument_public_id"], row["timestamp"]))
+        await original_row_upsert(session, row)
+
+    batch: list[MarketSnapshotUpsertRow] = [
+        {**_snapshot_row(inst_b, 1, 20.0), "timestamp": _T1},
+        {**_snapshot_row(inst_a, 2, 10.0), "timestamp": _T2},
+    ]
+    with patch.object(repo, "_upsert_snapshot_row", new=_track_order):
+        assert await repo.upsert_market_snapshots(batch) == 2
+
+    assert observed_order == [(inst_a, _T2), (inst_b, _T1)]
+
+
+@pytest.mark.asyncio
 async def test_upsert_market_snapshots_mixed_shape_uses_ordered_all_path(
     file_async_repo: tuple[SQLAlchemyRepository, Path],
 ) -> None:
-    """Mixed-shape batches skip bulk two-phase optimization and use ordered_all per-row writes."""
+    """Mixed-shape batches use the same ordered_all per-row writes."""
     repo, _ = file_async_repo
     inst_a, inst_b = await _seed_sorted_instruments(repo)
     assert (
@@ -2312,15 +2283,9 @@ async def test_upsert_market_snapshots_mixed_shape_uses_ordered_all_path(
         {**_snapshot_row(inst_a, 4, 12.0), "timestamp": _T2},
         {**_snapshot_row(inst_a, 5, 11.0), "timestamp": _T1},
     ]
-    with (
-        patch.object(repo, "_load_existing_snapshots_for_rows", new_callable=AsyncMock) as spy_load,
-        patch.object(repo, "_upsert_unique_snapshot_rows", new_callable=AsyncMock) as spy_bulk,
-        patch.object(repo, "_upsert_snapshot_row", new=_track_warm_order),
-    ):
+    with patch.object(repo, "_upsert_snapshot_row", new=_track_warm_order):
         assert await repo.upsert_market_snapshots(mixed_warm_b_first) == 3
 
-    spy_load.assert_not_awaited()
-    spy_bulk.assert_not_awaited()
     assert warm_order == [(inst_a, _T1), (inst_a, _T2), (inst_b, _T1)]
     assert any(
         isinstance(params, tuple) and inst_a in params and inst_b not in params

@@ -1660,8 +1660,6 @@ blocks every feed publisher's startup for minutes before its WebSocket
 connects. Two days comfortably covers the daily timeframe plus restart slack;
 candles older than the window are closed and never receive further updates, so
 omitting them from the cache cannot create duplicate versions."""
-_SnapshotNaturalKey = str
-_SNAPSHOT_LOOKUP_CHUNK_SIZE = 500
 _OUTBOX_BULK_LOOKUP_CHUNK_SIZE = 200
 _PLAN_CHECKPOINT_LOOKUP_CHUNK_SIZE = 200
 _POSITION_CYCLE_LOOKUP_CHUNK_SIZE = 300
@@ -15896,39 +15894,16 @@ class SQLAlchemyRepository(Repository):
             orig_row["timestamp"] = staged_row["timestamp"]
             orig_row["known_to"] = staged_row["known_to"]
 
-    async def _execute_snapshot_write_phases(
-        self,
-        session: AsyncSession,
-        staged_rows: list[MarketSnapshotUpsertRow],
-        unique_rows: list[MarketSnapshotUpsertRow],
-        sequential_rows: list[MarketSnapshotUpsertRow],
-        existing_by_key: dict[_SnapshotNaturalKey, MarketSnapshot],
-    ) -> int:
-        """Execute bulk snapshot writes for unique batches or globally sorted per-row writes."""
-        if not sequential_rows:
-            return await self._upsert_unique_snapshot_rows(session, unique_rows, existing_by_key)
-        ordered_all = sorted(
-            staged_rows,
-            key=lambda r: (r["instrument_public_id"], r["timestamp"]),
-        )
-        count = 0
-        for r in ordered_all:
-            await self._upsert_snapshot_row(session, r)
-            count += 1
-        return count
-
     async def upsert_market_snapshots(self, rows: list[MarketSnapshotUpsertRow]) -> int:
         """SCD2 close+insert for market snapshots.
 
         One active row per instrument_public_id. Closes the existing active
         snapshot and inserts a new version with the same public_id.
 
-        Unique-key batches pre-lock and bulk-upsert in deterministic key order;
-        batches containing duplicate keys skip the bulk pre-lookup/two-phase
-        path completely and process all rows in one globally sorted
-        ``(instrument_public_id, timestamp)`` order so chunk boundaries or
-        skewed active timestamps can never induce out-of-order locks. Defers
-        caller dict metadata copybacks until after commit.
+        Every batch processes all rows through the SAVEPOINT-protected per-row
+        path in one globally sorted ``(instrument_public_id, timestamp)`` order,
+        preventing batch shape or skewed active timestamps from changing lock
+        order. Defers caller dict metadata copybacks until after commit.
 
         Args:
             rows: Snapshot payloads to persist cleanly in deterministic order.
@@ -15948,141 +15923,15 @@ class SQLAlchemyRepository(Repository):
         staged_rows = [staged_row for _, staged_row in staged_pairs]
         async with self.session() as s:
             await begin_scd2_write(s)
-            unique_rows, sequential_rows = self._split_snapshot_rows_by_duplicate_key(staged_rows)
-            existing_by_key = (
-                {}
-                if sequential_rows
-                else await self._load_existing_snapshots_for_rows(s, unique_rows)
-            )
-            count = await self._execute_snapshot_write_phases(
-                s,
+            ordered_all = sorted(
                 staged_rows,
-                unique_rows,
-                sequential_rows,
-                existing_by_key,
+                key=lambda row: (row["instrument_public_id"], row["timestamp"]),
             )
+            for row in ordered_all:
+                await self._upsert_snapshot_row(s, row)
             await s.commit()
         self._commit_staged_snapshot_metadata(staged_pairs)
-        return count
-
-    @staticmethod
-    def _snapshot_natural_key(row: MarketSnapshotUpsertRow) -> _SnapshotNaturalKey:
-        """Return the SCD2 natural key for a market-snapshot upsert row."""
-        return row["instrument_public_id"]
-
-    @classmethod
-    def _split_snapshot_rows_by_duplicate_key(
-        cls,
-        rows: list[MarketSnapshotUpsertRow],
-    ) -> tuple[list[MarketSnapshotUpsertRow], list[MarketSnapshotUpsertRow]]:
-        """Separate rows safe for batch lookup from duplicate-key rows.
-
-        Rows sharing a natural key in the same incoming batch must keep
-        the sequential close+insert flow because earlier rows can create
-        the version that later rows need to close.
-        """
-        seen: set[_SnapshotNaturalKey] = set()
-        duplicate_keys: set[_SnapshotNaturalKey] = set()
-        for row in rows:
-            key = cls._snapshot_natural_key(row)
-            if key in seen:
-                duplicate_keys.add(key)
-            seen.add(key)
-        if not duplicate_keys:
-            return rows, []
-        unique_rows = [row for row in rows if cls._snapshot_natural_key(row) not in duplicate_keys]
-        sequential_rows = [row for row in rows if cls._snapshot_natural_key(row) in duplicate_keys]
-        return unique_rows, sequential_rows
-
-    @classmethod
-    async def _load_existing_snapshots_for_rows(
-        cls,
-        session: AsyncSession,
-        rows: list[MarketSnapshotUpsertRow],
-    ) -> dict[_SnapshotNaturalKey, MarketSnapshot]:
-        """Load and lock active SCD2 snapshot rows across all keys in deterministic order."""
-        if not rows:
-            return {}
-        rows_by_key: dict[_SnapshotNaturalKey, list[MarketSnapshotUpsertRow]] = {}
-        for row in rows:
-            rows_by_key.setdefault(cls._snapshot_natural_key(row), []).append(row)
-        keys = sorted(rows_by_key)
-        existing_by_key: dict[_SnapshotNaturalKey, MarketSnapshot] = {}
-        for offset in range(0, len(keys), _SNAPSHOT_LOOKUP_CHUNK_SIZE):
-            key_chunk = keys[offset : offset + _SNAPSHOT_LOOKUP_CHUNK_SIZE]
-            chunk_rows = [row for key in key_chunk for row in rows_by_key[key]]
-            min_timestamp = min(row["timestamp"] for row in chunk_rows)
-            max_timestamp = max(row["timestamp"] for row in chunk_rows)
-            result = await session.execute(
-                select(MarketSnapshot)
-                .where(
-                    MarketSnapshot.instrument_public_id.in_(key_chunk),
-                    MarketSnapshot.timestamp <= max_timestamp,
-                    MarketSnapshot.known_to > min_timestamp,
-                )
-                .order_by(MarketSnapshot.instrument_public_id.asc(), MarketSnapshot.id.asc())
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-            for snap in result.scalars().all():
-                key = snap.instrument_public_id
-                key_rows = rows_by_key[key]
-                if len(key_rows) != 1:
-                    continue
-                bus_time = key_rows[0]["timestamp"]
-                if snap.timestamp <= bus_time and snap.known_to > bus_time:
-                    existing_by_key[key] = snap
-        return existing_by_key
-
-    @classmethod
-    async def _upsert_unique_snapshot_rows(
-        cls,
-        session: AsyncSession,
-        rows: list[MarketSnapshotUpsertRow],
-        existing_by_key: dict[_SnapshotNaturalKey, MarketSnapshot],
-    ) -> int:
-        """Close matched snapshot rows and stage inserts inside a SAVEPOINT with per-key fallback."""
-        target_index = _resolve_target_unique_index(
-            MarketSnapshot,
-            "market_snapshots",
-            [MarketSnapshot.instrument_public_id == ""],
-            allow_insert=True,
-        )
-        committed_updates: list[tuple[MarketSnapshotUpsertRow, str, datetime]] = []
-        try:
-            async with session.begin_nested():
-                for row in sorted(rows, key=lambda r: (r["instrument_public_id"], r["timestamp"])):
-                    staged_row = dict(row)
-                    existing = existing_by_key.get(cls._snapshot_natural_key(row))
-                    bus_time = row["timestamp"]
-                    staged_public_id = row["public_id"]
-                    if existing is not None:
-                        bus_time = _validate_existing_for_write(
-                            "market_snapshots",
-                            existing,
-                            bus_time,
-                            allow_insert=True,
-                        )
-                        await session.execute(
-                            update(MarketSnapshot)
-                            .where(MarketSnapshot.id == existing.id)
-                            .values(known_to=bus_time)
-                        )
-                        staged_public_id = existing.public_id
-                        staged_row["public_id"] = staged_public_id
-                    staged_row["timestamp"] = bus_time
-                    session.add(MarketSnapshot(**staged_row))
-                    committed_updates.append((row, staged_public_id, bus_time))
-                await session.flush()
-            for row, public_id, bus_time in committed_updates:
-                row["public_id"] = public_id
-                row["timestamp"] = bus_time
-        except IntegrityError as exc:
-            if not _is_retryable_scd2_conflict(exc, "market_snapshots", target_index):
-                raise
-            for row in sorted(rows, key=lambda r: (r["instrument_public_id"], r["timestamp"])):
-                await cls._upsert_snapshot_row(session, row)
-        return len(rows)
+        return len(ordered_all)
 
     @classmethod
     async def _upsert_snapshot_row(

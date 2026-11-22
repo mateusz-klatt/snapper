@@ -1211,14 +1211,14 @@ async def test_upsert_market_snapshots_empty_returns_zero() -> None:
 async def test_upsert_market_snapshots_inserts_new_row() -> None:
     """Insert new market snapshot when no existing active row.
 
-    Given: Session returning no existing row from bulk lookup,
+    Given: Session returning no existing row from the per-row lookup,
     When: upsert_market_snapshots is called,
     Then: New row is added and count is 1.
     """
     added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
 
     session = _DummyAsyncSession()
     session.execute = _execute
@@ -1246,7 +1246,7 @@ async def test_upsert_market_snapshots_inserts_new_row() -> None:
 async def test_upsert_market_snapshots_closes_and_replaces() -> None:
     """Close existing active snapshot and insert new version.
 
-    Given: Bulk lookup returns an existing active row for the same instrument,
+    Given: Per-row lookup returns an existing active row for the same instrument,
     When: upsert_market_snapshots is called,
     Then: Existing row is closed (UPDATE executed), public_id is preserved, new row added.
     """
@@ -1265,7 +1265,7 @@ async def test_upsert_market_snapshots_closes_and_replaces() -> None:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [existing]))
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: existing))
         return SimpleNamespace(rowcount=1)
 
     session = _DummyAsyncSession()
@@ -1300,7 +1300,7 @@ async def test_upsert_market_snapshots_generates_defaults() -> None:
     added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
 
     session = _DummyAsyncSession()
     session.execute = _execute
@@ -1336,7 +1336,7 @@ async def test_upsert_market_snapshots_preserves_supplied_keys() -> None:
     added_objects: list[Any] = []
 
     async def _execute(stmt: Any) -> Any:
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
 
     session = _DummyAsyncSession()
     session.execute = _execute
@@ -6296,24 +6296,10 @@ async def test_bulk_dispatch_trade_commands_clamps_stale_clock_spec(
 
 
 @pytest.mark.asyncio
-async def test_load_existing_snapshots_skips_row_outside_per_spec_bus_time(
+async def test_upsert_market_snapshots_all_unique_stale_row_recovers_active_version(
     tmp_path: Path,
 ) -> None:
-    """``_load_existing_snapshots_for_rows`` SCD2 per-row guard skips stale rows.
-
-    Given: A pre-existing active snapshot at ``t_mid`` for ``inst_X`` and a
-        mixed upsert batch — one row for ``inst_X`` at ``t_small`` (stale,
-        before ``t_mid``) and one row for ``inst_Y`` at ``t_large``
-        (after ``t_mid``),
-    When: ``_load_existing_snapshots_for_rows`` runs against the active
-        session, the SELECT's aggregate ``[min(t_small), max(t_large)]``
-        bounds catch the existing ``inst_X`` row,
-    Then: The per-row check ``snap.timestamp <= bus_time`` is False for
-        the ``inst_X`` spec (``t_mid > t_small``), covering the False
-        branch at the per-row guard, and the returned mapping omits
-        ``inst_X`` — the bulk path therefore never attempts an SCD2 close
-        for the stale spec.
-    """
+    """An all-unique batch clamps a stale row against the locked active version."""
     db_path = tmp_path / "snapshot_per_row_guard.db"
     r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await r.create_all()
@@ -6336,32 +6322,45 @@ async def test_load_existing_snapshots_skips_row_outside_per_spec_bus_time(
     assert seeded == 1
     t_small = t_mid - timedelta(seconds=5)
     t_large = t_mid + timedelta(seconds=5)
+    written = await r.upsert_market_snapshots(
+        [
+            {
+                "instrument_public_id": inst_x,
+                "bid": 200.0,
+                "ask": 201.0,
+                "last_price": 200.5,
+                "timestamp": t_small,
+                "session_id": "s1",
+                "sequence_id": 2,
+            },
+            {
+                "instrument_public_id": inst_y,
+                "bid": 300.0,
+                "ask": 301.0,
+                "last_price": 300.5,
+                "timestamp": t_large,
+                "session_id": "s1",
+                "sequence_id": 3,
+            },
+        ]
+    )
+    assert written == 2
     async with r.session() as session:
-        existing = await type(r)._load_existing_snapshots_for_rows(
-            session,
-            [
-                {
-                    "instrument_public_id": inst_x,
-                    "bid": 200.0,
-                    "ask": 201.0,
-                    "last_price": 200.5,
-                    "timestamp": t_small,
-                    "session_id": "s1",
-                    "sequence_id": 2,
-                },
-                {
-                    "instrument_public_id": inst_y,
-                    "bid": 300.0,
-                    "ask": 301.0,
-                    "last_price": 300.5,
-                    "timestamp": t_large,
-                    "session_id": "s1",
-                    "sequence_id": 3,
-                },
-            ],
-        )
-    assert inst_x not in existing
-    assert inst_y not in existing
+        active = (
+            await session.scalars(
+                _sa_select(MarketSnapshot)
+                .where(
+                    MarketSnapshot.instrument_public_id.in_([inst_x, inst_y]),
+                    MarketSnapshot.known_to == KNOWN_TO_MAX,
+                )
+                .order_by(MarketSnapshot.instrument_public_id)
+            )
+        ).all()
+    assert [(row.instrument_public_id, row.timestamp) for row in active] == [
+        (inst_x, t_mid),
+        (inst_y, t_large),
+    ]
+    assert [row.bid for row in active] == [200.0, 300.0]
 
 
 @pytest.mark.asyncio
