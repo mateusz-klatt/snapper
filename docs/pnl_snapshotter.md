@@ -387,16 +387,17 @@ Keep the password out of the URL, argv and the environment: asyncpg reads it
 from `~/.pgpass` (or the file named by `PGPASSFILE`, mode `0600`) when the
 DSN carries none, and the `.pgpass` host field must match the DSN host.
 
-`snapper_ro` is LAN-only by `pg_hba` design: it may connect from the LAN
-(`192.168.5.0/24`) but never from a container on the Docker bridge, which is
-reserved for the application role. Run the probe either from a LAN host's
-virtualenv or from a one-off container on the host network:
+`snapper_ro` may connect from the database host's loopback (`127.0.0.1`) or
+the LAN (`192.168.5.0/24`) but never from a container on the Docker bridge,
+which is reserved for the application role. Run the probe either from a LAN
+host's virtualenv or from a one-off container on the host network, where
+`<db-host>` defaults to `127.0.0.1`:
 
 ```bash
 docker run --rm --network host --user "$(id -u)" \
     -v ~/.pgpass:/run/secrets/pgpass:ro \
     -e PGPASSFILE=/run/secrets/pgpass \
-    -e PNL_PROBE_DB_URL='postgresql+asyncpg://snapper_ro@<lan-db-host>:5432/<database>' \
+    -e PNL_PROBE_DB_URL='postgresql+asyncpg://snapper_ro@<db-host>:5432/<database>' \
     <image> python scripts/pnl_checkpoint_resume_probe.py \
     --wallet <WALLET_PUBLIC_ID> --mode live --valuation-ccy USD --window-minutes 60
 ```
@@ -406,7 +407,7 @@ The same run from a LAN host's virtualenv uses `--db-url` instead:
 ```bash
 PYTHONPATH=src python scripts/pnl_checkpoint_resume_probe.py \
     --wallet <WALLET_PUBLIC_ID> --mode live --valuation-ccy USD --window-minutes 60 \
-    --db-url 'postgresql+asyncpg://snapper_ro@<lan-db-host>:5432/<database>'
+    --db-url 'postgresql+asyncpg://snapper_ro@<db-host>:5432/<database>'
 ```
 
 Exit codes:
