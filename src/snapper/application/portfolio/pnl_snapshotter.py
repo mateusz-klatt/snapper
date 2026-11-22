@@ -59,6 +59,23 @@ from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shado
 from snapper.application.portfolio.pnl_correction_planner import PlannedPnlCorrection
 from snapper.application.portfolio.pnl_correction_planner import PnlCorrectionPlanInputs
 from snapper.application.portfolio.pnl_correction_planner import plan_correction_chunk
+from snapper.application.portfolio.pnl_opening_checkpoint_capture import PnlCheckpointCaptureRequest
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
+    record_checkpoint_capture_committed,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
+    record_checkpoint_resume_attempted,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
+    record_checkpoint_resume_succeeded,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
+    record_checkpoint_shadow_comparison,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
+    record_checkpoint_shadow_mismatch,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointResume
 from snapper.application.portfolio.pnl_snapshot_planner import FINALIZATION_LAG
 from snapper.application.portfolio.pnl_snapshot_planner import SELF_HEAL_LOOKBACK
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
@@ -69,6 +86,15 @@ from snapper.application.portfolio.pnl_snapshot_planner import SelfHealCandidate
 from snapper.application.portfolio.pnl_snapshot_planner import WithheldMinute
 from snapper.application.portfolio.pnl_snapshot_planner import plan_late_fill_recompute
 from snapper.application.portfolio.pnl_snapshot_planner import plan_self_heal_minutes
+from snapper.application.portfolio.pnl_snapshotter_checkpoint import PnlCheckpointResumeRequest
+from snapper.application.portfolio.pnl_snapshotter_checkpoint import capture_request_for
+from snapper.application.portfolio.pnl_snapshotter_checkpoint import certified_checkpoint_write
+from snapper.application.portfolio.pnl_snapshotter_checkpoint import delete_checkpoint
+from snapper.application.portfolio.pnl_snapshotter_checkpoint import handle_resume_fallback
+from snapper.application.portfolio.pnl_snapshotter_checkpoint import prepare_checkpoint_resume
+from snapper.application.portfolio.pnl_snapshotter_checkpoint_shadow import (
+    compare_checkpoint_shadow,
+)
 from snapper.application.portfolio.pnl_snapshotter_config import CHECKPOINT_MODE_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import ENABLED_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import FX_SHADOW_PINNING_ENV_VAR
@@ -242,6 +268,28 @@ class _ScopeContext:
     t0: datetime
     expected_venues: frozenset[str]
     as_of: datetime
+    anchor: PortfolioPnlAnchorRow
+
+
+@dataclass(frozen=True, slots=True)
+class _CheckpointReplayOptions:
+    """Optional capture and verified resume inputs for one replay attempt."""
+
+    capture: PnlCheckpointCaptureRequest | None = None
+    resume: PnlCheckpointResume | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _CheckpointDispatchRequest:
+    """Complete immutable state for one non-off replay dispatch."""
+
+    repo: Repository
+    ctx: _ScopeContext
+    frontier: PnlCorrectionFrontier
+    chunk: ChunkWindow
+    started: float
+    capture: PnlCheckpointCaptureRequest | None
+    resume: PnlCheckpointResume | None
 
 
 class PortfolioPnlSnapshotter:
@@ -634,6 +682,7 @@ class PortfolioPnlSnapshotter:
             t0=t0,
             expected_venues=expected_venues,
             as_of=as_of,
+            anchor=anchor,
         )
 
     def _log_once(self, seen: set[str], wallet: str, detail: str, *, reason: str) -> None:
@@ -999,6 +1048,15 @@ class PortfolioPnlSnapshotter:
         frozen = replace(ctx, as_of=frontier.as_of, expected_venues=venues)
         started = self._monotonic()
         try:
+            if self._checkpoint_mode != "off":
+                await self._advance_checkpoint(
+                    repo,
+                    frozen,
+                    frontier,
+                    ChunkWindow(start, end),
+                    started,
+                )
+                return
             chunk, result = await self._replay_series(
                 repo, frozen, ChunkWindow(start, end), frontier
             )
@@ -1019,14 +1077,172 @@ class PortfolioPnlSnapshotter:
         self._log_repair_from_lag(ctx, committed)
         self._report_withheld(ctx.wallet_public_id, plan.withheld, bool(plan.chunk.edits))
 
+    async def _advance_checkpoint(
+        self,
+        repo: Repository,
+        ctx: _ScopeContext,
+        frontier: PnlCorrectionFrontier,
+        chunk: ChunkWindow,
+        started: float,
+    ) -> None:
+        """Dispatch one non-off chunk through capture, shadow, or active resume."""
+        decision = await prepare_checkpoint_resume(
+            PnlCheckpointResumeRequest(
+                repo,
+                ctx.scope,
+                ctx.anchor,
+                frontier,
+                chunk.start,
+                self._checkpoint_mode,
+            )
+        )
+        resume = decision.resume
+        capture = (
+            capture_request_for(frontier, ctx.scope, ctx.anchor, chunk.end)
+            if decision.recapture is not None
+            else None
+        )
+        request = _CheckpointDispatchRequest(repo, ctx, frontier, chunk, started, capture, resume)
+        if self._checkpoint_mode == "shadow" and resume is not None:
+            await self._advance_shadow(request)
+            return
+        await self._advance_active(request)
+
+    async def _advance_active(self, request: _CheckpointDispatchRequest) -> None:
+        """Commit a resumed plan, or an anchor plan after a soft resume fallback."""
+        repo, ctx, frontier = request.repo, request.ctx, request.frontier
+        capture, resume = request.capture, request.resume
+        if resume is not None:
+            record_checkpoint_resume_attempted()
+        chunk, result = await self._replay_series(
+            repo,
+            ctx,
+            request.chunk,
+            frontier,
+            _CheckpointReplayOptions(capture if resume is None else None, resume),
+        )
+        fallback = result.checkpoint_resume_fallback
+        if resume is not None and fallback is not None:
+            await handle_resume_fallback(repo, ctx.scope, frontier, resume, fallback)
+            recapture = capture or capture_request_for(frontier, ctx.scope, ctx.anchor, chunk.end)
+            chunk, result = await self._replay_series(
+                repo,
+                ctx,
+                chunk,
+                frontier,
+                _CheckpointReplayOptions(capture=recapture),
+            )
+        elif resume is not None:
+            record_checkpoint_resume_succeeded()
+        await self._plan_and_commit_checkpoint(request, chunk, result)
+
+    async def _advance_shadow(self, request: _CheckpointDispatchRequest) -> None:
+        """Compare both plans, retire divergence before capture, and commit the anchor."""
+        repo, ctx, frontier = request.repo, request.ctx, request.frontier
+        resume = request.resume
+        assert resume is not None
+        anchor_chunk, anchor = await self._replay_series(repo, ctx, request.chunk, frontier)
+        record_checkpoint_resume_attempted()
+        with activate_fx_shadow_context(None):
+            _, resumed = await self._replay_series(
+                repo,
+                ctx,
+                request.chunk,
+                frontier,
+                _CheckpointReplayOptions(resume=resume),
+            )
+        fallback = resumed.checkpoint_resume_fallback
+        if fallback is not None:
+            await handle_resume_fallback(repo, ctx.scope, frontier, resume, fallback)
+        else:
+            record_checkpoint_resume_succeeded()
+        evidence = await repo.get_portfolio_pnl_correction_evidence(
+            ctx.scope, anchor_chunk.start, anchor_chunk.end
+        )
+        if evidence.prior_peak != frontier.prior_peak:
+            await self._rewind_replay(repo, ctx, frontier)
+            return
+        anchor_plan = await self._plan_chunk(repo, ctx, anchor, evidence)
+        if fallback is None:
+            resumed_plan = await self._plan_chunk(repo, ctx, resumed, evidence)
+            mismatch = compare_checkpoint_shadow(anchor, anchor_plan, resumed, resumed_plan)
+            record_checkpoint_shadow_comparison()
+            if mismatch is not None:
+                record_checkpoint_shadow_mismatch()
+                await delete_checkpoint(repo, ctx.scope, resume.record)
+                logger.error(
+                    "checkpoint_shadow_mismatch wallet=%s generation=%s point=%s field=%s",
+                    ctx.wallet_public_id,
+                    resume.record.certificate.source_generation,
+                    mismatch.point_time,
+                    mismatch.field,
+                    extra={
+                        "checkpoint_shadow_mismatch": True,
+                        "point_time": mismatch.point_time,
+                        "field": mismatch.field,
+                    },
+                )
+        capture_result = anchor
+        if fallback is not None:
+            recapture = capture_request_for(frontier, ctx.scope, ctx.anchor, anchor_chunk.end)
+            _, capture_result = await self._replay_series(
+                repo,
+                ctx,
+                anchor_chunk,
+                frontier,
+                _CheckpointReplayOptions(capture=recapture),
+            )
+        await self._commit_checkpoint_plan(request, anchor_chunk, capture_result, anchor_plan)
+
+    async def _plan_and_commit_checkpoint(
+        self,
+        request: _CheckpointDispatchRequest,
+        chunk: ChunkWindow,
+        result: PnlWalletSeriesResult,
+    ) -> None:
+        """Plan a selected checkpoint-mode replay against exact physical evidence."""
+        repo, ctx, frontier = request.repo, request.ctx, request.frontier
+        evidence = await repo.get_portfolio_pnl_correction_evidence(
+            ctx.scope, chunk.start, chunk.end
+        )
+        if evidence.prior_peak != frontier.prior_peak:
+            await self._rewind_replay(repo, ctx, frontier)
+            return
+        plan = await self._plan_chunk(repo, ctx, result, evidence)
+        await self._commit_checkpoint_plan(request, chunk, result, plan)
+
+    async def _commit_checkpoint_plan(
+        self,
+        request: _CheckpointDispatchRequest,
+        chunk: ChunkWindow,
+        result: PnlWalletSeriesResult,
+        plan: PlannedPnlCorrection,
+    ) -> None:
+        """Commit the selected plan with only a pre-certified checkpoint write."""
+        repo, ctx, frontier = request.repo, request.ctx, request.frontier
+        write = certified_checkpoint_write(frontier, ctx.scope, plan, result)
+        committed = await repo.commit_portfolio_pnl_correction_chunk(
+            ctx.scope,
+            frontier,
+            plan.chunk,
+            checkpoint=write,
+        )
+        if write is not None:
+            record_checkpoint_capture_committed()
+        self._record_chunk_outcome(ctx.wallet_public_id, self._monotonic() - request.started, chunk)
+        self._log_repair_from_lag(ctx, committed)
+        self._report_withheld(ctx.wallet_public_id, plan.withheld, bool(plan.chunk.edits))
+
     async def _replay_series(
         self,
         repo: Repository,
         ctx: _ScopeContext,
         chunk: ChunkWindow,
         frontier: PnlCorrectionFrontier,
+        checkpoint: _CheckpointReplayOptions | None = None,
     ) -> tuple[ChunkWindow, PnlWalletSeriesResult]:
         """Subdivide work-budget overflow without scheduling another successful chunk."""
+        checkpoint = checkpoint or _CheckpointReplayOptions()
         venue_watermarks, witness_digest = (
             frontier.venue_event_watermarks,
             frontier.fill_witness_digest,
@@ -1046,6 +1262,8 @@ class PortfolioPnlSnapshotter:
                 "digest": witness_digest,
             },
             replay_generation_tip=frontier.tip,
+            checkpoint_capture=checkpoint.capture,
+            checkpoint_resume=checkpoint.resume,
         )
         while True:
             try:
