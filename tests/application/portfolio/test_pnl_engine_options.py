@@ -145,16 +145,15 @@ def test_pnl_engine_options_for_5c5_returns_expected_flags() -> None:
 
 
 def test_pnl_engine_options_for_5c6_returns_expected_flags() -> None:
-    """Resolve ``"5C.6"`` with capture disabled and valuation completeness flags enabled.
+    """Resolve ``"5C.6"`` with capture permitted and valuation completeness flags enabled.
 
-    Given: The ``"5C.6"`` calculation version with checkpoint capture disabled until
-        resume equivalence is proved.
+    Given: The ``"5C.6"`` calculation version with checkpoint capture permitted.
     When: ``pnl_engine_options_for("5C.6")`` is called.
-    Then: It returns ``PnlEngineOptions(capture_permitted=False,
+    Then: It returns ``PnlEngineOptions(capture_permitted=True,
         compensated_unrealized_fallback=True, request_all_conversion_minutes=True)``.
     """
     assert pnl_engine_options_for("5C.6") == PnlEngineOptions(
-        capture_permitted=False,
+        capture_permitted=True,
         compensated_unrealized_fallback=True,
         request_all_conversion_minutes=True,
     )
@@ -194,9 +193,9 @@ def test_pnl_engine_options_table_seam_supports_monkeypatching(
     Then: The synthetic entry is returned and unregistered versions still raise ``ValueError``.
     """
     candidate = PnlEngineOptions(
-        capture_permitted=True,
+        capture_permitted=False,
         compensated_unrealized_fallback=True,
-        request_all_conversion_minutes=True,
+        request_all_conversion_minutes=False,
     )
     monkeypatch.setattr(
         pnl_engine_options,

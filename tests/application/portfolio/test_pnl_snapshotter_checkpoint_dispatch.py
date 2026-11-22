@@ -64,6 +64,24 @@ def _enable_checkpoint_modes(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _restrict_checkpoint_modes_to_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Narrow code-enabled checkpoint modes to ``off`` when testing the kill switch."""
+    monkeypatch.setattr(
+        pnl_snapshotter_config,
+        "CHECKPOINT_MODES_ENABLED",
+        frozenset({"off"}),
+    )
+
+
+def _disallow_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disallow checkpoint capture for the production calc version under test."""
+    monkeypatch.setattr(
+        pnl_engine_options,
+        "_engine_options_table",
+        lambda: {PNL_SAMPLE_CALC_VERSION: PnlEngineOptions(False, True, True)},
+    )
+
+
 def _pending(repo: fixtures._FakeRepo) -> PnlCorrectionFrontier:
     """Return a clean one-minute settling generation."""
     repo.seed_completed_replay(fixtures._minute(2))
@@ -184,23 +202,24 @@ def _install_replay(
 
 @pytest.mark.parametrize("mode", ["off", "shadow", "active"])
 @pytest.mark.parametrize("capture_permitted", [False, True])
-async def test_off_and_production_modes_never_read_a_checkpoint(
+async def test_off_and_kill_switch_modes_never_read_a_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
     capture_permitted: bool,
 ) -> None:
-    """Keep off query-free and production shadow/active inert regardless of capture permission.
+    """Keep off query-free and kill-switch shadow/active inert regardless of capture permission.
 
-    Given: A clean settling chunk with capture either disallowed or permitted.
-    When: Off runs (or shadow/active runs under the default kill switch -> effective off).
-    Then: No checkpoint read or capture dispatch ever occurs when effective mode is ``off``,
+    Given: A clean settling chunk with capture either disallowed or unpatched-permitted.
+    When: Off runs, or shadow/active runs under a narrowed kill switch, or unpatched
+        shadow/active runs with capture disallowed via engine options.
+    Then: No checkpoint read or capture write ever occurs when effective mode is ``off``,
         while enabled non-off modes with ``capture_permitted=False`` count permission refusal.
     """
     reset_checkpoint_metrics()
-    if capture_permitted:
-        _permit_capture(monkeypatch)
-    if mode != "off" and not capture_permitted:
-        _enable_checkpoint_modes(monkeypatch)
+    if not capture_permitted:
+        _disallow_capture(monkeypatch)
+    if mode != "off" and capture_permitted:
+        _restrict_checkpoint_modes_to_off(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", mode)
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -375,7 +394,6 @@ async def test_shadow_match_keeps_anchor_plan_without_capture(
     Then: No deletion or capture occurs, comparison counters advance, and a row remains.
     """
     reset_checkpoint_metrics()
-    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -405,7 +423,6 @@ async def test_shadow_mismatch_deletes_row_and_logs_error(
     Then: Fenced deletion occurs, no row survives, and ERROR is logged.
     """
     reset_checkpoint_metrics()
-    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     repo = fixtures._FakeRepo()
     frontier = _pending(repo)
@@ -551,7 +568,6 @@ async def test_shadow_without_tip_capture_still_commits_matching_anchor(
     Then: Only those two paths run and the anchor plan commits.
     """
     reset_checkpoint_metrics()
-    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     repo = fixtures._FakeRepo()
     frontier = replace(_pending(repo), tip=fixtures._minute(4))
@@ -652,7 +668,6 @@ async def test_periodic_summary_emits_every_n_ticks_and_separates_scopes(
     Then: Ticks 1..N-1 emit nothing, tick N emits one cumulative line per scope, and scopes stay isolated.
     """
     reset_checkpoint_metrics()
-    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     wallet_a = "wallet-alpha"
     wallet_b = "wallet-beta"
@@ -704,30 +719,34 @@ async def test_periodic_summary_emits_every_n_ticks_and_separates_scopes(
             "checkpoint_metrics_summary "
             f"wallet={alias_a} mode=live ccy=USD "
             "captures_committed=0 "
-            "capture_refusals={capture_not_permitted:1} "
+            "capture_refusals={} "
             "resumes_attempted=0 resumes_succeeded=0 "
-            "fallbacks={} invalidations_deleted=0 "
+            "fallbacks={checkpoint_absent:1} invalidations_deleted=0 "
             "shadow_comparisons=0 shadow_mismatches=0 "
-            "shadow_skipped={} recaptures={}"
+            "shadow_skipped={} recaptures={absent:1}"
         ),
         (
             "checkpoint_metrics_summary "
             f"wallet={alias_b} mode=live ccy=USD "
             "captures_committed=0 "
-            "capture_refusals={capture_not_permitted:1} "
+            "capture_refusals={} "
             "resumes_attempted=0 resumes_succeeded=0 "
-            "fallbacks={} invalidations_deleted=0 "
+            "fallbacks={checkpoint_absent:1} invalidations_deleted=0 "
             "shadow_comparisons=0 shadow_mismatches=0 "
-            "shadow_skipped={} recaptures={}"
+            "shadow_skipped={} recaptures={absent:1}"
         ),
     }
     assert set(lines) == expected_lines
     assert wallet_a not in "\n".join(lines)
     assert wallet_b not in "\n".join(lines)
     by_scope = checkpoint_metrics_by_scope()
-    assert by_scope[(alias_a, "live", "USD")].capture_refusals == {"capture_not_permitted": 1}
-    assert by_scope[(alias_b, "live", "USD")].capture_refusals == {"capture_not_permitted": 1}
-    assert checkpoint_metrics().capture_refusals == {"capture_not_permitted": 2}
+    assert by_scope[(alias_a, "live", "USD")].fallbacks == {"checkpoint_absent": 1}
+    assert by_scope[(alias_b, "live", "USD")].fallbacks == {"checkpoint_absent": 1}
+    assert by_scope[(alias_a, "live", "USD")].recaptures == {"absent": 1}
+    assert by_scope[(alias_b, "live", "USD")].recaptures == {"absent": 1}
+    assert checkpoint_metrics().capture_refusals == {}
+    assert checkpoint_metrics().fallbacks == {"checkpoint_absent": 2}
+    assert checkpoint_metrics().recaptures == {"absent": 2}
 
 
 async def test_off_mode_emits_no_summary_lines_or_per_scope_accounting(
@@ -806,7 +825,6 @@ async def test_two_scopes_count_commits_and_resumes_independently(
     Then: Each scope carries only its own counts, summaries reflect both, and totals sum them.
     """
     reset_checkpoint_metrics()
-    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     _permit_capture(monkeypatch)
     repo = fixtures._FakeRepo()
@@ -1078,7 +1096,6 @@ async def test_shadow_planning_is_side_effect_free_on_sequence_and_cursor(
     await off_snap._tick_once()
 
     reset_checkpoint_metrics()
-    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     shadow_repo = fixtures._FakeRepo(
         credentials=[fixtures._cred("kraken")],
@@ -1130,7 +1147,6 @@ async def test_shadow_dispatch_skips_window_mismatch_without_false_divergence(
         stored checkpoint survives without deletion.
     """
     reset_checkpoint_metrics()
-    _enable_checkpoint_modes(monkeypatch)
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
     repo = fixtures._FakeRepo()
     frontier = replace(_pending(repo), tip=fixtures._minute(4))

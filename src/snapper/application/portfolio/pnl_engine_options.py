@@ -1,9 +1,9 @@
 """Single-producer resolver for P&L engine valuation and checkpoint options.
 
-No registered calculation version currently permits opening-checkpoint capture.
-``5C.6`` enables compensated unrealized fallback valuation and all-conversion-minutes
-requests while keeping checkpoint capture disabled until a dedicated capture-enable
-change proves resume equivalence.
+``5C.6`` permits opening-checkpoint capture alongside compensated unrealized
+fallback valuation and all-conversion-minutes requests; capture still runs only
+when the caller sets ``checkpoint_capture`` and uses the pointwise, no-carry
+read profile. ``5C.5`` disables all three options.
 """
 
 from collections.abc import Mapping
@@ -38,7 +38,7 @@ _ENGINE_OPTIONS_BY_CALC_VERSION: Final[Mapping[str, PnlEngineOptions]] = Mapping
     {
         "5C.5": PNL_ENGINE_OPTIONS_OFF,
         "5C.6": PnlEngineOptions(
-            capture_permitted=False,
+            capture_permitted=True,
             compensated_unrealized_fallback=True,
             request_all_conversion_minutes=True,
         ),
@@ -56,10 +56,9 @@ def pnl_engine_options_for(calc_version: str) -> PnlEngineOptions:
     """Return engine valuation options for ``calc_version``.
 
     This function is the only producer of engine valuation options in the
-    codebase. No registered version currently permits checkpoint capture: ``5C.6``
-    enables the compensated unrealized fallback and the all-conversion-minutes
-    request, while capture stays disabled until a dedicated capture-enable
-    change proves resume equivalence. ``5C.5`` disables all three flags.
+    codebase. ``5C.6`` permits opening-checkpoint capture and enables both the
+    compensated unrealized fallback and the all-conversion-minutes request.
+    ``5C.5`` disables all three flags.
 
     Args:
         calc_version: Target P&L calculation version string.

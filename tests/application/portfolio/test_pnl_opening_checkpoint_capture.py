@@ -787,18 +787,17 @@ async def test_pre_5c6_conversion_minute_gap_becomes_capture_refusal(
     assert result.checkpoint_capture_refusal == "conversion_uses_mark_evidence"
 
 
-async def test_5c6_capture_is_not_permitted_under_unpatched_resolver() -> None:
-    """Refuse 5C.6 capture under the unpatched resolver.
+async def test_5c6_capture_is_permitted_under_unpatched_resolver() -> None:
+    """Permit 5C.6 capture under the unpatched resolver when pointwise exact FX is active.
 
-    Given: The unpatched engine-options resolver and a 5C.6 capture request.
+    Given: The unpatched engine-options resolver and a 5C.6 settling capture request.
     When: ``build_wallet_pnl_series`` evaluates the settling window.
-    Then: It produces ``checkpoint_write is None`` and
-        ``checkpoint_capture_refusal == "capture_not_permitted"``.
+    Then: It produces a certified ``checkpoint_write`` with ``checkpoint_capture_refusal is None``.
     """
     assert fixtures.PNL_SAMPLE_CALC_VERSION == "5C.6"
     result = await _build(_CaptureRepo(), _request(fixtures.PNL_SAMPLE_CALC_VERSION))
-    assert result.checkpoint_write is None
-    assert result.checkpoint_capture_refusal == "capture_not_permitted"
+    assert result.checkpoint_write is not None
+    assert result.checkpoint_capture_refusal is None
 
 
 @pytest.mark.parametrize(("pointwise_exact_fx", "carry_valuation"), [(False, False), (True, True)])

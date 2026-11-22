@@ -179,8 +179,8 @@ class TestStartHelper:
         "case",
         [
             (None, None, 60, "off", "off"),
-            ("30", "shadow", 30, "off", "shadow"),
-            ("120", "active", 120, "off", "active"),
+            ("30", "shadow", 30, "shadow", "shadow"),
+            ("120", "active", 120, "active", "active"),
         ],
     )
     @pytest.mark.asyncio
@@ -235,21 +235,21 @@ class TestStartHelper:
         )
 
     @pytest.mark.asyncio
-    async def test_startup_logs_widened_effective_and_configured_checkpoint_mode(
+    async def test_startup_logs_kill_switch_effective_and_configured_checkpoint_mode(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Log matching effective and configured modes when enabled in config.
+        """Log downgraded effective mode when ``CHECKPOINT_MODES_ENABLED`` restricts config.
 
-        Given: ``CHECKPOINT_MODES_ENABLED`` widened to permit ``shadow``.
+        Given: ``CHECKPOINT_MODES_ENABLED`` narrowed to ``{"off"}``.
         When: ``_start_pnl_snapshotter`` starts with ``PNL_SNAPSHOTTER_CHECKPOINT_MODE=shadow``.
-        Then: The INFO line reports both ``checkpoint_mode=shadow`` and ``configured_checkpoint_mode=shadow``.
+        Then: The INFO line reports ``checkpoint_mode=off`` and ``configured_checkpoint_mode=shadow``.
         """
         monkeypatch.setattr(
             pnl_snapshotter_config,
             "CHECKPOINT_MODES_ENABLED",
-            frozenset({"off", "shadow", "active"}),
+            frozenset({"off"}),
         )
         monkeypatch.setattr("snapper.server.app.get_repository", lambda _url: SimpleNamespace())
         monkeypatch.setattr(PortfolioPnlSnapshotter, "start", AsyncMock())
@@ -271,7 +271,7 @@ class TestStartHelper:
 
         expected = (
             "PortfolioPnlSnapshotter started: interval=45s "
-            "checkpoint_mode=shadow configured_checkpoint_mode=shadow"
+            "checkpoint_mode=off configured_checkpoint_mode=shadow"
         )
         assert any(
             record.levelname == "INFO" and record.getMessage() == expected

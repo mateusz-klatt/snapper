@@ -23,12 +23,13 @@ FX_SHADOW_PINNING_ENV_VAR: Final[str] = "PNL_FX_SHADOW_PINNING_ENABLED"
 CHECKPOINT_MODE_ENV_VAR: Final[str] = "PNL_SNAPSHOTTER_CHECKPOINT_MODE"
 type CheckpointMode = Literal["off", "shadow", "active"]
 DEFAULT_CHECKPOINT_MODE: Final[CheckpointMode] = "off"
-CHECKPOINT_MODES_ENABLED: Final[frozenset[str]] = frozenset({"off"})
+CHECKPOINT_MODES_ENABLED: Final[frozenset[str]] = frozenset({"off", "shadow", "active"})
 """Opening-checkpoint modes currently enabled in code.
 
-``shadow`` and ``active`` remain disabled until checkpoint capture and shadow
-equivalence paths are sound; any parsed mode outside this set resolves to
-``"off"`` with one process-wide warning.
+``off`` remains the default when ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` is unset;
+``shadow`` and ``active`` are enabled for configuration-gated rollout. Any
+parsed mode outside this set resolves to ``"off"`` with one process-wide
+warning.
 """
 _TRUTHY_ENV_VALUES: Final[frozenset[str]] = frozenset({"1", "true", "yes"})
 ENV_VARS: Final[frozenset[str]] = frozenset(

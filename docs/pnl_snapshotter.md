@@ -324,16 +324,40 @@ opening-checkpoint behavior (`off` by default, or `shadow`, or `active`):
 
 Migration `0071` adds the `portfolio_pnl_opening_checkpoints` sidecar table
 keyed by `(wallet_public_id, mode, valuation_ccy, epoch_public_id, calc_version)`
-without changing existing financial sample rows or altering `candles`. Leaving
-`PNL_SNAPSHOTTER_CHECKPOINT_MODE` at its default `off` preserves existing
-anchor-replay behavior. `shadow` and `active` are currently disabled in code
-(`CHECKPOINT_MODES_ENABLED = frozenset({"off"})` in
-`pnl_snapshotter_config.py`) and resolve to an effective mode of `off`, logging
-a once-per-process warning naming both the configured and effective modes until
-checkpoint capture is enabled; startup info logs both `checkpoint_mode` and
-`configured_checkpoint_mode`. Consequently, the snapshotter performs no
-checkpoint reads, resumes, shadow comparisons, or captures and plans once per
-chunk even when `shadow` or `active` is configured. However,
-correction-invalidation deletes during frontier writes still run even when the
-effective checkpoint mode is `off`, retiring any previously persisted opening
-checkpoint whose generation or window is invalidated by a rewrite.
+without changing existing financial sample rows or altering `candles`. Both
+`CHECKPOINT_MODES_ENABLED = frozenset({"off", "shadow", "active"})` in
+`pnl_snapshotter_config.py` and `capture_permitted=True` for `5C.6` in
+`pnl_engine_options.py` are now enabled in code; startup info logs both
+`checkpoint_mode` and `configured_checkpoint_mode`.
+
+Mode semantics:
+
+- `off` (default when unset): preserves pure cold anchor replay with zero
+    checkpoint reads, captures, resumes, or shadow comparisons, and plans once
+    per chunk.
+- `shadow`: replays cold from anchor to persist authoritative chunks and
+    captures checkpoints at settling tips (on the pointwise, no-carry `5C.6`
+    read profile), while also replaying verified checkpoints on later suffix
+    ticks to compare outputs against anchor replay without altering persisted
+    samples.
+- `active`: captures opening checkpoints at clean settling tips and resumes
+    subsequent suffix chunks directly from verified checkpoints without
+    prefix execution reads, falling back to anchor replay (and bounded
+    recapture when needed) on any closed verifier refusal.
+
+Rollout and rollback:
+
+1. **Pre-flight probe**: run the read-only probe script
+    `PYTHONPATH=src python scripts/pnl_checkpoint_resume_probe.py --wallet <ID> --mode live --valuation-ccy USD`
+    against a replica or production read path to compare cold anchor replay vs.
+    in-memory capture and suffix resume bit-for-bit before enabling writes.
+2. **Shadow soak**: set `PNL_SNAPSHOTTER_CHECKPOINT_MODE=shadow` and restart
+    the service; monitor `checkpoint_metrics_summary` logs to confirm
+    `captures_committed > 0`, `resumes_succeeded > 0`, and
+    `shadow_mismatches=0` before promoting.
+3. **Active rollout**: set `PNL_SNAPSHOTTER_CHECKPOINT_MODE=active` and restart
+    to switch catch-up and incremental ticks to suffix-only resume.
+4. **Immediate rollback**: unset `PNL_SNAPSHOTTER_CHECKPOINT_MODE` (or set it
+    to `off`) and restart the service. No schema rollback is needed;
+    correction-invalidation deletes during frontier writes continue to retire any
+    previously persisted opening checkpoint invalidated by a rewrite.
