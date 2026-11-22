@@ -8,6 +8,8 @@ from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import OperationalError
 
 from snapper.application.portfolio import pnl_engine_options
 from snapper.application.portfolio import pnl_snapshotter
@@ -903,10 +905,13 @@ async def test_checkpoint_upsert_error_becomes_closed_refusal_and_commits_sample
     """Keep chunk samples and frontier commit intact when checkpoint upsert raises.
 
     Given: Active mode with a settling capture write and a repository whose checkpoint
-        upsert raises ``RuntimeError``.
+        upsert raises ``IntegrityError``.
     When: ``_tick_once`` runs the capture chunk.
     Then: No exception escapes, the financial sample row and frontier advance commit,
         ``capture_refusals`` records ``capture_upsert_failed``, and ``captures_committed == 0``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for checkpoint mode and capture permissions.
     """
     reset_checkpoint_metrics()
     _enable_checkpoint_modes(monkeypatch)
@@ -915,7 +920,7 @@ async def test_checkpoint_upsert_error_becomes_closed_refusal_and_commits_sample
     frontier = _pending(repo)
     write = await _write(monkeypatch, frontier)
     _permit_capture(monkeypatch)
-    repo.upsert_failure = RuntimeError("synthetic upsert failure")
+    repo.upsert_failure = IntegrityError("INSERT", {}, Exception("synthetic constraint failure"))
     snap = fixtures._snapshotter(repo, frontier.as_of)
     _install_replay(monkeypatch, snap, frontier, _ReplayBehavior(write))
 
@@ -927,6 +932,87 @@ async def test_checkpoint_upsert_error_becomes_closed_refusal_and_commits_sample
     assert await repo.get_portfolio_pnl_opening_checkpoint(fixtures._sample_scope()) is None
     assert checkpoint_metrics().captures_committed == 0
     assert checkpoint_metrics().capture_refusals == {"capture_upsert_failed": 1}
+
+
+async def test_checkpoint_upsert_programming_error_propagates_without_silent_sample_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not swallow non-DB programming errors inside the synthetic SAVEPOINT wrapper.
+
+    Given: Active mode with a settling capture write whose synthetic upsert raises
+        ``RuntimeError``.
+    When: ``_advance_replay`` runs the chunk.
+    Then: ``RuntimeError`` propagates instead of turning into ``capture_upsert_failed``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for checkpoint mode and capture permissions.
+    """
+    reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
+    repo = fixtures._FakeRepo(credentials=[fixtures._cred("kraken")], anchor=fixtures._anchor())
+    frontier = _pending(repo)
+    write = await _write(monkeypatch, frontier)
+    _permit_capture(monkeypatch)
+    repo.upsert_failure = RuntimeError("synthetic programming bug")
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    _install_replay(monkeypatch, snap, frontier, _ReplayBehavior(write))
+
+    with pytest.raises(RuntimeError, match="synthetic programming bug"):
+        await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
+
+    assert repo.committed_chunks == []
+
+
+async def test_outer_tx_abort_on_checkpoint_write_retries_with_capture_write_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Engage the ``capture_write_failed`` retry when checkpoint persistence aborts the commit.
+
+    Given: Active mode with a settling capture write whose initial commit aborts the outer
+        transaction with ``OperationalError`` when a checkpoint write is attached.
+    When: ``_tick_once`` commits the chunk.
+    Then: ``capture_refusals`` records ``capture_write_failed``, the fallback retry commits
+        with ``checkpoint=None``, and financial sample rows still persist.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for checkpoint mode and commit interception.
+    """
+    reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
+    repo = fixtures._FakeRepo(credentials=[fixtures._cred("kraken")], anchor=fixtures._anchor())
+    frontier = _pending(repo)
+    write = await _write(monkeypatch, frontier)
+    _permit_capture(monkeypatch)
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    _install_replay(monkeypatch, snap, frontier, _ReplayBehavior(write))
+    original_commit = repo.commit_portfolio_pnl_correction_chunk
+    checkpoint_args: list[PnlOpeningCheckpointWrite | None] = []
+
+    async def abort_once(
+        scope: PortfolioPnlSampleScope,
+        expected: PnlCorrectionFrontier,
+        chunk: PnlCorrectionChunk,
+        checkpoint: PnlOpeningCheckpointWrite | None = None,
+    ) -> PnlCorrectionFrontier:
+        """Abort the outer commit once with OperationalError when a checkpoint write is attached."""
+        checkpoint_args.append(checkpoint)
+        if checkpoint is not None:
+            raise OperationalError("INSERT", {}, Exception("outer transaction aborted"))
+        return await original_commit(scope, expected, chunk, checkpoint=None)
+
+    monkeypatch.setattr(repo, "commit_portfolio_pnl_correction_chunk", abort_once)
+
+    await snap._tick_once()
+
+    assert len(checkpoint_args) == 2
+    assert checkpoint_args[0] is not None
+    assert checkpoint_args[1] is None
+    assert len(repo.committed_chunks) == 1
+    assert repo.persisted
+    assert checkpoint_metrics().captures_committed == 0
+    assert checkpoint_metrics().capture_refusals == {"capture_write_failed": 1}
 
 
 async def test_verify_error_becomes_closed_refusal_and_commits_anchor(
@@ -1255,3 +1341,161 @@ async def test_tick_recaptures_are_bounded_by_max_recaptures_per_tick(
     assert checkpoint_metrics().captures_committed == 1
     assert sum(checkpoint_metrics().recaptures.values()) == 1
     assert checkpoint_metrics().capture_refusals == {"capture_recapture_budget_exceeded": 2}
+
+
+async def test_active_resume_fallback_without_recapture_avoids_second_anchor_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reuse the anchor result already returned by the resumed service fallback when not recapturing.
+
+    Given: Active mode with a verified checkpoint, a non-tip chunk where recapture is ineligible,
+        and a resumed call whose service fallback already returns the anchor series.
+    When: ``_advance_replay`` dispatches the chunk.
+    Then: Only the single resumed call runs (no second anchor replay), the stale checkpoint
+        is invalidated, the fallback metric increments, and the financial chunk commits.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for checkpoint mode and service stubbing.
+    """
+    reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
+    repo = fixtures._FakeRepo()
+    frontier = replace(_pending(repo), tip=fixtures._minute(4))
+    repo._frontiers[frontier.key] = frontier
+    write = await _write(monkeypatch, frontier)
+    resume = await _resume(monkeypatch)
+    _permit_capture(monkeypatch)
+    _install_resume(monkeypatch, repo, frontier, resume)
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    snap._replay_chunk_limits[fixtures._WALLET] = 1
+    events = _install_replay(
+        monkeypatch,
+        snap,
+        frontier,
+        _ReplayBehavior(write, resume_fallback=True),
+    )
+
+    await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
+
+    assert events == ["resume"]
+    assert checkpoint_metrics().fallbacks == {"checkpoint_late_execution": 1}
+    assert checkpoint_metrics().invalidations_deleted == 1
+    assert checkpoint_metrics().resumes_succeeded == 0
+    assert len(repo.committed_chunks) == 1
+
+
+async def test_recapture_budget_rotates_fairly_across_ticks_including_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rotate recapture turn across ticks so failing earlier scopes cannot starve peers.
+
+    Given: ``MAX_RECAPTURES_PER_TICK == 1`` and three wallets needing recapture across three
+        ticks as finalized time advances, where the first two wallets fail whenever they
+        consume recapture budget.
+    When: Three consecutive ticks run via ``_tick_once``.
+    Then: Each tick gives recapture turn to the next wallet in cyclic order (``c1``, then
+        ``c2``, then ``c3``) while non-failing scopes still advance and commit samples.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for checkpoint mode and recapture budget.
+    """
+    reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
+    _permit_capture(monkeypatch)
+    monkeypatch.setattr(dispatch, "MAX_RECAPTURES_PER_TICK", 1)
+
+    wallets = (
+        "0000face-0000-7000-8000-0000000000c1",
+        "0000face-0000-7000-8000-0000000000c2",
+        "0000face-0000-7000-8000-0000000000c3",
+    )
+    failing_recaptures = {wallets[0], wallets[1]}
+    repo = fixtures._FakeRepo(
+        credentials=[fixtures._cred("kraken", wallet=w) for w in wallets],
+        anchor=fixtures._anchor(),
+    )
+    base_frontier = _pending(repo)
+    repo._frontiers.clear()
+    writes_by_wallet: dict[str, PnlOpeningCheckpointWrite] = {}
+    base_write = await _write(monkeypatch, base_frontier)
+    for wallet in wallets:
+        wf = replace(base_frontier, key=replace(base_frontier.key, wallet_public_id=wallet))
+        repo._frontiers[wf.key] = wf
+        writes_by_wallet[wallet] = replace(
+            base_write,
+            certificate=replace(base_write.certificate, key=wf.key),
+        )
+
+    async def anchor_for(
+        wallet: str, mode: str, ccy: str, as_of: datetime | None
+    ) -> PortfolioPnlAnchorRow:
+        """Return matching active USD anchor per wallet."""
+        del mode, ccy, as_of
+        return cast(PortfolioPnlAnchorRow, {**fixtures._anchor(), "wallet_public_id": wallet})
+
+    monkeypatch.setattr(repo, "get_portfolio_pnl_anchor", anchor_for)
+    clock_state = {"as_of": base_frontier.as_of}
+    snap = fixtures._snapshotter(repo, base_frontier.as_of)
+    snap._clock = lambda: clock_state["as_of"]
+    captured_by_tick: list[list[str]] = []
+    current_tick: list[str] = []
+
+    async def fake_series(
+        unused_repo: object,
+        ctx: _ScopeContext,
+        chunk: ChunkWindow,
+        options: object,
+    ) -> PnlWalletSeriesResult:
+        """Return a valid probe series when settled scopes advance to a new tip."""
+        del unused_repo, ctx, options
+        return fixtures._series(chunk.start, chunk.end, metadata=fixtures._meta(seq=4))
+
+    async def replay(
+        unused_repo: Repository,
+        ctx: _ScopeContext,
+        chunk: ChunkWindow,
+        current: PnlCorrectionFrontier,
+        checkpoint: _CheckpointReplayOptions | None = None,
+    ) -> tuple[ChunkWindow, PnlWalletSeriesResult]:
+        """Track capture attempts and fail recapturing scopes configured to error."""
+        del unused_repo
+        checkpoint = checkpoint or _CheckpointReplayOptions()
+        if checkpoint.capture is not None:
+            current_tick.append(ctx.wallet_public_id)
+            if ctx.wallet_public_id in failing_recaptures:
+                raise RuntimeError(f"synthetic recapture failure for {ctx.wallet_public_id}")
+        write = replace(
+            writes_by_wallet[ctx.wallet_public_id],
+            certificate=replace(
+                writes_by_wallet[ctx.wallet_public_id].certificate,
+                key=current.key,
+                source_generation=current.generation,
+                checkpoint_minute=current.tip,
+                as_of=current.as_of,
+            ),
+        )
+        return chunk, replace(
+            fixtures._series(chunk.start, chunk.end, metadata=fixtures._meta(seq=4)),
+            checkpoint_write=write if checkpoint.capture is not None else None,
+        )
+
+    monkeypatch.setattr(snap, "_series", fake_series)
+    monkeypatch.setattr(snap, "_replay_series", replay)
+    for step in range(3):
+        clock_state["as_of"] = (
+            base_frontier.tip + pnl_snapshotter.FINALIZATION_LAG + step * pnl_snapshotter._MINUTE
+        )
+        current_tick = []
+        await snap._tick_once()
+        captured_by_tick.append(current_tick)
+
+    assert captured_by_tick == [[wallets[0]], [wallets[1]], [wallets[2]]]
+    assert checkpoint_metrics().captures_committed == 1
+    assert (
+        await repo.get_portfolio_pnl_opening_checkpoint(
+            replace(fixtures._sample_scope(), wallet_public_id=wallets[2])
+        )
+        is not None
+    )

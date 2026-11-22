@@ -51,6 +51,7 @@ from typing import Final
 from uuid import uuid7
 
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.application.portfolio import pnl_snapshotter_checkpoint as checkpoint_dispatch
 from snapper.application.portfolio.basket_valuation import CryptoUsdCandle
@@ -382,6 +383,7 @@ class PortfolioPnlSnapshotter:
         self._checkpoint_mode: CheckpointMode = checkpoint_resolution.effective
         self._checkpoint_summary_ticks: int = 0
         self._tick_recaptures: int = 0
+        self._tick_last_recapture_wallet: str | None = None
 
     @property
     def disabled(self) -> bool:
@@ -494,6 +496,7 @@ class PortfolioPnlSnapshotter:
     async def _tick_valuation(self, repo: Repository, as_of: datetime) -> None:
         """Run one tick's valuation and durable sample work before shadow flushing."""
         self._tick_recaptures = 0
+        self._tick_last_recapture_wallet = None
         credentials = await repo.list_active_wallet_credentials(as_of)
         raw_pin = await self._read_mint_wallet_pin()
         topology = await resolve_executor_topology(repo, credentials, raw_pin, self._clock)
@@ -501,7 +504,8 @@ class PortfolioPnlSnapshotter:
         mint_excluded_wallets = _mint_excluded_spot_wallets(credentials, topology)
         self._prune_absent_scopes(set(venues_by_wallet))
         failures = 0
-        for wallet in self._wallet_order(venues_by_wallet):
+        order = self._wallet_order(venues_by_wallet)
+        for wallet in order:
             self._last_scheduled_wallet = wallet
             try:
                 conflicted = await self._process_wallet(
@@ -524,6 +528,8 @@ class PortfolioPnlSnapshotter:
                 failures += 1
             else:
                 self._reset_scope_logs(wallet)
+        if order:
+            self._last_scheduled_wallet = self._tick_last_recapture_wallet or order[0]
         if failures:
             logger.warning(
                 "PortfolioPnlSnapshotter: %s scope(s) failed this tick; continuing", failures
@@ -1131,6 +1137,11 @@ class PortfolioPnlSnapshotter:
         self._log_repair_from_lag(ctx, committed)
         self._report_withheld(ctx.wallet_public_id, plan.withheld, bool(plan.chunk.edits))
 
+    def _record_recapture_consumed(self, wallet: str) -> None:
+        """Advance the tick recapture budget and mark the consuming wallet for rotation."""
+        self._tick_recaptures += 1
+        self._tick_last_recapture_wallet = wallet
+
     def _can_recapture(self) -> bool:
         """Return whether this tick still has budget for a full anchor recapture."""
         return self._tick_recaptures < checkpoint_dispatch.MAX_RECAPTURES_PER_TICK
@@ -1156,7 +1167,7 @@ class PortfolioPnlSnapshotter:
             return None
         recapture = capture_request_for(frontier, ctx.scope, ctx.anchor, end)
         if recapture is not None:
-            self._tick_recaptures += 1
+            self._record_recapture_consumed(ctx.wallet_public_id)
         return recapture
 
     @staticmethod
@@ -1251,7 +1262,7 @@ class PortfolioPnlSnapshotter:
         if decision.recapture is not None:
             capture = capture_request_for(frontier, ctx.scope, ctx.anchor, chunk.end)
             if capture is not None:
-                self._tick_recaptures += 1
+                self._record_recapture_consumed(ctx.wallet_public_id)
         request = _CheckpointDispatchRequest(repo, ctx, frontier, chunk, started, capture, resume)
         if self._checkpoint_mode == "shadow" and resume is not None:
             await self._advance_shadow(request)
@@ -1275,13 +1286,14 @@ class PortfolioPnlSnapshotter:
         if resume is not None and fallback is not None:
             await handle_resume_fallback(repo, ctx.scope, frontier, resume, fallback)
             recapture = capture or self._consume_recapture(request, chunk.end)
-            chunk, result = await self._replay_series(
-                repo,
-                ctx,
-                chunk,
-                frontier,
-                _CheckpointReplayOptions(capture=recapture),
-            )
+            if recapture is not None:
+                chunk, result = await self._replay_series(
+                    repo,
+                    ctx,
+                    chunk,
+                    frontier,
+                    _CheckpointReplayOptions(capture=recapture),
+                )
         elif resume is not None:
             record_checkpoint_resume_succeeded(ctx.scope)
         await self._plan_and_commit_checkpoint(request, chunk, result)
@@ -1367,7 +1379,9 @@ class PortfolioPnlSnapshotter:
                 plan.chunk,
                 checkpoint=write,
             )
-        except PnlCheckpointWriteRefusalError:
+        except PnlCheckpointWriteRefusalError, SQLAlchemyError:
+            if write is None:
+                raise
             checkpoint_dispatch.record_checkpoint_write_refusal(
                 ctx.scope,
                 "capture_write_failed",

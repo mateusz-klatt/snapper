@@ -1586,6 +1586,7 @@ class _SeriesRequirementInput:
     options: PnlSeriesReplayOptions
     policy: PnlSeriesReadPolicy
     opening: TimelineOpening
+    refs: Sequence[InstrumentSymbolRefRow] = ()
 
 
 class _SeriesRequirementPlan(NamedTuple):
@@ -3928,19 +3929,30 @@ def _validate_resume_fx_venues(
     resume: PnlCheckpointResume,
     opening: TimelineOpening,
     identity_planes: Mapping[str, PnlFxRatePlane],
+    refs: Sequence[InstrumentSymbolRefRow],
 ) -> None:
-    """Fall back when a suffix-discovered instrument identity plane overrides a prefix shared pair.
+    """Fall back when suffix proof pins an identity FX plane absent from prefix proof.
+
+    Refuses at resume rather than at capture: holding an unproven opening pool at
+    ``C`` is valid and produces identical values whenever no suffix proof pins an
+    identity plane for an instrument that converted in the prefix; refusing capture
+    would permanently block checkpointing for any scope carrying an unproven opening pool.
 
     Args:
         resume: Verified checkpoint resume state from the capture cutoff.
         opening: Engine opening state active before prefix replay.
         identity_planes: Canonical instrument-owned FX planes elected for the resumed horizon.
+        refs: Symbol references loaded for proving opening spans up to the checkpoint cutoff.
 
     Raises:
         _CheckpointResumeFallbackError: With ``"checkpoint_fx_venue_changed"`` when a
-            prefix event consumer now binds an instrument-owned FX plane.
+            prefix event consumer lacking ``[t0, C]`` and prefix-fill proof now binds an
+            instrument-owned FX plane.
     """
-    prefix_proven_instruments = {pool.instrument_public_id for pool in opening.pools} | set(
+    cutoff = max(opening.t0, resume.record.certificate.checkpoint_minute)
+    opening_spans = {pool.instrument_public_id: (opening.t0, cutoff) for pool in opening.pools}
+    proven_opening_refs, _ = _partition_series_price_refs(opening_spans, refs)
+    prefix_proven_instruments = {ref["instrument_public_id"] for ref in proven_opening_refs} | set(
         resume.bundle.price_ref_spans_by_instrument
     )
     prefix_state = resume.bundle.event_walk_state
@@ -3989,7 +4001,12 @@ async def _series_requirement_plan(
         ),
     )
     if inputs.options.checkpoint_resume is not None:
-        _validate_resume_fx_venues(inputs.options.checkpoint_resume, inputs.opening, identity)
+        _validate_resume_fx_venues(
+            inputs.options.checkpoint_resume,
+            inputs.opening,
+            identity,
+            inputs.refs,
+        )
     _capture_walk_states(
         inputs.options,
         inputs.replay,
@@ -8029,6 +8046,7 @@ async def build_wallet_pnl_series(
                     options=options,
                     policy=policy,
                     opening=anchor.opening,
+                    refs=refs,
                 ),
             )
     except _CheckpointResumeFallbackError as error:

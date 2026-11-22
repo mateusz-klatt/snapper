@@ -146,6 +146,7 @@ from sqlalchemy.engine import Engine as SyncEngine
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -20662,6 +20663,16 @@ class SQLAlchemyRepository(Repository):
         )
         await s.execute(stmt)
 
+    @staticmethod
+    async def _ensure_outer_tx_active_after_savepoint(
+        s: AsyncSession,
+        exc: SQLAlchemyError,
+    ) -> None:
+        """Re-raise ``exc`` unless the outer transaction survived savepoint rollback."""
+        if not s.is_active or not s.in_transaction():
+            raise exc
+        await s.execute(text("SELECT 1"))
+
     async def _persist_pnl_opening_checkpoint(
         self,
         s: AsyncSession,
@@ -20690,9 +20701,8 @@ class SQLAlchemyRepository(Repository):
         try:
             async with s.begin_nested():
                 await self._upsert_pnl_opening_checkpoint(s, checkpoint)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
+        except SQLAlchemyError as exc:
+            await self._ensure_outer_tx_active_after_savepoint(s, exc)
             self._last_pnl_checkpoint_write_refusal = "capture_upsert_failed"
             logger.warning(
                 "Opening checkpoint upsert rolled back inside savepoint; chunk will commit (%s)",

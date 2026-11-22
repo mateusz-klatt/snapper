@@ -15,6 +15,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.application.portfolio import pnl_correction_planner
 from snapper.application.portfolio import pnl_engine_options
@@ -730,9 +731,7 @@ class _FakeRepo:
             raise PnlCheckpointWriteRefusalError(refusal)
         try:
             self._upsert_synthetic_checkpoint(key, checkpoint)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
+        except SQLAlchemyError:
             self._last_pnl_checkpoint_write_refusal = "capture_upsert_failed"
 
     def _stage_chunk_edits(

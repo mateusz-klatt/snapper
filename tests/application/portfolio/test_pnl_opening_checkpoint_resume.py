@@ -1859,3 +1859,170 @@ async def test_e2e_5c6_capture_verify_resume_preserves_prefix_conversion_only_mi
     assert resumed.checkpoint_resume_fallback is None
     assert resumed.rate_sources == anchor.rate_sources
     checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
+
+
+def _unproven_opening_pool_repo(*, include_suffix: bool) -> _ResumeRepo:
+    """Hold EUR-USD at t0 with no opening-span proof until a covered suffix fill.
+
+    Args:
+        include_suffix: Whether the suffix execution pinning walutomat is present.
+
+    Returns:
+        Configured fake repository for unproven opening-pool identity testing.
+    """
+    repo = _ResumeRepo()
+    shard_key = f"walutomat:live:{fixtures._I2}:untagged"
+    anchor = fixtures._empty_anchor(
+        fixtures._W1,
+        "live",
+        "USD",
+        watermarks={"walutomat": 1},
+    )
+    anchor["unrealized_pnl"] = 0.5
+    anchor["opening_basket_json"] = fixtures._canonical_test_json(
+        {
+            "schema_version": 3,
+            "pools": [
+                fixtures._test_anchor_pool(
+                    instrument_public_id=fixtures._I2,
+                    shard_key=shard_key,
+                    exchange="walutomat",
+                    position_qty=1.0,
+                    historical_entry_price=1.0,
+                    t0_mark=1.5,
+                    opening_unrealized_value=0.5,
+                )
+            ],
+            "annulments": [],
+            "native_basket": {fixtures._I2: 1.0},
+        }
+    )
+    anchor["contributions_json"] = fixtures._canonical_test_json(
+        {
+            "schema_version": 3,
+            "pools": [
+                fixtures._test_anchor_contribution(
+                    instrument_public_id=fixtures._I2,
+                    shard_key=shard_key,
+                    exchange="walutomat",
+                    quantity=1.0,
+                )
+            ],
+        }
+    )
+    repo._anchor = anchor
+    repo._executions = [
+        fixtures._exec_row(
+            fixtures._I2,
+            1,
+            -1,
+            "buy",
+            1.0,
+            1.0,
+            0.0,
+            "USD",
+            exchange="walutomat",
+        ),
+        *(
+            [
+                fixtures._exec_row(
+                    fixtures._I2,
+                    2,
+                    6,
+                    "buy",
+                    1.0,
+                    1.5,
+                    0.0,
+                    "USD",
+                    exchange="walutomat",
+                )
+            ]
+            if include_suffix
+            else []
+        ),
+    ]
+    repo._accruals = [fixtures._accrual_row(fixtures._I2, 3, 1.0, "EUR")]
+    repo._refs = [
+        fixtures._ref(
+            fixtures._I2,
+            "EUR-USD",
+            "USD",
+            exchange="walutomat",
+            valid_from=fixtures._m(2),
+        )
+    ]
+    repo._candles = [
+        fixtures._candle(fixtures._m(minute), 1.5, fixtures._I2) for minute in range(9)
+    ]
+    repo._lineage = [
+        fixtures._lineage_row(row["order_public_id"], "rest") for row in repo._executions
+    ]
+    repo._fx_rows = [
+        fixtures._fx_row("EUR", "USD", 3, 2.0, exchange="kraken"),
+        *[
+            fixtures._fx_row("EUR", "USD", minute, 3.0, exchange="walutomat")
+            for minute in range(1, 9)
+        ],
+    ]
+    repo._execution_watermarks = {"walutomat": len(repo._executions)}
+    return repo
+
+
+async def test_resume_refuses_identity_plane_for_unproven_opening_pool_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse when a suffix fill proves a plane that an unproven opening pool could not pin.
+
+    Given: An opening EUR-USD pool on walutomat whose symbol reference starts only at
+        ``m(2)`` (leaving ``[t0, C]`` unproven), a prefix accrual at ``m(3)`` converted on
+        the shared kraken plane (``-2.0``), and a suffix fill at ``m(6)`` covered by
+        the reference that proves walutomat on a cold replay (``-3.0``).
+    When: Checkpoint capture runs without the suffix fill and resume runs after the suffix
+        fill lands.
+    Then: Resume falls back with ``checkpoint_fx_venue_changed`` and returns bit-identical
+        points and rate sources to the cold anchor replay.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for profile flags.
+    """
+    repo = _unproven_opening_pool_repo(include_suffix=False)
+    resume = await _capture_and_verify_profile(
+        monkeypatch,
+        repo,
+        {"walutomat": 1},
+        PnlEngineOptions(True, True, True),
+    )
+    full_repo = _unproven_opening_pool_repo(include_suffix=True)
+    repo._executions = list(full_repo._executions)
+    repo._lineage = list(full_repo._lineage)
+    repo._execution_watermarks = {"walutomat": 2}
+    options = replace(_resume_options(resume), frozen_execution_watermarks={"walutomat": 2})
+    resumed = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    anchor = await build_wallet_pnl_series(
+        cast(Repository, full_repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    assert anchor.points[-1].accrual_pnl == pytest.approx(-3.0)
+    assert resumed.checkpoint_resume_fallback == "checkpoint_fx_venue_changed"
+    assert resumed.points[-1].accrual_pnl == pytest.approx(-3.0)
+    assert resumed.rate_sources == anchor.rate_sources
+    checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)

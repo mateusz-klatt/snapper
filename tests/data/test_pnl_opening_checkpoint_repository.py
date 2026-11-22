@@ -22,6 +22,9 @@ from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import MAX_DEFERRED_EXECUTIONS
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
@@ -1324,7 +1327,7 @@ async def test_checkpoint_upsert_failure_rolls_back_savepoint_only_and_commits_s
     """Roll back only the SAVEPOINT when checkpoint upsert fails so samples and frontier commit.
 
     Given: A settling generation with one edited sample row and a staged checkpoint write
-        whose ``_upsert_pnl_opening_checkpoint`` raises ``RuntimeError``.
+        whose ``_upsert_pnl_opening_checkpoint`` raises ``IntegrityError`` inside ``begin_nested()``.
     When: ``commit_portfolio_pnl_correction_chunk`` commits the chunk.
     Then: The sample edit and advanced frontier commit, no checkpoint row is stored,
         and ``consume_last_pnl_checkpoint_write_refusal()`` returns ``"capture_upsert_failed"``.
@@ -1347,10 +1350,10 @@ async def test_checkpoint_upsert_failure_rolls_back_savepoint_only_and_commits_s
     planned_after = advance_correction_frontier(started, chunk)
     write = PnlOpeningCheckpointWrite(_certificate_for(planned_after), '{"state":1}')
 
-    async def boom(s: object, checkpoint: object) -> None:
-        """Fail inside the savepoint after sample edits have been flushed."""
+    async def boom(s: AsyncSession, checkpoint: PnlOpeningCheckpointWrite) -> None:
+        """Fail with a DB IntegrityError inside the SAVEPOINT after sample edits flush."""
         del s, checkpoint
-        raise RuntimeError("synthetic upsert failure")
+        raise IntegrityError("INSERT", {}, Exception("synthetic constraint failure"))
 
     monkeypatch.setattr(repository, "_upsert_pnl_opening_checkpoint", boom)
     committed = await repository.commit_portfolio_pnl_correction_chunk(
@@ -1368,7 +1371,118 @@ async def test_checkpoint_upsert_failure_rolls_back_savepoint_only_and_commits_s
         samples._M2,
     )
     assert len(observed.versions) == 1
-    assert observed.versions[0].row["realized_pnl"] == 12.5
+    assert observed.versions[0].row["realized_pnl"] == pytest.approx(12.5)
+
+
+async def test_checkpoint_upsert_programming_error_propagates_and_rolls_back_chunk(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate non-SQLAlchemy programming errors instead of committing without checkpoint.
+
+    Given: A settling generation with one edited sample row and a staged checkpoint write
+        whose ``_upsert_pnl_opening_checkpoint`` raises ``RuntimeError`` inside ``begin_nested()``.
+    When: ``commit_portfolio_pnl_correction_chunk`` commits the chunk.
+    Then: The ``RuntimeError`` propagates and rolls back the outer sample and frontier writes.
+
+    Args:
+        repository: Isolated file-backed SQLite repository fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    started = await repository.invalidate_portfolio_pnl_correction(
+        samples._scope(),
+        _request(start=samples._M1, tip=samples._M2, as_of=samples._M5),
+        None,
+    )
+    row = samples._complete_sample(samples._M1, timestamp=samples._M5)
+    chunk = replace(
+        _empty_chunk(started, samples._M2),
+        edits=(PnlCorrectionEdit(samples._M1, None, row),),
+        prior_peak=1250.0,
+    )
+    planned_after = advance_correction_frontier(started, chunk)
+    write = PnlOpeningCheckpointWrite(_certificate_for(planned_after), '{"state":1}')
+
+    async def bug(s: AsyncSession, checkpoint: PnlOpeningCheckpointWrite) -> None:
+        """Simulate a programming error inside the SAVEPOINT."""
+        del s, checkpoint
+        raise RuntimeError("synthetic programming bug")
+
+    monkeypatch.setattr(repository, "_upsert_pnl_opening_checkpoint", bug)
+    with pytest.raises(RuntimeError, match="synthetic programming bug"):
+        await repository.commit_portfolio_pnl_correction_chunk(
+            samples._scope(),
+            started,
+            chunk,
+            checkpoint=write,
+        )
+    observed = await repository.get_portfolio_pnl_correction_evidence(
+        samples._scope(),
+        samples._M1,
+        samples._M2,
+    )
+    assert observed.versions == ()
+    assert await repository.get_portfolio_pnl_correction_frontier(samples._scope()) == started
+
+
+async def test_checkpoint_upsert_outer_abort_propagates_and_rolls_back_chunk(
+    repository: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate an outer-transaction abort during checkpoint upsert so callers retry cleanly.
+
+    Given: A settling generation with one edited sample row and a staged checkpoint write
+        whose ``_upsert_pnl_opening_checkpoint`` aborts the outer session before raising
+        ``OperationalError``.
+    When: ``commit_portfolio_pnl_correction_chunk`` attempts to commit with the checkpoint.
+    Then: ``OperationalError`` propagates instead of committing an empty session, the outer
+        transaction rolls back cleanly, and a subsequent retry without checkpoint succeeds.
+
+    Args:
+        repository: Isolated file-backed SQLite repository fixture.
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    started = await repository.invalidate_portfolio_pnl_correction(
+        samples._scope(),
+        _request(start=samples._M1, tip=samples._M2, as_of=samples._M5),
+        None,
+    )
+    row = samples._complete_sample(samples._M1, timestamp=samples._M5)
+    chunk = replace(
+        _empty_chunk(started, samples._M2),
+        edits=(PnlCorrectionEdit(samples._M1, None, row),),
+        prior_peak=1250.0,
+    )
+    planned_after = advance_correction_frontier(started, chunk)
+    write = PnlOpeningCheckpointWrite(_certificate_for(planned_after), '{"state":1}')
+
+    async def abort_outer(s: AsyncSession, checkpoint: PnlOpeningCheckpointWrite) -> None:
+        """Abort the outer transaction before raising a SQLAlchemy error."""
+        del checkpoint
+        await s.rollback()
+        raise OperationalError("INSERT", {}, Exception("outer transaction aborted"))
+
+    monkeypatch.setattr(repository, "_upsert_pnl_opening_checkpoint", abort_outer)
+    with pytest.raises(OperationalError, match="outer transaction aborted"):
+        await repository.commit_portfolio_pnl_correction_chunk(
+            samples._scope(),
+            started,
+            chunk,
+            checkpoint=write,
+        )
+    observed = await repository.get_portfolio_pnl_correction_evidence(
+        samples._scope(),
+        samples._M1,
+        samples._M2,
+    )
+    assert observed.versions == ()
+    committed = await repository.commit_portfolio_pnl_correction_chunk(
+        samples._scope(),
+        started,
+        chunk,
+        checkpoint=None,
+    )
+    assert committed == planned_after
 
 
 async def test_accrual_prefix_fingerprint_matches_python_across_lifecycle_and_overflow(
