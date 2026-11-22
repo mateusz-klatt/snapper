@@ -1,5 +1,6 @@
 """Fallback, deletion, and defensive refusal tests for checkpoint dispatch helpers."""
 
+import asyncio
 from dataclasses import replace
 from datetime import timedelta
 from typing import cast
@@ -179,6 +180,10 @@ async def test_prepare_resume_returns_verified_state_and_handles_start_at_tip(
     )
     fallback = await dispatch.prepare_checkpoint_resume(replace(request, start=fixtures._minute(3)))
     assert fallback.recapture == "fallback"
+    exhausted = await dispatch.prepare_checkpoint_resume(
+        replace(request, start=fixtures._minute(3), recapture_budget_exhausted=True)
+    )
+    assert exhausted == dispatch.PnlCheckpointDecision()
 
 
 async def test_resume_fallback_reason_and_delete_fence_miss(
@@ -187,8 +192,8 @@ async def test_resume_fallback_reason_and_delete_fence_miss(
     """Classify unexpected service fallback as corrupt and ignore a stale fence.
 
     Given: A stored resume whose generation no longer matches the repository row.
-    When: A non-late fallback is handled.
-    Then: Corruption is counted and a fence miss does not count a deletion.
+    When: Delete-required and non-delete service fallbacks are handled.
+    Then: Corruption is counted, a fence miss is ignored, and non-delete falls back without deleting.
     """
     reset_checkpoint_metrics()
     repo = fixtures._FakeRepo()
@@ -205,6 +210,16 @@ async def test_resume_fallback_reason_and_delete_fence_miss(
     )
     assert checkpoint_metrics().fallbacks == {"checkpoint_payload_corrupt": 1}
     assert checkpoint_metrics().invalidations_deleted == 0
+    delete = AsyncMock(return_value=True)
+    monkeypatch.setattr(repo, "delete_portfolio_pnl_opening_checkpoint", delete)
+    await dispatch.handle_resume_fallback(
+        cast(Repository, repo),
+        fixtures._sample_scope(),
+        stale,
+        resume,
+        "checkpoint_ineligible",
+    )
+    delete.assert_not_awaited()
     assert (
         await dispatch._suffix_fills(
             cast(Repository, repo),
@@ -214,6 +229,72 @@ async def test_resume_fallback_reason_and_delete_fence_miss(
         )
         == 0
     )
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_delete_checkpoint_handles_failure_and_preserves_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    cancelled: bool,
+) -> None:
+    """Contain deletion failures while allowing task cancellation to propagate.
+
+    Given: A stored checkpoint whose fenced deletion raises an error or cancellation.
+    When: The deletion helper awaits the repository.
+    Then: Ordinary errors are contained and cancellation preserves its identity.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        cancelled: Whether the repository raises cancellation instead of an ordinary error.
+    """
+    reset_checkpoint_metrics()
+    repo = fixtures._FakeRepo()
+    resume = await cases._resume(monkeypatch)
+    failure = asyncio.CancelledError() if cancelled else RuntimeError("delete failed")
+    delete = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(repo, "delete_portfolio_pnl_opening_checkpoint", delete)
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await dispatch.delete_checkpoint(
+                cast(Repository, repo), fixtures._sample_scope(), resume.record
+            )
+    else:
+        await dispatch.delete_checkpoint(
+            cast(Repository, repo), fixtures._sample_scope(), resume.record
+        )
+    delete.assert_awaited_once()
+    assert checkpoint_metrics().invalidations_deleted == 0
+
+
+async def test_prepare_resume_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preserve cancellation raised before stored checkpoint verification.
+
+    Given: An eligible resume request whose checkpoint read is cancelled.
+    When: Resume preparation awaits the stored row.
+    Then: ``CancelledError`` propagates without logging a fallback.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    cases._permit_capture(monkeypatch)
+    repo = fixtures._FakeRepo()
+    frontier = cases._pending(repo)
+    request = dispatch.PnlCheckpointResumeRequest(
+        cast(Repository, repo),
+        fixtures._sample_scope(),
+        fixtures._anchor(),
+        frontier,
+        fixtures._minute(3),
+        "active",
+    )
+    monkeypatch.setattr(
+        repo,
+        "get_portfolio_pnl_opening_checkpoint",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch.prepare_checkpoint_resume(request)
 
 
 async def test_write_precheck_value_error_is_soft(

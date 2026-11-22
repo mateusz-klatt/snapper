@@ -556,9 +556,9 @@ def test_rejects_naive_datetime() -> None:
 def test_rejects_duplicate_json_keys() -> None:
     """Reject duplicate keys instead of silently keeping the last value.
 
-    Given: Canonical bundle JSON with a second top-level ``bundle_version`` key.
-    When: The duplicate-aware JSON parser runs.
-    Then: ``ValueError`` names the duplicate key.
+    Given: Duplicate-key, malformed, and version-free JSON documents.
+    When: Strict decoding and the non-raising version probe run.
+    Then: ``ValueError`` names the duplicate key and both probe inputs return ``False``.
     """
     encoded = bundle_to_json(_populated_bundle())
     duplicated = encoded.replace(
@@ -568,6 +568,8 @@ def test_rejects_duplicate_json_keys() -> None:
     )
     with pytest.raises(ValueError, match="duplicate JSON key"):
         bundle_from_json(duplicated)
+    assert is_unsupported_bundle_version("{") is False
+    assert is_unsupported_bundle_version("{}") is False
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
@@ -850,6 +852,13 @@ def test_prefix_fx_election_and_coverage_validators() -> None:
             minute=_m(3),
             elected_plane=("GBP", "USD", "kraken"),
         )
+    missing_plane = PnlPrefixFxElectionPayload(
+        instrument_public_id=_INSTRUMENT,
+        pair=("EUR", "USD"),
+        minute=_m(3),
+        elected_plane=None,
+    )
+    assert missing_plane.elected_plane is None
     base_json = bundle_to_json(_populated_bundle())
     dup_elections = _json_object(base_json)
     election_entries = cast(list[object], dup_elections["prefix_fx_elections"])

@@ -19,6 +19,7 @@ from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContex
 from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shadow_context
 from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
 from snapper.application.portfolio.pnl_fx_replay_state import _FxInstrumentRequirements
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlCheckpointStateBundle
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointResume
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
     verify_checkpoint_for_resume,
@@ -2195,6 +2196,23 @@ def _shared_plane_move_repo(*, include_suffix: bool) -> _ResumeRepo:
     return repo
 
 
+async def _verified_shared_prefix(monkeypatch: pytest.MonkeyPatch) -> PnlCheckpointResume:
+    """Capture and verify a prefix with shared EUR/USD conversion elections.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for engine profile flags.
+
+    Returns:
+        Verified resume state containing populated prefix FX evidence.
+    """
+    return await _capture_and_verify_profile(
+        monkeypatch,
+        _shared_plane_move_repo(include_suffix=False),
+        {"kraken": 1},
+        PnlEngineOptions(True, True, True),
+    )
+
+
 async def test_resume_refuses_span_proven_at_c_reclassified_to_suffix_ref(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2250,6 +2268,104 @@ async def test_resume_refuses_span_proven_at_c_reclassified_to_suffix_ref(
     assert resumed.points[-1].accrual_pnl == pytest.approx(-2.0)
     assert resumed.rate_sources == anchor.rate_sources
     checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
+
+
+def test_ref_binding_tuple_returns_none_without_quote_currency() -> None:
+    """Retain an absent quote currency as an absent denomination binding.
+
+    Given: A symbol reference whose optional quote currency is absent.
+    When: Its canonical checkpoint binding is projected.
+    Then: The projection is ``None`` rather than a partial binding.
+    """
+    ref = fixtures._ref(fixtures._I1, "BTC-USD", "USD")
+    ref["quote_currency"] = None
+    assert service._ref_binding_tuple(ref) is None
+
+
+async def test_resume_rejects_window_election_drift_after_matching_loaded_pins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check window-wide election stability after loaded prefix pins match.
+
+    Given: A verified prefix whose loaded event pins equal its captured elections.
+    When: The independently reconstructed window election selects another venue.
+    Then: The validator raises the closed FX-election fallback.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for profile flags and election evidence.
+    """
+    captured = await _verified_shared_prefix(monkeypatch)
+    entries = captured.bundle.prefix_fx_elections
+    expected_entry = next(entry for entry in entries if entry.elected_plane is not None)
+    expected_plane = expected_entry.elected_plane
+    assert expected_plane is not None
+    pins: service._FxPlanesByInstrument = {}
+    for entry in entries:
+        if entry.elected_plane is not None:
+            pins.setdefault(entry.instrument_public_id, {})[entry.pair] = entry.elected_plane
+    evidence = service._SeriesFxEvidence(service.exact_fx_book({}), pins, set())
+    resume = replace(
+        captured,
+        bundle=captured.bundle.model_copy(update={"prefix_ref_bindings": ()}),
+    )
+
+    def changed_window(
+        bundle: PnlCheckpointStateBundle,
+        inputs: service._ResumeFxElectionInputs,
+    ) -> service._FxPlanesByInstrument:
+        """Return one conflicting shared-plane election with all other pins absent."""
+        del bundle, inputs
+        return {
+            expected_entry.instrument_public_id: {
+                expected_entry.pair: (expected_plane[0], expected_plane[1], "changed")
+            }
+        }
+
+    monkeypatch.setattr(
+        service,
+        "_window_elected_venues_with_prefix_coverage",
+        changed_window,
+    )
+    inputs = service._ResumeFxElectionInputs(
+        event_requirements={},
+        mark_requirements={},
+        fx_evidence=evidence,
+        trusted_refs=[],
+        identity_planes={},
+        valuation_ccy="USD",
+        pointwise_exact_fx=False,
+    )
+    with pytest.raises(service._CheckpointResumeFallbackError) as failure:
+        service._validate_resume_fx_election(resume, inputs)
+    assert failure.value.reason == "checkpoint_fx_election_changed"
+
+
+async def test_resume_rejects_unverified_plane_observed_at_prefix_event_minute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject a newly observed exchange on a certificate-bound prefix FX pair.
+
+    Given: A verified prefix certificate and post-load coverage from another plane.
+    When: That plane has a candle at a consumed prefix event minute.
+    Then: The validator raises the closed event-FX exchange fallback.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for profile flags.
+    """
+    resume = await _verified_shared_prefix(monkeypatch)
+    open_at = resume.record.certificate.consumed_fx_open_ats[0]
+    verified_planes = resume.verified_fx_planes
+    assert verified_planes is not None
+    unexpected = ("EUR", "USD", "unexpected")
+    evidence = service._SeriesFxEvidence(
+        service.exact_fx_book({}),
+        {},
+        set(),
+        coverage_by_plane={unexpected: {open_at + timedelta(minutes=1)}},
+    )
+    with pytest.raises(service._CheckpointResumeFallbackError) as failure:
+        service._validate_loaded_event_fx_planes(resume, evidence, verified_planes)
+    assert failure.value.reason == "checkpoint_event_fx_exchanges_changed"
 
 
 async def test_resume_refuses_shared_plane_move_including_peer_via_election_stability(

@@ -1230,9 +1230,6 @@ class PortfolioPnlSnapshotter:
             PnlCheckpointShadowSide(anchor_window, anchor, anchor_plan),
             PnlCheckpointShadowSide(resumed_window, resumed, resumed_plan),
         )
-        if outcome.skipped_reason is not None:
-            record_checkpoint_shadow_skipped(outcome.skipped_reason, ctx.scope)
-            return
         record_checkpoint_shadow_comparison(ctx.scope)
         if outcome.mismatch is not None:
             await self._record_shadow_mismatch(request.repo, ctx, resume, outcome.mismatch)

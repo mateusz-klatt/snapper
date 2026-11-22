@@ -51,6 +51,7 @@ from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointWrite
 from snapper.data.pnl_correction_state import PortfolioPnlCorrectionConflictError
 from snapper.data.pnl_correction_state import advance_correction_frontier
+from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import _combine_id_aggregates
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
@@ -99,6 +100,12 @@ async def repository(tmp_path: Path) -> AsyncIterator[SQLAlchemyRepository]:
         yield repo
     finally:
         await repo.engine.dispose()
+
+
+def test_default_checkpoint_write_refusal_is_empty() -> None:
+    """Keep the base repository compatible with callers that never stage checkpoints."""
+    repository = cast(Repository, object())
+    assert Repository.consume_last_pnl_checkpoint_write_refusal(repository) is None
 
 
 def _key() -> PnlCorrectionKey:

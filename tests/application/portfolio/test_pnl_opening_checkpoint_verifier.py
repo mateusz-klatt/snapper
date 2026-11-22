@@ -1,5 +1,6 @@
 """Tests for ordered checkpoint resume eligibility and evidence verification."""
 
+import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -13,12 +14,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from snapper.application.portfolio.execution_chain import ExecutionChainError
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_from_json
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import PnlCheckpointCaptureRequest
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointFallback
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointResume
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
     PnlCheckpointResumeEligibility,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_verifier import _effective_times_match
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import service_resume_fallback
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
     verify_checkpoint_for_resume,
@@ -630,6 +633,68 @@ async def test_verifier_refuses_manifest_and_prefix_assignment_drift_against_liv
         "checkpoint_prefix_assignments_changed",
         delete_required=True,
     )
+
+
+async def test_effective_time_validation_covers_activation_and_deferred_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject missing activation and deferred assignments that disagree with event timing.
+
+    Given: A captured bundle and prefix rows at or after activation and checkpoint boundaries.
+    When: Effective-time validation evaluates absent activation and deferred flags.
+    Then: Only the non-deferred row at activation passes and every inconsistent case fails.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    bundle = bundle_from_json(record.state_json)
+    prefix = repo._execution_prefix_at(capture._AS_OF)
+    missing_activation = bundle.model_copy(
+        update={"engine_state": bundle.engine_state.model_copy(update={"activation_time": None})}
+    )
+    assert _effective_times_match(record.certificate, missing_activation, prefix) is False
+    activation = bundle.engine_state.activation_time
+    assert activation is not None
+    certificate = replace(record.certificate, deferred_execution_sequences={})
+    early = fixtures._exec_row(fixtures._I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")
+    early["timestamp"] = activation
+    prefix["executions"] = [early]
+    assert _effective_times_match(certificate, bundle, prefix) is True
+    deferred = replace(certificate, deferred_execution_sequences={"kraken": (1,)})
+    assert _effective_times_match(deferred, bundle, prefix) is False
+    late = fixtures._exec_row(fixtures._I1, 1, 5, "buy", 1.0, 100.0, 0.0, "USD")
+    late["timestamp"] = certificate.checkpoint_minute + timedelta(minutes=1)
+    prefix["executions"] = [late]
+    assert _effective_times_match(certificate, bundle, prefix) is False
+
+
+async def test_verifier_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preserve cancellation raised by a repository read during verification.
+
+    Given: A valid stored checkpoint and a cancelled prefix-count read.
+    When: Verification awaits that repository read.
+    Then: ``CancelledError`` propagates without conversion to a fallback.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    monkeypatch.setattr(
+        repo,
+        "get_pnl_execution_prefix_counts",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await verify_checkpoint_for_resume(
+            repo,
+            record,
+            _scope(request),
+            _RESUMING_AS_OF,
+            _eligibility(request),
+        )
 
 
 async def test_verifier_converts_unexpected_error_and_exposes_single_late_owner(

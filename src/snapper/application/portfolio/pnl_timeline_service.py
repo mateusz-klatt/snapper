@@ -5819,7 +5819,6 @@ async def _load_gap_predecessors(
     return fetched
 
 
-@pnl_read_stage("fx")
 async def _load_request_fx_book(repo: Repository, request: _FxRequest) -> _SeriesFxEvidence:
     """Elect planes as an exact read would, then add carry evidence for the gaps.
 
@@ -5897,7 +5896,6 @@ def _series_pointwise_shadow_requirements(
             )
 
 
-@pnl_read_stage("fx")
 async def _load_pointwise_series_fx(repo: Repository, request: _FxRequest) -> _SeriesFxEvidence:
     """Read FX in batches and choose causal minute pins for exact replay only.
 
@@ -5957,6 +5955,7 @@ async def _load_pointwise_series_fx(repo: Repository, request: _FxRequest) -> _S
     )
 
 
+@pnl_read_stage("fx")
 async def _load_series_fx(
     repo: Repository,
     request: _FxRequest,

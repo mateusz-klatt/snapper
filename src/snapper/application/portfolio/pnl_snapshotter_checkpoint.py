@@ -370,8 +370,8 @@ async def _prepare_with_record(
             else _recapture(scope, "absent")
         )
     if initial is not None:
-        if record is not None:
-            await delete_checkpoint(repo, scope, record)
+        assert record is not None
+        await delete_checkpoint(repo, scope, record)
         return (
             _exhausted_recapture_decision(scope)
             if request.recapture_budget_exhausted

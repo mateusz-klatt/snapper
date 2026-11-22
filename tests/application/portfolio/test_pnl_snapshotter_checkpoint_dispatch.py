@@ -43,6 +43,7 @@ from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import PortfolioPnlAnchorRow
 from tests.application.portfolio import test_pnl_opening_checkpoint_verifier as verifier
 from tests.application.portfolio import test_pnl_snapshotter as fixtures
+from tests.application.portfolio import test_pnl_snapshotter_checkpoint_shadow as shadow_cases
 
 
 def _permit_capture(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1343,23 +1344,100 @@ async def test_tick_recaptures_are_bounded_by_max_recaptures_per_tick(
     assert checkpoint_metrics().capture_refusals == {"capture_recapture_budget_exceeded": 2}
 
 
-async def test_active_resume_fallback_without_recapture_avoids_second_anchor_replay(
+def test_exhausted_recapture_budget_records_only_tip_capture_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reuse the anchor result already returned by the resumed service fallback when not recapturing.
+    """Report a bounded recapture omission only for an otherwise capturable tip chunk.
 
-    Given: Active mode with a verified checkpoint, a non-tip chunk where recapture is ineligible,
-        and a resumed call whose service fallback already returns the anchor series.
+    Given: An exhausted tick recapture budget and a complete pending frontier.
+    When: Tip and non-tip chunks request recapture.
+    Then: Only the tip request records the closed budget-exceeded refusal.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for capture permission.
+    """
+    reset_checkpoint_metrics()
+    _permit_capture(monkeypatch)
+    repo = fixtures._FakeRepo()
+    frontier = replace(_pending(repo), tip=fixtures._minute(4))
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    snap._tick_recaptures = dispatch.MAX_RECAPTURES_PER_TICK
+    start = frontier.next_minute
+    assert start is not None
+    request = pnl_snapshotter._CheckpointDispatchRequest(
+        cast(Repository, repo),
+        _context(snap, frontier),
+        frontier,
+        ChunkWindow(start, frontier.tip),
+        0.0,
+        None,
+        None,
+    )
+    assert snap._consume_recapture(request, frontier.tip) is None
+    assert snap._consume_recapture(request, start) is None
+    assert checkpoint_metrics().capture_refusals == {"capture_recapture_budget_exceeded": 1}
+
+
+async def test_commit_without_checkpoint_reraises_database_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not convert an ordinary financial commit failure into a checkpoint refusal.
+
+    Given: A commit plan with no staged checkpoint write.
+    When: The financial commit raises a SQLAlchemy failure.
+    Then: The original failure propagates without a checkpoint-only retry.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for the failing repository commit.
+    """
+    repo = fixtures._FakeRepo()
+    frontier = _pending(repo)
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    start = frontier.next_minute
+    assert start is not None
+    chunk = ChunkWindow(start, frontier.tip)
+    request = pnl_snapshotter._CheckpointDispatchRequest(
+        cast(Repository, repo),
+        _context(snap, frontier),
+        frontier,
+        chunk,
+        0.0,
+        None,
+        None,
+    )
+    monkeypatch.setattr(
+        repo,
+        "commit_portfolio_pnl_correction_chunk",
+        AsyncMock(side_effect=OperationalError("UPDATE", {}, Exception("commit failed"))),
+    )
+    with pytest.raises(OperationalError, match="commit failed"):
+        await snap._commit_checkpoint_plan(
+            request,
+            chunk,
+            fixtures._series(start, frontier.tip),
+            shadow_cases._plan(frontier),
+        )
+
+
+@pytest.mark.parametrize("mode", ["active", "shadow"])
+async def test_resume_fallback_without_recapture_avoids_second_anchor_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """Reuse the anchor result already returned by the resumed fallback when not recapturing.
+
+    Given: Active or shadow mode with a verified checkpoint, a non-tip chunk where recapture
+        is ineligible, and a resumed call whose service fallback returns the anchor series.
     When: ``_advance_replay`` dispatches the chunk.
-    Then: Only the single resumed call runs (no second anchor replay), the stale checkpoint
-        is invalidated, the fallback metric increments, and the financial chunk commits.
+    Then: No second anchor replay runs, the stale checkpoint is invalidated, and the chunk commits.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture for checkpoint mode and service stubbing.
+        mode: Checkpoint dispatch mode under test.
     """
     reset_checkpoint_metrics()
     _enable_checkpoint_modes(monkeypatch)
-    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", mode)
     repo = fixtures._FakeRepo()
     frontier = replace(_pending(repo), tip=fixtures._minute(4))
     repo._frontiers[frontier.key] = frontier
@@ -1378,7 +1456,7 @@ async def test_active_resume_fallback_without_recapture_avoids_second_anchor_rep
 
     await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
 
-    assert events == ["resume"]
+    assert events == (["resume"] if mode == "active" else ["anchor", "resume"])
     assert checkpoint_metrics().fallbacks == {"checkpoint_late_execution": 1}
     assert checkpoint_metrics().invalidations_deleted == 1
     assert checkpoint_metrics().resumes_succeeded == 0
