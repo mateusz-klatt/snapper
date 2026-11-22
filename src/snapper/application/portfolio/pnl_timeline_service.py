@@ -7619,12 +7619,40 @@ def _checkpoint_read_profile_supported(
     return options.pointwise_exact_fx and not policy.carry_valuation
 
 
+def _require_resume_verified_horizon(
+    resume: PnlCheckpointResume,
+    as_of: datetime,
+) -> tuple[PnlFxRatePlane, ...]:
+    """Require verifier-stamped FX planes and exact horizon agreement on resume.
+
+    Args:
+        resume: Checkpoint resume state passed to the timeline read.
+        as_of: Replay knowledge horizon used for the series read.
+
+    Returns:
+        The verifier-observed event-FX planes for ``as_of``.
+
+    Raises:
+        _CheckpointResumeFallbackError: With
+            ``"checkpoint_verification_horizon_mismatch"`` when verification
+            metadata is absent or belongs to a different horizon.
+    """
+    if (
+        resume.verified_at is None
+        or resume.verified_fx_planes is None
+        or resume.verified_at != as_of
+    ):
+        raise _CheckpointResumeFallbackError("checkpoint_verification_horizon_mismatch")
+    return resume.verified_fx_planes
+
+
 def _enforce_checkpoint_resume_read_profile(
     options: PnlSeriesReplayOptions,
     policy: PnlSeriesReadPolicy,
     from_time: datetime,
+    as_of: datetime,
 ) -> None:
-    """Fall back softly unless read profile and window satisfy direct checkpoint resume."""
+    """Fall back softly unless read profile, window, and horizon match resume."""
     resume = options.checkpoint_resume
     if resume is None:
         return
@@ -7635,6 +7663,7 @@ def _enforce_checkpoint_resume_read_profile(
         or from_time.replace(second=0, microsecond=0) <= resume.record.certificate.checkpoint_minute
     ):
         raise _CheckpointResumeFallbackError("checkpoint_ineligible")
+    _require_resume_verified_horizon(resume, as_of)
 
 
 def _activate_checkpoint_capture(
@@ -7900,8 +7929,6 @@ def _validate_loaded_event_fx_planes(
     verified_planes: tuple[PnlFxRatePlane, ...],
 ) -> None:
     """Detect unexpected prefix event-FX planes already observed during FX loading."""
-    if resume.verified_fx_planes is None:
-        return
     certificate = resume.record.certificate
     opens = set(certificate.consumed_fx_open_ats)
     pairs = {currency_pair_key(first, second) for first, second in certificate.consumed_fx_pairs}
@@ -7922,21 +7949,13 @@ async def _validate_resume_event_fx_candles(
     """Fall back cold if prefix event-FX candles commit between verify and FX load."""
     if resume is None:
         return
+    planes = _require_resume_verified_horizon(resume, as_of)
     certificate = resume.record.certificate
     opens = certificate.consumed_fx_open_ats
     if not opens:
         return
-    planes = (
-        tuple(
-            (entry.base, entry.quote, entry.exchange)
-            for entry in resume.bundle.event_fx_candles_by_plane
-        )
-        if resume.verified_fx_planes is None
-        else resume.verified_fx_planes
-    )
     _validate_loaded_event_fx_planes(resume, fx_evidence, planes)
-    check_as_of = resume.verified_at or as_of
-    total = await repo.get_pnl_event_fx_candle_fingerprint(planes, opens, check_as_of)
+    total = await repo.get_pnl_event_fx_candle_fingerprint(planes, opens, as_of)
     if total != certificate.event_fx_candles_fingerprint:
         raise _CheckpointResumeFallbackError("checkpoint_event_fx_candles_changed")
 
@@ -8159,7 +8178,7 @@ async def build_wallet_pnl_series(
                 valuation_ccy,
             )
     try:
-        _enforce_checkpoint_resume_read_profile(options, policy, from_time)
+        _enforce_checkpoint_resume_read_profile(options, policy, from_time, as_of)
         with pnl_read_phase("series_replay"):
             replay = await _load_series_replay_inputs(repo, anchor_load, to_time, options)
             replay_metadata = await _series_replay_metadata(

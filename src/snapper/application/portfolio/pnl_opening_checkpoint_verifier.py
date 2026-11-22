@@ -63,6 +63,7 @@ PnlCheckpointFallbackReason = Literal[
     "checkpoint_event_fx_candles_changed",
     "checkpoint_fx_election_changed",
     "checkpoint_late_execution",
+    "checkpoint_verification_horizon_mismatch",
 ]
 """Closed fallback vocabulary for checkpoint resume refusal."""
 
@@ -89,6 +90,7 @@ _SERVICE_FALLBACK_REASONS: dict[str, PnlCheckpointFallbackReason] = {
     "checkpoint_event_fx_candles_changed": "checkpoint_event_fx_candles_changed",
     "checkpoint_fx_election_changed": "checkpoint_fx_election_changed",
     "checkpoint_late_execution": "checkpoint_late_execution",
+    "checkpoint_verification_horizon_mismatch": "checkpoint_verification_horizon_mismatch",
 }
 """Exact lookup mapping closed service fallback strings back to typed literals."""
 

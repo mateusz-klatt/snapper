@@ -31,6 +31,7 @@ from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOp
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.application.portfolio.pnl_timeline_service import _execution_manifest_digest
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
+from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PnlFxRatePlane
@@ -228,12 +229,15 @@ async def _read_window(
 async def _verified_resume(
     monkeypatch: pytest.MonkeyPatch,
     repo: _ResumeRepo,
+    *,
+    as_of: datetime = fixtures._m(10),
 ) -> PnlCheckpointResume:
     """Capture at C and verify the persisted-shaped record at the resume horizon.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
         repo: Populated capture and verification fake.
+        as_of: Verification knowledge horizon.
 
     Returns:
         Verified decoded resume state.
@@ -255,7 +259,7 @@ async def _verified_resume(
     )
     assert capture_result.checkpoint_write is not None
     write = capture_result.checkpoint_write
-    record = PnlOpeningCheckpointRecord(write.certificate, write.state_json, fixtures._m(10))
+    record = PnlOpeningCheckpointRecord(write.certificate, write.state_json, as_of)
     eligibility = replace(
         verifier._eligibility(request),
         from_time=fixtures._m(5),
@@ -266,7 +270,7 @@ async def _verified_resume(
         repo,
         record,
         verifier._scope(request),
-        fixtures._m(10),
+        as_of,
         eligibility,
     )
     assert isinstance(outcome, PnlCheckpointResume)
@@ -2738,4 +2742,406 @@ async def test_resume_falls_back_when_prefix_fx_candle_commits_between_verify_an
     )
     assert cold.points[-1].fee_pnl == pytest.approx(-8.0)
     assert resumed.checkpoint_resume_fallback == "checkpoint_event_fx_candles_changed"
+    checkpoint_fixtures._assert_points_bit_identical(cold.points, resumed.points)
+
+
+class _HorizonFxResumeRepo(_ResumeRepo):
+    """Resume fake filtering FX candles by SCD2 ``candle_timestamp <= as_of``."""
+
+    def _fx_rows_at(self, as_of: datetime) -> list[PnlFxRateRow]:
+        """Return the latest visible FX candle per ``(base, quote, exchange, open_at)``.
+
+        Args:
+            as_of: Knowledge horizon bound on ``candle_timestamp``.
+
+        Returns:
+            Latest FX rows visible at ``as_of``.
+        """
+        latest: dict[tuple[str, str, str, datetime], PnlFxRateRow] = {}
+        for row in self._fx_rows:
+            if row["candle_timestamp"] > as_of:
+                continue
+            key = (row["base"], row["quote"], row["exchange"], row["open_at"])
+            existing = latest.get(key)
+            if existing is None or row["candle_id"] > existing["candle_id"]:
+                latest[key] = row
+        return list(latest.values())
+
+    async def get_pnl_fx_rate_exchanges_at(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[PnlFxRatePlane]:
+        """Discover FX planes visible at ``as_of``.
+
+        Args:
+            pairs: Oriented currency pairs.
+            open_ats: Exact candle open minutes.
+            as_of: Knowledge horizon.
+
+        Returns:
+            Populated FX planes visible at ``as_of``.
+        """
+        saved = self._fx_rows
+        self._fx_rows = self._fx_rows_at(as_of)
+        try:
+            return await super().get_pnl_fx_rate_exchanges_at(pairs, open_ats, as_of)
+        finally:
+            self._fx_rows = saved
+
+    async def get_pnl_fx_rate_exchanges(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
+    ) -> list[PnlFxRatePlane]:
+        """Discover window FX planes visible at ``as_of``.
+
+        Args:
+            pairs: Oriented currency pairs.
+            start: Inclusive start open minute.
+            end: Inclusive end open minute.
+            as_of: Knowledge horizon.
+            open_intervals: Optional interval restriction.
+
+        Returns:
+            Populated FX planes visible at ``as_of``.
+        """
+        saved = self._fx_rows
+        self._fx_rows = self._fx_rows_at(as_of)
+        try:
+            return await super().get_pnl_fx_rate_exchanges(
+                pairs,
+                start,
+                end,
+                as_of,
+                open_intervals=open_intervals,
+            )
+        finally:
+            self._fx_rows = saved
+
+    async def get_pnl_fx_rate_candles_at(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Load exact FX candles visible at ``as_of``.
+
+        Args:
+            planes: Selected FX planes.
+            open_ats: Exact candle open minutes.
+            as_of: Knowledge horizon.
+
+        Returns:
+            Visible FX candle rows at ``as_of``.
+        """
+        saved = self._fx_rows
+        self._fx_rows = self._fx_rows_at(as_of)
+        try:
+            return await super().get_pnl_fx_rate_candles_at(planes, open_ats, as_of)
+        finally:
+            self._fx_rows = saved
+
+    async def get_pnl_fx_rate_candles(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        start: datetime,
+        end: datetime,
+        as_of: datetime,
+        *,
+        open_intervals: Sequence[tuple[datetime, datetime]] = (),
+    ) -> list[PnlFxRateRow]:
+        """Load ranged FX candles visible at ``as_of``.
+
+        Args:
+            planes: Selected FX planes.
+            start: Inclusive start open minute.
+            end: Inclusive end open minute.
+            as_of: Knowledge horizon.
+            open_intervals: Optional interval restriction.
+
+        Returns:
+            Visible FX candle rows at ``as_of``.
+        """
+        saved = self._fx_rows
+        self._fx_rows = self._fx_rows_at(as_of)
+        try:
+            return await super().get_pnl_fx_rate_candles(
+                planes,
+                start,
+                end,
+                as_of,
+                open_intervals=open_intervals,
+            )
+        finally:
+            self._fx_rows = saved
+
+    async def get_pnl_event_fx_candle_fingerprints_by_plane(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> dict[PnlFxRatePlane, IdAggregate]:
+        """Aggregate per-plane FX candle identities visible at ``as_of``.
+
+        Args:
+            planes: Selected FX planes.
+            open_ats: Exact candle open minutes.
+            as_of: Knowledge horizon.
+
+        Returns:
+            Per-plane candle aggregates visible at ``as_of``.
+        """
+        saved = self._fx_rows
+        self._fx_rows = self._fx_rows_at(as_of)
+        try:
+            return await super().get_pnl_event_fx_candle_fingerprints_by_plane(
+                planes,
+                open_ats,
+                as_of,
+            )
+        finally:
+            self._fx_rows = saved
+
+    async def get_pnl_event_fx_candle_fingerprint(
+        self,
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> IdAggregate:
+        """Aggregate total FX candle identity visible at ``as_of``.
+
+        Args:
+            planes: Selected FX planes.
+            open_ats: Exact candle open minutes.
+            as_of: Knowledge horizon.
+
+        Returns:
+            Total candle aggregate visible at ``as_of``.
+        """
+        saved = self._fx_rows
+        self._fx_rows = self._fx_rows_at(as_of)
+        try:
+            return await super().get_pnl_event_fx_candle_fingerprint(planes, open_ats, as_of)
+        finally:
+            self._fx_rows = saved
+
+
+async def _verified_prefix_fx_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    repo: _HorizonFxResumeRepo,
+    verify_as_of: datetime,
+) -> PnlCheckpointResume:
+    """Capture at C and verify a prefix-FX checkpoint at ``verify_as_of``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        repo: Horizon-aware fake repository.
+        verify_as_of: Verification knowledge horizon ``H1``.
+
+    Returns:
+        Verified checkpoint resume stamped with ``verified_at == verify_as_of``.
+    """
+    capture._permit_capture(monkeypatch)
+    request = replace(capture._request(), raw_execution_watermarks={"kraken": 1})
+    capture_options = replace(capture._options(request), replay_generation_tip=_C)
+    capture_result = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(0),
+        _C,
+        "1m",
+        verify_as_of,
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=capture_options,
+    )
+    assert capture_result.checkpoint_write is not None
+    write = capture_result.checkpoint_write
+    record = PnlOpeningCheckpointRecord(write.certificate, write.state_json, verify_as_of)
+    eligibility = replace(
+        verifier._eligibility(request),
+        from_time=fixtures._m(5),
+        frontier_tip=_T,
+        replay_generation_tip=_T,
+    )
+    outcome = await verify_checkpoint_for_resume(
+        cast(Repository, repo),
+        record,
+        verifier._scope(request),
+        verify_as_of,
+        eligibility,
+    )
+    assert isinstance(outcome, PnlCheckpointResume)
+    return outcome
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["verified_at_none", "verified_fx_planes_none", "verified_at_mismatch"],
+)
+async def test_resume_falls_back_on_missing_or_mismatched_verification_horizon(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """Fall back cold when verification metadata is absent or mismatched with ``as_of``.
+
+    Given: A prefix-FX checkpoint verified at ``H1 = m(9)``, plus a corrected
+        prefix FX candle visible only at ``H2 = m(10)``.
+    When: A direct caller replays at ``H2`` with ``verified_at=None``,
+        ``verified_fx_planes=None``, or ``verified_at=H1 != H2``.
+    Then: All three cases fall back cold with
+        ``"checkpoint_verification_horizon_mismatch"`` and return points
+        bit-identical to the cold read at ``H2``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        case: Verification-horizon guard case under test.
+    """
+    h1 = fixtures._m(9)
+    h2 = fixtures._m(10)
+    repo = _HorizonFxResumeRepo()
+    repo._accruals = []
+    repo._executions = [
+        fixtures._exec_row(fixtures._I1, 1, 1, "buy", 1.0, 100.0, 1.0, "EUR"),
+        fixtures._exec_row(fixtures._I1, 2, 6, "buy", 1.0, 100.0, 1.0, "EUR"),
+    ]
+    repo._refs = [fixtures._ref(fixtures._I1, "BTC-USD", "USD", exchange="kraken")]
+    repo._candles = [
+        fixtures._candle(fixtures._m(minute), 100.0, fixtures._I1) for minute in range(9)
+    ]
+    repo._lineage = [
+        fixtures._lineage_row(row["order_public_id"], "rest") for row in repo._executions
+    ]
+    repo._fx_rows = [
+        fixtures._fx_row("EUR", "USD", 1, 2.0, exchange="kraken"),
+        fixtures._fx_row("EUR", "USD", 6, 2.0, exchange="kraken"),
+    ]
+    repo._execution_watermarks = {"kraken": 1}
+    resume = await _verified_prefix_fx_resume(monkeypatch, repo, h1)
+    repo._execution_watermarks = {"kraken": 2}
+    if case == "verified_at_mismatch":
+        corrected_prefix = fixtures._fx_row("EUR", "USD", 1, 5.0, exchange="kraken")
+        corrected_prefix["candle_id"] = 101
+        corrected_prefix["candle_timestamp"] = h2
+        repo._fx_rows.append(corrected_prefix)
+        replay_as_of = h2
+        mutated_resume = resume
+    elif case == "verified_at_none":
+        replay_as_of = h1
+        mutated_resume = replace(resume, verified_at=None)
+    else:
+        replay_as_of = h1
+        mutated_resume = replace(resume, verified_fx_planes=None)
+    options = replace(
+        _resume_options(mutated_resume),
+        frozen_execution_watermarks={"kraken": 2},
+    )
+    resumed = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        replay_as_of,
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    cold = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        replay_as_of,
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    assert resumed.checkpoint_resume_fallback == "checkpoint_verification_horizon_mismatch"
+    checkpoint_fixtures._assert_points_bit_identical(cold.points, resumed.points)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["verified_at_none", "verified_fx_planes_none", "verified_at_mismatch"],
+)
+async def test_resume_falls_back_without_prefix_event_fx_on_horizon_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """Fall back cold even when the prefix consumed zero event-FX opens.
+
+    Given: A USD-only verified checkpoint with ``consumed_fx_open_ats == ()``.
+    When: Direct replay runs with ``verified_at=None``,
+        ``verified_fx_planes=None``, or ``verified_at != as_of``.
+    Then: Every case falls back cold with
+        ``"checkpoint_verification_horizon_mismatch"`` and matches the cold read.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        case: Verification-horizon guard case under test.
+    """
+    repo = _ResumeRepo()
+    repo._accruals = []
+    repo._executions = [
+        fixtures._exec_row(fixtures._I1, 1, 1, "buy", 1.0, 100.0, 0.0, "USD"),
+        fixtures._exec_row(fixtures._I1, 2, 6, "buy", 1.0, 105.0, 0.0, "USD"),
+    ]
+    repo._refs = [fixtures._ref(fixtures._I1, "BTC-USD", "USD")]
+    repo._lineage = [
+        fixtures._lineage_row(row["order_public_id"], "rest") for row in repo._executions
+    ]
+    repo._fx_rows = []
+    repo._execution_watermarks = {"kraken": 1}
+    resume = await _capture_and_verify_custom(monkeypatch, repo, {"kraken": 1})
+    repo._execution_watermarks = {"kraken": 2}
+    assert resume.record.certificate.consumed_fx_open_ats == ()
+    if case == "verified_at_none":
+        replay_as_of = fixtures._m(10)
+        mutated_resume = replace(resume, verified_at=None)
+    elif case == "verified_fx_planes_none":
+        replay_as_of = fixtures._m(10)
+        mutated_resume = replace(resume, verified_fx_planes=None)
+    else:
+        replay_as_of = fixtures._m(11)
+        mutated_resume = resume
+    options = replace(
+        _resume_options(mutated_resume),
+        frozen_execution_watermarks={"kraken": 2},
+    )
+    resumed = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        replay_as_of,
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    cold = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        replay_as_of,
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    assert resumed.checkpoint_resume_fallback == "checkpoint_verification_horizon_mismatch"
     checkpoint_fixtures._assert_points_bit_identical(cold.points, resumed.points)

@@ -252,11 +252,15 @@ async def test_width_and_requirement_sets_match_anchor_replay(
         monkeypatch: Pytest monkeypatch fixture.
         width: Chunk width in minutes.
     """
+    tip = resume_fixtures._C + timedelta(minutes=width)
     repo = resume_fixtures._ResumeRepo()
-    resume = await resume_fixtures._verified_resume(monkeypatch, repo)
+    resume = await resume_fixtures._verified_resume(
+        monkeypatch,
+        repo,
+        as_of=tip + timedelta(minutes=1),
+    )
     log = _RequirementLog()
     _install_requirement_spies(monkeypatch, log)
-    tip = resume_fixtures._C + timedelta(minutes=width)
     anchor = await _read_width(resume_fixtures._ResumeRepo(), None, width, log)
     resumed = await _read_width(repo, resume, width, log)
     checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
@@ -621,7 +625,11 @@ async def test_requirement_spies_catch_missing_conversion_in_negative_control(
         monkeypatch: Pytest monkeypatch fixture.
     """
     repo = resume_fixtures._ResumeRepo()
-    resume = await resume_fixtures._verified_resume(monkeypatch, repo)
+    resume = await resume_fixtures._verified_resume(
+        monkeypatch,
+        repo,
+        as_of=resume_fixtures._C + timedelta(minutes=8),
+    )
     log = _RequirementLog()
     _install_requirement_spies(monkeypatch, log)
     await _read_width(repo, None, 7, log)

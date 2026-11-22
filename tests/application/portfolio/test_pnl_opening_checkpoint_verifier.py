@@ -669,6 +669,12 @@ async def test_verifier_converts_unexpected_error_and_exposes_single_late_owner(
         "checkpoint_ineligible",
         delete_required=False,
     )
+    assert service_resume_fallback(
+        "checkpoint_verification_horizon_mismatch"
+    ) == PnlCheckpointFallback(
+        "checkpoint_verification_horizon_mismatch",
+        delete_required=False,
+    )
     assert service_resume_fallback("unknown_code") == PnlCheckpointFallback(
         "checkpoint_payload_corrupt",
         delete_required=True,
