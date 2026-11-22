@@ -10,6 +10,7 @@ import hashlib
 import inspect
 import json
 import math
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
@@ -50,7 +51,8 @@ from snapper.data.models import FundingRate
 from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
-from snapper.data.repository import close_and_insert_sync
+from snapper.data.repository import Scd2UpsertSpec
+from snapper.data.repository import upsert_scd2_sync
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.tokenized_spec_provenance import TOKENIZED_MAX_DECIMALS
 from snapper.infrastructure.exchanges.tokenized_spec_provenance import TOKENIZED_SPEC_ETL_VERSION
@@ -1522,13 +1524,6 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             InstrumentOrderCapability.instrument_public_id == instrument_public_id,
             InstrumentOrderCapability.exchange == ExchangeEnum.KRAKEN,
         ]
-        existing = session.execute(
-            select(InstrumentOrderCapability).where(
-                *filters,
-                InstrumentOrderCapability.timestamp <= now,
-                InstrumentOrderCapability.known_to > now,
-            )
-        ).scalar_one_or_none()
         values: JsonObject = {
             "instrument_public_id": instrument_public_id,
             "exchange": ExchangeEnum.KRAKEN,
@@ -1548,20 +1543,26 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             "max_order_size": None,
             "top_of_book_quality": "unknown",
         }
-        if existing is not None and all(
-            getattr(existing, key) == value for key, value in values.items()
-        ):
-            return
-        close_and_insert_sync(
-            session,
-            InstrumentOrderCapability,
-            filters,
-            {
+
+        def _decide(existing: InstrumentOrderCapability | None) -> Mapping[str, object] | None:
+            if existing is not None and all(
+                getattr(existing, key) == value for key, value in values.items()
+            ):
+                return None
+            return {
                 **values,
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence("order_capabilities"),
-            },
-            now,
+            }
+
+        upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
+                model=InstrumentOrderCapability,
+                match_filters=filters,
+                bus_time=now,
+                decide=_decide,
+            ),
         )
 
     @staticmethod

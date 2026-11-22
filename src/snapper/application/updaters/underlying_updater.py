@@ -6,6 +6,8 @@ and upserts UnderlyingAsset + InstrumentUnderlyingMapping rows via SCD2.
 """
 
 import re
+from collections.abc import Mapping
+from dataclasses import asdict
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -25,14 +27,21 @@ from snapper.core.types import AssetTypeEnum
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import InstrumentKindEnum
 from snapper.core.types import RelationshipTypeEnum
+from snapper.data.instrument_spec_observation_spans import SpecObservationSpanTarget
 from snapper.data.instrument_spec_observation_spans import latest_spec_observation_at
+from snapper.data.instrument_spec_observation_spans import record_instrument_spec_observation_span
 from snapper.data.models import Instrument
+from snapper.data.models import InstrumentSpec
 from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import Symbol
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import Repository
+from snapper.data.repository import Scd2UpsertSpec
+from snapper.data.repository import begin_scd2_write
 from snapper.data.repository import get_repository
+from snapper.data.repository import upsert_scd2
 from snapper.data.repository import where_active
+from snapper.data.repository_types import InstrumentSpecObservationSpanRow
 from snapper.data.repository_types import InstrumentSpecRow
 
 _DEFAULT_YAML = Path(__file__).resolve().parents[2] / "data" / "underlying_mappings.yaml"
@@ -811,6 +820,106 @@ class UnderlyingUpdater:
             or rule.expiry_override != first.expiry_override
         )
 
+    @staticmethod
+    def _spec_orm_to_row(
+        existing: InstrumentSpec,
+        observation_spans: tuple[InstrumentSpecObservationSpanRow, ...] = (),
+    ) -> InstrumentSpecRow:
+        """Project an ORM InstrumentSpec row into the snapshot used by fallback logic."""
+        return InstrumentSpecRow(
+            instrument_public_id=existing.instrument_public_id,
+            tick_size=existing.tick_size,
+            lot_size=existing.lot_size,
+            min_order_size=existing.min_order_size,
+            max_order_size=existing.max_order_size,
+            cost_decimals=existing.cost_decimals,
+            qty_decimals=existing.qty_decimals,
+            margin_initial=existing.margin_initial,
+            position_limit_long=existing.position_limit_long,
+            position_limit_short=existing.position_limit_short,
+            status=existing.status,
+            contract_size=existing.contract_size,
+            quantity_unit=existing.quantity_unit,
+            spec_source=existing.spec_source,
+            spec_version=existing.spec_version,
+            spec_observed_at=existing.spec_observed_at,
+            observation_spans=observation_spans,
+            unit_certified=existing.unit_certified,
+            expiry_at=existing.expiry_at,
+            instrument_kind=existing.instrument_kind,
+            funding_type=existing.funding_type,
+            funding_frequency_hours=existing.funding_frequency_hours,
+            rollover_rate_long=existing.rollover_rate_long,
+            rollover_rate_short=existing.rollover_rate_short,
+            max_funding_rate=existing.max_funding_rate,
+        )
+
+    async def _apply_single_yaml_spec_fallback(
+        self,
+        ipid: str,
+        match: _MatchResult,
+        session_id: str,
+        sequence_id: int,
+        now: datetime,
+    ) -> bool:
+        """Apply YAML fallbacks for one instrument under Contract C SAVEPOINT retry."""
+        assert self._repo is not None
+        pre_existing = await self._repo.get_instrument_spec(ipid, now)
+        if self._build_fallback_spec(match, pre_existing) is None:
+            return False
+        pre_key = (
+            (pre_existing.get("spec_public_id"), pre_existing.get("spec_timestamp"))
+            if pre_existing is not None
+            else None
+        )
+        pre_spans = pre_existing.get("observation_spans", ()) if pre_existing is not None else ()
+
+        def _decide_fallback(locked: InstrumentSpec | None) -> Mapping[str, object] | None:
+            if locked is None:
+                existing_row = None
+            else:
+                spans = pre_spans if pre_key == (locked.public_id, locked.timestamp) else ()
+                existing_row = self._spec_orm_to_row(locked, spans)
+            spec = self._build_fallback_spec(match, existing_row)
+            if spec is None:
+                return None
+            return {
+                "instrument_public_id": ipid,
+                "session_id": session_id,
+                "sequence_id": sequence_id,
+                **asdict(spec),
+            }
+
+        async with self._repo.session() as session:
+            await begin_scd2_write(session)
+            result = await upsert_scd2(
+                session,
+                Scd2UpsertSpec(
+                    model=InstrumentSpec,
+                    match_filters=[InstrumentSpec.instrument_public_id == ipid],
+                    bus_time=now,
+                    decide=_decide_fallback,
+                ),
+            )
+            if result.outcome == "unchanged":
+                return False
+            assert result.row is not None
+            if result.row.spec_observed_at is not None:
+                await record_instrument_spec_observation_span(
+                    session,
+                    SpecObservationSpanTarget(
+                        instrument_public_id=result.row.instrument_public_id,
+                        spec_public_id=result.row.public_id,
+                        spec_timestamp=result.row.timestamp,
+                        spec_version=result.row.spec_version,
+                        observed_at=result.row.spec_observed_at,
+                        session_id=session_id,
+                        sequence_id=sequence_id,
+                    ),
+                )
+            await session.commit()
+            return True
+
     async def _apply_yaml_spec_fallbacks(
         self,
         desired: dict[str, _MatchResult],
@@ -820,25 +929,16 @@ class UnderlyingUpdater:
         """Apply YAML instrument_type and expiry_override as fallbacks.
 
         Only writes to InstrumentSpec when the current value is NULL,
-        preserving API-sourced data as authoritative.
+        preserving API-sourced data as authoritative. Re-evaluates under lock
+        and SAVEPOINT retry so concurrent catalog writers never lose API fields.
         """
         assert self._repo is not None
         applied = 0
         for seq, (ipid, match) in enumerate(desired.items(), start=1):
             if not match.instrument_type and not match.expiry_override:
                 continue
-            existing = await self._repo.get_instrument_spec(ipid, now)
-            spec = self._build_fallback_spec(match, existing)
-            if spec is None:
-                continue
-            await self._repo.revise_instrument_spec(
-                instrument_public_id=ipid,
-                session_id=session_id,
-                sequence_id=seq,
-                timestamp=now,
-                spec=spec,
-            )
-            applied += 1
+            if await self._apply_single_yaml_spec_fallback(ipid, match, session_id, seq, now):
+                applied += 1
         return applied
 
     @staticmethod

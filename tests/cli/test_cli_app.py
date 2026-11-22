@@ -3399,6 +3399,7 @@ def mock_setting() -> MagicMock:
     setting.key = "test_key"
     setting.value = None
     setting.is_encrypted = True
+    setting.timestamp = datetime(2025, 1, 1, tzinfo=UTC)
     setting.known_to = KNOWN_TO_MAX
     return setting
 
@@ -3416,6 +3417,11 @@ def mock_session() -> AsyncMock:
     """Provide a mock async database session with context manager."""
     session = AsyncMock()
     session.add = MagicMock()
+    nested = AsyncMock()
+    nested.__aenter__ = AsyncMock(return_value=nested)
+    nested.__aexit__ = AsyncMock(return_value=False)
+    session.begin_nested = MagicMock(return_value=nested)
+    session.flush = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock()
     session.execute = AsyncMock()

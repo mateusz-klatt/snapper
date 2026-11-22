@@ -40,6 +40,7 @@ from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import Trade
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.infrastructure.symbols import functions
 from snapper.infrastructure.symbols.mapper import SymbolMapperService
 
@@ -215,6 +216,7 @@ class Catalog:
     def add_polygon_franc(self) -> None:
         """Give CHF-USD polygon's real franc alias and market-data capability."""
         with self.sessions() as session:
+            begin_scd2_write_sync(session)
             owner = self.public_id("CHF-USD")
             self.updater._upsert_alias(
                 session, owner, "polygon", AliasChannelEnum.REST, "C:CHFUSD", _SEEDED, "seed", 1
@@ -482,6 +484,7 @@ async def test_destination_keeps_its_own_alias_identity(catalog: Catalog) -> Non
     await _seed_production(catalog)
     zchf_usd = catalog.public_id("ZCHF-USD")
     with catalog.sessions() as session:
+        begin_scd2_write_sync(session)
         catalog.updater._upsert_alias(
             session, zchf_usd, "kraken", AliasChannelEnum.REST, "ZCHFUSD-PREV", _SEEDED, "seed", 3
         )

@@ -20,6 +20,9 @@ from snapper.application.updaters.underlying_updater import _InstrumentInfo
 from snapper.application.updaters.underlying_updater import _MatchResult
 from snapper.application.updaters.underlying_updater import _RuleMatcher
 from snapper.application.updaters.underlying_updater import rule_matches
+from snapper.data.models import InstrumentSpec
+from snapper.data.repository import Scd2UpsertOutcome
+from snapper.data.repository import Scd2UpsertSpec
 from snapper.data.repository_types import InstrumentSpecRow
 
 _REPO_PATCH = "snapper.application.updaters.underlying_updater.get_repository"
@@ -1250,16 +1253,46 @@ class TestYamlSpecFallbackIntegration:
 
         repo = _mock_repo(instrument_rows=[inst_row])
         repo.get_instrument_spec = AsyncMock(return_value=None)
-        repo.revise_instrument_spec = AsyncMock(return_value=1)
         repo.get_underlying_assets = AsyncMock(return_value=[])
+        captured_writes: list[dict[str, object]] = []
 
-        with patch(_REPO_PATCH, return_value=repo):
+        async def _fake_begin(_session: object) -> None:
+            return None
+
+        async def _fake_upsert(
+            _session: object,
+            spec: Scd2UpsertSpec[InstrumentSpec],
+        ) -> Scd2UpsertOutcome[InstrumentSpec]:
+            new_values = spec.decide(None)
+            assert new_values is not None
+            captured_writes.append(dict(new_values))
+            return Scd2UpsertOutcome(
+                row=InstrumentSpec(
+                    instrument_public_id="inst-spy",
+                    instrument_kind=str(new_values["instrument_kind"]),
+                    spec_observed_at=None,
+                    session_id="test",
+                    sequence_id=1,
+                ),
+                outcome="inserted",
+            )
+
+        with (
+            patch(_REPO_PATCH, return_value=repo),
+            patch(
+                "snapper.application.updaters.underlying_updater.begin_scd2_write",
+                new=_fake_begin,
+            ),
+            patch(
+                "snapper.application.updaters.underlying_updater.upsert_scd2",
+                new=_fake_upsert,
+            ),
+        ):
             updater = UnderlyingUpdater(db_url="test://", yaml_path=yaml_file)
             await updater.run()
 
-        repo.revise_instrument_spec.assert_called_once()
-        call_kwargs = repo.revise_instrument_spec.call_args.kwargs
-        assert call_kwargs["spec"].instrument_kind == "etf"
+        assert len(captured_writes) == 1
+        assert captured_writes[0]["instrument_kind"] == "etf"
 
     @pytest.mark.asyncio
     async def test_skips_fallback_when_already_set(self, tmp_path: Path) -> None:
@@ -1320,8 +1353,14 @@ class TestYamlSpecFallbackIntegration:
         )
         repo.get_underlying_assets = AsyncMock(return_value=[])
 
-        with patch(_REPO_PATCH, return_value=repo):
+        with (
+            patch(_REPO_PATCH, return_value=repo),
+            patch(
+                "snapper.application.updaters.underlying_updater.upsert_scd2",
+                new_callable=AsyncMock,
+            ) as mock_upsert,
+        ):
             updater = UnderlyingUpdater(db_url="test://", yaml_path=yaml_file)
             await updater.run()
 
-        repo.revise_instrument_spec.assert_not_called()
+        mock_upsert.assert_not_awaited()

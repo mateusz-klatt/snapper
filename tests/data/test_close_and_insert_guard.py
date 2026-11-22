@@ -20,6 +20,8 @@ from sqlalchemy.orm import Session
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
 from snapper.data.repository import TemporalVersionConflictError
+from snapper.data.repository import begin_scd2_write
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import close_and_insert_sync
 
@@ -55,17 +57,18 @@ def settings_db_path(tmp_path: Path) -> Path:
 
 @pytest.fixture
 async def async_session(settings_db_path: Path) -> AsyncIterator[AsyncSession]:
-    """Open an async SQLite session on the private database.
+    """Open an async SQLite session with SCD2 write reservation active.
 
     Args:
         settings_db_path: Path to the initialized database.
 
     Yields:
-        Session that the async helper can use to write versions.
+        Reserved session that the async helper can use to write versions.
     """
     engine = create_async_engine(f"sqlite+aiosqlite:///{settings_db_path}")
     try:
         async with AsyncSession(engine) as session:
+            await begin_scd2_write(session)
             yield session
     finally:
         await engine.dispose()
@@ -73,17 +76,18 @@ async def async_session(settings_db_path: Path) -> AsyncIterator[AsyncSession]:
 
 @pytest.fixture
 def sync_session(settings_db_path: Path) -> Iterator[Session]:
-    """Open a sync SQLite session on the private database.
+    """Open a sync SQLite session with SCD2 write reservation active.
 
     Args:
         settings_db_path: Path to the initialized database.
 
     Yields:
-        Session that the synchronous helper can use to write versions.
+        Reserved session that the synchronous helper can use to write versions.
     """
     engine = create_engine(f"sqlite:///{settings_db_path}")
     try:
         with Session(engine) as session:
+            begin_scd2_write_sync(session)
             yield session
     finally:
         engine.dispose()
@@ -196,6 +200,7 @@ async def test_close_and_insert_refuses_closed_version(async_session: AsyncSessi
     await async_session.flush()
     original_id, successor_id = original.id, successor.id
     await async_session.commit()
+    await begin_scd2_write(async_session)
 
     with pytest.raises(
         TemporalVersionConflictError, match="settings version .* is no longer current"
@@ -228,6 +233,7 @@ async def test_close_and_insert_refreshes_stale_identity(async_session: AsyncSes
     """
     async_session.add(_original_setting())
     await async_session.commit()
+    await begin_scd2_write(async_session)
     cached = (await async_session.scalars(select(Setting))).one()
     original_id = cached.id
     await async_session.execute(_close_without_synchronizing(original_id))
@@ -314,6 +320,7 @@ def test_close_and_insert_sync_refuses_closed_version(sync_session: Session) -> 
     sync_session.flush()
     original_id, successor_id = original.id, successor.id
     sync_session.commit()
+    begin_scd2_write_sync(sync_session)
 
     with pytest.raises(
         TemporalVersionConflictError, match="settings version .* is no longer current"
@@ -342,6 +349,7 @@ def test_close_and_insert_sync_refreshes_stale_identity(sync_session: Session) -
     """
     sync_session.add(_original_setting())
     sync_session.commit()
+    begin_scd2_write_sync(sync_session)
     cached = sync_session.scalars(select(Setting)).one()
     original_id = cached.id
     sync_session.execute(_close_without_synchronizing(original_id))

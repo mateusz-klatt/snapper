@@ -3065,6 +3065,14 @@ class _DummyResult:
         return self.setting
 
 
+class _DummyDialect:
+    name = "postgresql"
+
+
+class _DummyBind:
+    dialect = _DummyDialect()
+
+
 class _DummySession:
     """Test dummy for async database session."""
 
@@ -3072,12 +3080,25 @@ class _DummySession:
         self.setting = setting
         self.commit_called = False
         self.added: list[Any] = []
+        self.info: dict[str, object] = {}
 
     async def __aenter__(self) -> _DummySession:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         return False
+
+    def get_bind(self) -> _DummyBind:
+        return _DummyBind()
+
+    def in_transaction(self) -> bool:
+        return False
+
+    def begin_nested(self) -> contextlib.AbstractAsyncContextManager[_DummySession]:
+        return self
+
+    async def flush(self) -> None:
+        return None
 
     async def execute(self, _stmt: Any) -> _DummyResult:
         return _DummyResult(self.setting)
@@ -3102,6 +3123,8 @@ class _DummyRepository:
         for row in setting if isinstance(setting, list) else [setting]:
             if row is not None and row.known_to is None:
                 row.known_to = KNOWN_TO_MAX
+            if row is not None and row.timestamp is None:
+                row.timestamp = datetime(2025, 1, 1, tzinfo=UTC)
         self.setting = setting
         self.last_session: _DummySession | None = None
 
@@ -3122,6 +3145,9 @@ class _RunsResult:
     def all(self) -> list[Any]:
         return self.runs
 
+    def first(self) -> Any:
+        return self.runs[0] if self.runs else None
+
 
 class _RunsSession:
     """Test stub for process runs session."""
@@ -3129,12 +3155,25 @@ class _RunsSession:
     def __init__(self, runs: list[Any]) -> None:
         self.runs = runs
         self.committed = False
+        self.info: dict[str, object] = {}
 
     async def __aenter__(self) -> _RunsSession:
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         return False
+
+    def get_bind(self) -> _DummyBind:
+        return _DummyBind()
+
+    def in_transaction(self) -> bool:
+        return False
+
+    def begin_nested(self) -> _RunsSession:
+        return self
+
+    async def flush(self) -> None:
+        return None
 
     async def execute(self, _stmt: Any) -> _RunsResult:
         return _RunsResult(self.runs)
@@ -5673,6 +5712,7 @@ async def test_create_process_config_persists_template(
         async def execute(self, *args: Any, **kwargs: Any) -> Any:
             result = MagicMock()
             result.scalar_one_or_none.return_value = None
+            result.scalars.return_value.first.return_value = None
             return result
 
     class _CaptureRepo:
@@ -6191,10 +6231,16 @@ async def test_sync_registry_to_database_adds_missing_tags(
     first_result.scalar_one_or_none.return_value = existing_setting
     update_result = MagicMock()
     update_result.scalar_one_or_none.return_value = existing_setting
-    update_result.scalars.return_value.first.return_value.known_to = KNOWN_TO_MAX
+    update_result.scalars.return_value.first.return_value = existing_setting
+    existing_setting.known_to = KNOWN_TO_MAX
+    existing_setting.timestamp = datetime(2025, 1, 1, tzinfo=UTC)
     first_session = AsyncMock()
     first_session.execute.return_value = first_result
     update_session = AsyncMock()
+    update_session.info = {}
+    update_session.get_bind = MagicMock(return_value=_DummyBind())
+    update_session.in_transaction = MagicMock(return_value=False)
+    update_session.begin_nested = MagicMock(return_value=AsyncMock())
     update_session.add = MagicMock()
     update_session.execute.return_value = update_result
     update_session.commit = AsyncMock()
@@ -6761,10 +6807,16 @@ class TestProcessFactoryRegistrySync:
         mock_get_registry.return_value = mock_registry
         mock_repo = MagicMock()
         mock_session = MagicMock()
+        mock_session.info = {}
+        mock_session.get_bind = MagicMock(return_value=_DummyBind())
+        mock_session.in_transaction = MagicMock(return_value=False)
+        mock_session.begin_nested = MagicMock(return_value=AsyncMock())
+        mock_session.flush = AsyncMock()
         mock_session.add = MagicMock()
         mock_session.commit = AsyncMock()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
+        mock_result.scalars.return_value.first.return_value = None
 
         async def execute_stub(*args: Any, **kwargs: Any) -> Any:
             return mock_result
@@ -6838,8 +6890,14 @@ class TestProcessFactoryRegistrySync:
         )
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = existing_setting
-        mock_result.scalars.return_value.first.return_value.known_to = KNOWN_TO_MAX
+        mock_result.scalars.return_value.first.return_value = existing_setting
+        existing_setting.known_to = KNOWN_TO_MAX
+        existing_setting.timestamp = datetime(2025, 1, 1, tzinfo=UTC)
         mock_session = AsyncMock()
+        mock_session.info = {}
+        mock_session.get_bind = MagicMock(return_value=_DummyBind())
+        mock_session.in_transaction = MagicMock(return_value=False)
+        mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_session.add = MagicMock()
         mock_session.execute.return_value = mock_result
         mock_session.commit = AsyncMock()

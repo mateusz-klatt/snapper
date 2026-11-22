@@ -37,7 +37,9 @@ from snapper.data.models import UserActiveToken
 from snapper.data.models import UserLoginEvent
 from snapper.data.oauth_grant_revocation import revoke_oauth_grants_in_tx
 from snapper.data.repository import TemporalVersionConflictError
-from snapper.data.repository import close_and_insert
+from snapper.data.repository import assert_scd2_write_reserved
+from snapper.data.repository import begin_scd2_write
+from snapper.data.repository import close_and_insert_existing
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
@@ -1000,7 +1002,8 @@ class UserService:
                 already closed before ``close_and_insert`` ran.
         """
         try:
-            new_row = await close_and_insert(
+            assert_scd2_write_reserved(session)
+            new_row = await close_and_insert_existing(
                 session=session,
                 model=User,
                 match_filters=[target],
@@ -1029,19 +1032,24 @@ class UserService:
 
         SQLite keeps legacy transaction control here and ignores ``FOR UPDATE``,
         so plain reads do not open a transaction or block concurrent writers.
-        Emitting ``BEGIN IMMEDIATE`` first serializes user SCD2 writers. On
-        PostgreSQL, pinning ``READ COMMITTED`` prevents ``REPEATABLE READ``
-        or ``SERIALIZABLE`` role/database defaults from failing with SQLSTATE
-        40001 instead of letting ``_lock_current_user`` detect and retry races.
+        Emitting ``BEGIN IMMEDIATE`` first serializes user SCD2 writers and
+        records the session reservation flag. On PostgreSQL, pinning
+        ``READ COMMITTED`` prevents ``REPEATABLE READ`` or ``SERIALIZABLE``
+        role/database defaults from failing with SQLSTATE 40001 instead of
+        letting ``_lock_current_user`` detect and retry races.
 
         Args:
             session: Open database session for the write attempt.
         """
         dialect = self.repository.dialect_name
         if dialect == "sqlite":
+            if isinstance(session, AsyncSession):
+                await begin_scd2_write(session)
+                return
             await session.execute(text("BEGIN IMMEDIATE"))
         elif dialect == "postgresql":
             await session.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+            await begin_scd2_write(session)
 
     async def _prepare_oauth_authority_reduction(
         self, session: AsyncSession, target: ColumnElement[bool]

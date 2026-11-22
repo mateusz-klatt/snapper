@@ -31,6 +31,7 @@ from snapper.data.models import InstrumentSpecObservationSpan
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import SymbolMarketDataChannelCapability
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
@@ -321,9 +322,7 @@ def _mock_sync_session() -> MagicMock:
     """Create a MagicMock conforming to SQLAlchemy Session for unit tests."""
     mock_session = MagicMock(spec=Session)
     mock_session.execute.return_value.scalar_one_or_none.return_value = None
-    mock_session.execute.return_value.scalars.return_value.first.return_value.known_to = (
-        KNOWN_TO_MAX
-    )
+    mock_session.execute.return_value.scalars.return_value.first.return_value = None
     return mock_session
 
 
@@ -829,6 +828,7 @@ class TestInstrumentMetadata:
             maxPositionSize=40.0,
         )
         with sessionmaker(bind=engine, future=True)() as session:
+            begin_scd2_write_sync(session)
             symbol_public_id = updater._persist_instrument_schema(session, schema, observed_at)
             session.commit()
             spec = session.execute(select(InstrumentSpec)).scalar_one()

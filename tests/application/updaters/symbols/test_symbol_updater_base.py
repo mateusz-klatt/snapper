@@ -28,6 +28,7 @@ from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import _repository_cache
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.data.repository import close_and_insert_sync
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -889,6 +890,7 @@ def test_upsert_symbol_creates_new_entry(
     now = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USD", "crypto", now, session_id="", sequence_id=0
         )
@@ -935,6 +937,7 @@ def test_upsert_symbol_updates_base_currency(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "XBT", "USD", "crypto", update_time, session_id="", sequence_id=0
         )
@@ -983,6 +986,7 @@ def test_upsert_symbol_updates_quote_currency(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USDT", "crypto", update_time, session_id="", sequence_id=0
         )
@@ -1031,6 +1035,7 @@ def test_upsert_symbol_updates_asset_type(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_symbol(
             session, "EUR-USD", "EUR", "USD", "forex", update_time, session_id="", sequence_id=0
         )
@@ -1079,6 +1084,7 @@ def test_upsert_symbol_preserves_timestamp_when_unchanged(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USD", "crypto", update_time, session_id="", sequence_id=0
         )
@@ -1136,6 +1142,7 @@ def test_upsert_capability_creates_new_entry(
     _spid = _seed_catalog(updater, "BTC-USD", now)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1197,6 +1204,7 @@ def test_upsert_capability_updates_can_trade(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1257,6 +1265,7 @@ def test_upsert_capability_updates_can_market_data(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1317,6 +1326,7 @@ def test_upsert_capability_updates_source(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1377,6 +1387,7 @@ def test_upsert_capability_updates_reason(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1437,6 +1448,7 @@ def test_upsert_capability_unchanged(
     update_time = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -1514,6 +1526,7 @@ def test_deactivate_stale_capabilities_deactivates_removed(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
             session,
             "kraken",
@@ -1566,6 +1579,7 @@ def test_deactivate_stale_capabilities_leaves_active_untouched(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
             session,
             "kraken",
@@ -1597,6 +1611,7 @@ def test_deactivate_stale_skips_already_inactive(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
             session,
             "kraken",
@@ -1628,6 +1643,7 @@ def test_reconcile_capabilities_proceeds_above_threshold(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._reconcile_capabilities(
             session,
             "kraken",
@@ -1660,6 +1676,7 @@ def test_reconcile_capabilities_skips_below_threshold(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._reconcile_capabilities(
             session,
             "kraken",
@@ -1700,6 +1717,7 @@ def test_reconcile_capabilities_empty_existing(
     now = datetime(2024, 6, 1, tzinfo=UTC)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._reconcile_capabilities(
             session,
             "kraken",
@@ -1730,6 +1748,7 @@ def test_deactivate_stale_different_exchange_not_touched(
     assert updater.repository is not None
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         count = SymbolUpdaterService._deactivate_stale_capabilities(
             session,
             "kraken",
@@ -1767,6 +1786,7 @@ def test_close_and_insert_sync_creates_fresh_row_when_no_existing(
     _spid = _seed_catalog(updater, "BTC-USD", now)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         new_row = close_and_insert_sync(
             session=session,
             model=SymbolExchangeCapability,
@@ -1828,6 +1848,7 @@ def test_close_and_insert_sync_closes_existing_and_inserts_new(
         original_public_id = original.public_id
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         close_and_insert_sync(
             session=session,
             model=SymbolExchangeCapability,
@@ -1905,6 +1926,7 @@ def test_real_updater_catalog_reingest_same_payload_is_noop(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USD", "crypto", t1, session_id="", sequence_id=0
         )
@@ -1920,6 +1942,7 @@ def test_real_updater_catalog_reingest_same_payload_is_noop(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         SymbolUpdaterService._upsert_symbol(
             session, "BTC-USD", "BTC", "USD", "crypto", t2, session_id="", sequence_id=0
         )
@@ -1954,6 +1977,7 @@ def test_real_updater_alias_reingest_preserves_public_id_and_timestamp(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result1 = SymbolUpdaterService._upsert_alias(
             session, _spid, "kraken", "ws", "XBT/USD", t1, session_id="", sequence_id=0
         )
@@ -1979,6 +2003,7 @@ def test_real_updater_alias_reingest_preserves_public_id_and_timestamp(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result2 = SymbolUpdaterService._upsert_alias(
             session, _spid, "kraken", "ws", "XBT/USD", t2, session_id="", sequence_id=0
         )
@@ -2022,6 +2047,7 @@ def test_real_updater_capability_change_closes_old_inserts_new(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result1 = SymbolUpdaterService._upsert_capability(
             session, _spid, "kraken", True, False, "seed", None, t1, session_id="", sequence_id=0
         )
@@ -2030,6 +2056,7 @@ def test_real_updater_capability_change_closes_old_inserts_new(
 
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         result2 = SymbolUpdaterService._upsert_capability(
             session,
             _spid,
@@ -2070,10 +2097,16 @@ def test_ensure_instrument_identity_returns_existing() -> None:
     When: _ensure_instrument_identity is called,
     Then: It returns the existing public_id without inserting.
     """
-    existing = SimpleNamespace(public_id="existing-inst-pid")
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = existing
     now = datetime.now(UTC)
+    existing = SimpleNamespace(
+        public_id="existing-inst-pid",
+        known_to=KNOWN_TO_MAX,
+        timestamp=now - timedelta(seconds=1),
+    )
+    session = MagicMock()
+    session.info = {"scd2_write_reserved": True}
+    session.execute.return_value.scalar_one_or_none.return_value = existing
+    session.execute.return_value.scalars.return_value.first.return_value = existing
     result = SymbolUpdaterService._ensure_instrument_identity(
         session, "sym-pid", "kraken", now, session_id="s", sequence_id=1
     )
@@ -2310,6 +2343,7 @@ def test_alias_rename_keeps_the_previous_observation_and_logical_identity(
     symbol_id = _seed_catalog(updater, "BTC-USD", original_at)
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         assert (
             SymbolUpdaterService._upsert_alias(
                 session, symbol_id, "kraken", "ws", "XBT/USD", original_at, "test-session", 1
@@ -2319,6 +2353,7 @@ def test_alias_rename_keeps_the_previous_observation_and_logical_identity(
         session.commit()
     with updater.repository.get_session() as session:
         assert isinstance(session, Session)
+        begin_scd2_write_sync(session)
         assert (
             SymbolUpdaterService._upsert_alias(
                 session, symbol_id, "kraken", "ws", "BTC/USD", changed_at, "test-session", 2

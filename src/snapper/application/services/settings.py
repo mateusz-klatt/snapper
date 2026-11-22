@@ -31,6 +31,7 @@ from snapper.data.financial_account_owner_policy_writer import FinancialOwnerPol
 from snapper.data.financial_account_owner_policy_writer import write_financial_owner_policy
 from snapper.data.models import Setting
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import begin_scd2_write
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
@@ -317,6 +318,7 @@ class SettingsService:
             raise FinancialAccountOwnerUnavailableError("financial_owner_reserved_writer_required")
         repository = get_repository(self.db_url)
         async with repository.session() as session:
+            await begin_scd2_write(session)
             await close_and_insert(
                 session=session,
                 model=Setting,

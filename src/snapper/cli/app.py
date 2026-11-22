@@ -183,6 +183,8 @@ from snapper.data.archiver import StateArchiver
 from snapper.data.backtest_repository import BacktestRepository
 from snapper.data.models import Setting
 from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import assert_scd2_write_reserved
+from snapper.data.repository import begin_scd2_write
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
@@ -1385,6 +1387,7 @@ async def _rotate_single_setting(
         new_encrypted_value = new_encryption.encrypt(decrypted_value)
         typer.echo(f"Rotating: {setting.key}")
         if not dry_run:
+            assert_scd2_write_reserved(session)
             now = datetime.now(UTC)
             await close_and_insert(
                 session=session,
@@ -1467,6 +1470,8 @@ async def _run_encryption_rotation(
         session_factory = async_sessionmaker(engine)
         rotation_tracker = SequenceTracker()
         async with session_factory() as session:
+            if not dry_run:
+                await begin_scd2_write(session)
             result = await session.execute(
                 sa.select(Setting).where(Setting.is_encrypted, *where_active_now(Setting))
             )

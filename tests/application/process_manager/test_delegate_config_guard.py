@@ -30,6 +30,8 @@ from snapper.core.json_types import JsonValue
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRoleEnum
+from snapper.data.models import Setting
+from snapper.data.repository import Scd2UpsertSpec
 
 _DELEGATE_NAME = "delegate_runner"
 
@@ -120,11 +122,14 @@ def _mock_update_repository(
         settings_service=None,
     )
     syncer = ProcessRegistrySyncer(settings)
-    existing = SimpleNamespace(
+    existing = Setting(
+        key="process_test",
         value=json.dumps(stored_config),
         category="process",
         description=None,
         is_encrypted=False,
+        session_id="test-session",
+        sequence_id=1,
     )
     result = MagicMock()
     result.scalar_one_or_none.return_value = existing
@@ -134,15 +139,28 @@ def _mock_update_repository(
     repository = MagicMock()
     repository.session.return_value.__aenter__ = AsyncMock(return_value=session)
     repository.session.return_value.__aexit__ = AsyncMock(return_value=False)
-    close_and_insert = AsyncMock()
+    recorded_write = AsyncMock()
+
+    async def _fake_begin_scd2_write(_session: object) -> None:
+        return None
+
+    async def _fake_upsert_scd2(
+        _session: object,
+        spec: Scd2UpsertSpec[Setting],
+    ) -> SimpleNamespace:
+        new_values = spec.decide(existing)
+        if new_values is not None:
+            await recorded_write(model=spec.model, new_values=new_values)
+        return SimpleNamespace(row=existing, outcome="updated")
 
     def _get_repository(db_url: str) -> MagicMock:
         del db_url
         return repository
 
     monkeypatch.setattr(registry_syncer_module, "get_repository", _get_repository)
-    monkeypatch.setattr(registry_syncer_module, "close_and_insert", close_and_insert)
-    return syncer, close_and_insert
+    monkeypatch.setattr(registry_syncer_module, "begin_scd2_write", _fake_begin_scd2_write)
+    monkeypatch.setattr(registry_syncer_module, "upsert_scd2", _fake_upsert_scd2)
+    return syncer, recorded_write
 
 
 _REJECTED_PARAMETERS: tuple[JsonObject, ...] = (
@@ -494,7 +512,18 @@ async def test_create_writer_leaves_non_delegate_parameters_untouched(
     syncer = ProcessRegistrySyncer(settings)
     result = MagicMock()
     result.scalar_one_or_none.return_value = None
+    result.scalars.return_value.first.return_value = None
     session = MagicMock()
+    session.info = {}
+    session.get_bind = MagicMock(
+        return_value=SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    )
+    session.in_transaction = MagicMock(return_value=False)
+    session.flush = AsyncMock()
+    nested = MagicMock()
+    nested.__aenter__ = AsyncMock(return_value=None)
+    nested.__aexit__ = AsyncMock(return_value=False)
+    session.begin_nested = MagicMock(return_value=nested)
     session.execute = AsyncMock(return_value=result)
     session.commit = AsyncMock()
     repository = MagicMock()

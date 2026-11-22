@@ -25,6 +25,7 @@ from snapper.data.models import Symbol
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.data.repository import is_effective_unit_certified
 from snapper.data.repository_types import InstrumentSpecRow
 
@@ -661,6 +662,7 @@ class TestUpdaterReviseHelper:
         repo, ipid = sync_repo
         ts = _ts()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -698,6 +700,7 @@ class TestUpdaterReviseHelper:
         ts1 = _ts()
         ts2 = ts1 + timedelta(hours=1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -710,6 +713,7 @@ class TestUpdaterReviseHelper:
             )
             session.commit()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -741,6 +745,7 @@ class TestUpdaterReviseHelper:
         ts1 = _ts()
         ts2 = ts1 + timedelta(hours=1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -752,6 +757,7 @@ class TestUpdaterReviseHelper:
             )
             session.commit()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -781,6 +787,7 @@ class TestUpdaterReviseHelper:
         repo, ipid = sync_repo
         ts = _ts()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -816,6 +823,7 @@ class TestUpdaterReviseHelper:
         ts1 = _ts()
         ts2 = ts1 + timedelta(hours=1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -829,6 +837,7 @@ class TestUpdaterReviseHelper:
             )
             session.commit()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session=session,
                 instrument_public_id=ipid,
@@ -877,6 +886,7 @@ class TestInstrumentMetadataRevision:
         first = _ts()
         second = _ts(1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -888,6 +898,7 @@ class TestInstrumentMetadataRevision:
             )
             session.commit()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -914,6 +925,7 @@ class TestInstrumentMetadataRevision:
         first = _ts()
         second = _ts(1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -942,6 +954,7 @@ class TestInstrumentMetadataRevision:
             unit_certified=True,
         )
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -967,6 +980,7 @@ class TestInstrumentMetadataRevision:
         repo, instrument_public_id = sync_repo
         observed_at = _ts()
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -1011,6 +1025,7 @@ class TestInstrumentMetadataRevision:
             unit_certified=False,
         )
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,
@@ -1048,6 +1063,7 @@ class TestInstrumentMetadataRevision:
         first = _ts()
         second = _ts(1)
         with repo.get_session() as session:
+            begin_scd2_write_sync(session)
             SymbolUpdaterService._revise_instrument_spec(
                 session,
                 instrument_public_id,

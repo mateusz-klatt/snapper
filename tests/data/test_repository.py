@@ -118,6 +118,9 @@ class _DummyAsyncSession:
     async def rollback(self) -> None:
         self.rollback_called = True
 
+    async def flush(self) -> None:
+        return None
+
 
 class _DummyAsyncSavepoint:
     def __init__(self, parent: _DummyAsyncSession) -> None:
@@ -170,6 +173,9 @@ class _StreamingSession:
 
     async def rollback(self) -> None:
         self.rollback_called = True
+
+    async def flush(self) -> None:
+        return None
 
 
 @asynccontextmanager
@@ -10924,6 +10930,9 @@ class _ReadinessProbeSession:
 
     async def rollback(self) -> None:
         self.rollback_called = True
+
+    async def flush(self) -> None:
+        return None
 
 
 @asynccontextmanager

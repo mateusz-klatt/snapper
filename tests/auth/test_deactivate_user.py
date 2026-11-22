@@ -209,7 +209,7 @@ class TestDeactivateUserOrchestration:
         session.scalars.side_effect = [["owner"], owners] if has_grants else [[]]
         with (
             patch.object(service.repository, "dialect_name", "postgresql"),
-            patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()),
+            patch("snapper.auth.user_service.close_and_insert_existing", new=AsyncMock()),
         ):
             assert await service.deactivate_user(target.public_id, reason=None)
         statements = [
@@ -260,7 +260,7 @@ class TestDeactivateUserOrchestration:
             patch.object(
                 service.repository, "session", side_effect=[first_context, second_context]
             ),
-            patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()) as mutate,
+            patch("snapper.auth.user_service.close_and_insert_existing", new=AsyncMock()) as mutate,
         ):
             if second_conflict:
                 with pytest.raises(UserAuthorityConflictError, match="OAuth grant owner changed"):
@@ -294,7 +294,7 @@ class TestDeactivateUserOrchestration:
         _patch_token_manager_lookup.return_value = tm
         publisher = _RecordingPublisher()
         service.set_msg_publisher(publisher)
-        with patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()):
+        with patch("snapper.auth.user_service.close_and_insert_existing", new=AsyncMock()):
             result = await service.deactivate_user("user-1", reason="policy_violation")
         assert result is True
         assert len(publisher.sent) == 1
@@ -322,7 +322,9 @@ class TestDeactivateUserOrchestration:
         _patch_token_manager_lookup.return_value = tm
         publisher = _RecordingPublisher()
         service.set_msg_publisher(publisher)
-        with patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()) as close_insert:
+        with patch(
+            "snapper.auth.user_service.close_and_insert_existing", new=AsyncMock()
+        ) as close_insert:
             result = await service.deactivate_user("ghost-user", reason=None)
         assert result is False
         assert publisher.sent == []
@@ -361,7 +363,7 @@ class TestDeactivateUserOrchestration:
                 await super().send(stream_key, data)
 
         service.set_msg_publisher(_ObservingPublisher())
-        with patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()):
+        with patch("snapper.auth.user_service.close_and_insert_existing", new=AsyncMock()):
             await service.deactivate_user("user-2", reason="test")
         assert publish_observation == [True]
         commit.assert_awaited_once()
@@ -381,7 +383,7 @@ class TestDeactivateUserOrchestration:
         existing = _make_db_user("user-3")
         service, _session, commit, revoke, tm = _build_service(existing_db_user=existing)
         _patch_token_manager_lookup.return_value = tm
-        with patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()):
+        with patch("snapper.auth.user_service.close_and_insert_existing", new=AsyncMock()):
             result = await service.deactivate_user("user-3", reason=None)
         assert result is True
         revoke.assert_awaited_once_with("user-3", service.repository)
@@ -397,7 +399,7 @@ class TestDeactivateUserOrchestration:
         _patch_token_manager_lookup.return_value = tm
         publisher = _RaisingPublisher()
         service.set_msg_publisher(publisher)
-        with patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()):
+        with patch("snapper.auth.user_service.close_and_insert_existing", new=AsyncMock()):
             result = await service.deactivate_user("user-4", reason="leaked_key")
         assert result is True
         revoke.assert_awaited_once_with("user-4", service.repository)
@@ -414,7 +416,7 @@ class TestDeactivateUserOrchestration:
         _patch_token_manager_lookup.return_value = tm
         publisher = _RecordingPublisher()
         service.set_msg_publisher(publisher)
-        with patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()):
+        with patch("snapper.auth.user_service.close_and_insert_existing", new=AsyncMock()):
             await service.deactivate_user("user-5", reason=None)
         _, payload = publisher.sent[0]
         assert isinstance(payload, UserDeactivatedData)
@@ -448,7 +450,7 @@ class TestDeactivateUserOrchestration:
         commit.side_effect = _record_commit
         publisher = _RecordingPublisher()
         service.set_msg_publisher(publisher)
-        with patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()):
+        with patch("snapper.auth.user_service.close_and_insert_existing", new=AsyncMock()):
             await service.deactivate_user("user-6", reason=None)
         assert ordering == ["revoke", "commit"]
 
@@ -471,7 +473,7 @@ class TestDeactivateUserOrchestration:
         publisher = _RecordingPublisher()
         service.set_msg_publisher(publisher)
         with (
-            patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()),
+            patch("snapper.auth.user_service.close_and_insert_existing", new=AsyncMock()),
             pytest.raises(RuntimeError, match="blacklist seed failed"),
         ):
             await service.deactivate_user("user-revoke-fail", reason="bad")
@@ -498,7 +500,7 @@ class TestDeactivateUserOrchestration:
         publisher = _RecordingPublisher()
         service.set_msg_publisher(publisher)
         with (
-            patch("snapper.auth.user_service.close_and_insert", new=AsyncMock()),
+            patch("snapper.auth.user_service.close_and_insert_existing", new=AsyncMock()),
             pytest.raises(RuntimeError, match="DB commit lost connection"),
         ):
             await service.deactivate_user("user-commit-fail", reason="net flap")
@@ -737,7 +739,9 @@ class TestUserAuthorityRetry:
             ),
             patch.object(service.repository, "dialect_name", "sqlite"),
             patch.object(service.repository, "session", side_effect=contexts) as open_session,
-            patch("snapper.auth.user_service.close_and_insert", return_value=successor) as mutate,
+            patch(
+                "snapper.auth.user_service.close_and_insert_existing", return_value=successor
+            ) as mutate,
         ):
             if status == 200:
                 response = await _call_authority_route(operation, target)
@@ -854,7 +858,7 @@ class TestUserAuthorityRetry:
             patch.object(service.repository, "session", side_effect=contexts),
             patch.object(service, "_verify_password", return_value=True),
             patch.object(service, "hash_password", return_value=_BCRYPT_FAKE_DIGEST),
-            patch("snapper.auth.user_service.close_and_insert", return_value=successor),
+            patch("snapper.auth.user_service.close_and_insert_existing", return_value=successor),
         ):
             await _invoke_writer_path(service, path, target)
         expected_start = (
@@ -946,7 +950,9 @@ def test_account_write_routes_resolve_authority_conflicts(
         patch.object(service.repository, "session", side_effect=contexts) as open_session,
         patch.object(service, "_verify_password", return_value=True),
         patch.object(service, "hash_password", return_value=_BCRYPT_FAKE_DIGEST),
-        patch("snapper.auth.user_service.close_and_insert", return_value=successor) as mutate,
+        patch(
+            "snapper.auth.user_service.close_and_insert_existing", return_value=successor
+        ) as mutate,
         TestClient(app) as client,
     ):
         response = client.post(
@@ -1012,7 +1018,7 @@ def test_account_write_route_maps_repeated_temporal_version_conflict_to_409() ->
         patch("snapper.auth.routes.get_user_service", return_value=service),
         patch.object(service.repository, "session", side_effect=[first_context, second_context]),
         patch(
-            "snapper.auth.user_service.close_and_insert",
+            "snapper.auth.user_service.close_and_insert_existing",
             new=AsyncMock(side_effect=[conflict, conflict]),
         ) as mutate,
         TestClient(app) as client,

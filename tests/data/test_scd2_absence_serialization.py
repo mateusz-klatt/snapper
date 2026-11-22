@@ -1,0 +1,1145 @@
+"""SQLite serialization, SAVEPOINT recovery, registry, and error-path tests for PR-1."""
+
+import asyncio
+import sqlite3
+from collections.abc import AsyncIterator
+from collections.abc import Iterator
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import and_
+from sqlalchemy import event
+from sqlalchemy import insert
+from sqlalchemy import select
+from sqlalchemy import update
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session as SyncSession
+from sqlalchemy.sql import Executable
+
+import snapper.cli.app as cli_app
+from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
+from snapper.core.financial_account_owner import FinancialAccountOwnerAssignment
+from snapper.core.financial_account_owner import FinancialAccountOwnerPolicy
+from snapper.core.financial_account_owner import financial_account_owner_key_from_authority
+from snapper.data.financial_account_owner_policy_writer import FinancialOwnerPolicyChange
+from snapper.data.financial_account_owner_policy_writer import _lock_reserved_policy
+from snapper.data.financial_account_owner_policy_writer import write_financial_owner_policy
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Candle
+from snapper.data.models import Instrument
+from snapper.data.models import InstrumentOrderCapability
+from snapper.data.models import InstrumentSpec
+from snapper.data.models import InstrumentUnderlyingMapping
+from snapper.data.models import MarketSnapshot
+from snapper.data.models import PortfolioPnlPoint
+from snapper.data.models import Setting
+from snapper.data.models import SpotAssetPrecisionEvidence
+from snapper.data.models import Symbol
+from snapper.data.models import SymbolAlias
+from snapper.data.models import SymbolExchangeCapability
+from snapper.data.models import SymbolMarketDataChannelCapability
+from snapper.data.models import TradeProjectionCheckpoint
+from snapper.data.models import UnderlyingAsset
+from snapper.data.models import User
+from snapper.data.models import UserOperatorMembership
+from snapper.data.models import UserTradingCaps
+from snapper.data.repository import DatabaseRepository
+from snapper.data.repository import Scd2UpsertSpec
+from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import TemporalVersionConflictError
+from snapper.data.repository import _is_unique_violation
+from snapper.data.repository import _matches_target_unique_index
+from snapper.data.repository import _resolve_target_unique_index
+from snapper.data.repository import active_partial_unique_indexes
+from snapper.data.repository import assert_scd2_write_reserved
+from snapper.data.repository import begin_scd2_write
+from snapper.data.repository import begin_scd2_write_sync
+from snapper.data.repository import close_and_insert
+from snapper.data.repository import close_and_insert_existing
+from snapper.data.repository import close_and_insert_existing_sync
+from snapper.data.repository import close_and_insert_sync
+from snapper.data.repository import upsert_scd2
+from snapper.data.repository import upsert_scd2_sync
+from snapper.data.repository_types import MarketSnapshotUpsertRow
+from snapper.infrastructure.security.encryption import SettingsEncryptionService
+from snapper.messaging.infrastructure.publisher import SequenceTracker
+from tests.helpers.native_account_authority import build_native_authority_payload
+from tests.helpers.native_account_authority import capture_native_account_read
+from tests.helpers.native_account_authority import insert_native_authority
+from tests.helpers.native_account_authority import native_authority_scenario
+
+_T0 = datetime(2026, 8, 1, 10, 0, tzinfo=UTC)
+_T1 = _T0 + timedelta(minutes=1)
+_T2 = _T0 + timedelta(minutes=2)
+
+
+def _attach_begin_immediate_counter(engine: Engine) -> list[str]:
+    """Attach a SQL listener recording every ``BEGIN IMMEDIATE`` statement."""
+    statements: list[str] = []
+
+    def _on_execute(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if "BEGIN IMMEDIATE" in statement.upper():
+            statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _on_execute)
+    return statements
+
+
+def _setting_payload(key: str, val: str, seq: int) -> dict[str, object]:
+    """Return a clean Setting upsert values dict."""
+    return {
+        "key": key,
+        "value": val,
+        "category": "app",
+        "description": None,
+        "is_encrypted": False,
+        "session_id": "test",
+        "sequence_id": seq,
+    }
+
+
+def _snapshot_row(instrument_pid: str, seq: int, bid: float) -> MarketSnapshotUpsertRow:
+    """Return a MarketSnapshotUpsertRow for concurrency and fallback tests."""
+    return MarketSnapshotUpsertRow(
+        instrument_public_id=instrument_pid,
+        timestamp=_T1,
+        session_id=f"snap-{seq}",
+        sequence_id=seq,
+        bid=bid,
+        bid_volume=1.0,
+        ask=bid + 1.0,
+        ask_volume=1.0,
+        last_price=bid + 0.5,
+        volume_24h=10.0,
+        vwap_24h=bid + 0.5,
+        low_24h=bid,
+        high_24h=bid + 1.0,
+        change_24h=0.0,
+        spread=1.0,
+        spread_pct=0.01,
+        public_id=str(uuid4()),
+        known_to=KNOWN_TO_MAX,
+    )
+
+
+@pytest.fixture
+async def file_async_repo(tmp_path: Path) -> AsyncIterator[tuple[SQLAlchemyRepository, Path]]:
+    """Provide a file-backed async SQLite repository with all tables created."""
+    db_path = tmp_path / "scd2-async.db"
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await repo.create_all()
+    try:
+        yield repo, db_path
+    finally:
+        await repo.engine.dispose()
+
+
+@pytest.fixture
+def sync_repo(tmp_path: Path) -> Iterator[DatabaseRepository]:
+    """Provide an isolated file-backed sync SQLite repository."""
+    db_path = tmp_path / "scd2-sync.db"
+    repo = DatabaseRepository(f"sqlite:///{db_path}")
+    repo.create_all()
+    try:
+        yield repo
+    finally:
+        repo.engine.dispose()
+
+
+async def _seed_symbol_and_instrument(
+    repo: SQLAlchemyRepository,
+    *,
+    native_symbol: str = "BTC-USD",
+    exchange: str = "kraken",
+) -> tuple[str, str]:
+    """Insert active Symbol and Instrument rows and return ``(symbol_pid, instrument_pid)``."""
+    symbol_pid = str(uuid4())
+    instrument_pid = str(uuid4())
+    base, quote = native_symbol.split("-", maxsplit=1)
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        session.add(
+            Symbol(
+                public_id=symbol_pid,
+                native_symbol=native_symbol,
+                base=base,
+                quote=quote,
+                asset_type="crypto",
+                created_at=_T0,
+                timestamp=_T0,
+                session_id="seed",
+                sequence_id=1,
+            )
+        )
+        session.add(
+            Instrument(
+                public_id=instrument_pid,
+                symbol_public_id=symbol_pid,
+                exchange=exchange,
+                timestamp=_T0,
+                session_id="seed",
+                sequence_id=2,
+            )
+        )
+        await session.commit()
+    return symbol_pid, instrument_pid
+
+
+@pytest.mark.asyncio
+async def test_sqlite_concurrent_revise_instrument_and_snapshots_serialize(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+) -> None:
+    """Two concurrent SQLite writers serialize via BEGIN IMMEDIATE without SQLITE_BUSY."""
+    repo1, db_path = file_async_repo
+    repo2 = SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    try:
+        symbol_pid, instrument_pid = await _seed_symbol_and_instrument(repo1)
+        barrier = asyncio.Barrier(2)
+
+        async def _revise(target: SQLAlchemyRepository, seq: int) -> int:
+            await barrier.wait()
+            return await target.revise_instrument(
+                instrument_public_id=instrument_pid,
+                symbol_public_id=symbol_pid,
+                exchange="kraken",
+                session_id=f"worker-{seq}",
+                sequence_id=seq,
+                timestamp=_T1,
+            )
+
+        res = await asyncio.gather(_revise(repo1, 10), _revise(repo2, 11))
+        assert len(res) == 2
+
+        snap_barrier = asyncio.Barrier(2)
+
+        async def _snap(target: SQLAlchemyRepository, seq: int, bid: float) -> int:
+            await snap_barrier.wait()
+            return await target.upsert_market_snapshots([_snapshot_row(instrument_pid, seq, bid)])
+
+        snap_counts = await asyncio.gather(_snap(repo1, 1, 100.0), _snap(repo2, 2, 101.0))
+        assert snap_counts == [1, 1]
+    finally:
+        await repo2.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_savepoint_unique_violation_preserves_outer_tx_work(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SAVEPOINT recovery inside BEGIN IMMEDIATE keeps prior outer-transaction writes."""
+    repo, _ = file_async_repo
+    async with repo.session() as seed_session:
+        await begin_scd2_write(seed_session)
+        seeded = await upsert_scd2(
+            seed_session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "race_key"],
+                bus_time=_T0,
+                decide=lambda _row: _setting_payload("race_key", "v1", 1),
+            ),
+        )
+        assert seeded.row is not None
+        race_public_id = seeded.row.public_id
+        await seed_session.commit()
+
+    original_flush = AsyncSession.flush
+    injected = False
+
+    async def _fault_on_race_key(session: AsyncSession) -> None:
+        nonlocal injected
+        has_race_key = any(
+            isinstance(obj, Setting) and obj.key == "race_key" and obj.value == "winner-v3"
+            for obj in session.new
+        )
+        if has_race_key and not injected:
+            injected = True
+            session.expunge_all()
+            original_exec = session.execute
+            re_read_done = False
+
+            async def _swap_winner(stmt: Executable) -> object:
+                nonlocal re_read_done
+                if not re_read_done and getattr(stmt, "is_select", False):
+                    re_read_done = True
+                    await original_exec(
+                        update(Setting)
+                        .where(Setting.key == "race_key", Setting.known_to == KNOWN_TO_MAX)
+                        .values(known_to=_T1)
+                    )
+                    await original_exec(
+                        insert(Setting).values(
+                            id=9999,
+                            public_id=race_public_id,
+                            **_setting_payload("race_key", "v2-winner", 2),
+                            timestamp=_T1,
+                            known_to=KNOWN_TO_MAX,
+                        )
+                    )
+                return await original_exec(stmt)
+
+            monkeypatch.setattr(session, "execute", _swap_winner)
+            raise IntegrityError(
+                "insert",
+                {},
+                sqlite3.IntegrityError("UNIQUE constraint failed: settings.key"),
+            )
+        await original_flush(session)
+
+    monkeypatch.setattr(AsyncSession, "flush", _fault_on_race_key)
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "prior_key"],
+                bus_time=_T0,
+                decide=lambda _row: _setting_payload("prior_key", "keep-me", 1),
+            ),
+        )
+        result = await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "race_key"],
+                bus_time=_T2,
+                decide=lambda existing: _setting_payload(
+                    "race_key",
+                    "winner-v3" if existing is None or existing.id != 9999 else "final-v4",
+                    3,
+                ),
+            ),
+        )
+        await session.commit()
+    assert injected is True
+    assert result.outcome == "updated"
+    assert result.row is not None
+    assert result.row.value == "final-v4"
+    assert result.row.public_id == race_public_id
+    async with repo.session() as session:
+        keys = set(
+            (
+                await session.scalars(select(Setting.key).where(Setting.known_to == KNOWN_TO_MAX))
+            ).all()
+        )
+        assert {"prior_key", "race_key"}.issubset(keys)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_bulk_market_snapshots_fallback_on_unique_conflict(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bulk snapshot flush failure falls back per-row cleanly inside one BEGIN IMMEDIATE."""
+    repo, _ = file_async_repo
+    _, inst_pid = await _seed_symbol_and_instrument(repo)
+    original_flush = AsyncSession.flush
+    tripped = False
+
+    async def _fail_bulk_once(session: AsyncSession) -> None:
+        nonlocal tripped
+        pending_snaps = [obj for obj in session.new if isinstance(obj, MarketSnapshot)]
+        if pending_snaps and not tripped:
+            tripped = True
+            raise IntegrityError(
+                "insert",
+                {},
+                sqlite3.IntegrityError(
+                    "UNIQUE constraint failed: market_snapshots.instrument_public_id"
+                ),
+            )
+        await original_flush(session)
+
+    monkeypatch.setattr(AsyncSession, "flush", _fail_bulk_once)
+    written = await repo.upsert_market_snapshots([_snapshot_row(inst_pid, 1, 99.5)])
+    assert tripped is True
+    assert written == 1
+
+
+@pytest.mark.asyncio
+async def test_composed_tx_regression_encryption_rotation(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_encryption_rotation rotates multiple settings under one outer BEGIN IMMEDIATE."""
+    repo, db_path = file_async_repo
+    monkeypatch.setenv("DB_URL", f"sqlite+aiosqlite:///{db_path}")
+    old_enc = SettingsEncryptionService("old-password")
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        await session.execute(Setting.__table__.delete())
+        for seq, (key, secret) in enumerate((("enc_a", "val-1"), ("enc_b", "val-2")), start=1):
+            session.add(
+                Setting(
+                    key=key,
+                    value=old_enc.encrypt(secret),
+                    category="api_keys",
+                    description=None,
+                    is_encrypted=True,
+                    session_id="seed",
+                    sequence_id=seq,
+                    timestamp=_T0,
+                    known_to=KNOWN_TO_MAX,
+                )
+            )
+        await session.commit()
+
+    begin_calls: list[str] = []
+
+    def _on_execute(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if "BEGIN IMMEDIATE" in statement.upper():
+            begin_calls.append(statement)
+
+    event.listen(Engine, "before_cursor_execute", _on_execute)
+    try:
+        await cli_app._run_encryption_rotation("new-password", "old-password", dry_run=True)
+        assert begin_calls == []
+
+        await cli_app._run_encryption_rotation("new-password", "old-password", dry_run=False)
+        assert len(begin_calls) == 1
+    finally:
+        event.remove(Engine, "before_cursor_execute", _on_execute)
+
+    new_enc = SettingsEncryptionService("new-password")
+    async with repo.session() as session:
+        active = {
+            row.key: new_enc.decrypt(row.value)
+            for row in (
+                await session.scalars(select(Setting).where(Setting.known_to == KNOWN_TO_MAX))
+            ).all()
+        }
+        assert active == {"enc_a": "val-1", "enc_b": "val-2"}
+
+
+@pytest.mark.asyncio
+async def test_composed_tx_regression_financial_owner_policy_and_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """write_financial_owner_policy shares one outer BEGIN IMMEDIATE and guards unreserved use."""
+    async with native_authority_scenario(tmp_path, monkeypatch) as scenario:
+        outcome = await capture_native_account_read(scenario)
+        payload = await build_native_authority_payload(scenario, outcome)
+        await insert_native_authority(scenario, payload, 500)
+        policy = FinancialAccountOwnerPolicy(
+            assignments=(
+                FinancialAccountOwnerAssignment(
+                    owner_key=financial_account_owner_key_from_authority(payload),
+                    owner_wallet_public_id=payload.scope.wallet_public_id,
+                ),
+            )
+        )
+        begin_calls = _attach_begin_immediate_counter(scenario.repository.engine.sync_engine)
+        result = await write_financial_owner_policy(
+            scenario.repository,
+            FinancialOwnerPolicyChange(policy=policy, updated_by="ops-admin"),
+            SequenceTracker(),
+        )
+        assert result.changed is True
+        assert len(begin_calls) == 1
+
+        async with scenario.repository.session() as unreserved:
+            with pytest.raises(RuntimeError, match="without outer begin_scd2_write"):
+                await _lock_reserved_policy(unreserved)
+
+
+@pytest.mark.asyncio
+async def test_composed_tx_regression_walutomat_updater_single_begin_immediate(
+    sync_repo: DatabaseRepository,
+) -> None:
+    """Walutomat _update_database keeps precision evidence inside one BEGIN IMMEDIATE."""
+    begin_calls = _attach_begin_immediate_counter(sync_repo.engine)
+    updater = WalutomatSymbolUpdaterService(update_threshold_hours=1, force=True)
+    updater.repository = sync_repo
+    records: list[dict[str, object]] = [
+        {
+            "symbol": "EUR_PLN",
+            "walutomat_rest_symbol": "EURPLN",
+            "native_symbol": "EUR-PLN",
+            "base": "EUR",
+            "quote": "PLN",
+        }
+    ]
+    await updater._update_database(records)
+    assert len(begin_calls) == 1
+    with sync_repo.get_session() as session:
+        evidence = session.scalars(
+            select(SpotAssetPrecisionEvidence).where(
+                SpotAssetPrecisionEvidence.known_to == KNOWN_TO_MAX
+            )
+        ).all()
+        assert len(evidence) >= 1
+
+
+def test_reservation_lifecycle_boundaries_sync(sync_repo: DatabaseRepository) -> None:
+    """Verify SAVEPOINT, commit, rollback, close, and DEFERRED detection on sync SQLite."""
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        with session.begin_nested():
+            assert_scd2_write_reserved(session)
+        try:
+            with session.begin_nested():
+                session.add(
+                    Setting(
+                        **_setting_payload("sp_rolled", "v0", 1),
+                        timestamp=_T0,
+                        known_to=KNOWN_TO_MAX,
+                    )
+                )
+                raise ValueError("force savepoint rollback")
+        except ValueError:
+            pass
+        assert_scd2_write_reserved(session)
+        outcome = upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "lifecycle_k"],
+                bus_time=_T0,
+                decide=lambda _r: _setting_payload("lifecycle_k", "v1", 2),
+            ),
+        )
+        assert outcome.outcome == "created"
+        session.commit()
+
+        with pytest.raises(RuntimeError, match="without outer begin_scd2_write"):
+            assert_scd2_write_reserved(session)
+
+        begin_scd2_write_sync(session)
+        assert_scd2_write_reserved(session)
+        session.rollback()
+        with pytest.raises(RuntimeError, match="without outer begin_scd2_write"):
+            assert_scd2_write_reserved(session)
+
+        session.execute(select(Setting))
+        with pytest.raises(RuntimeError, match="already in progress"):
+            begin_scd2_write_sync(session)
+        session.rollback()
+
+    with sync_repo.get_session() as fresh_session:
+        with pytest.raises(RuntimeError, match="without outer begin_scd2_write"):
+            assert_scd2_write_reserved(fresh_session)
+        begin_scd2_write_sync(fresh_session)
+        assert_scd2_write_reserved(fresh_session)
+
+
+@pytest.mark.asyncio
+async def test_reservation_lifecycle_boundaries_async(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+) -> None:
+    """Verify SAVEPOINT, commit, rollback, close, and DEFERRED detection on async SQLite."""
+    repo, _ = file_async_repo
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        async with session.begin_nested():
+            assert_scd2_write_reserved(session)
+        try:
+            async with session.begin_nested():
+                session.add(
+                    Setting(
+                        **_setting_payload("sp_rolled_async", "v0", 1),
+                        timestamp=_T0,
+                        known_to=KNOWN_TO_MAX,
+                    )
+                )
+                raise ValueError("force async savepoint rollback")
+        except ValueError:
+            pass
+        assert_scd2_write_reserved(session)
+        outcome = await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "lifecycle_async_k"],
+                bus_time=_T0,
+                decide=lambda _r: _setting_payload("lifecycle_async_k", "v1", 2),
+            ),
+        )
+        assert outcome.outcome == "created"
+        await session.commit()
+
+        with pytest.raises(RuntimeError, match="without outer begin_scd2_write"):
+            assert_scd2_write_reserved(session)
+
+        await begin_scd2_write(session)
+        assert_scd2_write_reserved(session)
+        await session.rollback()
+        with pytest.raises(RuntimeError, match="without outer begin_scd2_write"):
+            assert_scd2_write_reserved(session)
+
+        await session.execute(select(Setting))
+        with pytest.raises(RuntimeError, match="already in progress"):
+            await begin_scd2_write(session)
+        await session.rollback()
+
+    async with repo.session() as fresh_session:
+        with pytest.raises(RuntimeError, match="without outer begin_scd2_write"):
+            assert_scd2_write_reserved(fresh_session)
+        await begin_scd2_write(fresh_session)
+        assert_scd2_write_reserved(fresh_session)
+
+
+def test_active_partial_unique_indexes_covers_all_17_models_and_exclusions() -> None:
+    """Mapper inspection discovers all active partial unique indexes across 17 in-scope models."""
+    cases = (
+        (
+            InstrumentSpec,
+            "instrument_specs",
+            "uq_instrument_spec_instrument",
+            [InstrumentSpec.instrument_public_id == "inst-1"],
+        ),
+        (Symbol, "symbols", "uq_symbols_active_native", [Symbol.native_symbol == "BTC-USD"]),
+        (
+            SymbolAlias,
+            "symbol_aliases",
+            "uq_alias_spid_exchange_channel",
+            [
+                SymbolAlias.symbol_public_id == "s1",
+                SymbolAlias.exchange == "kraken",
+                SymbolAlias.channel == "ws",
+            ],
+        ),
+        (
+            SymbolExchangeCapability,
+            "symbol_exchange_capabilities",
+            "uq_sec_symbol_exchange",
+            [
+                SymbolExchangeCapability.symbol_public_id == "s1",
+                SymbolExchangeCapability.exchange == "kraken",
+            ],
+        ),
+        (
+            SymbolMarketDataChannelCapability,
+            "symbol_market_data_channel_capabilities",
+            "uq_smdcc_symbol_exchange_channel",
+            [
+                SymbolMarketDataChannelCapability.symbol_public_id == "s1",
+                SymbolMarketDataChannelCapability.exchange == "kraken_futures",
+                SymbolMarketDataChannelCapability.channel == "trade",
+            ],
+        ),
+        (
+            InstrumentOrderCapability,
+            "instrument_order_capabilities",
+            "ix_ioc_instrument_exchange_active",
+            [
+                InstrumentOrderCapability.instrument_public_id == "i1",
+                InstrumentOrderCapability.exchange == "kraken",
+            ],
+        ),
+        (Setting, "settings", "uq_settings_key", [Setting.key == "k1"]),
+        (
+            MarketSnapshot,
+            "market_snapshots",
+            "uq_market_snapshot_instrument",
+            [MarketSnapshot.instrument_public_id == "i1"],
+        ),
+        (
+            Instrument,
+            "instruments",
+            "uq_instrument_spid_exchange",
+            [Instrument.symbol_public_id == "s1", Instrument.exchange == "kraken"],
+        ),
+        (User, "users", "uq_users_username", [User.username == "alice"]),
+        (
+            UserTradingCaps,
+            "user_trading_caps",
+            "ix_user_trading_caps_active",
+            [UserTradingCaps.user_public_id == "u1"],
+        ),
+        (
+            UserOperatorMembership,
+            "user_operator_memberships",
+            "ix_user_operator_memberships_unique_active",
+            [
+                UserOperatorMembership.user_public_id == "u1",
+                UserOperatorMembership.operator_public_id == "o1",
+            ],
+        ),
+        (
+            SpotAssetPrecisionEvidence,
+            "spot_asset_precision_evidence",
+            "uq_spot_asset_precision_evidence_exchange_asset",
+            [
+                SpotAssetPrecisionEvidence.exchange == "walutomat",
+                SpotAssetPrecisionEvidence.asset == "EUR",
+            ],
+        ),
+        (
+            PortfolioPnlPoint,
+            "portfolio_pnl_points",
+            "uq_portfolio_pnl_points_identity",
+            [
+                PortfolioPnlPoint.wallet_public_id == "w1",
+                PortfolioPnlPoint.mode == "live",
+                PortfolioPnlPoint.point_time == _T0,
+                PortfolioPnlPoint.valuation_ccy == "USD",
+            ],
+        ),
+        (
+            TradeProjectionCheckpoint,
+            "trade_projection_checkpoints",
+            "uq_trade_checkpoints_shard_key",
+            [TradeProjectionCheckpoint.shard_key == "shard-1"],
+        ),
+        (
+            UnderlyingAsset,
+            "underlying_assets",
+            "uq_underlying_assets_active_ticker",
+            [UnderlyingAsset.ticker == "SPX"],
+        ),
+        (
+            InstrumentUnderlyingMapping,
+            "instrument_underlying_mappings",
+            "uq_ium_active_instrument",
+            [InstrumentUnderlyingMapping.instrument_public_id == "i1"],
+        ),
+    )
+    assert len(cases) == 17
+    for model, table_name, expected_index, filters in cases:
+        discovered = {idx.name for idx in active_partial_unique_indexes(model)}
+        assert expected_index in discovered
+        resolved = _resolve_target_unique_index(model, table_name, filters, allow_insert=True)
+        assert resolved is not None and resolved.name == expected_index
+
+    and_resolved = _resolve_target_unique_index(
+        Setting, "settings", [and_(Setting.key == "k1")], allow_insert=True
+    )
+    assert and_resolved is not None and and_resolved.name == "uq_settings_key"
+
+    with pytest.raises(ValueError, match="cannot uniquely resolve active partial unique index"):
+        _resolve_target_unique_index(Setting, "settings", [Setting.id == 1], allow_insert=True)
+    assert (
+        _resolve_target_unique_index(Setting, "settings", [Setting.id == 1], allow_insert=False)
+        is None
+    )
+
+    membership_names = {idx.name for idx in active_partial_unique_indexes(UserOperatorMembership)}
+    assert "ix_user_operator_memberships_primary_unique_active" not in membership_names
+    candle_names = {idx.name for idx in active_partial_unique_indexes(Candle)}
+    assert "ix_candle_instrument_open" not in candle_names
+    assert "uq_candle_itf_open" in candle_names
+
+
+@pytest.mark.asyncio
+async def test_contract_a_vs_contract_b_clock_skew_and_absence(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+    sync_repo: DatabaseRepository,
+) -> None:
+    """Verify Contract A refusal vs Contract B clamping for absence and clock skew."""
+    repo, _ = file_async_repo
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        with pytest.raises(TemporalVersionConflictError):
+            await close_and_insert_existing(
+                session, Setting, [Setting.key == "absent"], _setting_payload("absent", "v", 1), _T1
+            )
+        first = await close_and_insert(
+            session, Setting, [Setting.key == "skew_k"], _setting_payload("skew_k", "v1", 1), _T2
+        )
+        with pytest.raises(TemporalVersionConflictError):
+            await close_and_insert_existing(
+                session,
+                Setting,
+                [Setting.key == "skew_k"],
+                _setting_payload("skew_k", "v2", 2),
+                _T1,
+            )
+        clamped = await close_and_insert(
+            session, Setting, [Setting.key == "skew_k"], _setting_payload("skew_k", "v2", 2), _T1
+        )
+        assert clamped.timestamp == _T2
+        assert first.known_to == _T2
+        await session.commit()
+
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        with pytest.raises(TemporalVersionConflictError):
+            close_and_insert_existing_sync(
+                session, Setting, [Setting.key == "absent"], _setting_payload("absent", "v", 1), _T1
+            )
+        first_sync = close_and_insert_sync(
+            session, Setting, [Setting.key == "skew_s"], _setting_payload("skew_s", "v1", 1), _T2
+        )
+        with pytest.raises(TemporalVersionConflictError):
+            close_and_insert_existing_sync(
+                session,
+                Setting,
+                [Setting.key == "skew_s"],
+                _setting_payload("skew_s", "v2", 2),
+                _T1,
+            )
+        clamped_sync = close_and_insert_sync(
+            session, Setting, [Setting.key == "skew_s"], _setting_payload("skew_s", "v2", 2), _T1
+        )
+        assert clamped_sync.timestamp == _T2
+        assert first_sync.known_to == _T2
+        session.commit()
+
+
+def test_closed_version_guard_contract_b_sync(sync_repo: DatabaseRepository) -> None:
+    """Contract B refuses when a fetched version is already closed."""
+    closed_row = Setting(
+        id=42,
+        **_setting_payload("closed_k", "old", 3),
+        timestamp=_T0,
+        known_to=_T1,
+    )
+    mock_session = MagicMock(spec=SyncSession)
+    mock_session.get_bind.return_value = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    mock_session.execute.return_value.scalars.return_value.first.return_value = closed_row
+    with pytest.raises(TemporalVersionConflictError):
+        close_and_insert_sync(
+            mock_session,
+            Setting,
+            [Setting.key == "closed_k"],
+            _setting_payload("closed_k", "new", 4),
+            _T2,
+        )
+    del sync_repo
+
+
+def test_secondary_unique_violation_existing_row_sync(sync_repo: DatabaseRepository) -> None:
+    """Existing-row secondary unique index collision re-raises immediately with 0 retries."""
+    sym_a = str(uuid4())
+    sym_b = str(uuid4())
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        for pid, native in ((sym_a, "AAA-USD"), (sym_b, "BBB-USD")):
+            session.add(
+                Symbol(
+                    public_id=pid,
+                    native_symbol=native,
+                    base=native[:3],
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=_T0,
+                    timestamp=_T0,
+                    session_id="s",
+                    sequence_id=1,
+                )
+            )
+        session.flush()
+        for pid, wire, seq in ((sym_a, "WIRE_A", 1), (sym_b, "WIRE_B", 2)):
+            upsert_scd2_sync(
+                session,
+                Scd2UpsertSpec(
+                    model=SymbolAlias,
+                    match_filters=[
+                        SymbolAlias.symbol_public_id == pid,
+                        SymbolAlias.exchange == "kraken",
+                        SymbolAlias.channel == "ws",
+                    ],
+                    bus_time=_T0,
+                    decide=lambda _r, p=pid, w=wire, s=seq: {
+                        "symbol_public_id": p,
+                        "exchange": "kraken",
+                        "channel": "ws",
+                        "exchange_symbol": w,
+                        "created_at": _T0,
+                        "session_id": "s",
+                        "sequence_id": s,
+                    },
+                ),
+            )
+        session.commit()
+
+    attempts = 0
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+
+        def _decide_existing(_existing: SymbolAlias | None) -> dict[str, object]:
+            nonlocal attempts
+            attempts += 1
+            return {
+                "symbol_public_id": sym_a,
+                "exchange": "kraken",
+                "channel": "ws",
+                "exchange_symbol": "WIRE_B",
+                "created_at": _T0,
+                "session_id": "s",
+                "sequence_id": 3,
+            }
+
+        with pytest.raises(IntegrityError):
+            upsert_scd2_sync(
+                session,
+                Scd2UpsertSpec(
+                    model=SymbolAlias,
+                    match_filters=[
+                        SymbolAlias.symbol_public_id == sym_a,
+                        SymbolAlias.exchange == "kraken",
+                        SymbolAlias.channel == "ws",
+                    ],
+                    bus_time=_T1,
+                    decide=_decide_existing,
+                ),
+            )
+    assert attempts == 1
+
+
+def test_secondary_unique_violation_absence_and_non_unique_sync(
+    sync_repo: DatabaseRepository,
+) -> None:
+    """Absence secondary collision and non-unique IntegrityError re-raise on attempt 1."""
+    sym_b = str(uuid4())
+    sym_c = str(uuid4())
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        for pid, native in ((sym_b, "BBB2-USD"), (sym_c, "CCC2-USD")):
+            session.add(
+                Symbol(
+                    public_id=pid,
+                    native_symbol=native,
+                    base=native[:4],
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=_T0,
+                    timestamp=_T0,
+                    session_id="s",
+                    sequence_id=1,
+                )
+            )
+        session.flush()
+        upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
+                model=SymbolAlias,
+                match_filters=[
+                    SymbolAlias.symbol_public_id == sym_b,
+                    SymbolAlias.exchange == "kraken",
+                    SymbolAlias.channel == "ws",
+                ],
+                bus_time=_T0,
+                decide=lambda _r: {
+                    "symbol_public_id": sym_b,
+                    "exchange": "kraken",
+                    "channel": "ws",
+                    "exchange_symbol": "WIRE_SEC",
+                    "created_at": _T0,
+                    "session_id": "s",
+                    "sequence_id": 1,
+                },
+            ),
+        )
+
+        absent_attempts = 0
+
+        def _decide_absent(_existing: SymbolAlias | None) -> dict[str, object]:
+            nonlocal absent_attempts
+            absent_attempts += 1
+            return {
+                "symbol_public_id": sym_c,
+                "exchange": "kraken",
+                "channel": "ws",
+                "exchange_symbol": "WIRE_SEC",
+                "created_at": _T0,
+                "session_id": "s",
+                "sequence_id": 2,
+            }
+
+        with pytest.raises(IntegrityError):
+            upsert_scd2_sync(
+                session,
+                Scd2UpsertSpec(
+                    model=SymbolAlias,
+                    match_filters=[
+                        SymbolAlias.symbol_public_id == sym_c,
+                        SymbolAlias.exchange == "kraken",
+                        SymbolAlias.channel == "ws",
+                    ],
+                    bus_time=_T1,
+                    decide=_decide_absent,
+                ),
+            )
+        assert absent_attempts == 1
+
+        with pytest.raises(IntegrityError):
+            upsert_scd2_sync(
+                session,
+                Scd2UpsertSpec(
+                    model=Symbol,
+                    match_filters=[Symbol.native_symbol == "NULL-CHK"],
+                    bus_time=_T1,
+                    decide=lambda _r: {
+                        "native_symbol": None,
+                        "base": "NUL",
+                        "quote": "USD",
+                        "asset_type": "crypto",
+                        "created_at": _T1,
+                        "session_id": "s",
+                        "sequence_id": 3,
+                    },
+                ),
+            )
+
+
+def test_retry_exhaustion_after_three_attempts_sync(
+    sync_repo: DatabaseRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Advancing winners causing 3 unique conflicts raise TemporalVersionConflictError."""
+    winners = [
+        Setting(
+            id=seq,
+            **_setting_payload("exhaust_k", f"v{seq}", seq),
+            timestamp=_T0,
+            known_to=KNOWN_TO_MAX,
+        )
+        for seq in (10, 11, 12, 13)
+    ]
+    calls = 0
+
+    def _fake_flush(session: SyncSession) -> None:
+        if any(isinstance(obj, Setting) and obj.key == "exhaust_k" for obj in session.new):
+            raise IntegrityError(
+                "insert",
+                {},
+                sqlite3.IntegrityError("UNIQUE constraint failed: settings.key"),
+            )
+
+    def _advancing_fetch(stmt: object) -> SimpleNamespace:
+        nonlocal calls
+        if not getattr(stmt, "is_select", False):
+            return SimpleNamespace(rowcount=1)
+        row = winners[min(calls, len(winners) - 1)]
+        calls += 1
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: row))
+
+    monkeypatch.setattr(SyncSession, "flush", _fake_flush)
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        monkeypatch.setattr(session, "execute", _advancing_fetch)
+        with pytest.raises(TemporalVersionConflictError):
+            upsert_scd2_sync(
+                session,
+                Scd2UpsertSpec(
+                    model=Setting,
+                    match_filters=[Setting.key == "exhaust_k"],
+                    bus_time=_T1,
+                    decide=lambda row: _setting_payload(
+                        "exhaust_k", f"new-{row.sequence_id if row else 0}", 99
+                    ),
+                ),
+            )
+    assert calls == 4
+
+
+class _FakeDbApiError(Exception):
+    """Minimal DBAPI-shaped exception for dual-dialect classifier tests."""
+
+    def __init__(self, **attrs: object) -> None:
+        super().__init__("db error")
+        for key, value in attrs.items():
+            setattr(self, key, value)
+
+
+def test_dialect_unique_classifiers_and_identity_update(sync_repo: DatabaseRepository) -> None:
+    """Verify asyncpg/psycopg/SQLite unique violation matching and public_id preservation."""
+    missing_orig = IntegrityError("x", {}, Exception("x"))
+    missing_orig.orig = None
+    assert _is_unique_violation(missing_orig) is False
+
+    asyncpg_exc = IntegrityError(
+        "x", {}, _FakeDbApiError(sqlstate="23505", constraint_name="uq_settings_key")
+    )
+    assert _is_unique_violation(asyncpg_exc) is True
+    target = _resolve_target_unique_index(
+        Setting, "settings", [Setting.key == "k"], allow_insert=True
+    )
+    assert target is not None
+    assert _matches_target_unique_index(asyncpg_exc, "settings", target) is True
+    assert _matches_target_unique_index(asyncpg_exc, "settings", None) is False
+
+    other_pg = IntegrityError(
+        "x",
+        {},
+        _FakeDbApiError(pgcode="23505", diag=SimpleNamespace(constraint_name="other_idx")),
+    )
+    assert _is_unique_violation(other_pg) is True
+    assert _matches_target_unique_index(other_pg, "settings", target) is False
+
+    check_pg = IntegrityError("x", {}, _FakeDbApiError(pgcode="23514"))
+    assert _is_unique_violation(check_pg) is False
+
+    sqlite_errno_exc = IntegrityError(
+        "x",
+        {},
+        _FakeDbApiError(sqlite_errorcode=2067, args=("UNIQUE constraint failed: settings.key",)),
+    )
+    assert _is_unique_violation(sqlite_errno_exc) is True
+    assert _matches_target_unique_index(sqlite_errno_exc, "settings", target) is True
+
+    pg_session = MagicMock(spec=SyncSession)
+    pg_session.get_bind.return_value = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    begin_scd2_write_sync(pg_session)
+    assert_scd2_write_reserved(pg_session)
+
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        first_pid = str(uuid4())
+        second_pid = str(uuid4())
+        created = upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "keep_pid_k"],
+                bus_time=_T0,
+                decide=lambda _r: {
+                    **_setting_payload("keep_pid_k", "v1", 1),
+                    "public_id": first_pid,
+                },
+            ),
+        )
+        assert created.outcome == "created"
+        assert created.row is not None and created.row.public_id == first_pid
+        updated = upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "keep_pid_k"],
+                bus_time=_T1,
+                decide=lambda _r: {
+                    **_setting_payload("keep_pid_k", "v2", 2),
+                    "public_id": second_pid,
+                },
+            ),
+        )
+        assert updated.outcome == "updated"
+        assert updated.row is not None and updated.row.public_id == first_pid
+        unchanged = upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "keep_pid_k"],
+                bus_time=_T2,
+                decide=lambda _r: None,
+            ),
+        )
+        assert unchanged.outcome == "unchanged"
+        assert unchanged.row is not None and unchanged.row.public_id == first_pid
+        session.commit()

@@ -18,6 +18,7 @@ from snapper.data.models import InstrumentSpec
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import begin_scd2_write_sync
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_ETL_VERSION
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 
@@ -167,10 +168,12 @@ def test_updater_preserves_replaces_and_clears_the_monetary_block_atomically(
     """
     metadata = _metadata(("linear", "BTC", "USD"), _FIRST, "base_asset")
     with payoff_sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
         SymbolUpdaterService._revise_instrument_spec(
             session, _INSTRUMENT_ID, _FIRST, _SESSION_ID, 1, metadata=metadata
         )
         session.commit()
+        begin_scd2_write_sync(session)
         SymbolUpdaterService._revise_instrument_spec(
             session,
             _INSTRUMENT_ID,
@@ -189,6 +192,8 @@ def test_updater_preserves_replaces_and_clears_the_monetary_block_atomically(
         assert preserved.settlement_currency == "USD"
         assert preserved.native_order_quantity_unit == "base_asset"
         assert preserved.spec_observed_at == _FIRST
+        session.rollback()
+        begin_scd2_write_sync(session)
         SymbolUpdaterService._revise_instrument_spec(
             session,
             _INSTRUMENT_ID,
@@ -200,6 +205,7 @@ def test_updater_preserves_replaces_and_clears_the_monetary_block_atomically(
             ),
         )
         session.commit()
+        begin_scd2_write_sync(session)
         SymbolUpdaterService._revise_instrument_spec(
             session,
             _INSTRUMENT_ID,
@@ -274,6 +280,7 @@ def test_orm_rejects_partial_and_unknown_payoff_interpretations(
         ("inverse", "USD", " "),
     )
     with payoff_sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
         for sequence, evidence in enumerate(invalid, start=1):
             with pytest.raises(IntegrityError), session.begin_nested():
                 DatabaseRepository.revise_instrument_spec_sync(

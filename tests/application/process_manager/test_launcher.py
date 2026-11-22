@@ -36,6 +36,9 @@ from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.types import ProcessRunStatusEnum
 from snapper.core.types import StopProcessStatusEnum
+from snapper.data.models import Setting
+from snapper.data.repository import Scd2UpsertOutcome
+from snapper.data.repository import Scd2UpsertSpec
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import ProcessConfiguredEventData
 from snapper.messaging.schemas.data import ProcessRunEventData
@@ -1749,6 +1752,17 @@ class TestCreateProcessConfig:
             mock_session = MagicMock()
             mock_result = MagicMock()
             mock_result.scalar_one_or_none.return_value = None
+            mock_result.scalars.return_value.first.return_value = None
+            mock_session.info = {}
+            mock_session.get_bind = MagicMock(
+                return_value=SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+            )
+            mock_session.in_transaction = MagicMock(return_value=False)
+            mock_session.flush = AsyncMock()
+            nested = MagicMock()
+            nested.__aenter__ = AsyncMock(return_value=None)
+            nested.__aexit__ = AsyncMock(return_value=False)
+            mock_session.begin_nested = MagicMock(return_value=nested)
             mock_session.execute = AsyncMock(return_value=mock_result)
             mock_session.commit = AsyncMock()
             mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
@@ -1788,11 +1802,54 @@ class TestUpdateProcessConfig:
         mock_session = MagicMock()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = existing
+        mock_result.scalars.return_value.first.return_value = existing
+        mock_session.info = {}
+        mock_session.get_bind = MagicMock(
+            return_value=SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+        )
+        mock_session.in_transaction = MagicMock(return_value=False)
         mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.flush = AsyncMock()
+        mock_session.add = MagicMock()
+        nested_ctx = MagicMock()
+        nested_ctx.__aenter__ = AsyncMock(return_value=None)
+        nested_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_session.begin_nested = MagicMock(return_value=nested_ctx)
         mock_session.commit = AsyncMock()
         mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_repo.session.return_value.__aexit__ = AsyncMock(return_value=False)
         return mock_repo, mock_session
+
+    @staticmethod
+    def _make_fake_upsert(
+        current: dict[str, object],
+        write_spy: AsyncMock,
+    ) -> tuple[object, object]:
+        """Build deterministic begin/upsert patches invoking ``spec.decide``."""
+
+        async def _fake_begin(_session: object) -> None:
+            return None
+
+        async def _fake_upsert(
+            _session: object,
+            spec: Scd2UpsertSpec[Setting],
+        ) -> Scd2UpsertOutcome[Setting]:
+            row = cast(Setting | None, current["setting"])
+            new_values = spec.decide(row)
+            assert new_values is not None
+            await write_spy(model=spec.model, new_values=new_values)
+            successor = MagicMock()
+            successor.value = new_values["value"]
+            successor.category = new_values["category"]
+            successor.description = new_values["description"]
+            successor.is_encrypted = new_values["is_encrypted"]
+            current["setting"] = successor
+            return Scd2UpsertOutcome(
+                row=cast(Setting, successor),
+                outcome="inserted" if row is None else "updated",
+            )
+
+        return _fake_begin, _fake_upsert
 
     @staticmethod
     def _existing_setting(value: JsonObject) -> MagicMock:
@@ -1819,27 +1876,33 @@ class TestUpdateProcessConfig:
 
         Given: an active config with enabled=True and extra parameters,
         When: update_process_config(enabled=False) is called,
-        Then: close_and_insert persists enabled=False with parameters intact,
+        Then: upsert_scd2 persists enabled=False with parameters intact,
             no restart_nonce added, and the operator principal stamped.
         """
         existing = self._existing_setting(
             {"class": "a.B", "enabled": True, "mode": "thread", "parameters": {"k": "v"}}
         )
         mock_repo, mock_session = self._mock_repo_with_existing(existing)
+        write_spy = AsyncMock()
+        fake_begin, fake_upsert = self._make_fake_upsert({"setting": existing}, write_spy)
         with (
             patch(
                 "snapper.application.process_manager.registry_syncer.get_repository",
                 return_value=mock_repo,
             ),
             patch(
-                "snapper.application.process_manager.registry_syncer.close_and_insert",
-                new_callable=AsyncMock,
-            ) as mock_cai,
+                "snapper.application.process_manager.registry_syncer.begin_scd2_write",
+                new=fake_begin,
+            ),
+            patch(
+                "snapper.application.process_manager.registry_syncer.upsert_scd2",
+                new=fake_upsert,
+            ),
         ):
             await launcher._registry_syncer.update_process_config(
                 name="p", enabled=False, updated_by="alice"
             )
-        await_args = mock_cai.await_args
+        await_args = write_spy.await_args
         assert await_args is not None
         written = json.loads(await_args.kwargs["new_values"]["value"])
         assert written["enabled"] is False
@@ -1860,20 +1923,26 @@ class TestUpdateProcessConfig:
         """
         existing = self._existing_setting({"class": "a.B", "enabled": True, "parameters": {}})
         mock_repo, _ = self._mock_repo_with_existing(existing)
+        write_spy = AsyncMock()
+        fake_begin, fake_upsert = self._make_fake_upsert({"setting": existing}, write_spy)
         with (
             patch(
                 "snapper.application.process_manager.registry_syncer.get_repository",
                 return_value=mock_repo,
             ),
             patch(
-                "snapper.application.process_manager.registry_syncer.close_and_insert",
-                new_callable=AsyncMock,
-            ) as mock_cai,
+                "snapper.application.process_manager.registry_syncer.begin_scd2_write",
+                new=fake_begin,
+            ),
+            patch(
+                "snapper.application.process_manager.registry_syncer.upsert_scd2",
+                new=fake_upsert,
+            ),
         ):
             await launcher._registry_syncer.update_process_config(
                 name="p", restart_nonce="n1", updated_by="bob"
             )
-        await_args = mock_cai.await_args
+        await_args = write_spy.await_args
         assert await_args is not None
         written = json.loads(await_args.kwargs["new_values"]["value"])
         assert written["restart_nonce"] == "n1"
@@ -1886,7 +1955,7 @@ class TestUpdateProcessConfig:
         """§8 PATCH retry idempotency (syncer leg): a re-sent nonce write is harmless.
 
         Given: an active config with enabled=True and extra parameters behind
-            a STATEFUL close_and_insert stub — every write becomes the Setting
+            a STATEFUL upsert_scd2 stub — every write becomes the Setting
             the NEXT active-row read returns, mirroring the real SCD2 table,
         When: update_process_config(restart_nonce='n1') is called TWICE (the
             client retried the same PATCH after a lost response), so the
@@ -1901,31 +1970,12 @@ class TestUpdateProcessConfig:
         existing = self._existing_setting(
             {"class": "a.B", "enabled": True, "mode": "thread", "parameters": {"k": "v"}}
         )
-        current: dict[str, MagicMock] = {"setting": existing}
-
-        async def _read_active(*args: object, **kwargs: object) -> MagicMock:
-            result = MagicMock()
-            result.scalar_one_or_none.return_value = current["setting"]
-            return result
-
-        def _persist_version(
-            *,
-            session: object,
-            model: object,
-            match_filters: object,
-            new_values: dict[str, object],
-            bus_time: object,
-        ) -> None:
-            successor = MagicMock()
-            successor.value = new_values["value"]
-            successor.category = new_values["category"]
-            successor.description = new_values["description"]
-            successor.is_encrypted = new_values["is_encrypted"]
-            current["setting"] = successor
+        current: dict[str, object] = {"setting": existing}
+        write_spy = AsyncMock()
+        fake_begin, fake_upsert = self._make_fake_upsert(current, write_spy)
 
         mock_repo = MagicMock()
         mock_session = MagicMock()
-        mock_session.execute = AsyncMock(side_effect=_read_active)
         mock_session.commit = AsyncMock()
         mock_repo.session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_repo.session.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -1935,21 +1985,24 @@ class TestUpdateProcessConfig:
                 return_value=mock_repo,
             ),
             patch(
-                "snapper.application.process_manager.registry_syncer.close_and_insert",
-                new_callable=AsyncMock,
-                side_effect=_persist_version,
-            ) as mock_cai,
+                "snapper.application.process_manager.registry_syncer.begin_scd2_write",
+                new=fake_begin,
+            ),
+            patch(
+                "snapper.application.process_manager.registry_syncer.upsert_scd2",
+                new=fake_upsert,
+            ),
         ):
             await launcher._registry_syncer.update_process_config(
                 name="p", restart_nonce="n1", updated_by="alice"
             )
-            assert json.loads(current["setting"].value)["restart_nonce"] == "n1"
+            assert json.loads(cast(MagicMock, current["setting"]).value)["restart_nonce"] == "n1"
             await launcher._registry_syncer.update_process_config(
                 name="p", restart_nonce="n1", updated_by="alice"
             )
-        assert mock_cai.await_count == 2
-        first = json.loads(mock_cai.await_args_list[0].kwargs["new_values"]["value"])
-        second = json.loads(mock_cai.await_args_list[1].kwargs["new_values"]["value"])
+        assert write_spy.await_count == 2
+        first = json.loads(write_spy.await_args_list[0].kwargs["new_values"]["value"])
+        second = json.loads(write_spy.await_args_list[1].kwargs["new_values"]["value"])
         assert first == second
         assert second["restart_nonce"] == "n1"
         assert second["enabled"] is True
@@ -1982,7 +2035,7 @@ class TestUpdateProcessConfig:
         Given: an active strategy config with class/enabled/role/template and
             old parameters,
         When: update_process_config_parameters(parameters={new}) is called,
-        Then: close_and_insert persists the new parameters, every other config
+        Then: upsert_scd2 persists the new parameters, every other config
             key survives, NO restart_nonce is added, and the persisted
             parameters dict is returned.
         """
@@ -1997,6 +2050,8 @@ class TestUpdateProcessConfig:
             }
         )
         mock_repo, mock_session = self._mock_repo_with_existing(existing)
+        write_spy = AsyncMock()
+        fake_begin, fake_upsert = self._make_fake_upsert({"setting": existing}, write_spy)
         new_params = {
             "operator_public_id": "label:default",
             "wallet_public_id": "label:paper",
@@ -2008,14 +2063,18 @@ class TestUpdateProcessConfig:
                 return_value=mock_repo,
             ),
             patch(
-                "snapper.application.process_manager.registry_syncer.close_and_insert",
-                new_callable=AsyncMock,
-            ) as mock_cai,
+                "snapper.application.process_manager.registry_syncer.begin_scd2_write",
+                new=fake_begin,
+            ),
+            patch(
+                "snapper.application.process_manager.registry_syncer.upsert_scd2",
+                new=fake_upsert,
+            ),
         ):
             returned = await launcher._registry_syncer.update_process_config_parameters(
                 name="p", parameters=new_params, updated_by="alice"
             )
-        await_args = mock_cai.await_args
+        await_args = write_spy.await_args
         assert await_args is not None
         written = json.loads(await_args.kwargs["new_values"]["value"])
         assert written["parameters"] == new_params

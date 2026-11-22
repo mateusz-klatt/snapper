@@ -34,6 +34,7 @@ from snapper.data.models import UserLoginEvent
 from snapper.data.repository import _CANDLE_ID_CACHE_LOOKBACK
 from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import begin_scd2_write
 from snapper.data.repository import close_and_insert
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
@@ -716,6 +717,7 @@ async def _upsert_symbol_pattern(
         now: Bus timestamp for the operation.
     """
     async with repo.session() as s:
+        await begin_scd2_write(s)
         existing = (
             (
                 await s.execute(
@@ -1189,6 +1191,7 @@ class TestUserBitemporal:
         user_v1 = await _create_user(repo, "alice", "hash_v1", t1)
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 session=s,
                 model=User,
@@ -1234,6 +1237,7 @@ class TestUserBitemporal:
         user_v1 = await _create_user(repo, "bob", "hash_v1", t1)
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 session=s,
                 model=User,
@@ -1253,6 +1257,7 @@ class TestUserBitemporal:
             await s.commit()
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 session=s,
                 model=User,
@@ -1539,6 +1544,7 @@ class TestSettingsApiBitemporal:
             await s.commit()
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 session=s,
                 model=Setting,
@@ -1557,6 +1563,7 @@ class TestSettingsApiBitemporal:
             await s.commit()
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 session=s,
                 model=Setting,
@@ -1825,6 +1832,7 @@ class TestInstrumentBitemporal:
             original_pid = sym.public_id
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 s,
                 Symbol,
@@ -2402,6 +2410,7 @@ class TestInstrumentJoinSemantics:
             original_pid = sym.public_id
 
         async with repo.session() as s:
+            await begin_scd2_write(s)
             await close_and_insert(
                 s,
                 Symbol,

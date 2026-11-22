@@ -17,6 +17,7 @@ The publisher uses public (anonymous) WebSocket connections.
 """
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
 from typing import Any
@@ -24,7 +25,6 @@ from typing import Final
 from uuid import uuid7
 
 from loguru import logger
-from sqlalchemy import select
 
 from snapper.application.process_manager.process_parameters import PublisherSymbolsParameters
 from snapper.application.process_manager.registry import register_process
@@ -36,7 +36,9 @@ from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import SymbolMarketDataChannelCapability
 from snapper.data.repository import Repository
-from snapper.data.repository import close_and_insert
+from snapper.data.repository import Scd2UpsertSpec
+from snapper.data.repository import begin_scd2_write
+from snapper.data.repository import upsert_scd2
 from snapper.infrastructure.exchanges._subscription_health import _SymbolEntry
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
@@ -408,56 +410,52 @@ class KrakenFuturesMarketDataPublisher(MarketDataPublisherService[KrakenFuturesE
                 native_symbol,
             )
             return False
-        async with repository.session() as session:
-            result = await session.execute(
-                select(SymbolMarketDataChannelCapability).where(
-                    SymbolMarketDataChannelCapability.symbol_public_id == symbol_public_id,
-                    SymbolMarketDataChannelCapability.exchange == ExchangeEnum.KRAKEN_FUTURES,
-                    SymbolMarketDataChannelCapability.channel == "trade",
-                    SymbolMarketDataChannelCapability.timestamp <= now,
-                    SymbolMarketDataChannelCapability.known_to > now,
+
+        def _decide(
+            existing: SymbolMarketDataChannelCapability | None,
+        ) -> Mapping[str, object] | None:
+            if (
+                existing is not None
+                and existing.can_market_data is False
+                and (
+                    existing.source != _RUNTIME_CHANNEL_SOURCE
+                    or existing.reason == _RUNTIME_CHANNEL_REASON
                 )
-            )
-            existing = result.scalar_one_or_none()
-            if (
-                existing is not None
-                and existing.can_market_data is False
-                and existing.source != _RUNTIME_CHANNEL_SOURCE
             ):
-                return True
-            if (
-                existing is not None
-                and existing.can_market_data is False
-                and existing.source == _RUNTIME_CHANNEL_SOURCE
-                and existing.reason == _RUNTIME_CHANNEL_REASON
-            ):
-                return True
-            await close_and_insert(
-                session=session,
-                model=SymbolMarketDataChannelCapability,
-                match_filters=[
-                    SymbolMarketDataChannelCapability.symbol_public_id == symbol_public_id,
-                    SymbolMarketDataChannelCapability.exchange == ExchangeEnum.KRAKEN_FUTURES,
-                    SymbolMarketDataChannelCapability.channel == "trade",
-                ],
-                new_values={
-                    "symbol_public_id": symbol_public_id,
-                    "exchange": ExchangeEnum.KRAKEN_FUTURES,
-                    "channel": "trade",
-                    "can_market_data": False,
-                    "source": _RUNTIME_CHANNEL_SOURCE,
-                    "reason": _RUNTIME_CHANNEL_REASON,
-                    "created_at": existing.created_at if existing is not None else now,
-                    "session_id": self._tracker.session_id,
-                    "sequence_id": self._tracker.next_sequence("channel_capabilities"),
-                },
-                bus_time=now,
+                return None
+            return {
+                "symbol_public_id": symbol_public_id,
+                "exchange": ExchangeEnum.KRAKEN_FUTURES,
+                "channel": "trade",
+                "can_market_data": False,
+                "source": _RUNTIME_CHANNEL_SOURCE,
+                "reason": _RUNTIME_CHANNEL_REASON,
+                "created_at": existing.created_at if existing is not None else now,
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence("channel_capabilities"),
+            }
+
+        async with repository.session() as session:
+            await begin_scd2_write(session)
+            result = await upsert_scd2(
+                session,
+                Scd2UpsertSpec(
+                    model=SymbolMarketDataChannelCapability,
+                    match_filters=[
+                        SymbolMarketDataChannelCapability.symbol_public_id == symbol_public_id,
+                        SymbolMarketDataChannelCapability.exchange == ExchangeEnum.KRAKEN_FUTURES,
+                        SymbolMarketDataChannelCapability.channel == "trade",
+                    ],
+                    bus_time=now,
+                    decide=_decide,
+                ),
             )
-            await session.commit()
-        logger.info(
-            "Kraken Futures learned trade channel unavailable for {}",
-            native_symbol,
-        )
+            if result.outcome != "unchanged":
+                await session.commit()
+                logger.info(
+                    "Kraken Futures learned trade channel unavailable for {}",
+                    native_symbol,
+                )
         return True
 
     async def _broadcast_runtime_capability_invalidation(self) -> None:

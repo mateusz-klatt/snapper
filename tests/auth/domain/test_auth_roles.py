@@ -323,6 +323,7 @@ class TestUserService:
         """
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
+        mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_db_user
         mock_session.execute.return_value = mock_result
@@ -523,6 +524,7 @@ class TestUserService:
         """
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
+        mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
@@ -577,6 +579,7 @@ class TestUserService:
         """
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
+        mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_session.execute.return_value = mock_result
@@ -603,6 +606,7 @@ class TestUserService:
         """
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
+        mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_select_result = MagicMock()
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()
@@ -651,6 +655,7 @@ class TestUserService:
         """
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
+        mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_select_result = MagicMock()
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()
@@ -678,6 +683,7 @@ class TestUserService:
         """
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
+        mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_select_result = MagicMock()
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()
@@ -710,6 +716,7 @@ class TestUserService:
         """
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
+        mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_select_result = MagicMock()
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()
@@ -733,6 +740,7 @@ class TestUserService:
         mock_db_user.default_language = "pl"
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
+        mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_select_result = MagicMock()
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
         mock_ci_result = MagicMock()
@@ -797,6 +805,7 @@ class TestUserService:
         """
         mock_session = AsyncMock()
         mock_session.add = MagicMock()
+        mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_session.scalar.return_value = mock_db_user.password_hash
         mock_select_result = MagicMock()
         mock_select_result.scalar_one_or_none.return_value = mock_db_user
@@ -909,7 +918,9 @@ class TestUserService:
             patch.object(user_service.repository, "session", side_effect=contexts),
             patch.object(user_service, "_verify_password", return_value=True) as verify,
             patch.object(user_service, "hash_password", return_value="new_hash"),
-            patch("snapper.auth.user_service.close_and_insert", return_value=locked_two) as mutate,
+            patch(
+                "snapper.auth.user_service.close_and_insert_existing", return_value=locked_two
+            ) as mutate,
         ):
             if second_conflict:
                 with pytest.raises(UserAuthorityConflictError, match="User version changed"):
@@ -959,7 +970,7 @@ class TestUserService:
             patch.object(user_service.repository, "session", side_effect=[read_ctx, write_ctx]),
             patch.object(user_service, "_verify_password", return_value=True),
             patch.object(user_service, "hash_password", return_value="new_hash"),
-            patch("snapper.auth.user_service.close_and_insert") as mutate,
+            patch("snapper.auth.user_service.close_and_insert_existing") as mutate,
         ):
             result = await user_service.change_password("testuser", "old", "new")
         assert result is False
@@ -1078,7 +1089,7 @@ class TestUserService:
             patch.object(user_service.repository, "session", side_effect=track_session),
             patch.object(user_service, "_verify_password", side_effect=record_verify),
             patch.object(user_service, "hash_password", side_effect=record_hash),
-            patch("snapper.auth.user_service.close_and_insert", return_value=mock_db_user),
+            patch("snapper.auth.user_service.close_and_insert_existing", return_value=mock_db_user),
         ):
             await writer(user_service)
         assert bcrypt_depths and all(depth == 0 for depth in bcrypt_depths)
@@ -1156,7 +1167,7 @@ class TestUserService:
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
-        with patch("snapper.auth.user_service.close_and_insert", new_callable=AsyncMock):
+        with patch("snapper.auth.user_service.close_and_insert_existing", new_callable=AsyncMock):
             await user_service.admin_reset_password("testuser", "newpassword123")
         assert mock_session.commit.called
 
@@ -1197,7 +1208,7 @@ class TestUserService:
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
         user_service.repository.session.return_value.__aenter__.return_value = mock_session
-        with patch("snapper.auth.user_service.close_and_insert", new_callable=AsyncMock):
+        with patch("snapper.auth.user_service.close_and_insert_existing", new_callable=AsyncMock):
             await user_service.reset_password_by_username("testuser", "newpassword123")
         assert mock_session.commit.called
 
@@ -1321,7 +1332,7 @@ class TestUserService:
             patch.object(user_service, "_verify_password", return_value=True),
             patch.object(user_service, "hash_password", return_value="new_hash"),
             patch(
-                "snapper.auth.user_service.close_and_insert", return_value=mock_db_user
+                "snapper.auth.user_service.close_and_insert_existing", return_value=mock_db_user
             ) as mutate,
         ):
             if second_conflict:
@@ -1521,7 +1532,7 @@ class TestUserService:
             patch.object(user_service, "hash_password", return_value="new_hash"),
             patch.object(user_service, "_msg_publisher", publisher),
             patch("snapper.auth.user_service.get_token_manager", return_value=token_manager),
-            patch("snapper.auth.user_service.close_and_insert", new=mutate),
+            patch("snapper.auth.user_service.close_and_insert_existing", new=mutate),
         ):
             if second_conflict:
                 with pytest.raises(
