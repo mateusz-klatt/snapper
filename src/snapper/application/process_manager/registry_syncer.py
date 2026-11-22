@@ -6,6 +6,7 @@ ones with current metadata.
 """
 
 import json
+from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
 from datetime import UTC
@@ -29,6 +30,7 @@ from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessRoleEnum
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Setting
 from snapper.data.repository import Repository
 from snapper.data.repository import Scd2UpsertSpec
@@ -39,6 +41,7 @@ from snapper.data.repository import where_active_now
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _SETTINGS_TOPIC = "settings"
+_MAX_CONFIG_UPDATE_ATTEMPTS = 3
 
 
 def _seeded_identity_params_for_registry_name(registry_name: str) -> tuple[str, ...]:
@@ -490,6 +493,86 @@ class ProcessRegistrySyncer:
             )
             await session.commit()
 
+    async def _mutate_existing_process_config(
+        self,
+        *,
+        name: str,
+        updated_by: str,
+        mutate: Callable[[dict[str, Any]], None],
+    ) -> dict[str, Any]:
+        """Apply an in-place JSON mutation to an existing process config with lock-wake recovery.
+
+        Re-reads the current ``Setting`` row before raising ``KeyError`` when an
+        initial locked lookup yields ``None`` after a PostgreSQL ``READ COMMITTED``
+        EvalPlanQual lock wake.
+        """
+        repository = get_repository(self.settings.db_url)
+        config_key = f"process_{name}"
+        bus_time = datetime.now(UTC)
+        persisted_config: dict[str, Any] = {}
+
+        def _decide_mutate(existing: Setting | None) -> Mapping[str, object] | None:
+            nonlocal persisted_config
+            if existing is None:
+                raise KeyError(f"Process '{name}' is not configured")
+            config_dict: dict[str, Any] = json.loads(existing.value)
+            mutate(config_dict)
+            _mint_missing_seeded_identities(
+                config_dict.get("parameters"),
+                _seeded_identity_params_for_registry_name(str(config_dict.get("template") or name)),
+            )
+            persisted_config = config_dict
+            return {
+                "key": config_key,
+                "value": json.dumps(config_dict, indent=4),
+                "category": existing.category,
+                "description": existing.description,
+                "is_encrypted": existing.is_encrypted,
+                "updated_by": updated_by,
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence(_SETTINGS_TOPIC),
+            }
+
+        async with repository.session() as session:
+            await begin_scd2_write(session)
+            attempt = 0
+            while True:
+                try:
+                    await upsert_scd2(
+                        session,
+                        Scd2UpsertSpec(
+                            model=Setting,
+                            match_filters=[Setting.key == config_key],
+                            bus_time=bus_time,
+                            decide=_decide_mutate,
+                            active_only=True,
+                        ),
+                    )
+                    break
+                except KeyError:
+                    attempt += 1
+                    if attempt >= _MAX_CONFIG_UPDATE_ATTEMPTS:
+                        raise
+                    active_row = (
+                        (
+                            await session.execute(
+                                select(Setting)
+                                .where(
+                                    Setting.key == config_key,
+                                    Setting.known_to == KNOWN_TO_MAX,
+                                )
+                                .limit(1)
+                            )
+                        )
+                        .scalars()
+                        .first()
+                    )
+                    if active_row is None:
+                        raise
+                    bus_time = max(bus_time, active_row.timestamp)
+            await session.commit()
+            return persisted_config
+
     async def update_process_config(
         self,
         *,
@@ -526,45 +609,18 @@ class ProcessRegistrySyncer:
             KeyError: If no active config exists for ``name`` (the REST
                 layer maps this to 404).
         """
-        repository = get_repository(self.settings.db_url)
-        config_key = f"process_{name}"
-        now = datetime.now(UTC)
 
-        def _decide_update(existing: Setting | None) -> Mapping[str, object] | None:
-            if existing is None:
-                raise KeyError(f"Process '{name}' is not configured")
-            config_dict = json.loads(existing.value)
+        def _apply_desired_state(config_dict: dict[str, Any]) -> None:
             if enabled is not None:
                 config_dict["enabled"] = enabled
             if restart_nonce is not None:
                 config_dict["restart_nonce"] = restart_nonce
-            _mint_missing_seeded_identities(
-                config_dict.get("parameters"),
-                _seeded_identity_params_for_registry_name(str(config_dict.get("template") or name)),
-            )
-            return {
-                "key": config_key,
-                "value": json.dumps(config_dict, indent=4),
-                "category": existing.category,
-                "description": existing.description,
-                "is_encrypted": existing.is_encrypted,
-                "updated_by": updated_by,
-                "session_id": self._tracker.session_id,
-                "sequence_id": self._tracker.next_sequence(_SETTINGS_TOPIC),
-            }
 
-        async with repository.session() as session:
-            await begin_scd2_write(session)
-            await upsert_scd2(
-                session,
-                Scd2UpsertSpec(
-                    model=Setting,
-                    match_filters=[Setting.key == config_key],
-                    bus_time=now,
-                    decide=_decide_update,
-                ),
-            )
-            await session.commit()
+        await self._mutate_existing_process_config(
+            name=name,
+            updated_by=updated_by,
+            mutate=_apply_desired_state,
+        )
 
     async def update_process_config_parameters(
         self,
@@ -599,16 +655,8 @@ class ProcessRegistrySyncer:
             KeyError: If no active config exists for ``name`` (the REST layer
                 maps this to 404).
         """
-        repository = get_repository(self.settings.db_url)
-        config_key = f"process_{name}"
-        now = datetime.now(UTC)
-        persisted_params: dict[str, Any] = {}
 
-        def _decide_params(existing: Setting | None) -> Mapping[str, object] | None:
-            nonlocal persisted_params
-            if existing is None:
-                raise KeyError(f"Process '{name}' is not configured")
-            config_dict = json.loads(existing.value)
+        def _apply_parameters(config_dict: dict[str, Any]) -> None:
             template_name = config_dict.get("template")
             validate_delegate_config_references(
                 name,
@@ -616,32 +664,10 @@ class ProcessRegistrySyncer:
                 parameters,
             )
             config_dict["parameters"] = parameters
-            _mint_missing_seeded_identities(
-                config_dict.get("parameters"),
-                _seeded_identity_params_for_registry_name(str(config_dict.get("template") or name)),
-            )
-            persisted_params = dict(config_dict["parameters"])
-            return {
-                "key": config_key,
-                "value": json.dumps(config_dict, indent=4),
-                "category": existing.category,
-                "description": existing.description,
-                "is_encrypted": existing.is_encrypted,
-                "updated_by": updated_by,
-                "session_id": self._tracker.session_id,
-                "sequence_id": self._tracker.next_sequence(_SETTINGS_TOPIC),
-            }
 
-        async with repository.session() as session:
-            await begin_scd2_write(session)
-            await upsert_scd2(
-                session,
-                Scd2UpsertSpec(
-                    model=Setting,
-                    match_filters=[Setting.key == config_key],
-                    bus_time=now,
-                    decide=_decide_params,
-                ),
-            )
-            await session.commit()
-            return persisted_params
+        persisted_config = await self._mutate_existing_process_config(
+            name=name,
+            updated_by=updated_by,
+            mutate=_apply_parameters,
+        )
+        return dict(persisted_config["parameters"])

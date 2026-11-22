@@ -12,12 +12,18 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
+from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
+from snapper.application.updaters.symbols.kraken_equities import KrakenEquitiesSymbolUpdaterService
+from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSymbolUpdaterService
+from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterService
+from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
@@ -2425,3 +2431,162 @@ def test_nonowning_refresh_preserves_stored_base_asset_units_and_source_clock(
         assert metadata.contract_size is None
         assert metadata.contract_payoff_model is None
         assert metadata.unit_certified is False
+
+
+async def test_cross_exchange_updaters_acquire_symbol_locks_in_deterministic_native_order(
+    tmp_path: Path,
+) -> None:
+    """Acquire Symbol row locks in ascending native_symbol order across updaters.
+
+    Given: Reverse-ordered symbol payloads for Kraken, Polygon, Walutomat,
+        Kraken Futures, and Kraken Equities updaters,
+    When: Each concrete updater runs ``_update_database`` against an initialized repository,
+    Then: Every updater calls ``_upsert_symbol`` in deterministic ascending
+        ``native_symbol`` order.
+    """
+    db_url = f"sqlite:///{tmp_path / 'cross-exchange-order.db'}"
+    repo = DatabaseRepository(db_url)
+    repo.create_all()
+    recorded_natives: list[str] = []
+    original_upsert_symbol = SymbolUpdaterService._upsert_symbol
+
+    def _recording_upsert(*args: Any, **kwargs: Any) -> str:
+        recorded_natives.append(str(kwargs.get("native_symbol") or args[1]))
+        return original_upsert_symbol(*args, **kwargs)
+
+    try:
+        with patch.object(SymbolUpdaterService, "_upsert_symbol", side_effect=_recording_upsert):
+            kraken = KrakenSymbolUpdaterService(force=True)
+            kraken.repository = repo
+            recorded_natives.clear()
+            await kraken._update_database(
+                [
+                    {
+                        "native_symbol": "ZZZ-USD",
+                        "base_currency": "ZZZ",
+                        "quote_currency": "USD",
+                        "kraken_websocket_symbol": "ZZZ/USD",
+                        "kraken_rest_symbol": "ZZZUSD",
+                        "ccxt_symbol": "ZZZ/USD",
+                    },
+                    {
+                        "native_symbol": "AAA-USD",
+                        "base_currency": "AAA",
+                        "quote_currency": "USD",
+                        "kraken_websocket_symbol": "AAA/USD",
+                        "kraken_rest_symbol": "AAAUSD",
+                        "ccxt_symbol": "AAA/USD",
+                    },
+                ]
+            )
+            assert recorded_natives == ["AAA-USD", "ZZZ-USD"]
+
+            polygon = PolygonSymbolUpdaterService(force=True, insert_new=True)
+            polygon.repository = repo
+            recorded_natives.clear()
+            await polygon._update_database(
+                [
+                    {
+                        "ticker": "X:ZZZUSD",
+                        "base_currency_symbol": "ZZZ",
+                        "currency_symbol": "USD",
+                    },
+                    {
+                        "ticker": "X:AAAUSD",
+                        "base_currency_symbol": "AAA",
+                        "currency_symbol": "USD",
+                    },
+                ]
+            )
+            assert recorded_natives == ["AAA-USD", "ZZZ-USD"]
+
+            walutomat = WalutomatSymbolUpdaterService(update_threshold_hours=6, force=True)
+            walutomat.repository = repo
+            recorded_natives.clear()
+            await walutomat._update_database(
+                [
+                    {
+                        "symbol": "ZZZ_USD",
+                        "walutomat_rest_symbol": "ZZZUSD",
+                        "native_symbol": "ZZZ-USD",
+                        "base": "ZZZ",
+                        "quote": "USD",
+                    },
+                    {
+                        "symbol": "AAA_USD",
+                        "walutomat_rest_symbol": "AAAUSD",
+                        "native_symbol": "AAA-USD",
+                        "base": "AAA",
+                        "quote": "USD",
+                    },
+                ]
+            )
+            assert recorded_natives == ["AAA-USD", "ZZZ-USD"]
+
+            futures = KrakenFuturesSymbolUpdaterService(update_threshold_hours=6, force=True)
+            futures.repository = repo
+            recorded_natives.clear()
+            await futures._update_database(
+                [
+                    {
+                        "symbol": "PF_ZZZUSD",
+                        "type": "futures_vanilla",
+                        "tickSize": 0.5,
+                        "contractSize": 1,
+                        "tradeable": True,
+                        "base": "ZZZ",
+                        "quote": "USD",
+                    },
+                    {
+                        "symbol": "PF_AAAUSD",
+                        "type": "futures_vanilla",
+                        "tickSize": 0.5,
+                        "contractSize": 1,
+                        "tradeable": True,
+                        "base": "AAA",
+                        "quote": "USD",
+                    },
+                ]
+            )
+            assert len(recorded_natives) == 2
+            assert recorded_natives == sorted(recorded_natives)
+
+            equities = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6, force=True)
+            equities.repository = repo
+            recorded_natives.clear()
+            await equities._update_database(
+                [
+                    {
+                        "symbol": "ZZZM6.NYMEX",
+                        "name": "ZZZM6 19May26",
+                        "short_name": "ZZZ",
+                        "contract_name": "ZZZM6",
+                        "tradable": True,
+                        "status": "active",
+                        "category": "Equities",
+                        "exchange": "NYMEX",
+                        "tick_size": "0.01",
+                        "contract_size": "1",
+                        "base": "ZZZ",
+                        "quote": "USD",
+                    },
+                    {
+                        "symbol": "AAAM6.NYMEX",
+                        "name": "AAAM6 19May26",
+                        "short_name": "AAA",
+                        "contract_name": "AAAM6",
+                        "tradable": True,
+                        "status": "active",
+                        "category": "Equities",
+                        "exchange": "NYMEX",
+                        "tick_size": "0.01",
+                        "contract_size": "1",
+                        "base": "AAA",
+                        "quote": "USD",
+                    },
+                ]
+            )
+            assert len(recorded_natives) == 2
+            assert recorded_natives == sorted(recorded_natives)
+    finally:
+        repo.engine.dispose()

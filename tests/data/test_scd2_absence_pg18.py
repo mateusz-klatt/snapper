@@ -7,7 +7,9 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
+from uuid import NAMESPACE_URL
 from uuid import uuid4
+from uuid import uuid5
 
 import pytest
 from sqlalchemy import select
@@ -51,6 +53,11 @@ _T0 = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
 _T1 = _T0 + timedelta(seconds=10)
 _T2 = _T0 + timedelta(seconds=20)
 _WAIT_TIMEOUT_S = 10.0
+
+
+def _session_uuid(label: str) -> str:
+    """Return a deterministic valid UUID string for ``UUIDColumn`` provenance."""
+    return str(uuid5(NAMESPACE_URL, f"snapper-pg18:{label}"))
 
 
 def _pg_urls() -> tuple[str, str]:
@@ -101,12 +108,18 @@ async def pg_repos() -> AsyncIterator[tuple[SQLAlchemyRepository, DatabaseReposi
 
 
 async def _wait_for_blocked_lock(repo: SQLAlchemyRepository, relation: str) -> None:
-    """Wait until PostgreSQL reports a waiting lock on ``relation``."""
+    """Wait until PostgreSQL reports a waiting lock (including transactionid waits)."""
     deadline = asyncio.get_running_loop().time() + _WAIT_TIMEOUT_S
     query = text(
-        "SELECT count(*) FROM pg_locks l "
-        "JOIN pg_class c ON c.oid = l.relation "
-        "WHERE c.relname = :rel AND NOT l.granted"
+        "SELECT count(*) "
+        "FROM pg_stat_activity a "
+        "JOIN pg_locks l ON l.pid = a.pid "
+        "LEFT JOIN pg_class c ON c.oid = l.relation "
+        "WHERE a.datname = current_database() "
+        "AND a.pid <> pg_backend_pid() "
+        "AND a.wait_event_type = 'Lock' "
+        "AND NOT l.granted "
+        "AND (c.relname = :rel OR l.locktype IN ('transactionid', 'tuple'))"
     )
     while asyncio.get_running_loop().time() < deadline:
         async with repo.session() as session:
@@ -124,6 +137,7 @@ async def _seed_symbol_instrument_pg(
     """Insert an active Symbol and Instrument pair on PostgreSQL."""
     symbol_pid = str(uuid4())
     instrument_pid = str(uuid4())
+    seed_session_id = _session_uuid("pg-seed")
     async with repo.session() as session:
         session.add(
             Symbol(
@@ -134,7 +148,7 @@ async def _seed_symbol_instrument_pg(
                 asset_type="crypto",
                 created_at=_T0,
                 timestamp=_T0,
-                session_id="pg-seed",
+                session_id=seed_session_id,
                 sequence_id=1,
             )
         )
@@ -143,9 +157,8 @@ async def _seed_symbol_instrument_pg(
                 public_id=instrument_pid,
                 symbol_public_id=symbol_pid,
                 exchange="kraken",
-                created_at=_T0,
                 timestamp=_T0,
-                session_id="pg-seed",
+                session_id=seed_session_id,
                 sequence_id=2,
             )
         )
@@ -162,16 +175,22 @@ async def test_pg18_cold_start_absence_race(
     async_repo, _ = pg_repos
     key = f"pg-cold-{uuid4().hex}"
     select_barrier = asyncio.Barrier(2)
+    passed_sessions: set[int] = set()
     original_flush = AsyncSession.flush
 
     async def _coordinated_flush(session: AsyncSession) -> None:
-        if any(isinstance(obj, Setting) and obj.key == key for obj in session.new):
+        session_key = id(session)
+        if session_key not in passed_sessions and any(
+            isinstance(obj, Setting) and obj.key == key for obj in session.new
+        ):
+            passed_sessions.add(session_key)
             await select_barrier.wait()
         await original_flush(session)
 
     monkeypatch.setattr(AsyncSession, "flush", _coordinated_flush)
 
     async def _worker(tag: str) -> str:
+        worker_sid = _session_uuid(f"cold-{tag}")
         async with async_repo.session() as session:
             await begin_scd2_write(session)
             outcome = await upsert_scd2(
@@ -186,7 +205,7 @@ async def test_pg18_cold_start_absence_race(
                         "category": "race",
                         "description": None,
                         "is_encrypted": False,
-                        "session_id": tag,
+                        "session_id": worker_sid,
                         "sequence_id": 1,
                     },
                 ),
@@ -210,6 +229,7 @@ async def test_pg18_cold_start_absence_race(
 @pytest.mark.asyncio
 async def test_pg18_evalplanqual_lock_wake_and_clock_skew_race(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Waking from FOR UPDATE after predecessor close retries cleanly and clamps clock skew."""
     async_repo, _ = pg_repos
@@ -224,9 +244,9 @@ async def test_pg18_evalplanqual_lock_wake_and_clock_skew_race(
                 category="race",
                 description=None,
                 is_encrypted=False,
-                session_id="seed",
+                session_id=_session_uuid("seed"),
                 sequence_id=1,
-                timestamp=_T2,
+                timestamp=_T0,
                 known_to=KNOWN_TO_MAX,
             )
         )
@@ -237,19 +257,20 @@ async def test_pg18_evalplanqual_lock_wake_and_clock_skew_race(
 
     async def _session_a() -> None:
         async with async_repo.session() as session:
+            await begin_scd2_write(session)
             await upsert_scd2(
                 session,
                 Scd2UpsertSpec(
                     model=Setting,
                     match_filters=[Setting.key == key],
-                    bus_time=_T2,
+                    bus_time=_T1,
                     decide=lambda _r: {
                         "key": key,
                         "value": "v2",
                         "category": "race",
                         "description": None,
                         "is_encrypted": False,
-                        "session_id": "a",
+                        "session_id": _session_uuid("epq-a"),
                         "sequence_id": 2,
                     },
                 ),
@@ -262,6 +283,7 @@ async def test_pg18_evalplanqual_lock_wake_and_clock_skew_race(
         nonlocal b_finished
         await asyncio.wait_for(a_locked.wait(), timeout=_WAIT_TIMEOUT_S)
         async with async_repo.session() as session:
+            await begin_scd2_write(session)
             outcome = await upsert_scd2(
                 session,
                 Scd2UpsertSpec(
@@ -274,7 +296,7 @@ async def test_pg18_evalplanqual_lock_wake_and_clock_skew_race(
                         "category": "race",
                         "description": None,
                         "is_encrypted": False,
-                        "session_id": "b",
+                        "session_id": _session_uuid("epq-b"),
                         "sequence_id": 3,
                     },
                 ),
@@ -282,7 +304,7 @@ async def test_pg18_evalplanqual_lock_wake_and_clock_skew_race(
             await session.commit()
             assert outcome.row is not None
             assert outcome.row.public_id == initial_pid
-            assert outcome.row.timestamp == _T2
+            assert outcome.row.timestamp == _T1
             b_finished = True
             return outcome.outcome
 
@@ -291,6 +313,63 @@ async def test_pg18_evalplanqual_lock_wake_and_clock_skew_race(
     )
     assert b_finished is True
     assert b_outcome == "updated"
+    await _run_pg18_clock_skew_subphase(async_repo, monkeypatch)
+
+
+async def _run_pg18_clock_skew_subphase(
+    async_repo: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise cold-start clock skew clamping under a concurrent PG18 flush barrier."""
+    skew_key = f"pg-skew-{uuid4().hex}"
+    skew_pid = str(uuid4())
+    skew_barrier = asyncio.Barrier(2)
+    skew_passed: set[int] = set()
+    original_flush = AsyncSession.flush
+
+    async def _skew_flush(session: AsyncSession) -> None:
+        session_key = id(session)
+        if session_key not in skew_passed and any(
+            isinstance(obj, Setting) and obj.key == skew_key for obj in session.new
+        ):
+            skew_passed.add(session_key)
+            await skew_barrier.wait()
+        await original_flush(session)
+
+    monkeypatch.setattr(AsyncSession, "flush", _skew_flush)
+
+    async def _skew_writer(tag: str, bus_time: datetime, seq: int) -> tuple[str, datetime, str]:
+        async with async_repo.session() as session:
+            await begin_scd2_write(session)
+            outcome = await upsert_scd2(
+                session,
+                Scd2UpsertSpec(
+                    model=Setting,
+                    match_filters=[Setting.key == skew_key],
+                    bus_time=bus_time,
+                    decide=lambda existing: {
+                        "public_id": skew_pid if existing is None else existing.public_id,
+                        "key": skew_key,
+                        "value": tag,
+                        "category": "race",
+                        "description": None,
+                        "is_encrypted": False,
+                        "session_id": _session_uuid(f"skew-{tag}"),
+                        "sequence_id": seq,
+                    },
+                ),
+            )
+            await session.commit()
+            assert outcome.row is not None
+            return outcome.outcome, outcome.row.timestamp, outcome.row.public_id
+
+    res_new, res_old = await asyncio.wait_for(
+        asyncio.gather(_skew_writer("new", _T2, 1), _skew_writer("old", _T1, 2)),
+        timeout=_WAIT_TIMEOUT_S,
+    )
+    assert sorted((res_new[0], res_old[0])) == ["created", "updated"]
+    assert res_new[1] == _T2 and res_old[1] == _T2
+    assert res_new[2] == skew_pid and res_old[2] == skew_pid
 
 
 @pytest.mark.asyncio
@@ -306,7 +385,7 @@ async def test_pg18_race_instrument_spec(
         await barrier.wait()
         return await async_repo.revise_instrument_spec(
             instrument_public_id=instrument_pid,
-            session_id="async-spec",
+            session_id=_session_uuid("async-spec"),
             sequence_id=1,
             timestamp=_T1,
             spec=InstrumentSpecInput(instrument_kind="spot"),
@@ -318,7 +397,7 @@ async def test_pg18_race_instrument_spec(
             outcome = sync_repo.revise_instrument_spec_sync(
                 session,
                 instrument_pid,
-                "sync-spec",
+                _session_uuid("sync-spec"),
                 1,
                 _T1,
                 InstrumentSpecInput(instrument_kind="spot"),
@@ -363,7 +442,7 @@ async def test_pg18_race_symbol(
                             "quote": "PLN",
                             "asset_type": "forex",
                             "created_at": _T1,
-                            "session_id": exchange,
+                            "session_id": _session_uuid(f"sym-{exchange}"),
                             "sequence_id": 1,
                         }
                     ),
@@ -414,7 +493,7 @@ async def test_pg18_race_symbol_alias_and_secondary_unique_index(
                             "channel": "ws",
                             "exchange_symbol": "RACE/USD",
                             "created_at": _T1,
-                            "session_id": tag,
+                            "session_id": _session_uuid(f"alias-{tag}"),
                             "sequence_id": 1,
                         }
                     ),
@@ -446,7 +525,7 @@ async def test_pg18_race_symbol_alias_and_secondary_unique_index(
                         "channel": "ws",
                         "exchange_symbol": "RACE/USD",
                         "created_at": _T2,
-                        "session_id": "sec",
+                        "session_id": _session_uuid("alias-sec"),
                         "sequence_id": 2,
                     },
                 ),
@@ -496,7 +575,7 @@ async def test_pg18_race_symbol_exchange_capability(
             "source": "a",
             "reason": None,
             "created_at": existing.created_at if existing is not None else _T1,
-            "session_id": "a",
+            "session_id": _session_uuid("sec-a"),
             "sequence_id": 1,
         },
     )
@@ -512,7 +591,7 @@ async def test_pg18_race_symbol_exchange_capability(
             "source": "b",
             "reason": None,
             "created_at": existing.created_at if existing is not None else _T1,
-            "session_id": "b",
+            "session_id": _session_uuid("sec-b"),
             "sequence_id": 2,
         },
     )
@@ -544,7 +623,7 @@ async def test_pg18_race_symbol_market_data_channel_capability(
             "source": "runtime",
             "reason": "no-trade",
             "created_at": existing.created_at if existing is not None else _T1,
-            "session_id": "pub",
+            "session_id": _session_uuid("mdc-pub"),
             "sequence_id": 1,
         },
     )
@@ -560,7 +639,7 @@ async def test_pg18_race_symbol_market_data_channel_capability(
             "source": "updater",
             "reason": None,
             "created_at": existing.created_at if existing is not None else _T1,
-            "session_id": "upd",
+            "session_id": _session_uuid("mdc-upd"),
             "sequence_id": 2,
         },
     )
@@ -586,10 +665,11 @@ async def test_pg18_race_instrument_order_capability(
         decide=lambda _r: {
             "instrument_public_id": inst_pid,
             "exchange": "kraken",
+            "supported_order_types": ["market", "limit"],
             "can_place_order": False,
             "source": "tokenized",
             "reason": "restricted",
-            "session_id": "a",
+            "session_id": _session_uuid("ioc-a"),
             "sequence_id": 1,
         },
     )
@@ -600,10 +680,11 @@ async def test_pg18_race_instrument_order_capability(
         decide=lambda _r: {
             "instrument_public_id": inst_pid,
             "exchange": "kraken",
+            "supported_order_types": ["market", "limit"],
             "can_place_order": True,
             "source": "updater",
             "reason": None,
-            "session_id": "b",
+            "session_id": _session_uuid("ioc-b"),
             "sequence_id": 2,
         },
     )
@@ -628,7 +709,7 @@ async def test_pg18_race_setting(
             "category": "app",
             "description": None,
             "is_encrypted": False,
-            "session_id": "a",
+            "session_id": _session_uuid("set-a"),
             "sequence_id": 1,
         },
     )
@@ -642,7 +723,7 @@ async def test_pg18_race_setting(
             "category": "app",
             "description": None,
             "is_encrypted": False,
-            "session_id": "b",
+            "session_id": _session_uuid("set-b"),
             "sequence_id": 2,
         },
     )
@@ -655,7 +736,7 @@ def _snapshot_row(instrument_pid: str, seq: int, bid: float) -> MarketSnapshotUp
     return MarketSnapshotUpsertRow(
         instrument_public_id=instrument_pid,
         timestamp=_T1,
-        session_id=f"snap-{seq}",
+        session_id=_session_uuid(f"snap-{seq}"),
         sequence_id=seq,
         bid=bid,
         bid_volume=1.0,
@@ -740,7 +821,7 @@ async def test_pg18_race_instrument(
                 asset_type="crypto",
                 created_at=_T0,
                 timestamp=_T0,
-                session_id="seed",
+                session_id=_session_uuid("inst-seed"),
                 sequence_id=1,
             )
         )
@@ -766,8 +847,7 @@ async def test_pg18_race_instrument(
                         else {
                             "symbol_public_id": sym_pid,
                             "exchange": "kraken",
-                            "created_at": _T1,
-                            "session_id": f"i-{seq}",
+                            "session_id": _session_uuid(f"inst-{seq}"),
                             "sequence_id": seq,
                         }
                     ),
@@ -796,7 +876,8 @@ async def test_pg18_race_user(
                 email=f"{username}@example.com",
                 role="viewer",
                 is_active=True,
-                session_id="seed",
+                created_at=_T0,
+                session_id=_session_uuid("user-seed"),
                 sequence_id=1,
                 timestamp=_T0,
                 known_to=KNOWN_TO_MAX,
@@ -808,6 +889,7 @@ async def test_pg18_race_user(
 
     async def _user_a() -> None:
         async with async_repo.session() as session:
+            await begin_scd2_write(session)
             await close_and_insert_existing(
                 session,
                 User,
@@ -818,7 +900,8 @@ async def test_pg18_race_user(
                     "email": f"{username}@example.com",
                     "role": "operator",
                     "is_active": True,
-                    "session_id": "a",
+                    "created_at": _T0,
+                    "session_id": _session_uuid("user-a"),
                     "sequence_id": 2,
                 },
                 _T1,
@@ -827,27 +910,36 @@ async def test_pg18_race_user(
             await _wait_for_blocked_lock(async_repo, "users")
             await session.commit()
 
-    async def _user_b() -> None:
+    async def _user_b() -> str:
         await asyncio.wait_for(a_locked.wait(), timeout=_WAIT_TIMEOUT_S)
         async with async_repo.session() as session:
-            await close_and_insert_existing(
-                session,
-                User,
-                [User.username == username],
-                {
-                    "username": username,
-                    "password_hash": "h3",
-                    "email": f"{username}@example.com",
-                    "role": "admin",
-                    "is_active": True,
-                    "session_id": "b",
-                    "sequence_id": 3,
-                },
-                _T2,
-            )
-            await session.commit()
+            await begin_scd2_write(session)
+            try:
+                await close_and_insert_existing(
+                    session,
+                    User,
+                    [User.username == username],
+                    {
+                        "username": username,
+                        "password_hash": "h3",
+                        "email": f"{username}@example.com",
+                        "role": "admin",
+                        "is_active": True,
+                        "created_at": _T0,
+                        "session_id": _session_uuid("user-b"),
+                        "sequence_id": 3,
+                    },
+                    _T2,
+                )
+                await session.commit()
+                return "updated"
+            except TemporalVersionConflictError:
+                return "conflict"
 
-    await asyncio.wait_for(asyncio.gather(_user_a(), _user_b()), timeout=_WAIT_TIMEOUT_S)
+    _, b_status = await asyncio.wait_for(
+        asyncio.gather(_user_a(), _user_b()), timeout=_WAIT_TIMEOUT_S
+    )
+    assert b_status == "conflict"
     async with async_repo.session() as session:
         active = (
             await session.scalars(
@@ -855,6 +947,7 @@ async def test_pg18_race_user(
             )
         ).all()
         assert len(active) == 1
+        assert active[0].role == "operator"
 
 
 @pytest.mark.asyncio
@@ -872,7 +965,8 @@ async def test_pg18_race_user_trading_caps(
                 password_hash="h",
                 role="operator",
                 is_active=True,
-                session_id="seed",
+                created_at=_T0,
+                session_id=_session_uuid("caps-seed"),
                 sequence_id=1,
                 timestamp=_T0,
             )
@@ -886,7 +980,7 @@ async def test_pg18_race_user_trading_caps(
         decide=lambda _r: {
             "user_public_id": user_pid,
             "max_order_notional_usd": Decimal("100"),
-            "session_id": "a",
+            "session_id": _session_uuid("caps-a"),
             "sequence_id": 1,
         },
     )
@@ -897,7 +991,7 @@ async def test_pg18_race_user_trading_caps(
         decide=lambda _r: {
             "user_public_id": user_pid,
             "max_order_notional_usd": Decimal("200"),
-            "session_id": "b",
+            "session_id": _session_uuid("caps-b"),
             "sequence_id": 2,
         },
     )
@@ -914,6 +1008,7 @@ async def test_pg18_race_user_operator_membership_detach(
     user_pid = str(uuid4())
     op_pid = str(uuid4())
     username = f"mbr_{uuid4().hex[:6]}"
+    seed_sid = _session_uuid("mbr-seed")
     async with async_repo.session() as session:
         session.add(
             User(
@@ -922,7 +1017,8 @@ async def test_pg18_race_user_operator_membership_detach(
                 password_hash="h",
                 role="viewer",
                 is_active=True,
-                session_id="seed",
+                created_at=_T0,
+                session_id=seed_sid,
                 sequence_id=1,
                 timestamp=_T0,
             )
@@ -931,7 +1027,7 @@ async def test_pg18_race_user_operator_membership_detach(
             Operator(
                 public_id=op_pid,
                 label=f"op_{uuid4().hex[:6]}",
-                session_id="seed",
+                session_id=seed_sid,
                 sequence_id=2,
                 timestamp=_T0,
             )
@@ -942,7 +1038,7 @@ async def test_pg18_race_user_operator_membership_detach(
                 user_public_id=user_pid,
                 operator_public_id=op_pid,
                 is_primary=False,
-                session_id="seed",
+                session_id=seed_sid,
                 sequence_id=3,
                 timestamp=_T0,
             )
@@ -962,7 +1058,7 @@ async def test_pg18_race_user_operator_membership_detach(
                     username=username,
                     operator_public_id=op_pid,
                     timestamp=_T1,
-                    session_id=f"det-{seq}",
+                    session_id=_session_uuid(f"det-{seq}"),
                     sequence_id=seq,
                 ),
                 _noop_revoke,
@@ -1000,7 +1096,7 @@ async def test_pg18_race_spot_asset_precision_evidence(
                 fee_source=None,
                 fee_version=None,
                 fee_observed_at=None,
-                session_id="a",
+                session_id=_session_uuid("prec-a"),
                 sequence_id=1,
                 timestamp=_T1,
             )
@@ -1022,7 +1118,7 @@ async def test_pg18_race_spot_asset_precision_evidence(
                     fee_source="fee",
                     fee_version="v2",
                     fee_observed_at=_T1,
-                    session_id="s",
+                    session_id=_session_uuid("prec-s"),
                     sequence_id=2,
                     timestamp=_T1,
                 ),
@@ -1044,12 +1140,13 @@ async def test_pg18_race_portfolio_pnl_point(
     async_repo, _ = pg_repos
     op_pid = str(uuid4())
     wallet_pid = str(uuid4())
+    seed_sid = _session_uuid("pnl-seed")
     async with async_repo.session() as session:
         session.add(
             Operator(
                 public_id=op_pid,
                 label=f"op_pnl_{uuid4().hex[:6]}",
-                session_id="seed",
+                session_id=seed_sid,
                 sequence_id=1,
                 timestamp=_T0,
             )
@@ -1059,7 +1156,7 @@ async def test_pg18_race_portfolio_pnl_point(
                 public_id=wallet_pid,
                 label=f"w_pnl_{uuid4().hex[:6]}",
                 is_paper=True,
-                session_id="seed",
+                session_id=seed_sid,
                 sequence_id=2,
                 timestamp=_T0,
             )
@@ -1081,14 +1178,20 @@ async def test_pg18_race_portfolio_pnl_point(
             "mode": "paper",
             "point_time": _T1,
             "valuation_ccy": "USD",
-            "equity_epoch_id": epoch,
-            "total_equity": 100.0,
-            "cash_balance": 100.0,
-            "unrealized_pnl": 0.0,
+            "point_kind": "sample",
+            "epoch_public_id": epoch,
+            "calc_version": "v1",
+            "valuation_status": "complete",
             "realized_pnl": 0.0,
-            "source_timestamp": _T1,
-            "calc_version": 1,
-            "session_id": "a",
+            "fee_pnl": 0.0,
+            "accrual_pnl": 0.0,
+            "unrealized_pnl": 0.0,
+            "external_flow_adjustment": 0.0,
+            "cash_usd": 100.0,
+            "position_value_usd": 0.0,
+            "mark_source": "test",
+            "mark_time": _T1,
+            "session_id": _session_uuid("pnl-a"),
             "sequence_id": 1,
         },
     )
@@ -1101,14 +1204,20 @@ async def test_pg18_race_portfolio_pnl_point(
             "mode": "paper",
             "point_time": _T1,
             "valuation_ccy": "USD",
-            "equity_epoch_id": epoch,
-            "total_equity": 101.0,
-            "cash_balance": 101.0,
+            "point_kind": "sample",
+            "epoch_public_id": epoch,
+            "calc_version": "v1",
+            "valuation_status": "complete",
+            "realized_pnl": 1.0,
+            "fee_pnl": 0.0,
+            "accrual_pnl": 0.0,
             "unrealized_pnl": 0.0,
-            "realized_pnl": 0.0,
-            "source_timestamp": _T1,
-            "calc_version": 1,
-            "session_id": "b",
+            "external_flow_adjustment": 0.0,
+            "cash_usd": 101.0,
+            "position_value_usd": 0.0,
+            "mark_source": "test",
+            "mark_time": _T1,
+            "session_id": _session_uuid("pnl-b"),
             "sequence_id": 2,
         },
     )
@@ -1124,12 +1233,13 @@ async def test_pg18_race_trade_projection_checkpoint(
     async_repo, _ = pg_repos
     op_pid = str(uuid4())
     wallet_pid = str(uuid4())
+    seed_sid = _session_uuid("cp-seed")
     async with async_repo.session() as session:
         session.add(
             Operator(
                 public_id=op_pid,
                 label=f"op_cp_{uuid4().hex[:6]}",
-                session_id="seed",
+                session_id=seed_sid,
                 sequence_id=1,
                 timestamp=_T0,
             )
@@ -1139,7 +1249,7 @@ async def test_pg18_race_trade_projection_checkpoint(
                 public_id=wallet_pid,
                 label=f"w_cp_{uuid4().hex[:6]}",
                 is_paper=True,
-                session_id="seed",
+                session_id=seed_sid,
                 sequence_id=2,
                 timestamp=_T0,
             )
@@ -1166,7 +1276,7 @@ async def test_pg18_race_trade_projection_checkpoint(
                 open_command_ids="[]",
                 seen_exec_ids="[]",
                 checkpoint_at=_T1,
-                session_id=f"cp-{seq}",
+                session_id=_session_uuid(f"cp-{seq}"),
                 sequence_id=seq,
                 bus_time=_T1,
                 wallet_public_id=wallet_pid,
@@ -1193,7 +1303,7 @@ async def test_pg18_race_underlying_asset(
             ticker=ticker,
             name={"en": "Test Index"},
             asset_class="index",
-            session_id=f"ua-{seq}",
+            session_id=_session_uuid(f"ua-{seq}"),
             sequence_id=seq,
             timestamp=_T1,
         )
@@ -1215,7 +1325,7 @@ async def test_pg18_race_instrument_underlying_mapping(
         ticker=f"UMAP_{uuid4().hex[:6]}",
         name={"en": "Mapped Index"},
         asset_class="index",
-        session_id="seed-ua",
+        session_id=_session_uuid("um-seed"),
         sequence_id=1,
         timestamp=_T0,
     )
@@ -1227,7 +1337,7 @@ async def test_pg18_race_instrument_underlying_mapping(
             instrument_public_id=inst_pid,
             underlying_public_id=underlying_pid,
             relationship_type="spot",
-            session_id=f"um-{seq}",
+            session_id=_session_uuid(f"um-{seq}"),
             sequence_id=seq,
             timestamp=_T1,
         )

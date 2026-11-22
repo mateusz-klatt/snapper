@@ -271,6 +271,13 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             metadata=profile.metadata,
         )
 
+    def _polygon_sort_key(self, symbol_data: PolygonSymbolRecord) -> str:
+        """Return canonical native-symbol sort key for one Polygon record."""
+        ticker = symbol_data.get("ticker")
+        if not ticker:
+            return ""
+        return self._match_polygon_to_native(ticker, symbol_data) or ""
+
     async def _update_database(self, symbols: list[dict[str, Any]]) -> None:
         """Update database with fetched symbol data.
 
@@ -278,7 +285,10 @@ class PolygonSymbolUpdaterService(SymbolUpdaterService[PolygonExchangeClient]):
             symbols: List of symbol dictionaries from Polygon API.
         """
         assert self.repository is not None
-        records = cast(list[PolygonSymbolRecord], symbols)
+        records = self._sort_records_by_native_symbol(
+            cast(list[PolygonSymbolRecord], symbols),
+            self._polygon_sort_key,
+        )
         stats = {"updated": 0, "inserted": 0, "skipped": 0}
         now = datetime.now(UTC)
         processed_symbol_public_ids: set[str] = set()

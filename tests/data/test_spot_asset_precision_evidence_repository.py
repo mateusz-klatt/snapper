@@ -1006,7 +1006,6 @@ def test_sync_sqlite_lock_starts_write_transaction(tmp_path: Path) -> None:
             "walutomat",
             "EUR",
         )
-
         assert driver_connection.in_transaction is True
         session.rollback()
     repository.engine.dispose()
@@ -1149,3 +1148,120 @@ def test_sync_advisory_lock_rejects_foreign_sqlite_driver() -> None:
             "walutomat",
             "EUR",
         )
+
+
+@pytest.mark.asyncio
+async def test_async_delayed_fee_evidence_merges_into_newer_active_version_and_clamps_timestamp(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Delayed fee evidence merges onto a newer open version and clamps its timestamp."""
+    t_initial = _NOW
+    t_delayed = _NOW + timedelta(minutes=1)
+    t_newer = _NOW + timedelta(minutes=2)
+
+    await repository.upsert_spot_asset_precision_evidence(
+        _evidence(
+            timestamp=t_initial,
+            balance_decimals=2,
+            balance_version="balance-v1",
+            replace_fee=False,
+        )
+    )
+    newer_id = await repository.upsert_spot_asset_precision_evidence(
+        _evidence(
+            timestamp=t_newer,
+            balance_decimals=4,
+            balance_version="balance-v2",
+            replace_fee=False,
+        )
+    )
+
+    merged_id = await repository.upsert_spot_asset_precision_evidence(
+        _evidence(
+            timestamp=t_delayed,
+            balance_decimals=None,
+            fee_decimals=3,
+            fee_version="fee-v1",
+            replace_balance=False,
+        )
+    )
+    assert merged_id != newer_id
+
+    async with repository.session() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(SpotAssetPrecisionEvidence).order_by(SpotAssetPrecisionEvidence.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 3
+    assert rows[0].timestamp == t_initial
+    assert rows[0].known_to == t_newer
+    assert rows[1].timestamp == t_newer
+    assert rows[1].known_to == t_newer
+    assert rows[2].timestamp == t_newer
+    assert rows[2].known_to == KNOWN_TO_MAX
+    assert rows[2].balance_version == "balance-v2"
+    assert rows[2].balance_decimals == 4
+    assert rows[2].fee_version == "fee-v1"
+    assert rows[2].fee_decimals == 3
+
+
+def test_sync_delayed_fee_evidence_merges_into_newer_active_version_and_clamps_timestamp(
+    tmp_path: Path,
+) -> None:
+    """Sync delayed fee evidence merges onto a newer active version and clamps its timestamp."""
+    db_path = tmp_path / "precision-sync-delayed.db"
+    repo = DatabaseRepository(f"sqlite:///{db_path}")
+    SpotAssetPrecisionEvidence.__table__.create(repo.engine)
+    t_initial = _NOW
+    t_delayed = _NOW + timedelta(minutes=1)
+    t_newer = _NOW + timedelta(minutes=2)
+    try:
+        for row in (
+            _evidence(
+                timestamp=t_initial,
+                balance_decimals=2,
+                balance_version="balance-v1",
+                replace_fee=False,
+            ),
+            _evidence(
+                timestamp=t_newer,
+                balance_decimals=4,
+                balance_version="balance-v2",
+                replace_fee=False,
+            ),
+            _evidence(
+                timestamp=t_delayed,
+                balance_decimals=None,
+                fee_decimals=3,
+                fee_version="fee-v1",
+                replace_balance=False,
+            ),
+        ):
+            with repo.get_session() as session:
+                assert isinstance(session, SyncSession)
+                DatabaseRepository.upsert_spot_asset_precision_evidence_sync(session, row)
+                session.commit()
+
+        with repo.get_session() as session:
+            assert isinstance(session, SyncSession)
+            rows = (
+                session.execute(
+                    select(SpotAssetPrecisionEvidence).order_by(SpotAssetPrecisionEvidence.id)
+                )
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 3
+        assert rows[2].timestamp == t_newer
+        assert rows[2].known_to == KNOWN_TO_MAX
+        assert rows[2].balance_version == "balance-v2"
+        assert rows[2].balance_decimals == 4
+        assert rows[2].fee_version == "fee-v1"
+        assert rows[2].fee_decimals == 3
+    finally:
+        repo.engine.dispose()

@@ -1364,3 +1364,48 @@ class TestYamlSpecFallbackIntegration:
             await updater.run()
 
         mock_upsert.assert_not_awaited()
+
+
+def test_spec_orm_to_row_preserves_version_identity_for_span_matching() -> None:
+    """Retain ``spec_public_id`` and ``spec_timestamp`` on YAML fallback spec rows.
+
+    Given: A persisted ``InstrumentSpec`` ORM row with a version ``public_id`` and ``timestamp``,
+    When: ``UnderlyingUpdater._spec_orm_to_row`` converts it for fallback span lookup,
+    Then: The resulting ``InstrumentSpecRow`` carries both ``spec_public_id`` and ``spec_timestamp``.
+    """
+    spec_ts = _ts()
+    spec_orm = InstrumentSpec(
+        instrument_public_id="inst-spy",
+        public_id="spec-v1",
+        timestamp=spec_ts,
+        session_id="seed",
+        sequence_id=1,
+        tick_size=Decimal("0.01"),
+        lot_size=Decimal("1"),
+        min_order_size=Decimal("1"),
+        max_order_size=None,
+        cost_decimals=2,
+        qty_decimals=0,
+        margin_initial=None,
+        position_limit_long=None,
+        position_limit_short=None,
+        status="active",
+        contract_size=None,
+        quantity_unit="base_asset",
+        spec_source="polygon:rest",
+        spec_version="v1",
+        spec_observed_at=spec_ts,
+        unit_certified=True,
+        expiry_at=None,
+        instrument_kind="spot",
+        funding_type=None,
+        funding_frequency_hours=None,
+        rollover_rate_long=None,
+        rollover_rate_short=None,
+        max_funding_rate=None,
+    )
+
+    row = UnderlyingUpdater._spec_orm_to_row(spec_orm)
+
+    assert row["spec_public_id"] == "spec-v1"
+    assert row["spec_timestamp"] == spec_ts

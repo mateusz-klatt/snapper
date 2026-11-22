@@ -3322,6 +3322,8 @@ class Scd2UpsertSpec[Scd2ModelT: Base]:
     bus_time: datetime
     decide: Callable[[Scd2ModelT | None], Mapping[str, object] | None]
     allow_insert: bool = True
+    active_only: bool = False
+    preserve_known_to: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -3365,6 +3367,38 @@ def _mark_scd2_write_reserved(session: AsyncSession | SyncSession) -> None:
         info[_SCD2_WRITE_RESERVED_KEY] = True
 
 
+def _is_scd2_write_reserved(session: AsyncSession | SyncSession) -> bool:
+    """Return whether an outer SCD2 write reservation is recorded on ``session``."""
+    info = getattr(session, "info", None)
+    return isinstance(info, dict) and info.get(_SCD2_WRITE_RESERVED_KEY) is True
+
+
+async def _enter_pg_read_committed_async(session: AsyncSession) -> None:
+    """Issue PostgreSQL READ COMMITTED once per reserved transaction."""
+    if not _is_scd2_write_reserved(session):
+        await session.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        _mark_scd2_write_reserved(session)
+
+
+def _enter_pg_read_committed_sync(session: SyncSession) -> None:
+    """Issue PostgreSQL READ COMMITTED once per reserved synchronous transaction."""
+    if not _is_scd2_write_reserved(session):
+        session.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        _mark_scd2_write_reserved(session)
+
+
+async def _ensure_unreserved_pg_read_committed_async(session: AsyncSession) -> None:
+    """Enter PostgreSQL READ COMMITTED when an unreserved session has no active transaction."""
+    if _session_dialect_name(session) == "postgresql" and session.in_transaction() is False:
+        await _enter_pg_read_committed_async(session)
+
+
+def _ensure_unreserved_pg_read_committed_sync(session: SyncSession) -> None:
+    """Synchronous twin of :func:`_ensure_unreserved_pg_read_committed_async`."""
+    if _session_dialect_name(session) == "postgresql" and session.in_transaction() is False:
+        _enter_pg_read_committed_sync(session)
+
+
 def _sqlite_driver_connection_sync(session: SyncSession) -> sqlite3.Connection:
     """Return the underlying sqlite3 driver connection for a SQLite sync session."""
     conn = session.connection()
@@ -3383,7 +3417,8 @@ async def begin_scd2_write(session: AsyncSession) -> None:
     emitting ``BEGIN IMMEDIATE`` and setting
     ``session.info["scd2_write_reserved"] = True``. That prevents SQLite from
     upgrading a ``DEFERRED`` read transaction into ``SQLITE_BUSY`` mid-write.
-    On non-SQLite dialects, marks the reservation flag without extra locking SQL.
+    On PostgreSQL, enters ``READ COMMITTED`` explicitly before marking the
+    session reservation flag.
 
     Args:
         session: Outer async session owned by the calling workflow.
@@ -3393,7 +3428,10 @@ async def begin_scd2_write(session: AsyncSession) -> None:
         TypeError: If a SQLite session does not expose a driver connection with
             a boolean ``in_transaction`` attribute.
     """
-    if _session_dialect_name(session) != "sqlite":
+    dialect = _session_dialect_name(session)
+    if dialect != "sqlite":
+        if dialect == "postgresql":
+            await _enter_pg_read_committed_async(session)
         _mark_scd2_write_reserved(session)
         return
     was_in_tx = session.in_transaction() is True
@@ -3421,7 +3459,10 @@ def begin_scd2_write_sync(session: SyncSession) -> None:
         RuntimeError: If a SQLite transaction is already in progress.
         TypeError: If a SQLite session does not expose a ``sqlite3.Connection``.
     """
-    if _session_dialect_name(session) != "sqlite":
+    dialect = _session_dialect_name(session)
+    if dialect != "sqlite":
+        if dialect == "postgresql":
+            _enter_pg_read_committed_sync(session)
         _mark_scd2_write_reserved(session)
         return
     was_in_tx = session.in_transaction() is True
@@ -3695,13 +3736,16 @@ def _prepare_candidate_values[Scd2ModelT: Base](
     existing: Scd2ModelT | None,
     new_values: Mapping[str, object],
     effective_bus_time: datetime,
+    *,
+    preserve_known_to: bool = False,
 ) -> dict[str, object]:
     """Copy caller values and apply carried ``public_id`` and SCD2 interval bounds."""
     candidate = dict(new_values)
     if existing is not None:
         candidate["public_id"] = cast(_Scd2RowProto, existing).public_id
     candidate["timestamp"] = effective_bus_time
-    candidate["known_to"] = KNOWN_TO_MAX
+    if not preserve_known_to or "known_to" not in candidate:
+        candidate["known_to"] = KNOWN_TO_MAX
     return candidate
 
 
@@ -3759,6 +3803,42 @@ def _fetch_scd2_existing_sync[Scd2ModelT: Base](
     """Execute the locked SCD2 lookup query synchronously."""
     stmt = _build_scd2_lookup_stmt(model, match_filters, bus_time, post_conflict=post_conflict)
     return cast(Scd2ModelT | None, session.execute(stmt).scalars().first())
+
+
+async def _fetch_post_conflict_existing_async[Scd2ModelT: Base](
+    session: AsyncSession,
+    model: type[Scd2ModelT],
+    match_filters: Sequence[ColumnElement[bool]],
+    bus_time: datetime,
+) -> Scd2ModelT | None:
+    """Re-read the active version after a conflict, retrying lock-wake empty results."""
+    probes = 0
+    while probes < _SCD2_MAX_ATTEMPTS:
+        fresh_existing = await _fetch_scd2_existing_async(
+            session, model, match_filters, bus_time, post_conflict=True
+        )
+        if fresh_existing is not None:
+            return fresh_existing
+        probes += 1
+    return None
+
+
+def _fetch_post_conflict_existing_sync[Scd2ModelT: Base](
+    session: SyncSession,
+    model: type[Scd2ModelT],
+    match_filters: Sequence[ColumnElement[bool]],
+    bus_time: datetime,
+) -> Scd2ModelT | None:
+    """Synchronous twin of :func:`_fetch_post_conflict_existing_async`."""
+    probes = 0
+    while probes < _SCD2_MAX_ATTEMPTS:
+        fresh_existing = _fetch_scd2_existing_sync(
+            session, model, match_filters, bus_time, post_conflict=True
+        )
+        if fresh_existing is not None:
+            return fresh_existing
+        probes += 1
+    return None
 
 
 async def _apply_scd2_savepoint_async[Scd2ModelT: Base](
@@ -3833,8 +3913,13 @@ async def upsert_scd2[Scd2ModelT: Base](
     """
     table_name, target_index = _prepare_scd2_context(spec)
     assert_scd2_write_reserved(session)
+    await _ensure_unreserved_pg_read_committed_async(session)
     existing = await _fetch_scd2_existing_async(
-        session, spec.model, spec.match_filters, spec.bus_time, post_conflict=False
+        session,
+        spec.model,
+        spec.match_filters,
+        spec.bus_time,
+        post_conflict=spec.active_only,
     )
     attempt = 0
     while True:
@@ -3844,15 +3929,20 @@ async def upsert_scd2[Scd2ModelT: Base](
         new_values = spec.decide(existing)
         if new_values is None:
             return Scd2UpsertOutcome(outcome="unchanged", row=existing)
-        candidate = _prepare_candidate_values(existing, new_values, effective_bus_time)
+        candidate = _prepare_candidate_values(
+            existing,
+            new_values,
+            effective_bus_time,
+            preserve_known_to=spec.preserve_known_to,
+        )
         pre_attempt_id = cast(_Scd2RowProto, existing).id if existing is not None else None
         try:
             new_row = await _apply_scd2_savepoint_async(session, spec.model, existing, candidate)
         except IntegrityError as exc:
             if not _is_retryable_scd2_conflict(exc, table_name, target_index):
                 raise
-            fresh_existing = await _fetch_scd2_existing_async(
-                session, spec.model, spec.match_filters, spec.bus_time, post_conflict=True
+            fresh_existing = await _fetch_post_conflict_existing_async(
+                session, spec.model, spec.match_filters, spec.bus_time
             )
             existing = _next_retry_existing(
                 table_name, fresh_existing, pre_attempt_id, (attempt, spec.bus_time), exc
@@ -3878,8 +3968,13 @@ def upsert_scd2_sync[Scd2ModelT: Base](
     """
     table_name, target_index = _prepare_scd2_context(spec)
     assert_scd2_write_reserved(session)
+    _ensure_unreserved_pg_read_committed_sync(session)
     existing = _fetch_scd2_existing_sync(
-        session, spec.model, spec.match_filters, spec.bus_time, post_conflict=False
+        session,
+        spec.model,
+        spec.match_filters,
+        spec.bus_time,
+        post_conflict=spec.active_only,
     )
     attempt = 0
     while True:
@@ -3889,15 +3984,20 @@ def upsert_scd2_sync[Scd2ModelT: Base](
         new_values = spec.decide(existing)
         if new_values is None:
             return Scd2UpsertOutcome(outcome="unchanged", row=existing)
-        candidate = _prepare_candidate_values(existing, new_values, effective_bus_time)
+        candidate = _prepare_candidate_values(
+            existing,
+            new_values,
+            effective_bus_time,
+            preserve_known_to=spec.preserve_known_to,
+        )
         pre_attempt_id = cast(_Scd2RowProto, existing).id if existing is not None else None
         try:
             new_row = _apply_scd2_savepoint_sync(session, spec.model, existing, candidate)
         except IntegrityError as exc:
             if not _is_retryable_scd2_conflict(exc, table_name, target_index):
                 raise
-            fresh_existing = _fetch_scd2_existing_sync(
-                session, spec.model, spec.match_filters, spec.bus_time, post_conflict=True
+            fresh_existing = _fetch_post_conflict_existing_sync(
+                session, spec.model, spec.match_filters, spec.bus_time
             )
             existing = _next_retry_existing(
                 table_name, fresh_existing, pre_attempt_id, (attempt, spec.bus_time), exc
@@ -12577,6 +12677,64 @@ class SQLAlchemyRepository(Repository):
             result = await session.execute(_market_snapshot_freshness_query(instrument_public_ids))
             return _market_snapshot_freshness_rows(instrument_public_ids, result.all())
 
+    @staticmethod
+    async def _load_revise_instrument_locked_rows(
+        session: AsyncSession,
+        instrument_public_id: str,
+        symbol_public_id: str,
+        exchange: str,
+        timestamp: datetime,
+    ) -> tuple[Instrument, Instrument | None]:
+        """Lock active Instrument rows in deterministic id order and validate update state."""
+        result = await session.execute(
+            select(Instrument)
+            .where(
+                or_(
+                    Instrument.public_id == instrument_public_id,
+                    and_(
+                        Instrument.symbol_public_id == symbol_public_id,
+                        Instrument.exchange == exchange,
+                    ),
+                ),
+                Instrument.known_to == KNOWN_TO_MAX,
+            )
+            .order_by(Instrument.id.asc())
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        locked_rows = result.scalars().all()
+        inst = next((row for row in locked_rows if row.public_id == instrument_public_id), None)
+        if inst is None:
+            prior = (
+                (
+                    await session.execute(
+                        select(Instrument)
+                        .where(Instrument.public_id == instrument_public_id)
+                        .order_by(Instrument.id.desc())
+                        .limit(1)
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if prior is not None:
+                raise TemporalVersionConflictError(
+                    "instruments", prior.id, prior.known_to, timestamp
+                )
+            raise ValueError(f"No active Instrument with public_id={instrument_public_id}")
+        _validate_existing_for_write("instruments", inst, timestamp, allow_insert=False)
+        conflict = next(
+            (
+                row
+                for row in locked_rows
+                if row.symbol_public_id == symbol_public_id
+                and row.exchange == exchange
+                and row.public_id != instrument_public_id
+            ),
+            None,
+        )
+        return inst, conflict
+
     async def revise_instrument(
         self,
         instrument_public_id: str,
@@ -12588,43 +12746,24 @@ class SQLAlchemyRepository(Repository):
     ) -> int:
         """SCD2 close+insert for instrument business attributes.
 
-        The successor carries ``requires_ai_review`` verbatim and keeps
-        ``source_exchange`` when the destination exchange stays paper
-        (a re-key away from paper must clear it — the CHECK constrains
-        the mapping to paper rows).
-
-        Raises ValueError when no active version exists or when the
-        target business key is already occupied by another instrument.
+        Locks both the target active instrument and any active occupant of the
+        destination business key in deterministic ``Instrument.id`` order,
+        enforces Contract A update-only checks (including lock-wake misses and
+        closed or clock-skewed rows), carries ``requires_ai_review`` verbatim,
+        and clears ``source_exchange`` unless the destination exchange is paper.
         """
         async with self.session() as s:
             await begin_scd2_write(s)
-            ts_filter, kt_filter = where_active(Instrument, timestamp)
-            q = await s.execute(
-                select(Instrument)
-                .where(
-                    Instrument.public_id == instrument_public_id,
-                    ts_filter,
-                    kt_filter,
-                )
-                .with_for_update()
+            inst, conflict = await self._load_revise_instrument_locked_rows(
+                s,
+                instrument_public_id,
+                symbol_public_id,
+                exchange,
+                timestamp,
             )
-            inst = q.scalar_one_or_none()
-            if inst is None:
-                raise ValueError(f"No active Instrument with public_id={instrument_public_id}")
             if inst.symbol_public_id == symbol_public_id and inst.exchange == exchange:
                 return int(inst.id)
-            conflict_q = await s.execute(
-                select(Instrument)
-                .where(
-                    Instrument.symbol_public_id == symbol_public_id,
-                    Instrument.exchange == exchange,
-                    ts_filter,
-                    kt_filter,
-                )
-                .with_for_update()
-            )
-            conflict = conflict_q.scalar_one_or_none()
-            if conflict is not None and conflict.public_id != instrument_public_id:
+            if conflict is not None:
                 raise ValueError(
                     f"Business key ({symbol_public_id}, {exchange}) "
                     f"already occupied by instrument {conflict.public_id}"
@@ -12759,11 +12898,11 @@ class SQLAlchemyRepository(Repository):
         """Acquire the cross-process transaction lock before evidence reads."""
         dialect = self.dialect_name
         if dialect == "postgresql":
+            await _enter_pg_read_committed_async(session)
             await session.execute(
                 text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
                 {"identity": f"{exchange}\x1f{asset}"},
             )
-            _mark_scd2_write_reserved(session)
             return
         if dialect == "sqlite":
             if isinstance(session, AsyncSession):
@@ -12951,6 +13090,7 @@ class SQLAlchemyRepository(Repository):
                         replace_balance,
                         replace_fee,
                     ),
+                    active_only=True,
                 ),
             )
             active_row = cast(SpotAssetPrecisionEvidence, result.row)
@@ -15803,17 +15943,23 @@ class SQLAlchemyRepository(Repository):
         row: MarketSnapshotUpsertRow,
     ) -> None:
         """Run the SAVEPOINT-protected SCD2 close+insert path for one snapshot row."""
-        inserted = await close_and_insert(
-            session=session,
-            model=MarketSnapshot,
-            match_filters=[
-                MarketSnapshot.instrument_public_id == row["instrument_public_id"],
-            ],
-            new_values=dict(row),
-            bus_time=row["timestamp"],
+        result = await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=MarketSnapshot,
+                match_filters=[
+                    MarketSnapshot.instrument_public_id == row["instrument_public_id"],
+                ],
+                bus_time=row["timestamp"],
+                decide=lambda _existing: dict(row),
+                allow_insert=True,
+                preserve_known_to=True,
+            ),
         )
+        inserted = cast(MarketSnapshot, result.row)
         row["public_id"] = inserted.public_id
         row["timestamp"] = inserted.timestamp
+        row["known_to"] = inserted.known_to
 
     async def get_exchanges(self, as_of: datetime) -> list[str]:
         """Return distinct exchange names from active symbol aliases."""
@@ -42969,11 +43115,11 @@ class DatabaseRepository:
         """
         dialect = session.get_bind().dialect.name
         if dialect == "postgresql":
+            _enter_pg_read_committed_sync(session)
             session.execute(
                 text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
                 {"identity": SYMBOL_UPDATER_LOCK_IDENTITY},
             )
-            _mark_scd2_write_reserved(session)
             return
         if dialect == "sqlite":
             _reserve_or_assert_scd2_write_sync(session)
@@ -43043,11 +43189,11 @@ class DatabaseRepository:
         """Acquire the sync producer's cross-process transaction lock."""
         dialect = session.get_bind().dialect.name
         if dialect == "postgresql":
+            _enter_pg_read_committed_sync(session)
             session.execute(
                 text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
                 {"identity": f"{exchange}\x1f{asset}"},
             )
-            _mark_scd2_write_reserved(session)
             return
         if dialect == "sqlite":
             _reserve_or_assert_scd2_write_sync(session)
@@ -43100,6 +43246,7 @@ class DatabaseRepository:
                     replace_balance,
                     replace_fee,
                 ),
+                active_only=True,
             ),
         )
         return result.outcome

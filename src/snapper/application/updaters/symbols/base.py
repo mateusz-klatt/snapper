@@ -7,6 +7,7 @@ mappings to the database.
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
+from collections.abc import Iterable
 from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
@@ -162,6 +163,14 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             logger.info("Broadcasted cache invalidation: system.symbol_aliases")
         else:
             logger.warning("ZMQ publisher not available, skipping cache invalidation broadcast")
+
+    @staticmethod
+    def _sort_records_by_native_symbol[RecordT](
+        records: Iterable[RecordT],
+        native_symbol_fn: Callable[[RecordT], str],
+    ) -> list[RecordT]:
+        """Order records deterministically by native symbol to prevent cross-updater deadlocks."""
+        return sorted(records, key=native_symbol_fn)
 
     @staticmethod
     def _upsert_symbol(

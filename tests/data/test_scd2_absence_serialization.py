@@ -1,6 +1,7 @@
 """SQLite serialization, SAVEPOINT recovery, registry, and error-path tests for PR-1."""
 
 import asyncio
+import json
 import sqlite3
 from collections.abc import AsyncIterator
 from collections.abc import Iterator
@@ -9,7 +10,10 @@ from datetime import datetime
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import patch
+from uuid import UUID
 from uuid import uuid4
 
 import pytest
@@ -25,7 +29,12 @@ from sqlalchemy.orm import Session as SyncSession
 from sqlalchemy.sql import Executable
 
 import snapper.cli.app as cli_app
+from snapper.application.process_manager.registry_syncer import ProcessRegistrySyncer
+from snapper.application.process_manager.registry_syncer import upsert_scd2 as real_syncer_upsert
 from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
+from snapper.cli.app import upsert_scd2 as real_cli_upsert
+from snapper.config.app import AppSettings
+from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.financial_account_owner import FinancialAccountOwnerAssignment
 from snapper.core.financial_account_owner import FinancialAccountOwnerPolicy
 from snapper.core.financial_account_owner import financial_account_owner_key_from_authority
@@ -55,6 +64,8 @@ from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import Scd2UpsertSpec
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import TemporalVersionConflictError
+from snapper.data.repository import _apply_scd2_savepoint_async as real_savepoint_async
+from snapper.data.repository import _apply_scd2_savepoint_sync as real_savepoint_sync
 from snapper.data.repository import _is_unique_violation
 from snapper.data.repository import _matches_target_unique_index
 from snapper.data.repository import _resolve_target_unique_index
@@ -71,6 +82,8 @@ from snapper.data.repository import upsert_scd2_sync
 from snapper.data.repository_types import MarketSnapshotUpsertRow
 from snapper.infrastructure.security.encryption import SettingsEncryptionService
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from tests.data.test_scd2_absence_pg18 import _session_uuid
+from tests.data.test_scd2_absence_pg18 import _wait_for_blocked_lock
 from tests.helpers.native_account_authority import build_native_authority_payload
 from tests.helpers.native_account_authority import capture_native_account_read
 from tests.helpers.native_account_authority import insert_native_authority
@@ -1143,3 +1156,734 @@ def test_dialect_unique_classifiers_and_identity_update(sync_repo: DatabaseRepos
         assert unchanged.outcome == "unchanged"
         assert unchanged.row is not None and unchanged.row.public_id == first_pid
         session.commit()
+
+
+def _make_mock_pg_async_session(*, in_tx: bool) -> MagicMock:
+    """Create a mock async session reporting PostgreSQL dialect."""
+    pg_session = MagicMock(spec=AsyncSession)
+    pg_session.info = {}
+    pg_session.get_bind.return_value = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    pg_session.in_transaction.return_value = in_tx
+    pg_session.execute = AsyncMock()
+    return pg_session
+
+
+@pytest.mark.asyncio
+async def test_pg_read_committed_isolation_emitted_before_queries() -> None:
+    """Verify explicit PG READ COMMITTED emission and idempotency across reserved sessions."""
+    pg_async = _make_mock_pg_async_session(in_tx=False)
+    await begin_scd2_write(pg_async)
+    sql_texts = [str(call.args[0]) for call in pg_async.execute.await_args_list]
+    assert sql_texts == ["SET TRANSACTION ISOLATION LEVEL READ COMMITTED"]
+
+    pg_sync = MagicMock(spec=SyncSession)
+    pg_sync.info = {}
+    pg_sync.get_bind.return_value = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    begin_scd2_write_sync(pg_sync)
+    DatabaseRepository.acquire_symbol_updater_lock_sync(pg_sync, "kraken")
+    DatabaseRepository._acquire_spot_asset_precision_evidence_advisory_lock_sync(
+        pg_sync, "walutomat", "EUR"
+    )
+    sync_sql = [str(call.args[0]) for call in pg_sync.execute.call_args_list]
+    assert sync_sql.count("SET TRANSACTION ISOLATION LEVEL READ COMMITTED") == 1
+
+    pg_direct_async = _make_mock_pg_async_session(in_tx=False)
+    pg_direct_async.execute.return_value = MagicMock(
+        scalars=MagicMock(return_value=MagicMock(first=MagicMock(return_value=None)))
+    )
+    await upsert_scd2(
+        pg_direct_async,
+        Scd2UpsertSpec(
+            model=Setting,
+            match_filters=[Setting.key == "pg_auto_iso"],
+            bus_time=_T0,
+            decide=lambda _row: None,
+        ),
+    )
+    assert (
+        str(pg_direct_async.execute.await_args_list[0].args[0])
+        == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+    )
+
+    pg_direct_sync = MagicMock(spec=SyncSession)
+    pg_direct_sync.info = {}
+    pg_direct_sync.get_bind.return_value = SimpleNamespace(
+        dialect=SimpleNamespace(name="postgresql")
+    )
+    pg_direct_sync.in_transaction.return_value = False
+    pg_direct_sync.execute.return_value = MagicMock(
+        scalars=MagicMock(return_value=MagicMock(first=MagicMock(return_value=None)))
+    )
+    upsert_scd2_sync(
+        pg_direct_sync,
+        Scd2UpsertSpec(
+            model=Setting,
+            match_filters=[Setting.key == "pg_auto_iso_sync"],
+            bus_time=_T0,
+            decide=lambda _row: None,
+        ),
+    )
+    assert (
+        str(pg_direct_sync.execute.call_args_list[0].args[0])
+        == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_post_conflict_reread_recovers_and_exhausts(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+) -> None:
+    """Verify bounded async post-conflict fresh re-read recovery and exhaustion."""
+    repo, _ = file_async_repo
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "wake_async"],
+                bus_time=_T0,
+                decide=lambda _row: _setting_payload("wake_async", "v1", 1),
+            ),
+        )
+        await session.commit()
+
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        winner = (
+            await session.execute(
+                select(Setting).where(Setting.key == "wake_async", Setting.known_to == KNOWN_TO_MAX)
+            )
+        ).scalar_one()
+        fetch_calls = 0
+        savepoint_calls = 0
+
+        async def _stub_fetch_async(*args: object, **kwargs: object) -> Setting | None:
+            nonlocal fetch_calls
+            fetch_calls += 1
+            if fetch_calls in (1, 2):
+                return None
+            return winner
+
+        async def _stub_savepoint_async(
+            s: AsyncSession,
+            model: type[Setting],
+            existing: Setting | None,
+            candidate: dict[str, object],
+        ) -> Setting:
+            nonlocal savepoint_calls
+            savepoint_calls += 1
+            if savepoint_calls == 1:
+                raise IntegrityError(
+                    "stmt",
+                    {},
+                    _FakeDbApiError(
+                        sqlite_errorcode=2067, args=("UNIQUE constraint failed: settings.key",)
+                    ),
+                )
+            return await real_savepoint_async(s, model, existing, candidate)
+
+        with (
+            patch("snapper.data.repository._fetch_scd2_existing_async", new=_stub_fetch_async),
+            patch("snapper.data.repository._apply_scd2_savepoint_async", new=_stub_savepoint_async),
+        ):
+            outcome = await upsert_scd2(
+                session,
+                Scd2UpsertSpec(
+                    model=Setting,
+                    match_filters=[Setting.key == "wake_async"],
+                    bus_time=_T1,
+                    decide=lambda row: _setting_payload(
+                        "wake_async", f"after-{row.value if row else 'none'}", 2
+                    ),
+                ),
+            )
+        assert outcome.outcome == "updated"
+        assert outcome.row is not None and outcome.row.value == "after-v1"
+        await session.commit()
+
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        with (
+            patch(
+                "snapper.data.repository._fetch_scd2_existing_async",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "snapper.data.repository._apply_scd2_savepoint_async",
+                new=AsyncMock(
+                    side_effect=IntegrityError(
+                        "stmt",
+                        {},
+                        _FakeDbApiError(
+                            sqlite_errorcode=2067, args=("UNIQUE constraint failed: settings.key",)
+                        ),
+                    )
+                ),
+            ),
+            pytest.raises(IntegrityError),
+        ):
+            await upsert_scd2(
+                session,
+                Scd2UpsertSpec(
+                    model=Setting,
+                    match_filters=[Setting.key == "wake_async"],
+                    bus_time=_T2,
+                    decide=lambda _row: _setting_payload("wake_async", "fail", 3),
+                ),
+            )
+
+
+def test_sync_post_conflict_reread_recovers_and_exhausts(
+    sync_repo: DatabaseRepository,
+) -> None:
+    """Verify bounded sync post-conflict fresh re-read recovery and exhaustion."""
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "wake_sync"],
+                bus_time=_T0,
+                decide=lambda _row: _setting_payload("wake_sync", "v1", 1),
+            ),
+        )
+        session.commit()
+
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        sync_winner = session.execute(
+            select(Setting).where(Setting.key == "wake_sync", Setting.known_to == KNOWN_TO_MAX)
+        ).scalar_one()
+        sync_fetches = 0
+        sync_saves = 0
+
+        def _stub_fetch_sync(*args: object, **kwargs: object) -> Setting | None:
+            nonlocal sync_fetches
+            sync_fetches += 1
+            if sync_fetches in (1, 2):
+                return None
+            return sync_winner
+
+        def _stub_savepoint_sync(
+            s: SyncSession,
+            model: type[Setting],
+            existing: Setting | None,
+            candidate: dict[str, object],
+        ) -> Setting:
+            nonlocal sync_saves
+            sync_saves += 1
+            if sync_saves == 1:
+                raise IntegrityError(
+                    "stmt",
+                    {},
+                    _FakeDbApiError(
+                        sqlite_errorcode=2067, args=("UNIQUE constraint failed: settings.key",)
+                    ),
+                )
+            return real_savepoint_sync(s, model, existing, candidate)
+
+        with (
+            patch("snapper.data.repository._fetch_scd2_existing_sync", new=_stub_fetch_sync),
+            patch("snapper.data.repository._apply_scd2_savepoint_sync", new=_stub_savepoint_sync),
+        ):
+            sync_outcome = upsert_scd2_sync(
+                session,
+                Scd2UpsertSpec(
+                    model=Setting,
+                    match_filters=[Setting.key == "wake_sync"],
+                    bus_time=_T1,
+                    decide=lambda row: _setting_payload(
+                        "wake_sync", f"after-{row.value if row else 'none'}", 2
+                    ),
+                ),
+            )
+        assert sync_outcome.outcome == "updated"
+        assert sync_outcome.row is not None and sync_outcome.row.value == "after-v1"
+        session.commit()
+
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        with (
+            patch("snapper.data.repository._fetch_scd2_existing_sync", return_value=None),
+            patch(
+                "snapper.data.repository._apply_scd2_savepoint_sync",
+                side_effect=IntegrityError(
+                    "stmt",
+                    {},
+                    _FakeDbApiError(
+                        sqlite_errorcode=2067, args=("UNIQUE constraint failed: settings.key",)
+                    ),
+                ),
+            ),
+            pytest.raises(IntegrityError),
+        ):
+            upsert_scd2_sync(
+                session,
+                Scd2UpsertSpec(
+                    model=Setting,
+                    match_filters=[Setting.key == "wake_sync"],
+                    bus_time=_T2,
+                    decide=lambda _row: _setting_payload("wake_sync", "fail", 3),
+                ),
+            )
+
+
+@pytest.mark.asyncio
+async def test_registry_syncer_rereads_active_config_on_lock_wake_miss(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+) -> None:
+    """Process config mutations re-read on lock-wake KeyError and raise only when truly absent."""
+    repo, db_path = file_async_repo
+    db_url = f"sqlite+aiosqlite:///{db_path}"
+    future_ts = datetime.now(UTC) + timedelta(minutes=5)
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        initial_value = json.dumps(
+            {"class": "snapper.Mod", "enabled": True, "role": "service", "parameters": {"a": 1}}
+        )
+        await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "process_worker_a"],
+                bus_time=future_ts,
+                decide=lambda _row: {
+                    "key": "process_worker_a",
+                    "value": initial_value,
+                    "category": "process_config",
+                    "description": "Process config for worker_a",
+                    "is_encrypted": False,
+                    "session_id": str(uuid4()),
+                    "sequence_id": 1,
+                    "updated_by": "seed",
+                },
+            ),
+        )
+        await session.commit()
+
+    syncer = ProcessRegistrySyncer(
+        AppSettings(BootstrapSettingsLoader(DB_URL=db_url), settings_service=None)
+    )
+
+    upsert_calls = 0
+
+    async def _flaky_wake_upsert(session: AsyncSession, spec: Scd2UpsertSpec[Setting]) -> object:
+        nonlocal upsert_calls
+        upsert_calls += 1
+        if upsert_calls == 1:
+            raise KeyError("worker_a")
+        return await real_syncer_upsert(session, spec)
+
+    with (
+        patch(
+            "snapper.application.process_manager.registry_syncer.get_repository",
+            return_value=repo,
+        ),
+        patch(
+            "snapper.application.process_manager.registry_syncer.upsert_scd2",
+            new=_flaky_wake_upsert,
+        ),
+    ):
+        await syncer.update_process_config(
+            name="worker_a",
+            enabled=False,
+            updated_by="ops",
+        )
+    assert upsert_calls == 2
+    async with repo.session() as session:
+        updated_row = (
+            await session.execute(
+                select(Setting).where(
+                    Setting.key == "process_worker_a", Setting.known_to == KNOWN_TO_MAX
+                )
+            )
+        ).scalar_one()
+        assert json.loads(updated_row.value)["enabled"] is False
+        assert updated_row.timestamp == future_ts
+
+    upsert_calls = 0
+    with (
+        patch(
+            "snapper.application.process_manager.registry_syncer.get_repository",
+            return_value=repo,
+        ),
+        patch(
+            "snapper.application.process_manager.registry_syncer.upsert_scd2",
+            new=_flaky_wake_upsert,
+        ),
+    ):
+        params = await syncer.update_process_config_parameters(
+            name="worker_a",
+            parameters={"a": 2},
+            updated_by="ops2",
+        )
+    assert upsert_calls == 2
+    assert params == {"a": 2}
+
+    with (
+        patch(
+            "snapper.application.process_manager.registry_syncer.get_repository",
+            return_value=repo,
+        ),
+        pytest.raises(KeyError, match="ghost"),
+    ):
+        await syncer.update_process_config(name="ghost", enabled=True, updated_by="ops")
+
+    with (
+        patch(
+            "snapper.application.process_manager.registry_syncer.get_repository",
+            return_value=repo,
+        ),
+        patch(
+            "snapper.application.process_manager.registry_syncer.upsert_scd2",
+            new=AsyncMock(side_effect=KeyError("worker_a")),
+        ),
+        pytest.raises(KeyError, match="worker_a"),
+    ):
+        await syncer.update_process_config(name="worker_a", enabled=True, updated_by="ops")
+
+
+@pytest.mark.asyncio
+async def test_upsert_market_snapshots_preserves_finite_known_to_across_batch_shapes(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot expiry stays identical across unique, duplicate-key, and conflict-fallback batches."""
+    repo, _ = file_async_repo
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        sym = Symbol(
+            native_symbol="SNAP-USD",
+            base="SNAP",
+            quote="USD",
+            asset_type="crypto",
+            created_at=_T0,
+            timestamp=_T0,
+            session_id="seed",
+            sequence_id=1,
+        )
+        session.add(sym)
+        await session.flush()
+        inst_rows = [
+            Instrument(
+                symbol_public_id=sym.public_id,
+                exchange=ex,
+                timestamp=_T0,
+                session_id="seed",
+                sequence_id=idx,
+            )
+            for idx, ex in enumerate(("kraken", "binance", "coinbase"), start=1)
+        ]
+        session.add_all(inst_rows)
+        await session.commit()
+        inst_u, inst_d, inst_f = [row.public_id for row in inst_rows]
+
+    unique_batch: list[MarketSnapshotUpsertRow] = [
+        {**_snapshot_row(inst_u, 1, 10.0), "timestamp": _T0, "known_to": _T1}
+    ]
+    assert await repo.upsert_market_snapshots(unique_batch) == 1
+    assert unique_batch[0]["known_to"] == _T1
+
+    dup_batch: list[MarketSnapshotUpsertRow] = [
+        {**_snapshot_row(inst_d, 1, 20.0), "timestamp": _T0, "known_to": _T1},
+        {**_snapshot_row(inst_d, 2, 22.0), "timestamp": _T1, "known_to": _T2},
+    ]
+    assert await repo.upsert_market_snapshots(dup_batch) == 2
+    assert dup_batch[0]["known_to"] == _T1
+    assert dup_batch[1]["known_to"] == _T2
+
+    fallback_batch: list[MarketSnapshotUpsertRow] = [
+        {**_snapshot_row(inst_f, 1, 30.0), "timestamp": _T0, "known_to": _T1}
+    ]
+    original_flush = AsyncSession.flush
+    tripped = False
+
+    async def _fail_bulk_once(session: AsyncSession) -> None:
+        nonlocal tripped
+        if not tripped and any(isinstance(obj, MarketSnapshot) for obj in session.new):
+            tripped = True
+            raise IntegrityError(
+                "stmt",
+                {},
+                _FakeDbApiError(
+                    sqlite_errorcode=2067,
+                    args=("UNIQUE constraint failed: market_snapshots.instrument_public_id",),
+                ),
+            )
+        await original_flush(session)
+
+    monkeypatch.setattr(AsyncSession, "flush", _fail_bulk_once)
+    with patch.object(
+        SQLAlchemyRepository,
+        "_upsert_snapshot_row",
+        wraps=repo._upsert_snapshot_row,
+    ) as spy_row:
+        assert await repo.upsert_market_snapshots(fallback_batch) == 1
+    assert tripped is True
+    spy_row.assert_awaited_once()
+    assert fallback_batch[0]["known_to"] == _T1
+
+    async with repo.session() as session:
+        saved = (
+            (
+                await session.execute(
+                    select(MarketSnapshot).order_by(
+                        MarketSnapshot.instrument_public_id, MarketSnapshot.timestamp
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_inst: dict[str, list[datetime]] = {}
+        for row in saved:
+            by_inst.setdefault(row.instrument_public_id, []).append(row.known_to)
+        assert by_inst[inst_u] == [_T1]
+        assert by_inst[inst_d] == [_T1, _T2]
+        assert by_inst[inst_f] == [_T1]
+
+
+@pytest.mark.asyncio
+async def test_cli_rotate_single_setting_reads_locked_winner_and_retries_lock_wake(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+) -> None:
+    """Key rotation decrypts and carries metadata from the locked active row after concurrent updates."""
+    repo, _ = file_async_repo
+    old_service = SettingsEncryptionService("old-master-password")
+    new_service = SettingsEncryptionService("new-master-password")
+    tracker = SequenceTracker()
+    stale_enc = old_service.encrypt("stale-secret")
+    fresh_enc = old_service.encrypt("fresh-secret")
+    future_ts = datetime.now(UTC) + timedelta(minutes=5)
+
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        res = await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "api_secret"],
+                bus_time=_T0,
+                decide=lambda _row: {
+                    "key": "api_secret",
+                    "value": stale_enc,
+                    "category": "credentials",
+                    "description": "initial",
+                    "is_encrypted": True,
+                    "session_id": str(uuid4()),
+                    "sequence_id": 1,
+                    "updated_by": "alice",
+                },
+            ),
+        )
+        await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "api_secret"],
+                bus_time=future_ts,
+                decide=lambda _row: {
+                    "key": "api_secret",
+                    "value": fresh_enc,
+                    "category": "credentials",
+                    "description": "concurrent-update",
+                    "is_encrypted": True,
+                    "session_id": str(uuid4()),
+                    "sequence_id": 2,
+                    "updated_by": "bob",
+                },
+            ),
+        )
+        await session.commit()
+        stale_snapshot = Setting(
+            id=res.row.id if res.row is not None else 1,
+            public_id=res.row.public_id if res.row is not None else str(uuid4()),
+            key="api_secret",
+            value=stale_enc,
+            category="credentials",
+            description="initial",
+            is_encrypted=True,
+            session_id="stale",
+            sequence_id=1,
+            updated_by="alice",
+            timestamp=_T0,
+            known_to=future_ts,
+        )
+
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        rotated = await cli_app._rotate_single_setting(
+            stale_snapshot,
+            old_service,
+            new_service,
+            False,
+            session,
+            tracker,
+        )
+        assert rotated is True
+        await session.commit()
+
+    async with repo.session() as session:
+        active_row = (
+            await session.execute(
+                select(Setting).where(Setting.key == "api_secret", Setting.known_to == KNOWN_TO_MAX)
+            )
+        ).scalar_one()
+        assert new_service.decrypt(active_row.value) == "fresh-secret"
+        assert active_row.description == "concurrent-update"
+        assert active_row.updated_by == "bob"
+        assert active_row.timestamp == future_ts
+
+    absent_snapshot = Setting(
+        id=999,
+        public_id=str(uuid4()),
+        key="deleted_secret",
+        value=old_service.encrypt("gone"),
+        category="credentials",
+        description="removed",
+        is_encrypted=True,
+        session_id="stale",
+        sequence_id=1,
+        updated_by="alice",
+        timestamp=_T0,
+        known_to=KNOWN_TO_MAX,
+    )
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        missing_result = await cli_app._rotate_single_setting(
+            absent_snapshot,
+            old_service,
+            new_service,
+            False,
+            session,
+            tracker,
+        )
+        assert missing_result is False
+
+    attempt_count = 0
+
+    async def _wake_then_rotate(session: AsyncSession, spec: Scd2UpsertSpec[Setting]) -> object:
+        nonlocal attempt_count
+        attempt_count += 1
+        if attempt_count == 1:
+            raise KeyError("api_secret")
+        return await real_cli_upsert(session, spec)
+
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        with patch("snapper.cli.app.upsert_scd2", new=_wake_then_rotate):
+            wake_result = await cli_app._rotate_single_setting(
+                stale_snapshot,
+                new_service,
+                old_service,
+                False,
+                session,
+                tracker,
+            )
+        assert wake_result is True
+        assert attempt_count == 2
+        await session.commit()
+
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        with (
+            patch("snapper.cli.app.upsert_scd2", new=AsyncMock(side_effect=KeyError("api_secret"))),
+            pytest.raises(KeyError, match="api_secret"),
+        ):
+            await cli_app._rotate_single_setting(
+                stale_snapshot,
+                old_service,
+                new_service,
+                False,
+                session,
+                tracker,
+            )
+
+
+@pytest.mark.asyncio
+async def test_pg18_fixture_helpers_produce_valid_uuids_and_schemas(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+) -> None:
+    """Verify PG18 test helpers produce valid UUIDs, valid lock SQL, and valid ORM payloads."""
+    parsed = UUID(_session_uuid("pg18-regression"))
+    assert str(parsed) == _session_uuid("pg18-regression")
+
+    executed_sql: list[str] = []
+    mock_session = MagicMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+
+    async def _capture_exec(stmt: object, params: object = None) -> MagicMock:
+        del params
+        executed_sql.append(str(stmt))
+        return MagicMock(scalar_one=MagicMock(return_value=1))
+
+    mock_session.execute = AsyncMock(side_effect=_capture_exec)
+    mock_repo = MagicMock()
+    mock_repo.session.return_value = mock_session
+    await _wait_for_blocked_lock(mock_repo, "settings")
+    assert executed_sql
+    assert "pg_stat_activity" in executed_sql[0]
+    assert "LEFT JOIN pg_class" in executed_sql[0]
+    assert "l.locktype IN ('transactionid', 'tuple')" in executed_sql[0]
+
+    repo, _ = file_async_repo
+    async with repo.session() as session:
+        sym = Symbol(
+            native_symbol="PG18-USD",
+            base="PG18",
+            quote="USD",
+            asset_type="crypto",
+            created_at=_T0,
+            timestamp=_T0,
+            session_id=_session_uuid("sym"),
+            sequence_id=1,
+        )
+        session.add(sym)
+        await session.flush()
+        inst = Instrument(
+            symbol_public_id=sym.public_id,
+            exchange="kraken",
+            timestamp=_T0,
+            session_id=_session_uuid("inst"),
+            sequence_id=1,
+        )
+        session.add(inst)
+        await session.flush()
+        cap = InstrumentOrderCapability(
+            instrument_public_id=inst.public_id,
+            exchange="kraken",
+            supported_order_types=["market", "limit"],
+            session_id=_session_uuid("cap"),
+            sequence_id=1,
+            timestamp=_T0,
+        )
+        pnl = PortfolioPnlPoint(
+            wallet_public_id=_session_uuid("wallet"),
+            mode="paper",
+            point_time=_T0,
+            valuation_ccy="USD",
+            point_kind="sample",
+            epoch_public_id=_session_uuid("epoch"),
+            calc_version="v1",
+            valuation_status="complete",
+            realized_pnl=0.0,
+            fee_pnl=0.0,
+            accrual_pnl=0.0,
+            unrealized_pnl=0.0,
+            external_flow_adjustment=0.0,
+            cash_usd=100.0,
+            position_value_usd=0.0,
+            mark_source="test",
+            mark_time=_T0,
+            timestamp=_T0,
+            session_id=_session_uuid("pnl"),
+            sequence_id=1,
+        )
+        session.add_all([cap, pnl])
+        await session.flush()
+        assert cap.supported_order_types == ["market", "limit"]
+        assert pnl.point_kind == "sample"
+        await session.rollback()

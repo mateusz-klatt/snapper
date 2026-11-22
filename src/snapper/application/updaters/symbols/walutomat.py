@@ -127,7 +127,10 @@ class WalutomatSymbolUpdaterService(SymbolUpdaterService[WalutomatExchangeClient
                 native_symbol, base, and quote keys.
         """
         assert self.repository is not None, "Repository not initialized"
-        records = cast(list[WalutomatSymbolRecord], symbols)
+        records = self._sort_records_by_native_symbol(
+            cast(list[WalutomatSymbolRecord], symbols),
+            lambda instrument: instrument["native_symbol"],
+        )
         created_count = 0
         updated_count = 0
         with self.repository.get_session() as session:

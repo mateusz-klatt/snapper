@@ -2303,6 +2303,55 @@ class TestEncryptionRotateErrors:
             assert any("Failed to rotate encryption" in call for call in error_calls)
             assert any("Encryption verification failed" in call for call in error_calls)
 
+    class _RotationScalarResult:
+        """Minimal async scalar result stub returning rows for rotation error tests."""
+
+        def __init__(self, rows: list[Any]) -> None:
+            """Initialize the scalar result wrapper."""
+            self._rows = rows
+
+        def all(self) -> list[Any]:
+            """Return all rows."""
+            return self._rows
+
+        def first(self) -> Any:
+            """Return the first row or None."""
+            return next(iter(self._rows), None)
+
+    class _RotationExecuteResult:
+        """Minimal async execute result stub exposing scalars."""
+
+        def __init__(self, rows: list[Any]) -> None:
+            """Initialize the execute result wrapper."""
+            self._rows = rows
+
+        def scalars(self) -> TestEncryptionRotateErrors._RotationScalarResult:
+            """Return the scalar result wrapper."""
+            return TestEncryptionRotateErrors._RotationScalarResult(self._rows)
+
+    class _RotationSession:
+        """Minimal async session context manager stub for rotation error tests."""
+
+        def __init__(self, rows: list[Any]) -> None:
+            """Initialize the stub session."""
+            self._rows = rows
+
+        async def __aenter__(self) -> TestEncryptionRotateErrors._RotationSession:
+            """Enter the async session context."""
+            return self
+
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+            """Exit the async session context."""
+            return None
+
+        async def execute(self, _query: Any) -> TestEncryptionRotateErrors._RotationExecuteResult:
+            """Return stub query results."""
+            return TestEncryptionRotateErrors._RotationExecuteResult(self._rows)
+
+        async def commit(self) -> None:
+            """No-op commit."""
+            return None
+
     def test_settings_rotate_encryption_decrypt_error_raises_in_loop(self) -> None:
         """Test encryption rotation shows DB inconsistency on error.
 
@@ -2330,40 +2379,11 @@ class TestEncryptionRotateErrors:
             mock_new_encryption.encrypt.return_value = "enc2"
             mock_new_encryption.decrypt.return_value = "test-rotation-verification"
             mock_encryption_class.side_effect = [mock_old_encryption, mock_new_encryption]
-
-            class _ScalarResult:
-                def __init__(self, rows: list[Any]) -> None:
-                    self._rows = rows
-
-                def all(self) -> list[Any]:
-                    return self._rows
-
-            class _ExecuteResult:
-                def __init__(self, rows: list[Any]) -> None:
-                    self._rows = rows
-
-                def scalars(self) -> _ScalarResult:
-                    return _ScalarResult(self._rows)
-
-            class _Session:
-                def __init__(self, rows: list[Any]) -> None:
-                    self._rows = rows
-
-                async def __aenter__(self) -> _Session:
-                    return self
-
-                async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-                    return None
-
-                async def execute(self, _query: Any) -> _ExecuteResult:
-                    return _ExecuteResult(self._rows)
-
-                async def commit(self) -> None:
-                    return None
-
             setting = SimpleNamespace(key="secret", value="ciphertext", is_encrypted=True)
             mock_engine.return_value = MagicMock()
-            mock_sessionmaker.return_value = MagicMock(return_value=_Session([setting]))
+            mock_sessionmaker.return_value = MagicMock(
+                return_value=self._RotationSession([setting])
+            )
             settings_rotate_encryption(
                 old_master_password="old",
                 new_master_password="new",
@@ -2400,40 +2420,11 @@ class TestEncryptionRotateErrors:
             mock_new_encryption.encrypt.return_value = "enc2"
             mock_new_encryption.decrypt.return_value = "test-rotation-verification"
             mock_encryption_class.side_effect = [mock_old_encryption, mock_new_encryption]
-
-            class _ScalarResult:
-                def __init__(self, rows: list[Any]) -> None:
-                    self._rows = rows
-
-                def all(self) -> list[Any]:
-                    return self._rows
-
-            class _ExecuteResult:
-                def __init__(self, rows: list[Any]) -> None:
-                    self._rows = rows
-
-                def scalars(self) -> _ScalarResult:
-                    return _ScalarResult(self._rows)
-
-            class _Session:
-                def __init__(self, rows: list[Any]) -> None:
-                    self._rows = rows
-
-                async def __aenter__(self) -> _Session:
-                    return self
-
-                async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-                    return None
-
-                async def execute(self, _query: Any) -> _ExecuteResult:
-                    return _ExecuteResult(self._rows)
-
-                async def commit(self) -> None:
-                    return None
-
             setting = SimpleNamespace(key="secret", value="ciphertext", is_encrypted=True)
             mock_engine.return_value = MagicMock()
-            mock_sessionmaker.return_value = MagicMock(return_value=_Session([setting]))
+            mock_sessionmaker.return_value = MagicMock(
+                return_value=self._RotationSession([setting])
+            )
             settings_rotate_encryption(
                 old_master_password="old",
                 new_master_password="new",

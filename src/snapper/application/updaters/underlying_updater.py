@@ -842,6 +842,8 @@ class UnderlyingUpdater:
             quantity_unit=existing.quantity_unit,
             spec_source=existing.spec_source,
             spec_version=existing.spec_version,
+            spec_public_id=existing.public_id,
+            spec_timestamp=existing.timestamp,
             spec_observed_at=existing.spec_observed_at,
             observation_spans=observation_spans,
             unit_certified=existing.unit_certified,
