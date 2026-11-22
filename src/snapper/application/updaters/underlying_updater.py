@@ -29,6 +29,7 @@ from snapper.core.types import InstrumentKindEnum
 from snapper.core.types import RelationshipTypeEnum
 from snapper.data.instrument_spec_observation_spans import SpecObservationSpanTarget
 from snapper.data.instrument_spec_observation_spans import latest_spec_observation_at
+from snapper.data.instrument_spec_observation_spans import load_instrument_spec_observation_spans
 from snapper.data.instrument_spec_observation_spans import record_instrument_spec_observation_span
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
@@ -869,30 +870,28 @@ class UnderlyingUpdater:
         pre_existing = await self._repo.get_instrument_spec(ipid, now)
         if self._build_fallback_spec(match, pre_existing) is None:
             return False
-        pre_key = (
-            (pre_existing.get("spec_public_id"), pre_existing.get("spec_timestamp"))
-            if pre_existing is not None
-            else None
-        )
-        pre_spans = pre_existing.get("observation_spans", ()) if pre_existing is not None else ()
-
-        def _decide_fallback(locked: InstrumentSpec | None) -> Mapping[str, object] | None:
-            if locked is None:
-                existing_row = None
-            else:
-                spans = pre_spans if pre_key == (locked.public_id, locked.timestamp) else ()
-                existing_row = self._spec_orm_to_row(locked, spans)
-            spec = self._build_fallback_spec(match, existing_row)
-            if spec is None:
-                return None
-            return {
-                "instrument_public_id": ipid,
-                "session_id": session_id,
-                "sequence_id": sequence_id,
-                **asdict(spec),
-            }
 
         async with self._repo.session() as session:
+
+            async def _decide_fallback(
+                locked: InstrumentSpec | None,
+            ) -> Mapping[str, object] | None:
+                if locked is None:
+                    existing_row = None
+                else:
+                    key = (locked.instrument_public_id, locked.public_id, locked.timestamp)
+                    spans_by_key = await load_instrument_spec_observation_spans(session, [key])
+                    existing_row = self._spec_orm_to_row(locked, spans_by_key.get(key, ()))
+                spec = self._build_fallback_spec(match, existing_row)
+                if spec is None:
+                    return None
+                return {
+                    "instrument_public_id": ipid,
+                    "session_id": session_id,
+                    "sequence_id": sequence_id,
+                    **asdict(spec),
+                }
+
             await begin_scd2_write(session)
             result = await upsert_scd2(
                 session,
@@ -900,7 +899,8 @@ class UnderlyingUpdater:
                     model=InstrumentSpec,
                     match_filters=[InstrumentSpec.instrument_public_id == ipid],
                     bus_time=now,
-                    decide=_decide_fallback,
+                    decide=lambda _locked: None,
+                    decide_async=_decide_fallback,
                 ),
             )
             if result.outcome == "unchanged":

@@ -66,6 +66,7 @@ from snapper.data.models import UnderlyingAsset
 from snapper.data.models import User
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
+from snapper.data.repository import SYMBOL_UPDATER_LOCK_IDENTITY
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import Scd2UpsertSpec
 from snapper.data.repository import SQLAlchemyRepository
@@ -1262,37 +1263,54 @@ async def test_pg_read_committed_isolation_emitted_before_queries() -> None:
     """Verify explicit PG READ COMMITTED emission and idempotency across reserved sessions."""
     pg_async = _make_mock_pg_async_session(in_tx=False)
     await begin_scd2_write(pg_async)
+    await begin_scd2_write(pg_async)
     sql_texts = [str(call.args[0]) for call in pg_async.execute.await_args_list]
     assert sql_texts == ["SET TRANSACTION ISOLATION LEVEL READ COMMITTED"]
 
     pg_sync = MagicMock(spec=SyncSession)
     pg_sync.info = {}
     pg_sync.get_bind.return_value = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    pg_sync.in_transaction.return_value = False
     begin_scd2_write_sync(pg_sync)
-    DatabaseRepository.acquire_symbol_updater_lock_sync(pg_sync, "kraken")
+    begin_scd2_write_sync(pg_sync)
+    DatabaseRepository.acquire_symbol_updater_lock_sync(pg_sync)
     DatabaseRepository._acquire_spot_asset_precision_evidence_advisory_lock_sync(
         pg_sync, "walutomat", "EUR"
     )
     sync_sql = [str(call.args[0]) for call in pg_sync.execute.call_args_list]
+    assert sync_sql[0] == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
     assert sync_sql.count("SET TRANSACTION ISOLATION LEVEL READ COMMITTED") == 1
+    assert pg_sync.execute.call_args_list[1].args[1] == {"identity": SYMBOL_UPDATER_LOCK_IDENTITY}
+
+    pg_lock_only = MagicMock(spec=SyncSession)
+    pg_lock_only.info = {}
+    pg_lock_only.get_bind.return_value = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    pg_lock_only.in_transaction.return_value = False
+    DatabaseRepository.acquire_symbol_updater_lock_sync(pg_lock_only)
+    DatabaseRepository.acquire_symbol_updater_lock_sync(pg_lock_only)
+    lock_sql = [str(call.args[0]) for call in pg_lock_only.execute.call_args_list]
+    assert lock_sql == [
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+        "SELECT pg_advisory_xact_lock(hashtext(:identity))",
+        "SELECT pg_advisory_xact_lock(hashtext(:identity))",
+    ]
 
     pg_direct_async = _make_mock_pg_async_session(in_tx=False)
     pg_direct_async.execute.return_value = MagicMock(
         scalars=MagicMock(return_value=MagicMock(first=MagicMock(return_value=None)))
     )
-    await upsert_scd2(
-        pg_direct_async,
-        Scd2UpsertSpec(
-            model=Setting,
-            match_filters=[Setting.key == "pg_auto_iso"],
-            bus_time=_T0,
-            decide=lambda _row: None,
-        ),
+    direct_spec = Scd2UpsertSpec(
+        model=Setting,
+        match_filters=[Setting.key == "pg_auto_iso"],
+        bus_time=_T0,
+        decide=lambda _row: None,
     )
-    assert (
-        str(pg_direct_async.execute.await_args_list[0].args[0])
-        == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
-    )
+    await upsert_scd2(pg_direct_async, direct_spec)
+    await upsert_scd2(pg_direct_async, direct_spec)
+    async_direct_sql = [str(call.args[0]) for call in pg_direct_async.execute.await_args_list]
+    assert async_direct_sql[0] == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+    assert "FROM settings" in async_direct_sql[1]
+    assert async_direct_sql.count("SET TRANSACTION ISOLATION LEVEL READ COMMITTED") == 1
 
     pg_direct_sync = MagicMock(spec=SyncSession)
     pg_direct_sync.info = {}
@@ -1303,19 +1321,18 @@ async def test_pg_read_committed_isolation_emitted_before_queries() -> None:
     pg_direct_sync.execute.return_value = MagicMock(
         scalars=MagicMock(return_value=MagicMock(first=MagicMock(return_value=None)))
     )
-    upsert_scd2_sync(
-        pg_direct_sync,
-        Scd2UpsertSpec(
-            model=Setting,
-            match_filters=[Setting.key == "pg_auto_iso_sync"],
-            bus_time=_T0,
-            decide=lambda _row: None,
-        ),
+    sync_spec = Scd2UpsertSpec(
+        model=Setting,
+        match_filters=[Setting.key == "pg_auto_iso_sync"],
+        bus_time=_T0,
+        decide=lambda _row: None,
     )
-    assert (
-        str(pg_direct_sync.execute.call_args_list[0].args[0])
-        == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
-    )
+    upsert_scd2_sync(pg_direct_sync, sync_spec)
+    upsert_scd2_sync(pg_direct_sync, sync_spec)
+    sync_direct_sql = [str(call.args[0]) for call in pg_direct_sync.execute.call_args_list]
+    assert sync_direct_sql[0] == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+    assert "FROM settings" in sync_direct_sql[1]
+    assert sync_direct_sql.count("SET TRANSACTION ISOLATION LEVEL READ COMMITTED") == 1
 
 
 @pytest.mark.asyncio

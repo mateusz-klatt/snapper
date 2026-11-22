@@ -3308,13 +3308,16 @@ class Scd2UpsertSpec[Scd2ModelT: Base]:
         model: Mapped ORM model class with temporal SCD2 columns.
         match_filters: Predicates identifying the logical entity or natural key.
         bus_time: Requested effective timestamp for the close and successor.
-        decide: Pure callback inspected under the row lock on initial lookup
-            and again on each post-conflict re-read. Returning ``None`` keeps
-            the current version unchanged; returning a column mapping triggers a
-            SAVEPOINT-protected close+insert+flush.
+        decide: Pure synchronous callback inspected under the row lock on
+            initial lookup and again on each post-conflict re-read. Returning
+            ``None`` keeps the current version unchanged; returning a column
+            mapping triggers a SAVEPOINT-protected close+insert+flush.
         allow_insert: When ``False``, enforces Contract A (update-only):
             missing rows, lock-wake absences, closed rows, and clock-skewed
             predecessors always raise :class:`TemporalVersionConflictError`.
+        decide_async: Optional asynchronous counterpart to ``decide`` supported
+            by :func:`upsert_scd2`. When set, ``upsert_scd2`` awaits it after
+            acquiring the row lock instead of calling ``decide``.
     """
 
     model: type[Scd2ModelT]
@@ -3324,6 +3327,9 @@ class Scd2UpsertSpec[Scd2ModelT: Base]:
     allow_insert: bool = True
     active_only: bool = False
     preserve_known_to: bool = False
+    decide_async: Callable[[Scd2ModelT | None], Awaitable[Mapping[str, object] | None]] | None = (
+        None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -3883,6 +3889,25 @@ def _apply_scd2_savepoint_sync[Scd2ModelT: Base](
     return new_row
 
 
+async def _evaluate_scd2_decide_async[Scd2ModelT: Base](
+    spec: Scd2UpsertSpec[Scd2ModelT],
+    existing: Scd2ModelT | None,
+) -> Mapping[str, object] | None:
+    """Evaluate async or sync SCD2 decision callback under the acquired row lock."""
+    if spec.decide_async is not None:
+        return await spec.decide_async(existing)
+    return spec.decide(existing)
+
+
+def _prepare_sync_scd2_context[Scd2ModelT: Base](
+    spec: Scd2UpsertSpec[Scd2ModelT],
+) -> tuple[str, _ActiveUniqueIndex | None]:
+    """Validate sync SCD2 decision compatibility and resolve table metadata."""
+    if spec.decide_async is not None:
+        raise ValueError("Scd2UpsertSpec.decide_async is only supported by upsert_scd2")
+    return _prepare_scd2_context(spec)
+
+
 async def upsert_scd2[Scd2ModelT: Base](
     session: AsyncSession,
     spec: Scd2UpsertSpec[Scd2ModelT],
@@ -3926,7 +3951,7 @@ async def upsert_scd2[Scd2ModelT: Base](
         effective_bus_time = _validate_existing_for_write(
             table_name, existing, spec.bus_time, allow_insert=spec.allow_insert
         )
-        new_values = spec.decide(existing)
+        new_values = await _evaluate_scd2_decide_async(spec, existing)
         if new_values is None:
             return Scd2UpsertOutcome(outcome="unchanged", row=existing)
         candidate = _prepare_candidate_values(
@@ -3966,7 +3991,7 @@ def upsert_scd2_sync[Scd2ModelT: Base](
     Returns:
         :class:`Scd2UpsertOutcome` describing the persisted outcome and entity.
     """
-    table_name, target_index = _prepare_scd2_context(spec)
+    table_name, target_index = _prepare_sync_scd2_context(spec)
     assert_scd2_write_reserved(session)
     _ensure_unreserved_pg_read_committed_sync(session)
     existing = _fetch_scd2_existing_sync(

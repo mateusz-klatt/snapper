@@ -1263,7 +1263,11 @@ class TestYamlSpecFallbackIntegration:
             _session: object,
             spec: Scd2UpsertSpec[InstrumentSpec],
         ) -> Scd2UpsertOutcome[InstrumentSpec]:
-            new_values = spec.decide(None)
+            new_values = (
+                await spec.decide_async(None)
+                if spec.decide_async is not None
+                else spec.decide(None)
+            )
             assert new_values is not None
             captured_writes.append(dict(new_values))
             return Scd2UpsertOutcome(

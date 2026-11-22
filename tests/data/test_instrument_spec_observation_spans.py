@@ -853,6 +853,91 @@ class TestPersistedSpansAndRevisions:
         finally:
             await repo.engine.dispose()
 
+    async def test_underlying_updater_yaml_fallback_reloads_spans_under_lock_on_heartbeat_race(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """YAML fallback reloads spans under the row lock instead of reusing stale pre-lock spans.
+
+        Given: Version R1 with ``instrument_kind=None`` pre-read with latest observation ``t1``,
+            followed by a committed API unchanged heartbeat extending R1's span to ``t2`` before
+            YAML acquires R1's lock.
+        When: ``UnderlyingUpdater`` applies the YAML fallback minting successor R2.
+        Then: R2 carries forward ``t2`` rather than stale ``t1`` and stays fresh at ``now``.
+        """
+        db_url = f"sqlite+aiosqlite:///{tmp_path / 'yaml-heartbeat-race.db'}"
+        repo = SQLAlchemyRepository(db_url)
+        await repo.create_all()
+        t0, t1, t2, now = _at(0), _at(1), _at(12), _at(13)
+        seed_sess, api_sess, yaml_sess = str(uuid4()), str(uuid4()), str(uuid4())
+        try:
+            yaml_inst = str(uuid4())
+            r1_input = InstrumentSpecInput(
+                **{
+                    **_spec_input(
+                        t0,
+                        spec_source="kraken:catalog",
+                        spec_version="v1:yaml",
+                    ).__dict__,
+                    "instrument_kind": None,
+                }
+            )
+            r1_id = await repo.revise_instrument_spec(yaml_inst, seed_sess, 1, t0, r1_input)
+            assert (
+                await repo.revise_instrument_spec(
+                    yaml_inst,
+                    seed_sess,
+                    2,
+                    t1,
+                    InstrumentSpecInput(**{**r1_input.__dict__, "spec_observed_at": t1}),
+                )
+                == r1_id
+            )
+
+            real_get_spec = repo.get_instrument_spec
+            interleaved = False
+
+            async def _get_spec_then_commit_heartbeat(
+                instrument_public_id: str,
+                as_of: datetime,
+            ) -> InstrumentSpecRow | None:
+                nonlocal interleaved
+                pre = await real_get_spec(instrument_public_id, as_of)
+                if not interleaved and instrument_public_id == yaml_inst:
+                    interleaved = True
+                    heartbeat_id = await repo.revise_instrument_spec(
+                        yaml_inst,
+                        api_sess,
+                        1,
+                        t2,
+                        InstrumentSpecInput(**{**r1_input.__dict__, "spec_observed_at": t2}),
+                    )
+                    assert heartbeat_id == r1_id
+                return pre
+
+            monkeypatch.setattr(repo, "get_instrument_spec", _get_spec_then_commit_heartbeat)
+
+            yaml_updater = UnderlyingUpdater(db_url=db_url)
+            yaml_updater._repo = repo
+            desired = {
+                yaml_inst: _MatchResult(
+                    underlying_ticker="BTC",
+                    relationship_type=RelationshipTypeEnum.EXACT,
+                    contract_family=None,
+                    instrument_type=InstrumentKindEnum.PERPETUAL,
+                    expiry_override=None,
+                )
+            }
+            assert await yaml_updater._apply_yaml_spec_fallbacks(desired, yaml_sess, now) == 1
+            assert interleaved is True
+            r2 = await real_get_spec(yaml_inst, now)
+            assert r2 is not None
+            assert r2["instrument_kind"] == "perpetual"
+            assert r2["spec_observed_at"] == t2
+            assert latest_spec_observation_at(r2) == t2
+            assert is_spec_observation_fresh(r2, now) is True
+        finally:
+            await repo.engine.dispose()
+
     async def test_symbol_updater_preserved_metadata_carries_latest_span_observation(
         self, tmp_path: Path
     ) -> None:
@@ -1170,22 +1255,25 @@ class TestSymbolUpdaterLocksAndConcurrency:
 
         Given: Kraken and Polygon symbol updaters with mocked PostgreSQL SyncSessions,
         When: Both run _update_database,
-        Then: Both acquire pg_advisory_xact_lock first with the same bound identity parameter.
+        Then: Both enter READ COMMITTED then acquire pg_advisory_xact_lock before catalog access
+            with the same bound identity parameter.
         """
         kraken_updater = KrakenSymbolUpdaterService()
         polygon_updater = PolygonSymbolUpdaterService()
         bound_identities: list[dict[str, str]] = []
         for updater in (kraken_updater, polygon_updater):
             pg_session = MagicMock(spec=SyncSession)
+            pg_session.info = {}
             pg_session.get_bind.return_value.dialect.name = "postgresql"
             mock_repo = MagicMock()
             mock_repo.get_session.return_value.__enter__ = MagicMock(return_value=pg_session)
             mock_repo.get_session.return_value.__exit__ = MagicMock(return_value=False)
             updater.repository = mock_repo
             await updater._update_database([])
-            first_call = pg_session.execute.call_args_list[0]
-            assert "pg_advisory_xact_lock(hashtext(:identity))" in str(first_call.args[0])
-            bound_identities.append(first_call.args[1])
+            iso_call, lock_call = pg_session.execute.call_args_list[:2]
+            assert str(iso_call.args[0]) == "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+            assert "pg_advisory_xact_lock(hashtext(:identity))" in str(lock_call.args[0])
+            bound_identities.append(lock_call.args[1])
         assert bound_identities[0] == bound_identities[1]
         assert bound_identities[0] == {"identity": "symbol_updater\x1fcatalog"}
 
