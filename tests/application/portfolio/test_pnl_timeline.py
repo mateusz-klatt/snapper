@@ -9,12 +9,14 @@ downsampling reduction, and the degenerate empty and invalid-granularity edges.
 """
 
 import math
+import sys
 from collections.abc import Iterable
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -29,8 +31,10 @@ from snapper.application.portfolio.pnl_timeline import AttributionKey
 from snapper.application.portfolio.pnl_timeline import MarkMap
 from snapper.application.portfolio.pnl_timeline import OpeningPool
 from snapper.application.portfolio.pnl_timeline import OpeningPoolValuation
+from snapper.application.portfolio.pnl_timeline import PnlCarriedInput
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReason
 from snapper.application.portfolio.pnl_timeline import PnlIncompletenessReasonEntry
+from snapper.application.portfolio.pnl_timeline import PnlInstrumentContribution
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
@@ -1153,6 +1157,483 @@ class TestAttribution:
         assert buckets[("plan", None)].unrealized_pnl == pytest.approx(0.5)
         assert buckets[("system", None)].unrealized_pnl == pytest.approx(weight / 2.0)
         _assert_exact_attribution_sums(point)
+
+
+class TestCompensatedUnrealizedFallback:
+    """Cover the opt-in 5C.6 compensated-total unrealized fallback."""
+
+    @staticmethod
+    def _unrealized_book(
+        values: tuple[float, ...],
+    ) -> tuple[tuple[TimelineExecution, ...], MarkMap]:
+        """Build exact per-instrument unrealized values in ``I1..In`` order.
+
+        Args:
+            values: Signed target unrealized values; non-negative entries open at
+                1.0 with mark 2.0, negative entries open at 2.0 with mark 1.0.
+
+        Returns:
+            Ordered executions and minute-zero marks realizing ``values`` exactly.
+        """
+        executions = tuple(
+            _exec(
+                f"I{index}",
+                index,
+                0,
+                "buy",
+                abs(value),
+                1.0 if value >= 0.0 else 2.0,
+            )
+            for index, value in enumerate(values, start=1)
+        )
+        marks: MarkMap = {
+            (f"I{index}", _m(0)): 2.0 if value >= 0.0 else 1.0
+            for index, value in enumerate(values, start=1)
+        }
+        return executions, marks
+
+    @staticmethod
+    def _three_owner_lineage() -> dict[str, TimelineExecutionLineage]:
+        """Assign ``{I1, I4}`` manual, ``{I2, I5}`` plan, and ``{I3}`` system."""
+        manual = TimelineExecutionLineage("rest", None, None, "live", None)
+        plan = TimelineExecutionLineage("strategy", "plan-1", None, "live", None)
+        system = TimelineExecutionLineage("strategy", None, "signal-1", "live", "alpha")
+        return {
+            "order-I1-1": manual,
+            "order-I2-2": plan,
+            "order-I3-3": system,
+            "order-I4-4": manual,
+            "order-I5-5": plan,
+        }
+
+    def test_builtin_float_sum_is_compensated(self) -> None:
+        """Pin the interpreter behaviour the fallback's ``T1`` and buckets depend on.
+
+        The 5C.6 fallback uses the builtin ``sum`` for the ``T1`` candidate and for
+        the compensated attribution buckets. CPython compensates float sums only
+        from 3.12; an older or different interpreter sums naively, and on the R2
+        owner repro ``math.fsum`` raises where ``sum`` returns the exact result, so
+        neither substitute is acceptable. This test fails before any deploy if the
+        interpreter's ``sum`` bits change.
+
+        Given: Cancelling float inputs whose naive and compensated sums differ.
+        When: The builtin ``sum`` adds them.
+        Then: It returns the compensated bits for the probe and both 5C.6 vectors.
+        """
+        assert sum([1e100, 1.0, -1e100]) == 1.0
+        assert sum([2.11, 0.03, -2.11]) == float.fromhex("0x1.eb851eb851eb8p-6")
+        assert sum([1.5, 0.04, -1.78]) == float.fromhex("-0x1.eb851eb851eb9p-3")
+        large = sys.float_info.max
+        small = math.ulp(large) / 4
+        assert sum([large, small, small, small, -large]) == 3 * small
+
+    def test_compensated_fallback_publishes_point_needing_compensated_attribution(self) -> None:
+        """Publish complete point when both total and attribution need compensation.
+
+        Given: Three instruments with exact unrealized ``[2.11, 0.03, -2.11]`` under
+            one unattributed owner whose naive ``+=`` sum drifts to ``0x1.eb851eb851e80p-6``,
+        When: Building the timeline with ``compensated_unrealized_fallback`` off and on,
+        Then: The default window withholds ``instrument_reconciliation_failed`` while
+            the opt-in fallback publishes ``0x1.eb851eb851eb8p-6`` with exact sums.
+        """
+        values = (
+            float.fromhex("0x1.0e147ae147ae1p+1"),
+            float.fromhex("0x1.eb851eb851eb8p-6"),
+            float.fromhex("-0x1.0e147ae147ae1p+1"),
+        )
+        assert (values[0] + values[1]) + values[2] == float.fromhex("0x1.eb851eb851e80p-6")
+        expected_t1 = float.fromhex("0x1.eb851eb851eb8p-6")
+        executions, marks = self._unrealized_book(values)
+        point_off = build_pnl_timeline(executions, (), marks, _window(0, 0)).points[0]
+        window_on = replace(_window(0, 0), compensated_unrealized_fallback=True)
+        point_on = build_pnl_timeline(executions, (), marks, window_on).points[0]
+        assert point_off.valuation_status == "incomplete"
+        assert _reason_rows(point_off) == [
+            ("instrument_reconciliation_failed", "untrusted", "global", None)
+        ]
+        assert point_on.valuation_status == "complete"
+        assert point_on.unrealized_pnl == expected_t1
+        instrument_values = [item.unrealized_pnl for item in point_on.per_instrument]
+        assert None not in instrument_values
+        assert sum(value for value in instrument_values if value is not None) == expected_t1
+        _assert_exact_attribution_sums(point_on)
+        assert len(point_on.attribution) == 1
+        assert point_on.attribution[0].unrealized_pnl == expected_t1
+
+    def test_allocation_lists_are_filled_only_under_the_fallback(self) -> None:
+        """Keep the per-key allocation lists empty on paths that can never use them.
+
+        Given: The ``[2.11, 0.03, -2.11]`` book and a recorder around each point
+            accumulator the engine creates,
+        When: The timeline is built with ``compensated_unrealized_fallback`` off and on,
+        Then: Every accumulator keeps empty allocation lists with the option off, while
+            the option-on run records the ordered shares the fallback re-sums.
+        """
+        values = (
+            float.fromhex("0x1.0e147ae147ae1p+1"),
+            float.fromhex("0x1.eb851eb851eb8p-6"),
+            float.fromhex("-0x1.0e147ae147ae1p+1"),
+        )
+        executions, marks = self._unrealized_book(values)
+        original = pnl_timeline._PointAccumulator
+        created: list[pnl_timeline._PointAccumulator] = []
+
+        def record(
+            *,
+            point_reasons: set[PnlIncompletenessReasonEntry],
+            carried_inputs: set[PnlCarriedInput],
+        ) -> pnl_timeline._PointAccumulator:
+            """Create a real accumulator and remember it for inspection."""
+            accumulator = original(point_reasons=point_reasons, carried_inputs=carried_inputs)
+            created.append(accumulator)
+            return accumulator
+
+        with patch.object(pnl_timeline, "_PointAccumulator", side_effect=record):
+            build_pnl_timeline(executions, (), marks, _window(0, 0))
+        assert created
+        assert all(not item.unrealized_allocations_by_attribution for item in created)
+
+        created.clear()
+        window_on = replace(_window(0, 0), compensated_unrealized_fallback=True)
+        with patch.object(pnl_timeline, "_PointAccumulator", side_effect=record):
+            build_pnl_timeline(executions, (), marks, window_on)
+        assert any(
+            list(item.unrealized_allocations_by_attribution.values()) == [list(values)]
+            for item in created
+        )
+
+    def test_compensated_fallback_keeps_naive_attribution_when_it_reconciles(self) -> None:
+        """Keep naive attribution buckets without consulting compensated shares.
+
+        Given: Exact unrealized ``[1.5, 0.04, -1.78]`` where ``T1`` sits one ULP
+            from naive ``T0`` so the single naive bucket reconciles directly,
+        When: Building the timeline with ``compensated_unrealized_fallback`` enabled,
+        Then: The point publishes complete and ``_compensated_attribution_buckets``
+            is never called.
+        """
+        values = (1.5, 0.04, -1.78)
+        naive_t0 = (values[0] + values[1]) + values[2]
+        expected_t1 = sum(values)
+        assert math.nextafter(naive_t0, expected_t1) == expected_t1
+        executions, marks = self._unrealized_book(values)
+        window_on = replace(_window(0, 0), compensated_unrealized_fallback=True)
+        with patch.object(
+            pnl_timeline,
+            "_compensated_attribution_buckets",
+            wraps=pnl_timeline._compensated_attribution_buckets,
+        ) as compensated_spy:
+            point = build_pnl_timeline(executions, (), marks, window_on).points[0]
+        compensated_spy.assert_not_called()
+        assert point.valuation_status == "complete"
+        assert point.unrealized_pnl == expected_t1
+        _assert_exact_attribution_sums(point)
+
+    def test_compensated_fallback_explicit_false_matches_default_window_bits(self) -> None:
+        """Preserve byte-for-byte point equality when the fallback flag is False.
+
+        Given: Both compensated-fallback vectors and the existing unrepresentable
+            instrument residue constellation,
+        When: Comparing default ``TimelineWindow`` builds against explicit
+            ``compensated_unrealized_fallback=False``,
+        Then: All ``PnlTimelineResult.points`` tuples match identically.
+        """
+        existing_executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 1.0),
+            _exec("I2", 2, 0, "buy", 1.0, 1.0),
+            _exec("I3", 3, 0, "buy", 1.0, 1e9),
+        )
+        existing_marks: MarkMap = {
+            ("I1", _m(0)): 100000000010.1,
+            ("I2", _m(0)): 0.1,
+            ("I3", _m(0)): 0.05,
+        }
+        constellations = (
+            self._unrealized_book((2.11, 0.03, -2.11)),
+            self._unrealized_book((1.5, 0.04, -1.78)),
+            (existing_executions, existing_marks),
+        )
+        default_window = _window(0, 0)
+        explicit_false = replace(default_window, compensated_unrealized_fallback=False)
+        for executions, marks in constellations:
+            default_result = build_pnl_timeline(executions, (), marks, default_window)
+            false_result = build_pnl_timeline(executions, (), marks, explicit_false)
+            assert false_result.points == default_result.points
+
+    def test_compensated_fallback_flag_false_pins_master_engine_base_bits(self) -> None:
+        """Pin exact IEEE-754 bits from master 379bd8d6 when the fallback is False.
+
+        The hex float literals below come directly from master 379bd8d6's engine
+        so any drift in flag-off residue reconciliation or withholding fails
+        immediately.
+
+        Given: The adjacent unrealized instrument residue constellation and the
+            ``[2.11, 0.03, -2.11]`` book built with explicit
+            ``compensated_unrealized_fallback=False``,
+        When: Evaluating minute zero on both constellations,
+        Then: The adjacent-residue point publishes complete with master's exact
+            aggregate and per-instrument hex bits, and ``[2.11, 0.03, -2.11]``
+            withholds with ``instrument_reconciliation_failed`` and ``None``
+            unrealized P&L.
+        """
+        window_off = replace(_window(0, 0), compensated_unrealized_fallback=False)
+        adjacent_executions = (
+            _exec("I1", 1, 0, "buy", 1.0, 1000.0),
+            _exec("I2", 2, 0, "buy", 1.0, 1000.0),
+            _exec("I3", 3, 0, "buy", 1.0, 1.0),
+        )
+        adjacent_marks: MarkMap = {
+            ("I1", _m(0)): 447.30889868163956,
+            ("I2", _m(0)): 352.6376610460791,
+            ("I3", _m(0)): 620.8804889202258,
+        }
+        adjacent_point = build_pnl_timeline(
+            adjacent_executions,
+            (),
+            adjacent_marks,
+            window_off,
+        ).points[0]
+        assert adjacent_point.valuation_status == "complete"
+        assert adjacent_point.unrealized_pnl is not None
+        assert adjacent_point.net_pnl is not None
+        assert adjacent_point.unrealized_pnl.hex() == "-0x1.2216234518706p+9"
+        assert adjacent_point.net_pnl.hex() == "-0x1.2216234518706p+9"
+        instrument_hex = [
+            contribution.unrealized_pnl.hex()
+            for contribution in adjacent_point.per_instrument
+            if contribution.unrealized_pnl is not None
+        ]
+        assert len(instrument_hex) == 3
+        assert instrument_hex == [
+            "-0x1.145876020c4a5p+9",
+            "-0x1.43ae611f72942p+9",
+            "0x1.35f0b3dc666e1p+9",
+        ]
+
+        withheld_executions, withheld_marks = self._unrealized_book((2.11, 0.03, -2.11))
+        withheld_point = build_pnl_timeline(
+            withheld_executions,
+            (),
+            withheld_marks,
+            window_off,
+        ).points[0]
+        assert withheld_point.valuation_status == "incomplete"
+        assert _reason_rows(withheld_point) == [
+            ("instrument_reconciliation_failed", "untrusted", "global", None)
+        ]
+        assert withheld_point.unrealized_pnl is None
+
+    def test_compensated_fallback_withholds_point_when_fsum_overflows(self) -> None:
+        """Catch ``math.fsum`` ``OverflowError`` and withhold when ``T1`` fails owners.
+
+        Given: Five instruments ``[L, s, s, s, -L]`` split across two owners so
+            ``T1`` fails both attribution representations and ``math.fsum`` overflows,
+        When: Building the timeline with ``compensated_unrealized_fallback`` enabled,
+        Then: No exception escapes and the point stays withheld as
+            ``instrument_reconciliation_failed``.
+        """
+        large = sys.float_info.max
+        small = math.ulp(large) / 4.0
+        executions, marks = self._unrealized_book((large, small, small, small, -large))
+        owner_a = TimelineExecutionLineage("rest", None, None, "live", None)
+        owner_b = TimelineExecutionLineage("strategy", None, "signal-b", "live", "beta")
+        lineage = {
+            "order-I1-1": owner_a,
+            "order-I2-2": owner_a,
+            "order-I3-3": owner_b,
+            "order-I4-4": owner_b,
+            "order-I5-5": owner_b,
+        }
+        window_on = replace(_window(0, 0), compensated_unrealized_fallback=True)
+        with patch.object(pnl_timeline.math, "fsum", wraps=math.fsum) as fsum_spy:
+            point = build_pnl_timeline(
+                executions,
+                (),
+                marks,
+                window_on,
+                lineage=lineage,
+            ).points[0]
+        fsum_spy.assert_called_once()
+        assert point.valuation_status == "incomplete"
+        assert _reason_rows(point) == [
+            ("instrument_reconciliation_failed", "untrusted", "global", None)
+        ]
+
+    def test_compensated_fallback_publishes_single_owner_max_float_lazily(self) -> None:
+        """Publish single-owner ``[L, s, s, s, -L]`` at ``T1`` without calling ``fsum``.
+
+        Given: Five instruments ``[L, s, s, s, -L]`` under one unattributed owner,
+        When: Building the timeline with ``compensated_unrealized_fallback`` enabled,
+        Then: ``T1 == 3 * s`` publishes complete and ``math.fsum`` is never evaluated.
+        """
+        large = sys.float_info.max
+        small = math.ulp(large) / 4.0
+        executions, marks = self._unrealized_book((large, small, small, small, -large))
+        window_on = replace(_window(0, 0), compensated_unrealized_fallback=True)
+        with patch.object(pnl_timeline.math, "fsum", wraps=math.fsum) as fsum_spy:
+            point = build_pnl_timeline(executions, (), marks, window_on).points[0]
+        fsum_spy.assert_not_called()
+        assert point.valuation_status == "complete"
+        assert point.unrealized_pnl == 3.0 * small
+        assert point.unrealized_pnl == 1.4968802321510399e292
+        _assert_exact_attribution_sums(point)
+
+    def test_compensated_fallback_leaves_point_and_state_unmutated_on_failure(self) -> None:
+        """Return the exact option-off point whenever every candidate is rejected.
+
+        Given: Constellations where ``T1`` overflows to ``inf``, raises ``OverflowError``
+            at ``T2``, or fails instrument reconciliation at ``T2``,
+        When: Building with ``compensated_unrealized_fallback`` both off and on,
+        Then: Every rejected fallback returns the exact option-off point untouched.
+        """
+        large = sys.float_info.max
+        small = math.ulp(large) / 4.0
+        two_owner_lineage = {
+            "order-I1-1": TimelineExecutionLineage("rest", None, None, "live", None),
+            "order-I2-2": TimelineExecutionLineage("rest", None, None, "live", None),
+            "order-I3-3": TimelineExecutionLineage("strategy", None, "s1", "live", "b"),
+            "order-I4-4": TimelineExecutionLineage("strategy", None, "s1", "live", "b"),
+            "order-I5-5": TimelineExecutionLineage("strategy", None, "s1", "live", "b"),
+        }
+        cases = (
+            (*self._unrealized_book((large, small, small, small, -large)), two_owner_lineage),
+            (*self._unrealized_book((large, small, small, small)), None),
+            (
+                *self._unrealized_book((2.0**200, 2.0**100, 1.0, -(2.0**200), -(2.0**100))),
+                self._three_owner_lineage(),
+            ),
+        )
+        window_off = _window(0, 0)
+        window_on = replace(window_off, compensated_unrealized_fallback=True)
+        for executions, marks, lineage in cases:
+            point_off = build_pnl_timeline(
+                executions,
+                (),
+                marks,
+                window_off,
+                lineage=lineage,
+            ).points[0]
+            point_on = build_pnl_timeline(
+                executions,
+                (),
+                marks,
+                window_on,
+                lineage=lineage,
+            ).points[0]
+            assert point_on == point_off
+
+    def test_compensated_fallback_accepts_fsum_candidate_after_sum_misses(self) -> None:
+        """Advance from rejected ``T1`` to ``math.fsum`` ``T2`` when ``T2`` reconciles.
+
+        Given: Five exact power-of-two positions ``[2^106, 2^53, 1, -2^106, -2^53]``
+            across three owners where Neumaier ``sum`` rounds to ``0.0`` and fails
+            attribution while ``math.fsum`` recovers ``1.0``,
+        When: Building the timeline with ``compensated_unrealized_fallback`` off and on,
+        Then: Option off withholds while option on publishes ``1.0`` via ``T2``.
+        """
+        values = (2.0**106, 2.0**53, 1.0, -(2.0**106), -(2.0**53))
+        executions, marks = self._unrealized_book(values)
+        lineage = self._three_owner_lineage()
+        point_off = build_pnl_timeline(
+            executions,
+            (),
+            marks,
+            _window(0, 0),
+            lineage=lineage,
+        ).points[0]
+        window_on = replace(_window(0, 0), compensated_unrealized_fallback=True)
+        point_on = build_pnl_timeline(
+            executions,
+            (),
+            marks,
+            window_on,
+            lineage=lineage,
+        ).points[0]
+        assert point_off.valuation_status == "incomplete"
+        assert point_on.valuation_status == "complete"
+        assert point_on.unrealized_pnl == 1.0
+        _assert_exact_attribution_sums(point_on)
+
+    def test_compensated_fallback_skips_incomplete_attribution_and_duplicates(self) -> None:
+        """Deduplicate candidates, skip ``None`` rows, and mirror incomplete attribution.
+
+        Given: Duplicate candidate totals, a ``None`` instrument contribution, and a
+            point accumulator with ``unrealized_incomplete`` set,
+        When: Invoking the compensated candidate and reconciliation helpers directly,
+        Then: Duplicate totals are skipped, ``None`` contributions are omitted,
+            incomplete attribution bypasses bucket trials, and failed runs leave
+            the accumulator unmutated.
+        """
+        assert list(pnl_timeline._compensated_unrealized_candidates([1.0, 2.0], 3.0)) == []
+        contributions = [
+            PnlInstrumentContribution("I1", None, None, 0.0, 0.0, 0.0, 2.11),
+            PnlInstrumentContribution("I2", None, None, 0.0, 0.0, 0.0, 0.03),
+            PnlInstrumentContribution("I3", None, None, 0.0, 0.0, 0.0, -2.11),
+        ]
+        with_missing = [
+            *contributions,
+            PnlInstrumentContribution("I4", None, None, 0.0, 0.0, 0.0, None),
+        ]
+        assert set(pnl_timeline._unrealized_by_instrument(with_missing)) == {"I1", "I2", "I3"}
+        empty_flow = _empty_exact_cumulatives()
+        context = _PointValuationContext(
+            point_time=_m(0),
+            pools={},
+            pool_index={},
+            weights_by_pool={},
+            marks={},
+            seen=["I1", "I2", "I3"],
+            attribution_seen=[("unattributed", None)],
+            cumulatives=_PointCumulatives(
+                realized_by_instrument={},
+                fee_by_instrument={},
+                accrual_by_instrument={},
+                realized_by_attribution={},
+                fee_by_attribution={},
+                accrual_by_attribution={},
+                realized_total=0.0,
+                fee_total=0.0,
+                accrual_total=0.0,
+                realized_exact=empty_flow,
+                fee_exact=empty_flow,
+                accrual_exact=empty_flow,
+            ),
+            activation_time=None,
+            global_reasons=(),
+            untrusted_reasons_by_instrument={},
+            basis_reasons_by_pool={},
+            mark_incompleteness_reasons={},
+            mark_carried_inputs={},
+            carried_event_inputs=(),
+            compensated_unrealized_fallback=True,
+        )
+        naive_t0 = (2.11 + 0.03) - 2.11
+        rejected = pnl_timeline._PointAccumulator(
+            contributions=list(contributions),
+            unrealized_total=naive_t0,
+        )
+        rejected.unrealized_by_attribution[("unattributed", None)] = 100.0
+        assert not pnl_timeline._reconcile_compensated_unrealized(
+            context,
+            rejected,
+            [("unattributed", None)],
+        )
+        assert rejected.unrealized_total == naive_t0
+        assert dict(rejected.unrealized_by_attribution) == {("unattributed", None): 100.0}
+        assert rejected.contributions == contributions
+        incomplete = pnl_timeline._PointAccumulator(
+            contributions=list(contributions),
+            unrealized_incomplete={("unattributed", None)},
+            unrealized_total=naive_t0,
+        )
+        incomplete.unrealized_by_attribution[("unattributed", None)] = 100.0
+        assert pnl_timeline._reconcile_compensated_unrealized(
+            context,
+            incomplete,
+            [("unattributed", None)],
+        )
+        assert incomplete.unrealized_total == sum((2.11, 0.03, -2.11))
+        assert dict(incomplete.unrealized_by_attribution) == {("unattributed", None): 100.0}
+        assert incomplete.unrealized_by_attribution.default_factory is float
 
 
 class TestRoundTrip:

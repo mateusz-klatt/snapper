@@ -703,15 +703,15 @@ async def test_opening_checkpoint_lookup_isolates_calc_version_and_pk_components
     repository: SQLAlchemyRepository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Treat ``calc_version`` (such as 5C.5 vs current) as an opaque isolated key part.
+    """Treat ``calc_version`` as an opaque isolated key part.
 
-    Given: A persisted checkpoint row stored under ``calc_version="5C.5"`` for the
-        scope and another row under a foreign ``calc_version="5C.6"``.
+    Given: A persisted checkpoint row stored under the current calculation version
+        and another row under the never-current foreign ``calc_version="5C.0"``.
     When: ``get_portfolio_pnl_opening_checkpoint(samples._scope())`` is called.
-    Then: A ``5C.5``-keyed row is never returned for a ``5C.6`` key, and vice versa.
+    Then: Neither the current-keyed nor foreign-keyed row is returned for the other key.
     """
     _, write = await _seed_settled_checkpoint(repository)
-    other_version = "5C.6" if PNL_SAMPLE_CALC_VERSION == "5C.5" else "5C.5"
+    other_version = "5C.0"
     with monkeypatch.context() as patcher:
         patcher.setattr("snapper.data.repository.PNL_SAMPLE_CALC_VERSION", other_version)
         assert await repository.get_portfolio_pnl_opening_checkpoint(samples._scope()) is None

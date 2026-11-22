@@ -180,9 +180,7 @@ def _real_walk_states() -> tuple[
     event_requirements = _event_fx_minutes(
         rows,
         accruals,
-        context.base_by_instrument,
-        context.quote_by_instrument,
-        context.valuation_ccy,
+        context,
     )
     assert event_requirements == event_state.requirements
     effective_events, shadows = _effective_mark_events(

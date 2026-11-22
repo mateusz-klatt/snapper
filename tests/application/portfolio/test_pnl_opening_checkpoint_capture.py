@@ -108,13 +108,15 @@ def _options(
     *,
     has_fill_gap: bool = False,
     replay_tip: datetime | None = None,
+    pointwise_exact_fx: bool = True,
 ) -> PnlSeriesReplayOptions:
-    """Build the snapshotter's exact replay policy with optional capture.
+    """Build replay options with optional capture and configurable pointwise FX.
 
     Args:
         request: Capture request to carry, or ``None`` for the off path.
         has_fill_gap: Frozen scope-level gap verdict.
         replay_tip: Generation tip, defaulting to the settling chunk end.
+        pointwise_exact_fx: Whether pointwise exact FX valuation is enabled.
 
     Returns:
         Frozen replay options with a certified execution cut.
@@ -127,7 +129,7 @@ def _options(
         frozen_has_fill_gap=has_fill_gap,
         frozen_fill_witness_cut=_WITNESS,
         replay_generation_tip=_C if replay_tip is None else replay_tip,
-        pointwise_exact_fx=True,
+        pointwise_exact_fx=pointwise_exact_fx,
         checkpoint_capture=request,
     )
 
@@ -434,7 +436,7 @@ class _CaptureRepo(fixtures.FakeRepo):
 
 
 def _permit_capture(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Permit the synthetic calculation version through the test-only seam.
+    """Permit the synthetic capture version and retain the current pointwise profile.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
@@ -442,7 +444,43 @@ def _permit_capture(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         pnl_engine_options,
         "_engine_options_table",
-        lambda: {_CAPTURE_VERSION: pnl_engine_options.PnlEngineOptions(True, False, False)},
+        lambda: {
+            _CAPTURE_VERSION: pnl_engine_options.PnlEngineOptions(True, False, False),
+            fixtures.PNL_SAMPLE_CALC_VERSION: pnl_engine_options.PnlEngineOptions(
+                True,
+                True,
+                True,
+            ),
+        },
+    )
+
+
+async def _build_series(
+    repo: _CaptureRepo,
+    policy: PnlSeriesReadPolicy,
+    options: PnlSeriesReplayOptions,
+) -> PnlWalletSeriesResult:
+    """Build the fixture series with explicit read policy and replay options.
+
+    Args:
+        repo: Spy repository.
+        policy: Series read policy.
+        options: Series replay options.
+
+    Returns:
+        The completed wallet series result.
+    """
+    return await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(0),
+        _C,
+        "1m",
+        _AS_OF,
+        "USD",
+        policy=policy,
+        options=options,
     )
 
 
@@ -464,17 +502,10 @@ async def _build(
     Returns:
         The completed wallet series result.
     """
-    return await build_wallet_pnl_series(
-        cast(Repository, repo),
-        fixtures._W1,
-        "live",
-        fixtures._m(0),
-        _C,
-        "1m",
-        _AS_OF,
-        "USD",
-        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
-        options=_options(request, has_fill_gap=has_fill_gap, replay_tip=replay_tip),
+    return await _build_series(
+        repo,
+        PnlSeriesReadPolicy(allow_anchor_creation=False),
+        _options(request, has_fill_gap=has_fill_gap, replay_tip=replay_tip),
     )
 
 
@@ -717,19 +748,32 @@ async def test_envelope_encode_value_error_becomes_capture_refusal(
     assert result.checkpoint_capture_refusal == "capture_value_error"
 
 
-async def test_engine_conversion_refusal_becomes_capture_refusal(
+async def test_pre_5c6_conversion_minute_gap_becomes_capture_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Propagate the engine's mark-evidence refusal without raising.
+    """Preserve the pre-5C.6 conversion-minute gap as a capture refusal.
 
-    Given: Mark evidence supplies a conversion absent from event requirements.
+    Given: A capture-enabled test profile with both valuation flags disabled, and mark
+        evidence supplying a conversion absent from the mocked event requirements.
     When: The engine refuses its closing checkpoint.
     Then: The service returns no write with ``conversion_uses_mark_evidence``.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
     """
-    _permit_capture(monkeypatch)
+    capture_only = pnl_engine_options.PnlEngineOptions(
+        capture_permitted=True,
+        compensated_unrealized_fallback=False,
+        request_all_conversion_minutes=False,
+    )
+    monkeypatch.setattr(
+        pnl_engine_options,
+        "_engine_options_table",
+        lambda: {
+            _CAPTURE_VERSION: capture_only,
+            fixtures.PNL_SAMPLE_CALC_VERSION: capture_only,
+        },
+    )
     monkeypatch.setattr(
         "snapper.application.portfolio.pnl_timeline_service._event_fx_minutes",
         Mock(return_value={}),
@@ -737,6 +781,86 @@ async def test_engine_conversion_refusal_becomes_capture_refusal(
     result = await _build(_CaptureRepo(), _request())
     assert result.checkpoint_write is None
     assert result.checkpoint_capture_refusal == "conversion_uses_mark_evidence"
+
+
+async def test_5c6_capture_is_not_permitted_under_unpatched_resolver() -> None:
+    """Refuse 5C.6 capture under the unpatched resolver.
+
+    Given: The unpatched engine-options resolver and a 5C.6 capture request.
+    When: ``build_wallet_pnl_series`` evaluates the settling window.
+    Then: It produces ``checkpoint_write is None`` and
+        ``checkpoint_capture_refusal == "capture_not_permitted"``.
+    """
+    assert fixtures.PNL_SAMPLE_CALC_VERSION == "5C.6"
+    result = await _build(_CaptureRepo(), _request(fixtures.PNL_SAMPLE_CALC_VERSION))
+    assert result.checkpoint_write is None
+    assert result.checkpoint_capture_refusal == "capture_not_permitted"
+
+
+@pytest.mark.parametrize(("pointwise_exact_fx", "carry_valuation"), [(False, False), (True, True)])
+async def test_capture_read_policy_guard_refuses_non_pointwise_or_carry_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    pointwise_exact_fx: bool,
+    carry_valuation: bool,
+) -> None:
+    """Refuse capture unless the read uses pointwise exact FX without carry valuation.
+
+    Given: A capture-permitted engine-options table and a settling capture request
+        paired with either ``pointwise_exact_fx=False`` or ``carry_valuation=True``.
+    When: ``build_wallet_pnl_series`` activates checkpoint capture.
+    Then: The request ends refused with ``capture_not_permitted``, produces no write,
+        and issues no capture fingerprint reads.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        pointwise_exact_fx: Whether pointwise exact FX valuation is enabled.
+        carry_valuation: Whether carried valuation is enabled on the read policy.
+    """
+    _permit_capture(monkeypatch)
+    repo = _CaptureRepo()
+    request = _request()
+    result = await _build_series(
+        repo,
+        PnlSeriesReadPolicy(allow_anchor_creation=False, carry_valuation=carry_valuation),
+        _options(request, pointwise_exact_fx=pointwise_exact_fx),
+    )
+    assert result.checkpoint_write is None
+    assert result.checkpoint_capture_refusal == "capture_not_permitted"
+    assert not request.active
+    assert request.refusal == "capture_not_permitted"
+    assert not set(repo.calls) & {
+        "execution_counts",
+        "execution_chain",
+        "accrual_fingerprint",
+        "fx_by_plane",
+        "fx_total",
+    }
+
+
+async def test_capture_read_policy_guard_permits_pointwise_without_carry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Permit capture when the read uses pointwise exact FX with carry disabled.
+
+    Given: A capture-permitted engine-options table and a settling capture request
+        with ``pointwise_exact_fx=True`` and ``carry_valuation=False``.
+    When: ``build_wallet_pnl_series`` builds the settling series.
+    Then: Capture remains active and produces a valid checkpoint write with no refusal.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    _permit_capture(monkeypatch)
+    request = _request()
+    result = await _build_series(
+        _CaptureRepo(),
+        PnlSeriesReadPolicy(allow_anchor_creation=False, carry_valuation=False),
+        _options(request, pointwise_exact_fx=True),
+    )
+    assert result.checkpoint_write is not None
+    assert result.checkpoint_capture_refusal is None
+    assert request.active
+    assert request.refusal is None
 
 
 async def test_global_withhold_becomes_capture_refusal(

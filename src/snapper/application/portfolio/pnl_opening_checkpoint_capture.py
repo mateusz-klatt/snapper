@@ -243,6 +243,10 @@ class PnlCheckpointCaptureRequest:
         """Convert a capture-only conversion or encoding failure to a soft refusal."""
         self._refuse("capture_value_error")
 
+    def refuse_read_policy(self) -> None:
+        """Refuse capture when the series read policy is not pointwise without carry."""
+        self._refuse("capture_not_permitted")
+
     async def capture_execution_prefix(
         self,
         repo: Repository,
