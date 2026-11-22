@@ -68,6 +68,9 @@ class _EventFxEvidence(Protocol):
     def venues_at(self, instrument_public_id: str, minute: datetime) -> FxVenueMap:
         """Return the venue pins for one instrument and exact event minute."""
 
+    def has_usable_rate(self, plane: PnlFxRatePlane, minute: datetime) -> bool:
+        """Return whether ``plane`` carries a positive finite close at ``minute``."""
+
 
 def event_rate_source_payloads(
     requirements: Mapping[str, Mapping[tuple[str, str], set[datetime]]],
@@ -78,7 +81,7 @@ def event_rate_source_payloads(
 
     Args:
         requirements: Event-only minutes grouped by instrument and pair.
-        evidence: Per-minute venue pins and the planes with usable evidence.
+        evidence: Per-minute venue pins, usable rate check, and used planes.
         valuation_ccy: Target series currency.
 
     Returns:
@@ -89,7 +92,11 @@ def event_rate_source_payloads(
         for (first, second), minutes in pair_requirements.items():
             for minute in minutes:
                 plane = evidence.venues_at(instrument_public_id, minute).get((first, second))
-                if plane is None or ((first, second), plane) not in evidence.used_planes:
+                if (
+                    plane is None
+                    or ((first, second), plane) not in evidence.used_planes
+                    or not evidence.has_usable_rate(plane, minute)
+                ):
                     continue
                 payload = PnlFxRateSourcePayload(
                     source_currency=second if first == valuation_ccy else first,

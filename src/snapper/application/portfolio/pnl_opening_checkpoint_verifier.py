@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from datetime import timedelta
 from typing import Literal
 
 from snapper.application.portfolio.execution_chain import ExecutionChainError
@@ -122,6 +123,8 @@ class PnlCheckpointResume:
     record: PnlOpeningCheckpointRecord
     bundle: PnlCheckpointStateBundle
     prefix_annulments: tuple[PnlTimelineAppliedAnnulment, ...] = ()
+    verified_fx_planes: tuple[PnlFxRatePlane, ...] | None = None
+    verified_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -418,14 +421,14 @@ async def _verify_event_fx(
     record: PnlOpeningCheckpointRecord,
     bundle: PnlCheckpointStateBundle,
     frontier_as_of: datetime,
-) -> PnlCheckpointFallback | None:
+) -> tuple[PnlCheckpointFallback | None, tuple[PnlFxRatePlane, ...]]:
     """Verify event-FX planes and both per-plane and total candle aggregates."""
     certificate = record.certificate
     pairs = _oriented_pairs(certificate.consumed_fx_pairs)
     opens = certificate.consumed_fx_open_ats
     planes = await repo.get_pnl_fx_rate_exchanges_at(pairs, opens, frontier_as_of)
     if event_fx_exchanges_digest(planes) != certificate.event_fx_exchanges_digest:
-        return _fallback("checkpoint_event_fx_exchanges_changed")
+        return _fallback("checkpoint_event_fx_exchanges_changed"), ()
     by_plane = await repo.get_pnl_event_fx_candle_fingerprints_by_plane(
         planes,
         opens,
@@ -433,10 +436,18 @@ async def _verify_event_fx(
     )
     total = await repo.get_pnl_event_fx_candle_fingerprint(planes, opens, frontier_as_of)
     if by_plane != _bundle_candle_aggregates(bundle):
-        return _fallback("checkpoint_event_fx_candles_changed")
+        return _fallback("checkpoint_event_fx_candles_changed"), ()
     if total != certificate.event_fx_candles_fingerprint:
-        return _fallback("checkpoint_event_fx_candles_changed")
-    return None
+        return _fallback("checkpoint_event_fx_candles_changed"), ()
+    return None, tuple(planes)
+
+
+def _from_time_ineligible(from_time: datetime, checkpoint_minute: datetime) -> bool:
+    """Return whether ``from_time`` falls at or before ``checkpoint_minute`` after flooring."""
+    return (
+        from_time.utcoffset() != timedelta(0)
+        or from_time.replace(second=0, microsecond=0) <= checkpoint_minute
+    )
 
 
 def _checkpoint_ineligible(
@@ -449,7 +460,7 @@ def _checkpoint_ineligible(
         or not eligibility.pointwise_exact_fx
         or eligibility.replay_generation_tip is None
         or eligibility.metadata_only
-        or eligibility.from_time <= record.certificate.checkpoint_minute
+        or _from_time_ineligible(eligibility.from_time, record.certificate.checkpoint_minute)
         or record.certificate.checkpoint_minute >= eligibility.frontier_tip
     )
 
@@ -628,11 +639,13 @@ async def _verify_checkpoint_domains(
     )
     if accounting is not None:
         return accounting
-    event_fx = await _verify_event_fx(repo, record, bundle, frontier_as_of)
+    event_fx, fx_planes = await _verify_event_fx(repo, record, bundle, frontier_as_of)
     if event_fx is not None:
         return event_fx
     return PnlCheckpointResume(
         record=record,
         bundle=bundle,
         prefix_annulments=tuple(prefix["annulments"]),
+        verified_fx_planes=fx_planes,
+        verified_at=frontier_as_of,
     )

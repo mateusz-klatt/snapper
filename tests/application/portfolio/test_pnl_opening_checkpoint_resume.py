@@ -33,6 +33,8 @@ from snapper.application.portfolio.pnl_timeline_service import _execution_manife
 from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import Repository
+from snapper.data.repository_types import PnlFxRatePlane
+from snapper.data.repository_types import PnlFxRateRow
 from snapper.data.repository_types import PnlTimelineAccrualRow
 from snapper.data.repository_types import PnlTimelineAppliedAnnulment
 from snapper.data.repository_types import PnlTimelineExecutionSuffix
@@ -2410,3 +2412,330 @@ async def test_resume_accepts_unchanged_shared_and_identity_elections(
     assert resumed.points[-1].accrual_pnl == pytest.approx(-2.0)
     assert resumed.rate_sources == anchor.rate_sources
     checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
+
+
+async def test_resume_excludes_prefix_mark_only_plane_from_rate_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exclude prefix mark-only FX planes from ``rate_sources_prefix`` so resume equals cold.
+
+    Given: I1 BTC-EUR on kraken opening at m(1) and closing at m(3), I2 EUR-USD on
+        walutomat buying at m(4) with a 1 EUR fee, kraken EUR-USD candles at m(1) and
+        m(3), and walutomat EUR-USD only at mark-only m(2).
+    When: Checkpoint capture runs at C=m(4) under pointwise exact FX and resumes to m(8).
+    Then: Resumed rate_sources matches cold rate_sources ``(kraken,)`` without leaking
+        walutomat from prefix mark minute m(2), and points remain bit-identical.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for profile flags.
+    """
+    repo = _ResumeRepo()
+    repo._accruals = []
+    repo._executions = [
+        fixtures._exec_row(fixtures._I1, 1, 1, "buy", 1.0, 100.0, 0.0, "EUR"),
+        fixtures._exec_row(fixtures._I1, 2, 3, "sell", 1.0, 100.0, 0.0, "EUR"),
+        fixtures._exec_row(
+            fixtures._I2,
+            1,
+            4,
+            "buy",
+            1.0,
+            1.1,
+            1.0,
+            "EUR",
+            exchange="walutomat",
+        ),
+    ]
+    repo._refs = [
+        fixtures._ref(fixtures._I1, "BTC-EUR", "EUR", exchange="kraken"),
+        fixtures._ref(fixtures._I2, "EUR-USD", "USD", exchange="walutomat"),
+    ]
+    repo._candles = [
+        fixtures._candle(fixtures._m(minute), 100.0, fixtures._I1) for minute in range(9)
+    ] + [fixtures._candle(fixtures._m(minute), 1.1, fixtures._I2) for minute in range(9)]
+    repo._lineage = [
+        fixtures._lineage_row(row["order_public_id"], "rest") for row in repo._executions
+    ]
+    repo._fx_rows = [
+        fixtures._fx_row("EUR", "USD", 1, 2.0, exchange="kraken"),
+        fixtures._fx_row("EUR", "USD", 2, 2.5, exchange="walutomat"),
+        fixtures._fx_row("EUR", "USD", 3, 2.0, exchange="kraken"),
+    ]
+    repo._execution_watermarks = {"kraken": 2, "walutomat": 1}
+    resume = await _capture_and_verify_profile(
+        monkeypatch,
+        repo,
+        {"kraken": 2, "walutomat": 1},
+        PnlEngineOptions(True, True, True),
+    )
+    assert [source.exchange for source in resume.bundle.rate_sources_prefix] == ["kraken"]
+    options = replace(
+        _resume_options(resume),
+        frozen_execution_watermarks={"kraken": 2, "walutomat": 1},
+    )
+    resumed = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    cold = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    assert [source.exchange for source in cold.rate_sources] == ["kraken"]
+    assert resumed.checkpoint_resume_fallback is None
+    assert resumed.rate_sources == cold.rate_sources
+    checkpoint_fixtures._assert_points_bit_identical(cold.points, resumed.points)
+
+
+async def test_resume_matches_cold_rate_sources_with_post_c_mark_only_plane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Include post-C mark-only FX planes on resume identically to cold read.
+
+    Given: The prefix mark-only walutomat setup at m(2) plus a held BTC-EUR position
+        with an isolated post-C mark-only bybit EUR-USD candle at m(6).
+    When: Checkpoint capture runs at C=m(4) and resumes across [m(5), m(8)].
+    Then: Both cold and resumed rate_sources include ``bybit`` and ``kraken`` while
+        excluding prefix mark-only ``walutomat``, and all points stay bit-identical.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for profile flags.
+    """
+    held_btc_eur = "00000000-0000-7000-8000-000000000b09"
+    repo = _ResumeRepo()
+    repo._accruals = []
+    repo._executions = [
+        fixtures._exec_row(fixtures._I1, 1, 1, "buy", 1.0, 100.0, 0.0, "EUR"),
+        fixtures._exec_row(fixtures._I1, 2, 3, "sell", 1.0, 100.0, 0.0, "EUR"),
+        fixtures._exec_row(held_btc_eur, 3, 1, "buy", 1.0, 100.0, 0.0, "EUR"),
+        fixtures._exec_row(
+            fixtures._I2,
+            1,
+            4,
+            "buy",
+            1.0,
+            1.1,
+            1.0,
+            "EUR",
+            exchange="walutomat",
+        ),
+    ]
+    repo._refs = [
+        fixtures._ref(fixtures._I1, "BTC-EUR", "EUR", exchange="kraken"),
+        fixtures._ref(held_btc_eur, "BTC-EUR", "EUR", exchange="kraken"),
+        fixtures._ref(fixtures._I2, "EUR-USD", "USD", exchange="walutomat"),
+    ]
+    repo._candles = (
+        [fixtures._candle(fixtures._m(minute), 100.0, fixtures._I1) for minute in range(9)]
+        + [fixtures._candle(fixtures._m(minute), 100.0, held_btc_eur) for minute in range(9)]
+        + [fixtures._candle(fixtures._m(minute), 1.1, fixtures._I2) for minute in range(9)]
+    )
+    repo._lineage = [
+        fixtures._lineage_row(row["order_public_id"], "rest") for row in repo._executions
+    ]
+    repo._fx_rows = [
+        fixtures._fx_row("EUR", "USD", 1, 2.0, exchange="kraken"),
+        fixtures._fx_row("EUR", "USD", 2, 2.5, exchange="walutomat"),
+        fixtures._fx_row("EUR", "USD", 3, 2.0, exchange="kraken"),
+        fixtures._fx_row("EUR", "USD", 6, 2.2, exchange="bybit"),
+    ]
+    repo._execution_watermarks = {"kraken": 3, "walutomat": 1}
+    resume = await _capture_and_verify_profile(
+        monkeypatch,
+        repo,
+        {"kraken": 3, "walutomat": 1},
+        PnlEngineOptions(True, True, True),
+    )
+    options = replace(
+        _resume_options(resume),
+        frozen_execution_watermarks={"kraken": 3, "walutomat": 1},
+    )
+    resumed = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    cold = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    assert sorted(source.exchange for source in cold.rate_sources) == ["bybit", "kraken"]
+    assert resumed.checkpoint_resume_fallback is None
+    assert resumed.rate_sources == cold.rate_sources
+    checkpoint_fixtures._assert_points_bit_identical(cold.points, resumed.points)
+
+
+@pytest.mark.parametrize("offset_seconds", [-30, 30])
+async def test_subminute_from_time_on_direct_resume_falls_back_equal_to_cold(
+    monkeypatch: pytest.MonkeyPatch,
+    offset_seconds: int,
+) -> None:
+    """Fall back cleanly instead of raising when direct resume receives sub-minute ``from_time``.
+
+    Given: A valid checkpoint captured at C and a read starting at ``C - 30s`` or ``C + 30s``.
+    When: ``build_wallet_pnl_series`` is called directly with that resume state.
+    Then: It never raises ``ValueError``, falls back with ``checkpoint_ineligible``,
+        and returns points bit-identical to the cold anchor read.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        offset_seconds: Sub-minute delta relative to ``C``.
+    """
+    repo = _ResumeRepo()
+    resume = await _verified_resume(monkeypatch, repo)
+    from_time = _C + timedelta(seconds=offset_seconds)
+    options = replace(_resume_options(resume), checkpoint_resume=resume)
+    resumed = await build_wallet_pnl_series(
+        repo,
+        fixtures._W1,
+        "live",
+        from_time,
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    anchor_repo = _ResumeRepo()
+    anchor_repo._execution_watermarks = {"kraken": 4}
+    cold = await build_wallet_pnl_series(
+        anchor_repo,
+        fixtures._W1,
+        "live",
+        from_time,
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    assert resumed.checkpoint_resume_fallback == "checkpoint_ineligible"
+    checkpoint_fixtures._assert_points_bit_identical(cold.points, resumed.points)
+
+
+async def test_resume_falls_back_when_prefix_fx_candle_commits_between_verify_and_fx_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fall back cold when same-plane prefix FX candles commit after verify before FX load.
+
+    Given: A verified checkpoint whose prefix EUR fee consumed kraken EUR/USD at m(1),
+        plus a suffix EUR fee at m(6).
+    When: A same-plane FX correction updates m(1) and m(6) inside ``frontier_as_of``
+        after ``verify_checkpoint_for_resume`` passes and before FX loading runs.
+    Then: The post-FX-load fingerprint guard detects the TOCTOU change, falls back with
+        ``checkpoint_event_fx_candles_changed``, and matches the cold read bit for bit
+        instead of mixing stale prefix totals with corrected suffix FX.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture for profile flags and TOCTOU hook.
+    """
+    repo = _ResumeRepo()
+    repo._accruals = []
+    repo._executions = [
+        fixtures._exec_row(fixtures._I1, 1, 1, "buy", 1.0, 100.0, 1.0, "EUR"),
+        fixtures._exec_row(fixtures._I1, 2, 6, "buy", 1.0, 100.0, 1.0, "EUR"),
+    ]
+    repo._refs = [fixtures._ref(fixtures._I1, "BTC-USD", "USD", exchange="kraken")]
+    repo._candles = [
+        fixtures._candle(fixtures._m(minute), 100.0, fixtures._I1) for minute in range(9)
+    ]
+    repo._lineage = [
+        fixtures._lineage_row(row["order_public_id"], "rest") for row in repo._executions
+    ]
+    repo._fx_rows = [
+        fixtures._fx_row("EUR", "USD", 1, 2.0, exchange="kraken"),
+        fixtures._fx_row("EUR", "USD", 6, 2.0, exchange="kraken"),
+    ]
+    repo._execution_watermarks = {"kraken": 1}
+    resume = await _capture_and_verify_profile(
+        monkeypatch,
+        repo,
+        {"kraken": 1},
+        PnlEngineOptions(True, True, True),
+    )
+    repo._executions = list(repo._executions)
+    repo._execution_watermarks = {"kraken": 2}
+    corrected_prefix = fixtures._fx_row("EUR", "USD", 1, 5.0, exchange="kraken")
+    corrected_prefix["candle_id"] = 101
+    corrected_prefix["candle_timestamp"] = fixtures._m(9)
+    corrected_suffix = fixtures._fx_row("EUR", "USD", 6, 3.0, exchange="kraken")
+    corrected_suffix["candle_id"] = 106
+    corrected_suffix["candle_timestamp"] = fixtures._m(9)
+    committed_after_verify = False
+    original_load_candles = repo.get_pnl_fx_rate_candles_at
+
+    async def commit_fx_before_load(
+        planes: Sequence[PnlFxRatePlane],
+        open_ats: Sequence[datetime],
+        as_of: datetime,
+    ) -> list[PnlFxRateRow]:
+        """Commit corrected prefix and suffix FX candles before resume loads FX rows."""
+        nonlocal committed_after_verify
+        if not committed_after_verify:
+            committed_after_verify = True
+            repo._fx_rows = [corrected_prefix, corrected_suffix]
+        return await original_load_candles(planes, open_ats, as_of)
+
+    monkeypatch.setattr(repo, "get_pnl_fx_rate_candles_at", commit_fx_before_load)
+    options = replace(_resume_options(resume), frozen_execution_watermarks={"kraken": 2})
+    resumed = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    assert committed_after_verify
+    cold = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        fixtures._W1,
+        "live",
+        fixtures._m(5),
+        _T,
+        "1m",
+        fixtures._m(10),
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    assert cold.points[-1].fee_pnl == pytest.approx(-8.0)
+    assert resumed.checkpoint_resume_fallback == "checkpoint_event_fx_candles_changed"
+    checkpoint_fixtures._assert_points_bit_identical(cold.points, resumed.points)

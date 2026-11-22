@@ -1111,16 +1111,19 @@ async def test_deferred_prefix_executions_are_included_in_lineage_envelope(
 
 
 class _UnusedEventEvidence:
-    """Event evidence with one unused pin and one absent pin."""
+    """Event evidence with an unused mark-only plane, an uncandled pin, and an absent pin."""
 
-    used_planes: set[tuple[tuple[str, str], PnlFxRatePlane]] = set()
+    used_planes: set[tuple[tuple[str, str], PnlFxRatePlane]] = {
+        (("EUR", "USD"), ("EUR", "USD", "walutomat")),
+        (("EUR", "USD"), ("EUR", "USD", "kraken")),
+    }
 
     def venues_at(
         self,
         instrument_public_id: str,
         minute: datetime,
     ) -> dict[tuple[str, str], PnlFxRatePlane]:
-        """Return an unused pin at M3 and no pin at M4.
+        """Return an uncandled walutomat pin at M3, a kraken pin at M2, and empty at M4.
 
         Args:
             instrument_public_id: Event instrument.
@@ -1130,24 +1133,45 @@ class _UnusedEventEvidence:
             The synthetic venue map for the requested minute.
         """
         del instrument_public_id
-        if minute == fixtures._m(3):
+        if minute == fixtures._m(2):
             return {("EUR", "USD"): ("EUR", "USD", "kraken")}
+        if minute == fixtures._m(3):
+            return {("EUR", "USD"): ("EUR", "USD", "walutomat")}
         return {}
+
+    def has_usable_rate(self, plane: PnlFxRatePlane, minute: datetime) -> bool:
+        """Report a usable candle only when kraken is consumed at M2.
+
+        Args:
+            plane: Candidate FX plane.
+            minute: Exact event minute.
+
+        Returns:
+            True solely for kraken at M2.
+        """
+        return plane == ("EUR", "USD", "kraken") and minute == fixtures._m(2)
 
 
 def test_event_rate_sources_exclude_absent_and_unused_planes() -> None:
-    """Exclude absent pins and planes without positive usable evidence.
+    """Exclude absent pins and planes without a positive exact close at an event minute.
 
-    Given: Event requirements at one unused pinned minute and one unpinned minute.
-    When: Event rate-source payloads are derived.
-    Then: Neither minute contributes a mark-only or unproven source.
+    Given: A mark-only walutomat plane in used_planes tied to an uncandled M3 event, an
+        unpinned M4 event, and a truly consumed kraken close at M2.
+    When: Event rate-source payloads are derived across M3 and M4 alone, then with M2.
+    Then: Mark-only walutomat is never emitted and only kraken enters rate_sources_prefix.
     """
-    sources = event_rate_source_payloads(
+    excluded = event_rate_source_payloads(
         {fixtures._I1: {("EUR", "USD"): {fixtures._m(3), fixtures._m(4)}}},
         _UnusedEventEvidence(),
         "USD",
     )
-    assert sources == ()
+    assert excluded == ()
+    consumed = event_rate_source_payloads(
+        {fixtures._I1: {("EUR", "USD"): {fixtures._m(2), fixtures._m(3), fixtures._m(4)}}},
+        _UnusedEventEvidence(),
+        "USD",
+    )
+    assert [source.exchange for source in consumed] == ["kraken"]
 
 
 async def test_symbol_ref_digest_rejects_uncaptured_engine_seen_instrument(

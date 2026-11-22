@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import datetime
+from datetime import timedelta
 from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
@@ -22,11 +23,15 @@ from snapper.application.portfolio.pnl_opening_checkpoint_verifier import servic
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
     verify_checkpoint_for_resume,
 )
+from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
+from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
+from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineFillWitnessCut
+from tests.application.portfolio import test_pnl_opening_checkpoint as checkpoint_fixtures
 from tests.application.portfolio import test_pnl_opening_checkpoint_capture as capture
 from tests.application.portfolio import test_pnl_timeline_service as fixtures
 
@@ -843,3 +848,66 @@ async def test_legacy_bundle_version_payload_refused_with_checkpoint_bundle_vers
         _eligibility(request),
     )
     assert outcome == PnlCheckpointFallback("checkpoint_bundle_version", delete_required=True)
+
+
+@pytest.mark.parametrize("offset_seconds", [-30, 30])
+async def test_verifier_refuses_subminute_from_time_before_service_window_check(
+    monkeypatch: pytest.MonkeyPatch,
+    offset_seconds: int,
+) -> None:
+    """Refuse ``from_time`` in the same floored minute as ``C`` before series replay runs.
+
+    Given: A valid captured checkpoint at ``C`` and a requested window starting at
+        ``C - 30s`` or ``C + 30s``.
+    When: ``verify_checkpoint_for_resume`` verifies eligibility and the dispatch decision
+        feeds ``build_wallet_pnl_series``.
+    Then: Verification refuses with ``checkpoint_ineligible`` without deleting, so
+        neither ``C - 30s`` nor ``C + 30s`` crashes and the series equals cold replay.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        offset_seconds: Sub-minute offset relative to ``C``.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    from_time = record.certificate.checkpoint_minute + timedelta(seconds=offset_seconds)
+    eligibility = replace(_eligibility(request), from_time=from_time)
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        _scope(request),
+        _RESUMING_AS_OF,
+        eligibility,
+    )
+    assert outcome == PnlCheckpointFallback("checkpoint_ineligible", delete_required=False)
+    options = PnlSeriesReplayOptions(
+        pointwise_exact_fx=True,
+        replay_generation_tip=eligibility.frontier_tip,
+        frozen_execution_watermarks=dict(request.raw_execution_watermarks),
+        frozen_execution_manifest_digest=request.execution_manifest_digest,
+        checkpoint_resume=outcome if isinstance(outcome, PnlCheckpointResume) else None,
+    )
+    dispatched = await build_wallet_pnl_series(
+        repo,
+        fixtures._W1,
+        "live",
+        from_time,
+        eligibility.frontier_tip,
+        "1m",
+        _RESUMING_AS_OF,
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    cold = await build_wallet_pnl_series(
+        repo,
+        fixtures._W1,
+        "live",
+        from_time,
+        eligibility.frontier_tip,
+        "1m",
+        _RESUMING_AS_OF,
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    checkpoint_fixtures._assert_points_bit_identical(cold.points, dispatched.points)

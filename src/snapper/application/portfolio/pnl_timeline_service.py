@@ -5253,6 +5253,10 @@ class _SeriesFxEvidence:
             minute,
         )
 
+    def has_usable_rate(self, plane: PnlFxRatePlane, minute: datetime) -> bool:
+        """Return whether ``plane`` carries a positive finite exact close at ``minute``."""
+        return is_positive_finite(self.book.exact.get((*plane, minute)))
+
 
 @dataclass(frozen=True, slots=True)
 class _FxMinuteSets:
@@ -7618,10 +7622,17 @@ def _checkpoint_read_profile_supported(
 def _enforce_checkpoint_resume_read_profile(
     options: PnlSeriesReplayOptions,
     policy: PnlSeriesReadPolicy,
+    from_time: datetime,
 ) -> None:
-    """Refuse direct resume with anchor fallback unless read profile is pointwise without carry."""
-    if options.checkpoint_resume is not None and not _checkpoint_read_profile_supported(
-        options, policy
+    """Fall back softly unless read profile and window satisfy direct checkpoint resume."""
+    resume = options.checkpoint_resume
+    if resume is None:
+        return
+    if not _checkpoint_read_profile_supported(options, policy):
+        raise _CheckpointResumeFallbackError("checkpoint_ineligible")
+    if (
+        from_time.utcoffset() != timedelta(0)
+        or from_time.replace(second=0, microsecond=0) <= resume.record.certificate.checkpoint_minute
     ):
         raise _CheckpointResumeFallbackError("checkpoint_ineligible")
 
@@ -7883,6 +7894,53 @@ async def _load_wallet_series_fx(
     )
 
 
+def _validate_loaded_event_fx_planes(
+    resume: PnlCheckpointResume,
+    fx_evidence: _SeriesFxEvidence,
+    verified_planes: tuple[PnlFxRatePlane, ...],
+) -> None:
+    """Detect unexpected prefix event-FX planes already observed during FX loading."""
+    if resume.verified_fx_planes is None:
+        return
+    certificate = resume.record.certificate
+    opens = set(certificate.consumed_fx_open_ats)
+    pairs = {currency_pair_key(first, second) for first, second in certificate.consumed_fx_pairs}
+    known_planes = set(verified_planes)
+    for plane, minutes in fx_evidence.coverage_by_plane.items():
+        if plane in known_planes or currency_pair_key(plane[0], plane[1]) not in pairs:
+            continue
+        if any(minute - timedelta(minutes=1) in opens for minute in minutes):
+            raise _CheckpointResumeFallbackError("checkpoint_event_fx_exchanges_changed")
+
+
+async def _validate_resume_event_fx_candles(
+    repo: Repository,
+    resume: PnlCheckpointResume | None,
+    fx_evidence: _SeriesFxEvidence,
+    as_of: datetime,
+) -> None:
+    """Fall back cold if prefix event-FX candles commit between verify and FX load."""
+    if resume is None:
+        return
+    certificate = resume.record.certificate
+    opens = certificate.consumed_fx_open_ats
+    if not opens:
+        return
+    planes = (
+        tuple(
+            (entry.base, entry.quote, entry.exchange)
+            for entry in resume.bundle.event_fx_candles_by_plane
+        )
+        if resume.verified_fx_planes is None
+        else resume.verified_fx_planes
+    )
+    _validate_loaded_event_fx_planes(resume, fx_evidence, planes)
+    check_as_of = resume.verified_at or as_of
+    total = await repo.get_pnl_event_fx_candle_fingerprint(planes, opens, check_as_of)
+    if total != certificate.event_fx_candles_fingerprint:
+        raise _CheckpointResumeFallbackError("checkpoint_event_fx_candles_changed")
+
+
 async def _load_and_validate_series_fx(
     repo: Repository,
     request: _FxRequest,
@@ -7890,7 +7948,7 @@ async def _load_and_validate_series_fx(
     policy: PnlSeriesReadPolicy,
     trusted_refs: Sequence[InstrumentSymbolRefRow],
 ) -> _SeriesFxEvidence:
-    """Load series FX evidence and enforce election stability on checkpoint resume."""
+    """Load series FX evidence and enforce election and candle stability on resume."""
     fx_evidence = await _load_wallet_series_fx(repo, request, options, policy)
     _validate_resume_fx_election(
         options.checkpoint_resume,
@@ -7903,6 +7961,12 @@ async def _load_and_validate_series_fx(
             valuation_ccy=request.valuation_ccy,
             pointwise_exact_fx=options.pointwise_exact_fx,
         ),
+    )
+    await _validate_resume_event_fx_candles(
+        repo,
+        options.checkpoint_resume,
+        fx_evidence,
+        request.as_of,
     )
     return fx_evidence
 
@@ -8095,7 +8159,7 @@ async def build_wallet_pnl_series(
                 valuation_ccy,
             )
     try:
-        _enforce_checkpoint_resume_read_profile(options, policy)
+        _enforce_checkpoint_resume_read_profile(options, policy, from_time)
         with pnl_read_phase("series_replay"):
             replay = await _load_series_replay_inputs(repo, anchor_load, to_time, options)
             replay_metadata = await _series_replay_metadata(
