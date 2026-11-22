@@ -5417,11 +5417,11 @@ async def test_sync_registry_update_handles_default_parameters_failure(
 async def test_sync_registry_update_handles_missing_record_on_second_fetch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify sync inserts fresh row when record deleted between fetch and update.
+    """Verify sync skips without resurrecting when record is deleted before update.
 
-    Given: A config that exists on first fetch but is deleted before update,
+    Given: A config that exists on first fetch but is absent on the locked update,
     When: sync_registry_to_database is called,
-    Then: close_and_insert inserts a fresh row and second session commits.
+    Then: No replacement row is inserted and neither dummy session commits.
     """
     settings = _create_settings()
     factory = ProcessLauncherService(settings)
@@ -5467,7 +5467,8 @@ async def test_sync_registry_update_handles_missing_record_on_second_fetch(
     assert repo.first_session is not None
     assert repo.first_session.commit_called is False
     assert repo.second_session is not None
-    assert repo.second_session.commit_called is True
+    assert repo.second_session.commit_called is False
+    assert repo.second_session.added == []
 
 
 @pytest.mark.asyncio

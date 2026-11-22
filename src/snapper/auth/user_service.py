@@ -7,6 +7,7 @@ Login events are temporal: inserted on login, closeable for corrections,
 queryable via where_active for point-in-time audit.
 """
 
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
 from typing import cast
@@ -36,11 +37,13 @@ from snapper.data.models import User
 from snapper.data.models import UserActiveToken
 from snapper.data.models import UserLoginEvent
 from snapper.data.oauth_grant_revocation import revoke_oauth_grants_in_tx
+from snapper.data.repository import Scd2UpsertSpec
 from snapper.data.repository import TemporalVersionConflictError
 from snapper.data.repository import assert_scd2_write_reserved
 from snapper.data.repository import begin_scd2_write
 from snapper.data.repository import close_and_insert_existing
 from snapper.data.repository import get_repository
+from snapper.data.repository import upsert_scd2
 from snapper.data.repository import where_active
 from snapper.data.repository import where_active_now
 from snapper.data.repository_types import DeskMemberRow
@@ -642,26 +645,36 @@ class UserService:
         Raises:
             ValueError: If username already exists.
         """
-        async with self.repository.session() as session:
-            stmt = select(User).where(User.username == username, *where_active_now(User))
-            result = await session.execute(stmt)
-            existing_user = result.scalar_one_or_none()
-            if existing_user:
+        password_hash = self.hash_password(password)
+        now = datetime.now(UTC)
+
+        def _decide_create(existing: User | None) -> Mapping[str, object]:
+            if existing is not None:
                 raise ValueError(f"User with username '{username}' already exists")
-            password_hash = self.hash_password(password)
-            now = datetime.now(UTC)
-            db_user = User(
-                username=username,
-                email=email,
-                password_hash=password_hash,
-                role=role.value,
-                is_active=is_active,
-                created_at=now,
-                timestamp=now,
-                session_id=self._tracker.session_id,
-                sequence_id=self._tracker.next_sequence(_USERS_TOPIC),
+            return {
+                "username": username,
+                "email": email,
+                "password_hash": password_hash,
+                "role": role.value,
+                "is_active": is_active,
+                "created_at": now,
+                "session_id": self._tracker.session_id,
+                "sequence_id": self._tracker.next_sequence(_USERS_TOPIC),
+            }
+
+        async with self.repository.session() as session:
+            await begin_scd2_write(session)
+            outcome = await upsert_scd2(
+                session,
+                Scd2UpsertSpec(
+                    model=User,
+                    match_filters=[User.username == username],
+                    bus_time=now,
+                    decide=_decide_create,
+                    active_only=True,
+                ),
             )
-            session.add(db_user)
+            db_user = cast(User, outcome.row)
             await session.commit()
             await session.refresh(db_user)
             return self._db_user_to_auth_user(db_user)

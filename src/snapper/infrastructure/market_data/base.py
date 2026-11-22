@@ -180,7 +180,11 @@ class MarketSnapshotUpdaterService(ABC):
         with self.repository.session_factory() as session:
             begin_scd2_write_sync(session)
             count = 0
-            for snap in snapshots:
+            ordered_snapshots = sorted(
+                snapshots,
+                key=lambda snap: (snap.instrument_public_id, snap.timestamp),
+            )
+            for snap in ordered_snapshots:
                 bus_time = snap.timestamp
                 new_values: dict[str, Any] = {
                     "instrument_public_id": snap.instrument_public_id,

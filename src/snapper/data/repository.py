@@ -15824,7 +15824,11 @@ class SQLAlchemyRepository(Repository):
             unique_rows, sequential_rows = self._split_snapshot_rows_by_duplicate_key(rows)
             existing_by_key = await self._load_existing_snapshots_for_rows(s, unique_rows)
             count = await self._upsert_unique_snapshot_rows(s, unique_rows, existing_by_key)
-            for r in sequential_rows:
+            ordered_sequential = sorted(
+                sequential_rows,
+                key=lambda r: (r["instrument_public_id"], r["timestamp"]),
+            )
+            for r in ordered_sequential:
                 await self._upsert_snapshot_row(s, r)
                 count += 1
             await s.commit()
@@ -15865,11 +15869,11 @@ class SQLAlchemyRepository(Repository):
         session: AsyncSession,
         rows: list[MarketSnapshotUpsertRow],
     ) -> dict[_SnapshotNaturalKey, MarketSnapshot]:
-        """Load existing SCD2 snapshot versions for unique-key rows in one query."""
+        """Load existing SCD2 snapshot versions for unique-key rows in deterministic lock order."""
         if not rows:
             return {}
         row_by_key = {cls._snapshot_natural_key(row): row for row in rows}
-        keys = list(row_by_key)
+        keys = sorted(row_by_key)
         existing_by_key: dict[_SnapshotNaturalKey, MarketSnapshot] = {}
         for offset in range(0, len(keys), _SNAPSHOT_LOOKUP_CHUNK_SIZE):
             key_chunk = keys[offset : offset + _SNAPSHOT_LOOKUP_CHUNK_SIZE]
@@ -15883,6 +15887,7 @@ class SQLAlchemyRepository(Repository):
                     MarketSnapshot.timestamp <= max_timestamp,
                     MarketSnapshot.known_to > min_timestamp,
                 )
+                .order_by(MarketSnapshot.instrument_public_id.asc(), MarketSnapshot.id.asc())
                 .with_for_update()
                 .execution_options(populate_existing=True)
             )
@@ -15908,11 +15913,14 @@ class SQLAlchemyRepository(Repository):
             [MarketSnapshot.instrument_public_id == ""],
             allow_insert=True,
         )
+        committed_updates: list[tuple[MarketSnapshotUpsertRow, str, datetime]] = []
         try:
             async with session.begin_nested():
-                for row in rows:
+                for row in sorted(rows, key=lambda r: (r["instrument_public_id"], r["timestamp"])):
+                    staged_row = dict(row)
                     existing = existing_by_key.get(cls._snapshot_natural_key(row))
                     bus_time = row["timestamp"]
+                    staged_public_id = row["public_id"]
                     if existing is not None:
                         bus_time = _validate_existing_for_write(
                             "market_snapshots",
@@ -15925,14 +15933,19 @@ class SQLAlchemyRepository(Repository):
                             .where(MarketSnapshot.id == existing.id)
                             .values(known_to=bus_time)
                         )
-                        row["public_id"] = existing.public_id
-                    row["timestamp"] = bus_time
-                    session.add(MarketSnapshot(**dict(row)))
+                        staged_public_id = existing.public_id
+                        staged_row["public_id"] = staged_public_id
+                    staged_row["timestamp"] = bus_time
+                    session.add(MarketSnapshot(**staged_row))
+                    committed_updates.append((row, staged_public_id, bus_time))
                 await session.flush()
+            for row, public_id, bus_time in committed_updates:
+                row["public_id"] = public_id
+                row["timestamp"] = bus_time
         except IntegrityError as exc:
             if not _is_retryable_scd2_conflict(exc, "market_snapshots", target_index):
                 raise
-            for row in rows:
+            for row in sorted(rows, key=lambda r: (r["instrument_public_id"], r["timestamp"])):
                 await cls._upsert_snapshot_row(session, row)
         return len(rows)
 
@@ -43127,6 +43140,55 @@ class DatabaseRepository:
         raise NotImplementedError(f"symbol updater lock not implemented for dialect={dialect}")
 
     @staticmethod
+    def revise_instrument_spec_from_locked_sync(
+        session: SyncSession,
+        instrument_public_id: str,
+        provenance: tuple[str, int, datetime],
+        resolve_spec: Callable[[InstrumentSpec | None], InstrumentSpecInput | None],
+        *,
+        active_only: bool = False,
+    ) -> str:
+        """Synchronous value-versioned SCD2 spec revision resolving fields inside the lock."""
+        session_id, sequence_id, timestamp = provenance
+        _reserve_or_assert_scd2_write_sync(session)
+        resolved_observed_at: datetime | None = None
+
+        def _decide(existing: InstrumentSpec | None) -> Mapping[str, object] | None:
+            nonlocal resolved_observed_at
+            spec = resolve_spec(existing)
+            if spec is None:
+                return None
+            resolved_observed_at = spec.spec_observed_at
+            payload = asdict(spec)
+            return SQLAlchemyRepository._instrument_spec_decide(
+                instrument_public_id, session_id, sequence_id, payload
+            )(existing)
+
+        result = upsert_scd2_sync(
+            session,
+            Scd2UpsertSpec(
+                model=InstrumentSpec,
+                match_filters=[
+                    InstrumentSpec.instrument_public_id == instrument_public_id,
+                ],
+                bus_time=timestamp,
+                decide=_decide,
+                active_only=active_only,
+            ),
+        )
+        if result.row is not None and resolved_observed_at is not None:
+            record_instrument_spec_observation_span_sync(
+                session,
+                _spec_span_target(
+                    result.row,
+                    resolved_observed_at,
+                    session_id,
+                    sequence_id,
+                ),
+            )
+        return result.outcome
+
+    @staticmethod
     def revise_instrument_spec_sync(
         session: SyncSession,
         instrument_public_id: str,
@@ -43152,33 +43214,12 @@ class DatabaseRepository:
         Returns:
             One of ``created``, ``updated``, or ``unchanged``.
         """
-        _reserve_or_assert_scd2_write_sync(session)
-        payload = asdict(spec)
-        result = upsert_scd2_sync(
+        return DatabaseRepository.revise_instrument_spec_from_locked_sync(
             session,
-            Scd2UpsertSpec(
-                model=InstrumentSpec,
-                match_filters=[
-                    InstrumentSpec.instrument_public_id == instrument_public_id,
-                ],
-                bus_time=timestamp,
-                decide=SQLAlchemyRepository._instrument_spec_decide(
-                    instrument_public_id, session_id, sequence_id, payload
-                ),
-            ),
+            instrument_public_id,
+            (session_id, sequence_id, timestamp),
+            lambda _existing: spec,
         )
-        active_row = cast(InstrumentSpec, result.row)
-        if spec.spec_observed_at is not None:
-            record_instrument_spec_observation_span_sync(
-                session,
-                _spec_span_target(
-                    active_row,
-                    spec.spec_observed_at,
-                    session_id,
-                    sequence_id,
-                ),
-            )
-        return result.outcome
 
     @staticmethod
     def _acquire_spot_asset_precision_evidence_advisory_lock_sync(

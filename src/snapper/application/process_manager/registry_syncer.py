@@ -319,28 +319,65 @@ class ProcessRegistrySyncer:
             defaults=defaults,
         )
 
+    @staticmethod
+    async def _upsert_existing_setting_with_lock_wake(
+        session: Any,
+        config_key: str,
+        decide: Callable[[Setting | None], Mapping[str, object] | None],
+        *,
+        return_if_deleted: bool,
+    ) -> str | None:
+        """Run active-only ``upsert_scd2`` with bounded lock-wake recovery on ``KeyError``."""
+        bus_time = datetime.now(UTC)
+        attempt = 0
+        while True:
+            try:
+                result = await upsert_scd2(
+                    session,
+                    Scd2UpsertSpec(
+                        model=Setting,
+                        match_filters=[Setting.key == config_key],
+                        bus_time=bus_time,
+                        decide=decide,
+                        active_only=True,
+                    ),
+                )
+                return result.outcome
+            except KeyError:
+                attempt += 1
+                active_row = (
+                    (
+                        await session.execute(
+                            select(Setting)
+                            .where(Setting.key == config_key, Setting.known_to == KNOWN_TO_MAX)
+                            .limit(1)
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if active_row is None:
+                    if return_if_deleted:
+                        return None
+                    raise
+                if attempt >= _MAX_CONFIG_UPDATE_ATTEMPTS:
+                    raise
+                bus_time = max(bus_time, active_row.timestamp)
+
     async def _sync_existing_process(
         self,
         name: str,
         entry: ProcessRegistryEntry,
-        existing: Setting,
         repository: Repository,
     ) -> None:
-        """Update database config for an existing registered process.
-
-        Args:
-            name: Process name.
-            entry: ProcessRegistryEntry from the registry.
-            existing: Existing Setting row from database.
-            repository: Database repository for update operations.
-        """
+        """Update database config for an existing registered process without stale fallbacks."""
         config_key = f"process_{name}"
-        now = datetime.now(UTC)
 
         def _decide_sync(locked_existing: Setting | None) -> Mapping[str, object] | None:
-            source_row = locked_existing if locked_existing is not None else existing
+            if locked_existing is None:
+                raise KeyError(config_key)
             try:
-                config_dict = json.loads(source_row.value)
+                config_dict = json.loads(locked_existing.value)
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse config for '{name}': {e}")
                 return None
@@ -349,9 +386,9 @@ class ProcessRegistrySyncer:
             return {
                 "key": config_key,
                 "value": json.dumps(config_dict, indent=4),
-                "category": source_row.category,
-                "description": source_row.description,
-                "is_encrypted": source_row.is_encrypted,
+                "category": locked_existing.category,
+                "description": locked_existing.description,
+                "is_encrypted": locked_existing.is_encrypted,
                 "updated_by": "sync_registry",
                 "session_id": self._tracker.session_id,
                 "sequence_id": self._tracker.next_sequence(_SETTINGS_TOPIC),
@@ -359,16 +396,13 @@ class ProcessRegistrySyncer:
 
         async with repository.session() as update_session:
             await begin_scd2_write(update_session)
-            result = await upsert_scd2(
+            outcome = await self._upsert_existing_setting_with_lock_wake(
                 update_session,
-                Scd2UpsertSpec(
-                    model=Setting,
-                    match_filters=[Setting.key == config_key],
-                    bus_time=now,
-                    decide=_decide_sync,
-                ),
+                config_key,
+                _decide_sync,
+                return_if_deleted=True,
             )
-            if result.outcome != "unchanged":
+            if outcome is not None and outcome != "unchanged":
                 await update_session.commit()
                 logger.info(
                     "Updated process '{}' metadata in database",
@@ -399,7 +433,7 @@ class ProcessRegistrySyncer:
                 if existing is None:
                     await self._sync_new_process(name, entry)
                 else:
-                    await self._sync_existing_process(name, entry, existing, repository)
+                    await self._sync_existing_process(name, entry, repository)
             except Exception as exc:
                 logger.exception(
                     f"Failed to sync process '{name}' to database; skipping it so server "
@@ -508,7 +542,6 @@ class ProcessRegistrySyncer:
         """
         repository = get_repository(self.settings.db_url)
         config_key = f"process_{name}"
-        bus_time = datetime.now(UTC)
         persisted_config: dict[str, Any] = {}
 
         def _decide_mutate(existing: Setting | None) -> Mapping[str, object] | None:
@@ -535,41 +568,12 @@ class ProcessRegistrySyncer:
 
         async with repository.session() as session:
             await begin_scd2_write(session)
-            attempt = 0
-            while True:
-                try:
-                    await upsert_scd2(
-                        session,
-                        Scd2UpsertSpec(
-                            model=Setting,
-                            match_filters=[Setting.key == config_key],
-                            bus_time=bus_time,
-                            decide=_decide_mutate,
-                            active_only=True,
-                        ),
-                    )
-                    break
-                except KeyError:
-                    attempt += 1
-                    if attempt >= _MAX_CONFIG_UPDATE_ATTEMPTS:
-                        raise
-                    active_row = (
-                        (
-                            await session.execute(
-                                select(Setting)
-                                .where(
-                                    Setting.key == config_key,
-                                    Setting.known_to == KNOWN_TO_MAX,
-                                )
-                                .limit(1)
-                            )
-                        )
-                        .scalars()
-                        .first()
-                    )
-                    if active_row is None:
-                        raise
-                    bus_time = max(bus_time, active_row.timestamp)
+            await self._upsert_existing_setting_with_lock_wake(
+                session,
+                config_key,
+                _decide_mutate,
+                return_if_deleted=False,
+            )
             await session.commit()
             return persisted_config
 

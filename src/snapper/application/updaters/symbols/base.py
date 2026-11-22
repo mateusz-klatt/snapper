@@ -670,67 +670,64 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
             metadata: Atomic venue metadata replacement, or
                 ``PRESERVE_EXISTING`` to carry the existing block forward.
         """
-        existing = DatabaseRepository.get_instrument_spec_sync(
-            session,
-            instrument_public_id,
-            now,
-        )
-        (
-            resolved_funding_type,
-            resolved_funding_frequency_hours,
-            resolved_rollover_rate_long,
-            resolved_rollover_rate_short,
-            resolved_max_funding_rate,
-        ) = SymbolUpdaterService._resolve_funding_fields(
-            existing,
-            funding_type,
-            funding_frequency_hours,
-            rollover_rate_long,
-            rollover_rate_short,
-            max_funding_rate,
-        )
-        resolved_metadata = SymbolUpdaterService._resolve_instrument_metadata(
-            session,
-            existing,
-            metadata,
-            instrument_public_id,
-        )
-        spec = InstrumentSpecInput(
-            tick_size=resolved_metadata.tick_size,
-            lot_size=resolved_metadata.lot_size,
-            min_order_size=resolved_metadata.min_order_size,
-            max_order_size=resolved_metadata.max_order_size,
-            cost_decimals=resolved_metadata.cost_decimals,
-            qty_decimals=resolved_metadata.qty_decimals,
-            margin_initial=resolved_metadata.margin_initial,
-            position_limit_long=resolved_metadata.position_limit_long,
-            position_limit_short=resolved_metadata.position_limit_short,
-            status=resolved_metadata.status,
-            contract_size=resolved_metadata.contract_size,
-            quantity_unit=resolved_metadata.quantity_unit,
-            native_order_quantity_unit=resolved_metadata.native_order_quantity_unit,
-            contract_payoff_model=resolved_metadata.contract_payoff_model,
-            contract_value_currency=resolved_metadata.contract_value_currency,
-            settlement_currency=resolved_metadata.settlement_currency,
-            spec_source=resolved_metadata.spec_source,
-            spec_version=resolved_metadata.spec_version,
-            spec_observed_at=resolved_metadata.spec_observed_at,
-            unit_certified=resolved_metadata.unit_certified,
-            expiry_at=expiry_at,
-            instrument_kind=instrument_kind,
-            funding_type=resolved_funding_type,
-            funding_frequency_hours=resolved_funding_frequency_hours,
-            rollover_rate_long=resolved_rollover_rate_long,
-            rollover_rate_short=resolved_rollover_rate_short,
-            max_funding_rate=resolved_max_funding_rate,
-        )
-        DatabaseRepository.revise_instrument_spec_sync(
+
+        def _build_from_locked(existing: InstrumentSpec | None) -> InstrumentSpecInput:
+            (
+                resolved_funding_type,
+                resolved_funding_frequency_hours,
+                resolved_rollover_rate_long,
+                resolved_rollover_rate_short,
+                resolved_max_funding_rate,
+            ) = SymbolUpdaterService._resolve_funding_fields(
+                existing,
+                funding_type,
+                funding_frequency_hours,
+                rollover_rate_long,
+                rollover_rate_short,
+                max_funding_rate,
+            )
+            resolved_metadata = SymbolUpdaterService._resolve_instrument_metadata(
+                session,
+                existing,
+                metadata,
+                instrument_public_id,
+            )
+            return InstrumentSpecInput(
+                tick_size=resolved_metadata.tick_size,
+                lot_size=resolved_metadata.lot_size,
+                min_order_size=resolved_metadata.min_order_size,
+                max_order_size=resolved_metadata.max_order_size,
+                cost_decimals=resolved_metadata.cost_decimals,
+                qty_decimals=resolved_metadata.qty_decimals,
+                margin_initial=resolved_metadata.margin_initial,
+                position_limit_long=resolved_metadata.position_limit_long,
+                position_limit_short=resolved_metadata.position_limit_short,
+                status=resolved_metadata.status,
+                contract_size=resolved_metadata.contract_size,
+                quantity_unit=resolved_metadata.quantity_unit,
+                native_order_quantity_unit=resolved_metadata.native_order_quantity_unit,
+                contract_payoff_model=resolved_metadata.contract_payoff_model,
+                contract_value_currency=resolved_metadata.contract_value_currency,
+                settlement_currency=resolved_metadata.settlement_currency,
+                spec_source=resolved_metadata.spec_source,
+                spec_version=resolved_metadata.spec_version,
+                spec_observed_at=resolved_metadata.spec_observed_at,
+                unit_certified=resolved_metadata.unit_certified,
+                expiry_at=expiry_at,
+                instrument_kind=instrument_kind,
+                funding_type=resolved_funding_type,
+                funding_frequency_hours=resolved_funding_frequency_hours,
+                rollover_rate_long=resolved_rollover_rate_long,
+                rollover_rate_short=resolved_rollover_rate_short,
+                max_funding_rate=resolved_max_funding_rate,
+            )
+
+        DatabaseRepository.revise_instrument_spec_from_locked_sync(
             session=session,
             instrument_public_id=instrument_public_id,
-            session_id=session_id,
-            sequence_id=sequence_id,
-            timestamp=now,
-            spec=spec,
+            provenance=(session_id, sequence_id, now),
+            resolve_spec=_build_from_locked,
+            active_only=True,
         )
 
     @staticmethod

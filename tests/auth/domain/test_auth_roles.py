@@ -527,6 +527,7 @@ class TestUserService:
         mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
+        mock_result.scalars.return_value.first.return_value = None
         mock_session.execute.return_value = mock_result
 
         def _fake_refresh(obj: User) -> None:
@@ -560,6 +561,7 @@ class TestUserService:
         mock_session = AsyncMock()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_db_user
+        mock_result.scalars.return_value.first.return_value = mock_db_user
         mock_session.execute.return_value = mock_result
         user_service.repository.session = MagicMock()
         user_service.repository.session.return_value = AsyncMock()
@@ -582,6 +584,7 @@ class TestUserService:
         mock_session.begin_nested = MagicMock(return_value=AsyncMock())
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
+        mock_result.scalars.return_value.first.return_value = None
         mock_session.execute.return_value = mock_result
 
         def _fake_refresh(obj: User) -> None:

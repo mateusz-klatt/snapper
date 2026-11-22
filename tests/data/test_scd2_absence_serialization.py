@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -29,6 +30,8 @@ from sqlalchemy.orm import Session as SyncSession
 from sqlalchemy.sql import Executable
 
 import snapper.cli.app as cli_app
+from snapper.application.process_manager.models import ProcessRegistryEntry
+from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry_syncer import ProcessRegistrySyncer
 from snapper.application.process_manager.registry_syncer import upsert_scd2 as real_syncer_upsert
 from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
@@ -38,6 +41,9 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.core.financial_account_owner import FinancialAccountOwnerAssignment
 from snapper.core.financial_account_owner import FinancialAccountOwnerPolicy
 from snapper.core.financial_account_owner import financial_account_owner_key_from_authority
+from snapper.core.types import ProcessLifecycleEnum
+from snapper.core.types import ProcessModeEnum
+from snapper.core.types import ProcessRoleEnum
 from snapper.data.financial_account_owner_policy_writer import FinancialOwnerPolicyChange
 from snapper.data.financial_account_owner_policy_writer import _lock_reserved_policy
 from snapper.data.financial_account_owner_policy_writer import write_financial_owner_policy
@@ -833,6 +839,89 @@ def test_closed_version_guard_contract_b_sync(sync_repo: DatabaseRepository) -> 
             _setting_payload("closed_k", "new", 4),
             _T2,
         )
+
+
+@pytest.mark.asyncio
+async def test_closed_version_guard_real_db_contract_a_and_b(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+    sync_repo: DatabaseRepository,
+) -> None:
+    """Contract A and Contract B refuse closing an already-closed version in a real DB."""
+    repo, _ = file_async_repo
+    t_mid = _T0 + timedelta(seconds=30)
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        await close_and_insert(
+            session,
+            Setting,
+            [Setting.key == "closed_real_a"],
+            _setting_payload("closed_real_a", "v1", 1),
+            _T0,
+        )
+        await close_and_insert(
+            session,
+            Setting,
+            [Setting.key == "closed_real_a"],
+            _setting_payload("closed_real_a", "v2", 2),
+            _T2,
+        )
+        await session.commit()
+
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        with pytest.raises(TemporalVersionConflictError):
+            await close_and_insert_existing(
+                session,
+                Setting,
+                [Setting.key == "closed_real_a"],
+                _setting_payload("closed_real_a", "v3", 3),
+                t_mid,
+            )
+        with pytest.raises(TemporalVersionConflictError):
+            await close_and_insert(
+                session,
+                Setting,
+                [Setting.key == "closed_real_a"],
+                _setting_payload("closed_real_a", "v3", 3),
+                t_mid,
+            )
+
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        close_and_insert_sync(
+            session,
+            Setting,
+            [Setting.key == "closed_real_s"],
+            _setting_payload("closed_real_s", "v1", 1),
+            _T0,
+        )
+        close_and_insert_sync(
+            session,
+            Setting,
+            [Setting.key == "closed_real_s"],
+            _setting_payload("closed_real_s", "v2", 2),
+            _T2,
+        )
+        session.commit()
+
+    with sync_repo.get_session() as session:
+        begin_scd2_write_sync(session)
+        with pytest.raises(TemporalVersionConflictError):
+            close_and_insert_existing_sync(
+                session,
+                Setting,
+                [Setting.key == "closed_real_s"],
+                _setting_payload("closed_real_s", "v3", 3),
+                t_mid,
+            )
+        with pytest.raises(TemporalVersionConflictError):
+            close_and_insert_sync(
+                session,
+                Setting,
+                [Setting.key == "closed_real_s"],
+                _setting_payload("closed_real_s", "v3", 3),
+                t_mid,
+            )
     del sync_repo
 
 
@@ -1882,8 +1971,270 @@ async def test_pg18_fixture_helpers_produce_valid_uuids_and_schemas(
             session_id=_session_uuid("pnl"),
             sequence_id=1,
         )
-        session.add_all([cap, pnl])
+        caps = UserTradingCaps(
+            public_id=str(uuid4()),
+            user_public_id=_session_uuid("user"),
+            max_daily_notional_usd=float(Decimal("100")),
+            timestamp=_T0,
+            known_to=KNOWN_TO_MAX,
+            session_id=_session_uuid("caps"),
+            sequence_id=1,
+        )
+        session.add_all([cap, pnl, caps])
         await session.flush()
         assert cap.supported_order_types == ["market", "limit"]
         assert pnl.point_kind == "sample"
+        assert caps.max_daily_notional_usd is not None
         await session.rollback()
+
+
+async def _seed_sorted_instruments(repo: SQLAlchemyRepository) -> tuple[str, str]:
+    """Seed one symbol and two instruments, returning (inst_lo, inst_hi) sorted lexicographically."""
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        sym = Symbol(
+            native_symbol="ORD-USD",
+            base="ORD",
+            quote="USD",
+            asset_type="crypto",
+            created_at=_T0,
+            timestamp=_T0,
+            session_id="seed",
+            sequence_id=1,
+        )
+        session.add(sym)
+        await session.flush()
+        inst_rows = [
+            Instrument(
+                symbol_public_id=sym.public_id,
+                exchange=ex,
+                timestamp=_T0,
+                session_id="seed",
+                sequence_id=idx,
+            )
+            for idx, ex in enumerate(("kraken", "binance"), start=1)
+        ]
+        session.add_all(inst_rows)
+        await session.commit()
+        inst_pids = sorted(row.public_id for row in inst_rows)
+        return inst_pids[0], inst_pids[1]
+
+
+@pytest.mark.asyncio
+async def test_upsert_market_snapshots_orders_locks_fallback_and_avoids_rollback_mutation(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Snapshot batch locks, fallback retries, and rollback avoid shape bias or dict leakage."""
+    repo, _ = file_async_repo
+    inst_lo, inst_hi = await _seed_sorted_instruments(repo)
+
+    captured_sql: list[str] = []
+
+    def _capture_snapshot_lock_sql(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        upper = statement.upper()
+        if "FROM MARKET_SNAPSHOTS" in upper and "ORDER BY" in upper:
+            captured_sql.append(statement)
+
+    event.listen(repo.engine.sync_engine, "before_cursor_execute", _capture_snapshot_lock_sql)
+    try:
+        reverse_batch: list[MarketSnapshotUpsertRow] = [
+            {**_snapshot_row(inst_hi, 1, 20.0), "timestamp": _T0, "known_to": _T1},
+            {**_snapshot_row(inst_lo, 2, 10.0), "timestamp": _T0, "known_to": _T1},
+        ]
+        assert await repo.upsert_market_snapshots(reverse_batch) == 2
+    finally:
+        event.remove(repo.engine.sync_engine, "before_cursor_execute", _capture_snapshot_lock_sql)
+
+    assert captured_sql
+    assert "ORDER BY market_snapshots.instrument_public_id ASC, market_snapshots.id ASC" in (
+        captured_sql[0]
+    )
+
+    fallback_order: list[tuple[str, datetime]] = []
+    original_flush = AsyncSession.flush
+    original_row_upsert = repo._upsert_snapshot_row
+    tripped_unique = False
+
+    async def _fail_unique_once(session: AsyncSession) -> None:
+        nonlocal tripped_unique
+        if not tripped_unique and any(isinstance(obj, MarketSnapshot) for obj in session.new):
+            tripped_unique = True
+            raise IntegrityError(
+                "stmt",
+                {},
+                _FakeDbApiError(
+                    sqlite_errorcode=2067,
+                    args=("UNIQUE constraint failed: market_snapshots.instrument_public_id",),
+                ),
+            )
+        await original_flush(session)
+
+    async def _record_fallback(session: AsyncSession, row: MarketSnapshotUpsertRow) -> None:
+        fallback_order.append((row["instrument_public_id"], row["timestamp"]))
+        await original_row_upsert(session, row)
+
+    fallback_batch: list[MarketSnapshotUpsertRow] = [
+        {**_snapshot_row(inst_hi, 3, 25.0), "timestamp": _T1, "known_to": KNOWN_TO_MAX},
+        {**_snapshot_row(inst_lo, 4, 15.0), "timestamp": _T1, "known_to": KNOWN_TO_MAX},
+    ]
+    monkeypatch.setattr(AsyncSession, "flush", _fail_unique_once)
+    with patch.object(SQLAlchemyRepository, "_upsert_snapshot_row", new=_record_fallback):
+        assert await repo.upsert_market_snapshots(fallback_batch) == 2
+
+    assert tripped_unique is True
+    assert fallback_order == [(inst_lo, _T1), (inst_hi, _T1)]
+
+    orig_pid = str(uuid4())
+    aborted_batch: list[MarketSnapshotUpsertRow] = [
+        {
+            **_snapshot_row(inst_lo, 5, 16.0),
+            "public_id": orig_pid,
+            "timestamp": _T2,
+            "known_to": KNOWN_TO_MAX,
+        }
+    ]
+
+    async def _fail_non_unique(session: AsyncSession) -> None:
+        if any(isinstance(obj, MarketSnapshot) for obj in session.new):
+            raise IntegrityError("stmt", {}, _FakeDbApiError(pgcode="23514"))
+        await original_flush(session)
+
+    monkeypatch.setattr(AsyncSession, "flush", _fail_non_unique)
+    with pytest.raises(IntegrityError):
+        await repo.upsert_market_snapshots(aborted_batch)
+
+    assert aborted_batch[0]["public_id"] == orig_pid
+    assert aborted_batch[0]["timestamp"] == _T2
+
+
+class _DummySyncProcess(RegisterableProcess):
+    """Minimal RegisterableProcess concrete stub for registry syncer tests."""
+
+    async def start(self) -> None:
+        """No-op start coroutine."""
+
+
+def _make_sync_entry() -> ProcessRegistryEntry:
+    """Build a test ProcessRegistryEntry without delegate parameter dependencies."""
+    return ProcessRegistryEntry(
+        class_ref=_DummySyncProcess,
+        class_path="tests.DummySyncProcess",
+        method="start",
+        description="Synced worker",
+        priority=50,
+        lifecycle=ProcessLifecycleEnum.LONG_RUNNING,
+        role=ProcessRoleEnum.CORE,
+        tags=("sync",),
+        parameters_model=None,
+        parameters_schema=None,
+        enabled=True,
+        mode=ProcessModeEnum.PROCESS,
+    )
+
+
+@pytest.mark.asyncio
+async def test_registry_syncer_sync_existing_process_ignores_deleted_key_and_recovers_lock_wake(
+    file_async_repo: tuple[SQLAlchemyRepository, Path],
+) -> None:
+    """_sync_existing_process skips deleted/closed keys and retries on lock-wake KeyError."""
+    repo, db_path = file_async_repo
+    syncer = ProcessRegistrySyncer(
+        AppSettings(
+            BootstrapSettingsLoader(DB_URL=f"sqlite+aiosqlite:///{db_path}"), settings_service=None
+        )
+    )
+    entry = _make_sync_entry()
+    real_upsert = upsert_scd2
+
+    async with repo.session() as session:
+        await begin_scd2_write(session)
+        await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=Setting,
+                match_filters=[Setting.key == "process_worker_b"],
+                bus_time=_T0,
+                decide=lambda _row: {
+                    "key": "process_worker_b",
+                    "value": json.dumps(
+                        {
+                            "class": "old.Worker",
+                            "enabled": True,
+                            "mode": "process",
+                            "role": "core",
+                            "parameters": {},
+                        }
+                    ),
+                    "category": "process_config",
+                    "description": "Seed worker",
+                    "is_encrypted": False,
+                    "session_id": str(uuid4()),
+                    "sequence_id": 1,
+                    "updated_by": "seed",
+                },
+            ),
+        )
+        session.add(
+            Setting(
+                public_id=str(uuid4()),
+                key="process_deleted_worker",
+                value=json.dumps({"class": "old.Deleted", "enabled": False}),
+                category="process_config",
+                description="Closed deleted worker",
+                is_encrypted=False,
+                session_id=str(uuid4()),
+                sequence_id=1,
+                updated_by="seed",
+                timestamp=_T0,
+                known_to=_T1,
+            )
+        )
+        await session.commit()
+
+    calls = 0
+
+    async def _flaky_sync_upsert(session: AsyncSession, spec: Scd2UpsertSpec[Setting]) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise KeyError("process_worker_b")
+        return await real_upsert(session, spec)
+
+    with patch(
+        "snapper.application.process_manager.registry_syncer.upsert_scd2",
+        new=_flaky_sync_upsert,
+    ):
+        await syncer._sync_existing_process("worker_b", entry, repo)
+
+    assert calls == 2
+
+    await syncer._sync_existing_process("deleted_worker", entry, repo)
+
+    async with repo.session() as session:
+        active_worker = (
+            await session.execute(
+                select(Setting).where(
+                    Setting.key == "process_worker_b", Setting.known_to == KNOWN_TO_MAX
+                )
+            )
+        ).scalar_one()
+        payload = json.loads(active_worker.value)
+        assert payload["class"] == "old.Worker"
+        assert payload["lifecycle"] == ProcessLifecycleEnum.LONG_RUNNING.value
+        assert payload["tags"] == ["sync"]
+        deleted_active = (
+            await session.execute(
+                select(Setting).where(
+                    Setting.key == "process_deleted_worker", Setting.known_to == KNOWN_TO_MAX
+                )
+            )
+        ).scalar_one_or_none()
+        assert deleted_active is None

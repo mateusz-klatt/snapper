@@ -2,11 +2,14 @@
 
 import asyncio
 import os
+import threading
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
+from typing import Any
+from typing import cast
 from uuid import NAMESPACE_URL
 from uuid import uuid4
 from uuid import uuid5
@@ -17,19 +20,25 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session as SyncSession
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentOrderCapability
+from snapper.data.models import InstrumentSpec
+from snapper.data.models import InstrumentUnderlyingMapping
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Operator
 from snapper.data.models import PortfolioPnlPoint
 from snapper.data.models import Setting
+from snapper.data.models import SpotAssetPrecisionEvidence
 from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import SymbolExchangeCapability
 from snapper.data.models import SymbolMarketDataChannelCapability
+from snapper.data.models import TradeProjectionCheckpoint
+from snapper.data.models import UnderlyingAsset
 from snapper.data.models import User
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import UserTradingCaps
@@ -372,17 +381,114 @@ async def _run_pg18_clock_skew_subphase(
     assert res_new[2] == skew_pid and res_old[2] == skew_pid
 
 
+def _install_async_flush_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+    model_cls: type[Base],
+) -> None:
+    """Coordinate two async writers inside ``AsyncSession.flush`` before INSERT."""
+    barrier = asyncio.Barrier(2)
+    passed_sessions: set[int] = set()
+    original_flush = AsyncSession.flush
+
+    async def _coordinated(session: AsyncSession) -> None:
+        session_key = id(session)
+        if session_key not in passed_sessions and any(
+            isinstance(obj, model_cls) for obj in session.new
+        ):
+            passed_sessions.add(session_key)
+            await barrier.wait()
+        await original_flush(session)
+
+    monkeypatch.setattr(AsyncSession, "flush", _coordinated)
+
+
+def _install_sync_flush_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+    model_cls: type[Base],
+) -> None:
+    """Coordinate two threaded sync writers inside ``SyncSession.flush`` before INSERT."""
+    barrier = threading.Barrier(2, timeout=_WAIT_TIMEOUT_S)
+    passed_sessions: set[int] = set()
+    original_flush = SyncSession.flush
+
+    def _coordinated(session: SyncSession, objects: Any = None) -> None:
+        session_key = id(session)
+        if session_key not in passed_sessions and any(
+            isinstance(obj, model_cls) for obj in session.new
+        ):
+            passed_sessions.add(session_key)
+            barrier.wait()
+        original_flush(session, objects)
+
+    monkeypatch.setattr(SyncSession, "flush", _coordinated)
+
+
+def _install_mixed_flush_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+    model_cls: type[Base],
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Coordinate one async session and one threaded sync session at first ``flush``."""
+    async_ready = asyncio.Event()
+    sync_ready = asyncio.Event()
+    sync_go = threading.Event()
+    passed_async: set[int] = set()
+    passed_sync: set[int] = set()
+    original_async_flush = AsyncSession.flush
+    original_sync_flush = SyncSession.flush
+
+    async def _coordinated_async(session: AsyncSession) -> None:
+        session_key = id(session)
+        if session_key not in passed_async and any(
+            isinstance(obj, model_cls) for obj in session.new
+        ):
+            passed_async.add(session_key)
+            async_ready.set()
+            await asyncio.wait_for(sync_ready.wait(), timeout=_WAIT_TIMEOUT_S)
+            sync_go.set()
+        await original_async_flush(session)
+
+    def _coordinated_sync(session: SyncSession, objects: Any = None) -> None:
+        session_key = id(session)
+        if session_key not in passed_sync and any(
+            isinstance(obj, model_cls) for obj in session.new
+        ):
+            passed_sync.add(session_key)
+            loop.call_soon_threadsafe(sync_ready.set)
+            if not sync_go.wait(timeout=_WAIT_TIMEOUT_S):
+                raise TimeoutError("Timed out waiting for async writer at flush barrier")
+        original_sync_flush(session, objects)
+
+    monkeypatch.setattr(AsyncSession, "flush", _coordinated_async)
+    monkeypatch.setattr(SyncSession, "flush", _coordinated_sync)
+
+
+async def _assert_single_active[ModelT: Base](
+    repo: SQLAlchemyRepository,
+    model_cls: type[ModelT],
+    *filters: Any,
+) -> list[ModelT]:
+    """Assert exactly one open ``KNOWN_TO_MAX`` version exists and return it."""
+    known_to_col = cast(Any, model_cls).known_to
+    async with repo.session() as session:
+        rows = (
+            await session.scalars(select(model_cls).where(*filters, known_to_col == KNOWN_TO_MAX))
+        ).all()
+    assert len(rows) == 1
+    return list(rows)
+
+
 @pytest.mark.asyncio
 async def test_pg18_race_instrument_spec(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """InstrumentSpec absence race across concurrent writers converges to 1 active row."""
     async_repo, sync_repo = pg_repos
     _, instrument_pid = await _seed_symbol_instrument_pg(async_repo, f"SPEC-{uuid4().hex[:6]}-USD")
-    barrier = asyncio.Barrier(2)
+    _install_mixed_flush_barrier(monkeypatch, InstrumentSpec, asyncio.get_running_loop())
 
     async def _async_write() -> int:
-        await barrier.wait()
         return await async_repo.revise_instrument_spec(
             instrument_public_id=instrument_pid,
             session_id=_session_uuid("async-spec"),
@@ -405,24 +511,24 @@ async def test_pg18_race_instrument_spec(
             session.commit()
             return outcome
 
-    async def _coordinated_sync() -> str:
-        await barrier.wait()
-        return await asyncio.to_thread(_sync_write)
-
     res_async, res_sync = await asyncio.wait_for(
-        asyncio.gather(_async_write(), _coordinated_sync()), timeout=_WAIT_TIMEOUT_S
+        asyncio.gather(_async_write(), asyncio.to_thread(_sync_write)), timeout=_WAIT_TIMEOUT_S
     )
     assert res_async > 0 and res_sync in {"created", "updated", "unchanged"}
+    await _assert_single_active(
+        async_repo, InstrumentSpec, InstrumentSpec.instrument_public_id == instrument_pid
+    )
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_symbol(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two cross-exchange writers upserting the same Symbol resolve without duplicates."""
-    _, sync_repo = pg_repos
+    async_repo, sync_repo = pg_repos
     native = f"EUR-PLN-{uuid4().hex[:6]}"
-    barrier = asyncio.Barrier(2)
+    _install_sync_flush_barrier(monkeypatch, Symbol)
 
     def _run_worker(exchange: str) -> str:
         with sync_repo.get_session() as session:
@@ -451,28 +557,29 @@ async def test_pg18_race_symbol(
             session.commit()
             return res.outcome
 
-    async def _task(exchange: str) -> str:
-        await barrier.wait()
-        return await asyncio.to_thread(_run_worker, exchange)
-
     outcomes = await asyncio.wait_for(
-        asyncio.gather(_task("kraken"), _task("walutomat")), timeout=_WAIT_TIMEOUT_S
+        asyncio.gather(
+            asyncio.to_thread(_run_worker, "kraken"),
+            asyncio.to_thread(_run_worker, "walutomat"),
+        ),
+        timeout=_WAIT_TIMEOUT_S,
     )
     assert sorted(outcomes) == ["created", "unchanged"]
+    await _assert_single_active(async_repo, Symbol, Symbol.native_symbol == native)
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_symbol_alias_and_secondary_unique_index(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SymbolAlias handles primary absence race and re-raises secondary collision immediately."""
+    """SymbolAlias handles primary absence race and re-raises cold and update secondary collisions."""
     async_repo, _ = pg_repos
     sym_a, _ = await _seed_symbol_instrument_pg(async_repo, f"AL1-{uuid4().hex[:6]}-USD")
     sym_b, _ = await _seed_symbol_instrument_pg(async_repo, f"AL2-{uuid4().hex[:6]}-USD")
-    barrier = asyncio.Barrier(2)
+    _install_async_flush_barrier(monkeypatch, SymbolAlias)
 
     async def _alias_worker(tag: str) -> str:
-        await barrier.wait()
         async with async_repo.session() as session:
             res = await upsert_scd2(
                 session,
@@ -506,9 +613,16 @@ async def test_pg18_race_symbol_alias_and_secondary_unique_index(
         asyncio.gather(_alias_worker("a"), _alias_worker("b")), timeout=_WAIT_TIMEOUT_S
     )
     assert sorted(outcomes) == ["created", "unchanged"]
+    await _assert_single_active(
+        async_repo,
+        SymbolAlias,
+        SymbolAlias.symbol_public_id == sym_a,
+        SymbolAlias.exchange == "kraken",
+        SymbolAlias.channel == "ws",
+    )
 
-    async with async_repo.session() as session:
-        with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError):
+        async with async_repo.session() as session:
             await upsert_scd2(
                 session,
                 Scd2UpsertSpec(
@@ -531,17 +645,73 @@ async def test_pg18_race_symbol_alias_and_secondary_unique_index(
                 ),
             )
 
+    async with async_repo.session() as session:
+        await upsert_scd2(
+            session,
+            Scd2UpsertSpec(
+                model=SymbolAlias,
+                match_filters=[
+                    SymbolAlias.symbol_public_id == sym_b,
+                    SymbolAlias.exchange == "kraken",
+                    SymbolAlias.channel == "ws",
+                ],
+                bus_time=_T1,
+                decide=lambda _r: {
+                    "symbol_public_id": sym_b,
+                    "exchange": "kraken",
+                    "channel": "ws",
+                    "exchange_symbol": "ALT/USD",
+                    "created_at": _T1,
+                    "session_id": _session_uuid("alias-b-init"),
+                    "sequence_id": 1,
+                },
+            ),
+        )
+        await session.commit()
+
+    with pytest.raises(IntegrityError):
+        async with async_repo.session() as session:
+            await upsert_scd2(
+                session,
+                Scd2UpsertSpec(
+                    model=SymbolAlias,
+                    match_filters=[
+                        SymbolAlias.symbol_public_id == sym_b,
+                        SymbolAlias.exchange == "kraken",
+                        SymbolAlias.channel == "ws",
+                    ],
+                    bus_time=_T2,
+                    decide=lambda existing: {
+                        "symbol_public_id": sym_b,
+                        "exchange": "kraken",
+                        "channel": "ws",
+                        "exchange_symbol": "RACE/USD",
+                        "created_at": existing.created_at if existing is not None else _T2,
+                        "session_id": _session_uuid("alias-b-upd-sec"),
+                        "sequence_id": 2,
+                    },
+                ),
+            )
+    rows_b = await _assert_single_active(
+        async_repo,
+        SymbolAlias,
+        SymbolAlias.symbol_public_id == sym_b,
+        SymbolAlias.exchange == "kraken",
+        SymbolAlias.channel == "ws",
+    )
+    assert rows_b[0].exchange_symbol == "ALT/USD"
+
 
 async def _run_concurrent_simple_upsert[ModelT: Base](
     repo: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
     build_spec_a: Scd2UpsertSpec[ModelT],
     build_spec_b: Scd2UpsertSpec[ModelT],
 ) -> tuple[str, str]:
-    """Execute two barrier-synchronized async ``upsert_scd2`` calls against ``repo``."""
-    barrier = asyncio.Barrier(2)
+    """Execute two flush-barrier-synchronized ``upsert_scd2`` calls and verify single active."""
+    _install_async_flush_barrier(monkeypatch, build_spec_a.model)
 
     async def _one(spec: Scd2UpsertSpec[ModelT]) -> str:
-        await barrier.wait()
         async with repo.session() as session:
             outcome = await upsert_scd2(session, spec)
             await session.commit()
@@ -550,12 +720,14 @@ async def _run_concurrent_simple_upsert[ModelT: Base](
     first, second = await asyncio.wait_for(
         asyncio.gather(_one(build_spec_a), _one(build_spec_b)), timeout=_WAIT_TIMEOUT_S
     )
+    await _assert_single_active(repo, build_spec_a.model, *build_spec_a.match_filters)
     return first, second
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_symbol_exchange_capability(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent SymbolExchangeCapability upserts converge to one active row."""
     async_repo, _ = pg_repos
@@ -595,13 +767,14 @@ async def test_pg18_race_symbol_exchange_capability(
             "sequence_id": 2,
         },
     )
-    outcomes = await _run_concurrent_simple_upsert(async_repo, spec_a, spec_b)
-    assert "created" in outcomes
+    outcomes = await _run_concurrent_simple_upsert(async_repo, monkeypatch, spec_a, spec_b)
+    assert sorted(outcomes) == ["created", "updated"]
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_symbol_market_data_channel_capability(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent SymbolMarketDataChannelCapability writers converge cleanly."""
     async_repo, _ = pg_repos
@@ -643,13 +816,14 @@ async def test_pg18_race_symbol_market_data_channel_capability(
             "sequence_id": 2,
         },
     )
-    outcomes = await _run_concurrent_simple_upsert(async_repo, spec_a, spec_b)
-    assert "created" in outcomes
+    outcomes = await _run_concurrent_simple_upsert(async_repo, monkeypatch, spec_a, spec_b)
+    assert sorted(outcomes) == ["created", "updated"]
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_instrument_order_capability(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent InstrumentOrderCapability writers resolve cleanly under SAVEPOINT."""
     async_repo, _ = pg_repos
@@ -666,9 +840,8 @@ async def test_pg18_race_instrument_order_capability(
             "instrument_public_id": inst_pid,
             "exchange": "kraken",
             "supported_order_types": ["market", "limit"],
-            "can_place_order": False,
-            "source": "tokenized",
-            "reason": "restricted",
+            "supports_post_only": True,
+            "supports_reduce_only": False,
             "session_id": _session_uuid("ioc-a"),
             "sequence_id": 1,
         },
@@ -681,20 +854,20 @@ async def test_pg18_race_instrument_order_capability(
             "instrument_public_id": inst_pid,
             "exchange": "kraken",
             "supported_order_types": ["market", "limit"],
-            "can_place_order": True,
-            "source": "updater",
-            "reason": None,
+            "supports_post_only": True,
+            "supports_reduce_only": True,
             "session_id": _session_uuid("ioc-b"),
             "sequence_id": 2,
         },
     )
-    outcomes = await _run_concurrent_simple_upsert(async_repo, spec_a, spec_b)
-    assert "created" in outcomes
+    outcomes = await _run_concurrent_simple_upsert(async_repo, monkeypatch, spec_a, spec_b)
+    assert sorted(outcomes) == ["created", "updated"]
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_setting(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent Setting upserts resolve cleanly without duplicate active rows."""
     async_repo, _ = pg_repos
@@ -727,8 +900,8 @@ async def test_pg18_race_setting(
             "sequence_id": 2,
         },
     )
-    outcomes = await _run_concurrent_simple_upsert(async_repo, spec_a, spec_b)
-    assert "created" in outcomes
+    outcomes = await _run_concurrent_simple_upsert(async_repo, monkeypatch, spec_a, spec_b)
+    assert sorted(outcomes) == ["created", "updated"]
 
 
 def _snapshot_row(instrument_pid: str, seq: int, bid: float) -> MarketSnapshotUpsertRow:
@@ -758,14 +931,14 @@ def _snapshot_row(instrument_pid: str, seq: int, bid: float) -> MarketSnapshotUp
 @pytest.mark.asyncio
 async def test_pg18_race_market_snapshot_single_row(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent single-row MarketSnapshot writers resolve via SAVEPOINT cleanly."""
     async_repo, _ = pg_repos
     _, inst_pid = await _seed_symbol_instrument_pg(async_repo, f"SNP1-{uuid4().hex[:6]}-USD")
-    barrier = asyncio.Barrier(2)
+    _install_async_flush_barrier(monkeypatch, MarketSnapshot)
 
     async def _single(seq: int, bid: float) -> None:
-        await barrier.wait()
         async with async_repo.session() as session:
             await async_repo._upsert_snapshot_row(session, _snapshot_row(inst_pid, seq, bid))
             await session.commit()
@@ -773,42 +946,39 @@ async def test_pg18_race_market_snapshot_single_row(
     await asyncio.wait_for(
         asyncio.gather(_single(1, 50.0), _single(2, 51.0)), timeout=_WAIT_TIMEOUT_S
     )
+    await _assert_single_active(
+        async_repo, MarketSnapshot, MarketSnapshot.instrument_public_id == inst_pid
+    )
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_market_snapshot_bulk(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent bulk upsert_market_snapshots collectors fall back per-row cleanly."""
     async_repo, _ = pg_repos
     _, inst_pid = await _seed_symbol_instrument_pg(async_repo, f"SNPB-{uuid4().hex[:6]}-USD")
-    barrier = asyncio.Barrier(2)
+    _install_async_flush_barrier(monkeypatch, MarketSnapshot)
 
     async def _bulk(seq: int, bid: float) -> int:
-        await barrier.wait()
         return await async_repo.upsert_market_snapshots([_snapshot_row(inst_pid, seq, bid)])
 
     counts = await asyncio.wait_for(
         asyncio.gather(_bulk(1, 60.0), _bulk(2, 61.0)), timeout=_WAIT_TIMEOUT_S
     )
     assert counts == [1, 1]
-    async with async_repo.session() as session:
-        active = (
-            await session.scalars(
-                select(MarketSnapshot).where(
-                    MarketSnapshot.instrument_public_id == inst_pid,
-                    MarketSnapshot.known_to == KNOWN_TO_MAX,
-                )
-            )
-        ).all()
-        assert len(active) == 1
+    await _assert_single_active(
+        async_repo, MarketSnapshot, MarketSnapshot.instrument_public_id == inst_pid
+    )
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_instrument(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Instrument absence race succeeds once and concurrent lock-wake refuses overwrite."""
+    """Instrument absence race succeeds once and concurrent lock-wake converges cleanly."""
     async_repo, _ = pg_repos
     sym_pid = str(uuid4())
     async with async_repo.session() as session:
@@ -827,10 +997,9 @@ async def test_pg18_race_instrument(
         )
         await session.commit()
 
-    barrier = asyncio.Barrier(2)
+    _install_async_flush_barrier(monkeypatch, Instrument)
 
     async def _ensure(seq: int) -> str:
-        await barrier.wait()
         async with async_repo.session() as session:
             outcome = await upsert_scd2(
                 session,
@@ -859,6 +1028,82 @@ async def test_pg18_race_instrument(
 
     pids = await asyncio.wait_for(asyncio.gather(_ensure(1), _ensure(2)), timeout=_WAIT_TIMEOUT_S)
     assert pids[0] == pids[1]
+    await _assert_single_active(
+        async_repo,
+        Instrument,
+        Instrument.symbol_public_id == sym_pid,
+        Instrument.exchange == "kraken",
+    )
+
+
+@pytest.mark.asyncio
+async def test_pg18_revise_instrument_lock_wake_and_reciprocal_rekey(
+    pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+) -> None:
+    """``revise_instrument`` refuses EPQ lock-wake races and serializes reciprocal rekeys."""
+    async_repo, _ = pg_repos
+    sym_1, inst_1 = await _seed_symbol_instrument_pg(async_repo, f"REV1-{uuid4().hex[:6]}-USD")
+    sym_2, _ = await _seed_symbol_instrument_pg(async_repo, f"REV2-{uuid4().hex[:6]}-USD")
+
+    a_locked = asyncio.Event()
+
+    async def _reviser_a() -> int:
+        async with async_repo.session() as session:
+            await begin_scd2_write(session)
+            inst, _conflict = await async_repo._load_revise_instrument_locked_rows(
+                session, inst_1, sym_1, "binance", _T1
+            )
+            new_row = await close_and_insert_existing(
+                session,
+                Instrument,
+                [Instrument.public_id == inst_1],
+                {
+                    "symbol_public_id": sym_1,
+                    "exchange": "binance",
+                    "requires_ai_review": inst.requires_ai_review,
+                    "source_exchange": None,
+                    "session_id": _session_uuid("rev-a"),
+                    "sequence_id": 1,
+                },
+                _T1,
+            )
+            a_locked.set()
+            await _wait_for_blocked_lock(async_repo, "instruments")
+            await session.commit()
+            return int(new_row.id)
+
+    async def _reviser_b() -> str:
+        await asyncio.wait_for(a_locked.wait(), timeout=_WAIT_TIMEOUT_S)
+        try:
+            await async_repo.revise_instrument(
+                instrument_public_id=inst_1,
+                symbol_public_id=sym_1,
+                exchange="coinbase",
+                session_id=_session_uuid("rev-b"),
+                sequence_id=2,
+                timestamp=_T2,
+            )
+            return "updated"
+        except TemporalVersionConflictError:
+            return "conflict"
+
+    _, status = await asyncio.wait_for(
+        asyncio.gather(_reviser_a(), _reviser_b()), timeout=_WAIT_TIMEOUT_S
+    )
+    assert status == "conflict"
+    active = await _assert_single_active(async_repo, Instrument, Instrument.public_id == inst_1)
+    assert active[0].exchange == "binance"
+
+    _, inst_2 = await _seed_symbol_instrument_pg(async_repo, f"REV3-{uuid4().hex[:6]}-USD")
+    results = await asyncio.wait_for(
+        asyncio.gather(
+            async_repo.revise_instrument(inst_1, sym_2, "kraken", _session_uuid("swap-1"), 3, _T2),
+            async_repo.revise_instrument(inst_2, sym_1, "binance", _session_uuid("swap-2"), 3, _T2),
+            return_exceptions=True,
+        ),
+        timeout=_WAIT_TIMEOUT_S,
+    )
+    assert any(isinstance(res, ValueError) for res in results)
 
 
 @pytest.mark.asyncio
@@ -940,19 +1185,14 @@ async def test_pg18_race_user(
         asyncio.gather(_user_a(), _user_b()), timeout=_WAIT_TIMEOUT_S
     )
     assert b_status == "conflict"
-    async with async_repo.session() as session:
-        active = (
-            await session.scalars(
-                select(User).where(User.username == username, User.known_to == KNOWN_TO_MAX)
-            )
-        ).all()
-        assert len(active) == 1
-        assert active[0].role == "operator"
+    active = await _assert_single_active(async_repo, User, User.username == username)
+    assert active[0].role == "operator"
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_user_trading_caps(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent UserTradingCaps writers resolve cleanly under SAVEPOINT."""
     async_repo, _ = pg_repos
@@ -979,7 +1219,7 @@ async def test_pg18_race_user_trading_caps(
         bus_time=_T1,
         decide=lambda _r: {
             "user_public_id": user_pid,
-            "max_order_notional_usd": Decimal("100"),
+            "max_daily_notional_usd": Decimal("100"),
             "session_id": _session_uuid("caps-a"),
             "sequence_id": 1,
         },
@@ -990,13 +1230,13 @@ async def test_pg18_race_user_trading_caps(
         bus_time=_T1,
         decide=lambda _r: {
             "user_public_id": user_pid,
-            "max_order_notional_usd": Decimal("200"),
+            "max_daily_notional_usd": Decimal("200"),
             "session_id": _session_uuid("caps-b"),
             "sequence_id": 2,
         },
     )
-    outcomes = await _run_concurrent_simple_upsert(async_repo, spec_a, spec_b)
-    assert "created" in outcomes
+    outcomes = await _run_concurrent_simple_upsert(async_repo, monkeypatch, spec_a, spec_b)
+    assert sorted(outcomes) == ["created", "updated"]
 
 
 @pytest.mark.asyncio
@@ -1071,19 +1311,31 @@ async def test_pg18_race_user_operator_membership_detach(
         asyncio.gather(_detach(1), _detach(2)), timeout=_WAIT_TIMEOUT_S
     )
     assert sorted(results) in (["detached", "missing"], ["conflict", "detached"])
+    async with async_repo.session() as session:
+        active = (
+            await session.scalars(
+                select(UserOperatorMembership).where(
+                    UserOperatorMembership.user_public_id == user_pid,
+                    UserOperatorMembership.known_to == KNOWN_TO_MAX,
+                )
+            )
+        ).all()
+        assert active == []
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_spot_asset_precision_evidence(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sync and async precision writers resolve concurrent updates on PG18."""
+    """Sync and async precision writers merge both planes under one active row on PG18."""
     async_repo, sync_repo = pg_repos
     asset = f"A{uuid4().hex[:5]}"
-    barrier = asyncio.Barrier(2)
+    _install_mixed_flush_barrier(
+        monkeypatch, SpotAssetPrecisionEvidence, asyncio.get_running_loop()
+    )
 
     async def _async_ev() -> None:
-        await barrier.wait()
         await async_repo.upsert_spot_asset_precision_evidence(
             SpotAssetPrecisionEvidenceUpsertRow(
                 exchange="walutomat",
@@ -1125,16 +1377,23 @@ async def test_pg18_race_spot_asset_precision_evidence(
             )
             session.commit()
 
-    async def _sync_task() -> None:
-        await barrier.wait()
-        await asyncio.to_thread(_sync_ev)
-
-    await asyncio.wait_for(asyncio.gather(_async_ev(), _sync_task()), timeout=_WAIT_TIMEOUT_S)
+    await asyncio.wait_for(
+        asyncio.gather(_async_ev(), asyncio.to_thread(_sync_ev)), timeout=_WAIT_TIMEOUT_S
+    )
+    active = await _assert_single_active(
+        async_repo,
+        SpotAssetPrecisionEvidence,
+        SpotAssetPrecisionEvidence.exchange == "walutomat",
+        SpotAssetPrecisionEvidence.asset == asset,
+    )
+    assert active[0].balance_decimals == 2
+    assert active[0].fee_decimals == 4
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_portfolio_pnl_point(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent PortfolioPnlPoint upsert conflicts resolve deterministically under SAVEPOINT."""
     async_repo, _ = pg_repos
@@ -1221,13 +1480,14 @@ async def test_pg18_race_portfolio_pnl_point(
             "sequence_id": 2,
         },
     )
-    outcomes = await _run_concurrent_simple_upsert(async_repo, spec_a, spec_b)
-    assert "created" in outcomes
+    outcomes = await _run_concurrent_simple_upsert(async_repo, monkeypatch, spec_a, spec_b)
+    assert sorted(outcomes) == ["created", "updated"]
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_trade_projection_checkpoint(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent upsert_checkpoint calls on PG18 serialize through SAVEPOINT retry."""
     async_repo, _ = pg_repos
@@ -1257,10 +1517,9 @@ async def test_pg18_race_trade_projection_checkpoint(
         await session.commit()
 
     shard = f"shard-{uuid4().hex[:8]}"
-    barrier = asyncio.Barrier(2)
+    _install_async_flush_barrier(monkeypatch, TradeProjectionCheckpoint)
 
     async def _cp(seq: int) -> int:
-        await barrier.wait()
         return await async_repo.upsert_checkpoint(
             CheckpointUpsertRow(
                 shard_key=shard,
@@ -1286,19 +1545,22 @@ async def test_pg18_race_trade_projection_checkpoint(
 
     ids = await asyncio.wait_for(asyncio.gather(_cp(1), _cp(2)), timeout=_WAIT_TIMEOUT_S)
     assert all(row_id > 0 for row_id in ids)
+    await _assert_single_active(
+        async_repo, TradeProjectionCheckpoint, TradeProjectionCheckpoint.shard_key == shard
+    )
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_underlying_asset(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent upsert_underlying_asset calls resolve to one underlying asset."""
     async_repo, _ = pg_repos
     ticker = f"UND_{uuid4().hex[:6]}"
-    barrier = asyncio.Barrier(2)
+    _install_async_flush_barrier(monkeypatch, UnderlyingAsset)
 
     async def _asset(seq: int) -> tuple[str, str]:
-        await barrier.wait()
         return await async_repo.upsert_underlying_asset(
             ticker=ticker,
             name={"en": "Test Index"},
@@ -1312,11 +1574,13 @@ async def test_pg18_race_underlying_asset(
         asyncio.gather(_asset(1), _asset(2)), timeout=_WAIT_TIMEOUT_S
     )
     assert res_a[0] == res_b[0]
+    await _assert_single_active(async_repo, UnderlyingAsset, UnderlyingAsset.ticker == ticker)
 
 
 @pytest.mark.asyncio
 async def test_pg18_race_instrument_underlying_mapping(
     pg_repos: tuple[SQLAlchemyRepository, DatabaseRepository],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Concurrent upsert_instrument_underlying_mapping calls resolve via SAVEPOINT."""
     async_repo, _ = pg_repos
@@ -1329,10 +1593,9 @@ async def test_pg18_race_instrument_underlying_mapping(
         sequence_id=1,
         timestamp=_T0,
     )
-    barrier = asyncio.Barrier(2)
+    _install_async_flush_barrier(monkeypatch, InstrumentUnderlyingMapping)
 
     async def _map(seq: int) -> str:
-        await barrier.wait()
         return await async_repo.upsert_instrument_underlying_mapping(
             instrument_public_id=inst_pid,
             underlying_public_id=underlying_pid,
@@ -1343,4 +1606,9 @@ async def test_pg18_race_instrument_underlying_mapping(
         )
 
     outcomes = await asyncio.wait_for(asyncio.gather(_map(1), _map(2)), timeout=_WAIT_TIMEOUT_S)
-    assert "created" in outcomes
+    assert sorted(outcomes) == ["created", "updated"]
+    await _assert_single_active(
+        async_repo,
+        InstrumentUnderlyingMapping,
+        InstrumentUnderlyingMapping.instrument_public_id == inst_pid,
+    )
