@@ -15,6 +15,8 @@ from typing import Final
 
 from snapper.application.portfolio.exact_sum import faithful_roundings
 from snapper.application.portfolio.exact_sum import project_units
+from snapper.application.portfolio.pnl_adjusted_total import AdjustedFlowProjection
+from snapper.application.portfolio.pnl_adjusted_total import adjust_flow_family
 
 MAX_RECOVERY_KEYS: Final[int] = 64
 MAX_RECOVERY_BRANCH_KEYS: Final[int] = 12
@@ -167,6 +169,8 @@ class FaithfulFlowRecovery[InstrumentKeyT: Hashable, AttributionKeyT: Hashable]:
     budget: FaithfulRecoveryBudget
     _previous_input: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT] | None = None
     _previous_projection: FaithfulFlowProjection[InstrumentKeyT, AttributionKeyT] | None = None
+    _previous_adjusted_input: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT] | None = None
+    _previous_adjusted: AdjustedFlowProjection[InstrumentKeyT, AttributionKeyT] | None = None
 
     def recover(
         self, request: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT]
@@ -197,3 +201,40 @@ class FaithfulFlowRecovery[InstrumentKeyT: Hashable, AttributionKeyT: Hashable]:
         self._previous_input = request
         self._previous_projection = projection
         return projection
+
+    def completed_refusal(
+        self, request: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT]
+    ) -> bool:
+        """Report whether ``request`` completed recovery with an impossible result.
+
+        Args:
+            request: Complete ordered exact inputs most recently evaluated.
+
+        Returns:
+            ``True`` only when the exact input completed full faithful search or
+            reused a completed refusal, never on budget or structural aborts.
+        """
+        return self._previous_input == request and self._previous_projection is None
+
+    def adjusted(
+        self, request: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT]
+    ) -> AdjustedFlowProjection[InstrumentKeyT, AttributionKeyT] | None:
+        """Return the ``(a″)`` adjusted projection, reusing the last identical input.
+
+        Cumulative flow families stay unchanged across idle minutes, so one
+        public read would otherwise re-solve the same exact input every minute.
+        The solver is deterministic, so a single-entry cache keyed on the
+        immutable exact input returns identical results at zero repeat cost.
+
+        Args:
+            request: Complete ordered exact inputs for the family.
+
+        Returns:
+            The bounded adjusted projection, or ``None`` when it refuses.
+        """
+        if request != self._previous_adjusted_input:
+            self._previous_adjusted = adjust_flow_family(
+                request.total_units, request.instruments, request.attributions
+            )
+            self._previous_adjusted_input = request
+        return self._previous_adjusted

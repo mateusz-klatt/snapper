@@ -21,11 +21,14 @@ from unittest.mock import patch
 import pytest
 
 from snapper.api.schemas.pnl_timeline import PnlIncompletenessReasonData
+from snapper.application.portfolio import pnl_faithful_recovery
 from snapper.application.portfolio import pnl_timeline
 from snapper.application.portfolio.average_cost import FLAT_EPSILON
 from snapper.application.portfolio.exact_sum import ExactSum
 from snapper.application.portfolio.exact_sum import exact_units_of
 from snapper.application.portfolio.exact_sum import faithful_roundings
+from snapper.application.portfolio.exact_sum import project_units
+from snapper.application.portfolio.pnl_adjusted_total import AdjustedFlowProjection
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulRecoveryBudget
 from snapper.application.portfolio.pnl_timeline import AttributionKey
 from snapper.application.portfolio.pnl_timeline import MarkMap
@@ -3736,3 +3739,411 @@ class TestPublishedFlowFamily:
         assert point.valuation_status == "incomplete"
         assert point.fee_pnl is None
         assert ("cumulative_non_finite", "untrusted", "instrument", "I1") in _reason_rows(point)
+
+
+class TestAdjustedTotalFallback:
+    """Cover the 5A.18 (a″) public-read adjusted-total flow fallback."""
+
+    _PLN_TOTAL = (
+        -16187040773089496689807813778615044681873555847504026964709744282801324220636663165141420382999691947667737329626062877669405702741424182330992699763554396228386556886607244170576859028906793708002794870342794738304763884267161140975065380223652479163254244609630524029572230521452066859450989515298031448105643567097053184
+    )
+    _PLN_INST = (
+        5361476197134840320096735317440546918520996399417344764382578331621090648590857901786894243669468614905325299253947376625787145163081905307946713932148370702392918455230133447041578288870780239940661915775715845443631879060247800307003540034719339353640155446539419963913051893705241878671894422578636794903279211867275264,
+        -112164005775907702666686220246966565620777309509136256407691393787668115464736441634535938865555355429056828434059161354702954508170558866159192566833205993835219791543018946787285655173245396494637753481040334352474621014061538369487798964455533222381259743213793472643126434325689830651866824453359369815080251510717677568,
+        90615488805683365656781671150910974020382757262214884678599071173245700595508920567607624238886194866483765805179151100407761660266052778520253153137503226904440316201181569169667217855467822546694296694921823768726225250734129428205730044197161403864365343157623528649641151910532521913743940515482701572071328731753349120,
+    )
+    _PLN_ATTR = (
+        -102487506302311749445472305063199727752442905566769588598069958233747763487429829947722515539591971378672815641467717170021876982787320767818859678549992612942370688053644763016454268763561576421322763633113261963003452712972741387650513242708956567096885611408519695897324066021364506479756910441762607296829607598792638464,
+        86300465529222252755664491284584683070569349719265561633360213950946439266793166782581095156592279431005078311841654292352471280045896585487866978786438216713984131167037518845877409734654782713319968762770467224698688828705580246675447862485304087933631366798889171867751835499912439620305920926464575848723964031695585280,
+    )
+
+    def _decompose_units(self, units: int) -> list[float]:
+        """Decompose an exact unit integer into exact IEEE-754 double summands."""
+        remaining = units
+        terms: list[float] = []
+        while remaining:
+            term = project_units(remaining)
+            terms.append(term)
+            remaining -= exact_units_of(term)
+        return terms
+
+    def _pln_realized_constellation(
+        self,
+    ) -> tuple[tuple[TimelineExecution, ...], dict[str, TimelineExecutionLineage]]:
+        """Build round-trip executions matching the exact PLN fixture units."""
+        cells: tuple[tuple[str, tuple[str, str | None], int], ...] = (
+            ("I0", ("manual", None), self._PLN_INST[0]),
+            ("I2", ("plan", "dca"), self._PLN_ATTR[1] - (self._PLN_ATTR[1] - self._PLN_INST[2])),
+            ("I1", ("manual", None), self._PLN_ATTR[0] - self._PLN_INST[0]),
+            ("I1", ("plan", "dca"), self._PLN_ATTR[1] - self._PLN_INST[2]),
+        )
+        executions: list[TimelineExecution] = []
+        lineage: dict[str, TimelineExecutionLineage] = {}
+        scope_by_inst = {"I0": 0, "I1": 0, "I2": 0}
+        for instrument, (origin, strategy), cell_units in cells:
+            for term in self._decompose_units(cell_units):
+                open_price, close_price = (
+                    (term, 2.0 * term) if term > 0.0 else (2.0 * (-term), -term)
+                )
+                for side, price in (("buy", open_price), ("sell", close_price)):
+                    scope_by_inst[instrument] += 1
+                    seq = scope_by_inst[instrument]
+                    fill = _exec(instrument, seq, 0, side, 1.0, price)
+                    executions.append(fill)
+                    if origin == "manual":
+                        lineage[fill.order_public_id] = TimelineExecutionLineage(
+                            "rest", None, None, "live", None
+                        )
+                    else:
+                        lineage[fill.order_public_id] = TimelineExecutionLineage(
+                            "strategy", None, "sig-1", "live", strategy
+                        )
+        return tuple(executions), lineage
+
+    def test_pln_fixture_realized_constellation_publishes_only_on_public_read(self) -> None:
+        """Gate the adjusted-total fallback strictly behind ``TimelineWindow.public_read``.
+
+        Given: A timeline replay reproducing the exact PLN fixture realized family.
+        When: Built with ``public_read=False`` and again with ``public_read=True``.
+        Then: ``public_read=False`` withholds with ``attribution_sum_unrepresentable`` and
+            no disclosure, while ``public_read=True`` publishes ``-0.07997460753815056``,
+            exact sum invariants in both dimensions, and full absorber disclosure.
+        """
+        executions, lineage = self._pln_realized_constellation()
+        withheld = build_pnl_timeline(executions, (), {}, _window(0, 0), lineage=lineage).points[0]
+        assert withheld.valuation_status == "incomplete"
+        assert _reason_rows(withheld) == [
+            ("attribution_sum_unrepresentable", "untrusted", "global", None)
+        ]
+        assert withheld.total_rounding_adjusted is False
+        assert withheld.total_deviation_ulps is None
+        assert withheld.absorber_deviation_ulps is None
+        assert withheld.instrument_absorber_id is None
+        assert withheld.attribution_absorber_key is None
+
+        public_window = replace(_window(0, 0), public_read=True)
+        published = build_pnl_timeline(executions, (), {}, public_window, lineage=lineage).points[0]
+        assert published.valuation_status == "complete"
+        assert published.realized_pnl == -0.07997460753815056
+        assert published.total_rounding_adjusted is True
+        assert published.total_deviation_ulps == pytest.approx(1.85, abs=0.01)
+        assert published.absorber_deviation_ulps == pytest.approx(1.77, abs=0.01)
+        assert published.instrument_absorber_id == "I0"
+        assert published.attribution_absorber_key is None
+        _assert_exact_attribution_sums(published)
+
+    def test_usd_native_published_points_are_bit_identical_across_public_read(self) -> None:
+        """Keep existing Pass 1, Pass 2, and faithful-recovery points bit-identical.
+
+        Given: Native executions publishing under Pass 1, Pass 2 widening, and
+            bounded faithful recovery.
+        When: Built with ``public_read=False`` and ``public_read=True``.
+        Then: Every published point is bit-identical and leaves
+            ``total_rounding_adjusted`` at ``False``.
+        """
+        unit = math.ulp(20.0)
+        deltas = (32.0, 0.875 * unit, 120.0, 1.875 * unit, -132.0, 2.875 * unit)
+        executions = tuple(
+            _exec("I1", index, 0, "buy", 0.0, 100.0, fee=-delta)
+            for index, delta in enumerate(deltas, start=1)
+        ) + (
+            _exec("I1", 7, 0, "buy", 1.0, 100.0),
+            _exec("I2", 1, 0, "buy", 1.0, 100.0),
+        )
+        owners = (
+            TimelineExecutionLineage("rest", None, None, "live", None),
+            TimelineExecutionLineage("strategy", "plan-1", "signal-1", "live", "dca"),
+            TimelineExecutionLineage("strategy", None, "signal-2", "live", "rebalance"),
+        )
+        lineage = {
+            execution.order_public_id: owners[index // 2]
+            for index, execution in enumerate(executions[:6])
+        }
+        lineage[executions[6].order_public_id] = owners[0]
+        lineage[executions[7].order_public_id] = owners[1]
+        marks: MarkMap = {("I1", _m(0)): 101.0, ("I2", _m(0)): 99.0}
+        baseline = build_pnl_timeline(executions, (), marks, _window(0, 0), lineage=lineage)
+        public = build_pnl_timeline(
+            executions,
+            (),
+            marks,
+            replace(_window(0, 0), public_read=True),
+            lineage=lineage,
+        )
+        assert baseline == public
+        assert public.points[0].valuation_status == "complete"
+        assert public.points[0].fee_pnl == 20.00000000000002
+        assert public.points[0].total_rounding_adjusted is False
+
+    def test_public_read_never_runs_adjusted_fallback_after_budget_or_cap_abort(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Do not invoke ``(a″)`` after budget exhaustion, branch-cap, or key-cap aborts.
+
+        Given: The PLN fixture under zero budget, 13 inexact branches, or >64 keys,
+            with ``adjust_flow_family`` guarded to fail if called.
+        When: Built or evaluated with ``public_read=True``.
+        Then: Every point withholds with the historical reason and ``(a″)`` is never called.
+        """
+        executions, lineage = self._pln_realized_constellation()
+        public_window = replace(_window(0, 0), public_read=True)
+
+        def forbid_adjust(*_args: object, **_kwargs: object) -> None:
+            """Fail immediately if ``(a″)`` is reached after any abort."""
+            raise AssertionError("adjust_flow_family must not run on budget or cap aborts")
+
+        monkeypatch.setattr(pnl_faithful_recovery, "adjust_flow_family", forbid_adjust)
+
+        def zero_budget() -> FaithfulRecoveryBudget:
+            """Return an exhausted budget forcing a recovery abort."""
+            return FaithfulRecoveryBudget(0)
+
+        monkeypatch.setattr(pnl_timeline, "FaithfulRecoveryBudget", zero_budget)
+        budget_point = build_pnl_timeline(
+            executions, (), {}, public_window, lineage=lineage
+        ).points[0]
+        assert budget_point.valuation_status == "incomplete"
+        assert _reason_rows(budget_point) == [
+            ("attribution_sum_unrepresentable", "untrusted", "global", None)
+        ]
+        assert budget_point.total_rounding_adjusted is False
+
+        monkeypatch.undo()
+        monkeypatch.setattr(pnl_faithful_recovery, "adjust_flow_family", forbid_adjust)
+        u = math.ulp(1.0)
+        branch_execs: list[TimelineExecution] = []
+        for idx in range(12):
+            branch_execs.append(_exec(f"B{idx:02d}", 1, 0, "buy", 0.0, 100.0, fee=-1.0))
+            branch_execs.append(_exec(f"B{idx:02d}", 2, 0, "buy", 0.0, 100.0, fee=-0.375 * u))
+        branch_execs.append(_exec("B12", 1, 0, "buy", 0.0, 100.0, fee=12.0))
+        branch_execs.append(_exec("B12", 2, 0, "buy", 0.0, 100.0, fee=-0.375 * u))
+        branch_point = build_pnl_timeline(tuple(branch_execs), (), {}, public_window).points[0]
+        assert branch_point.valuation_status == "incomplete"
+        assert branch_point.total_rounding_adjusted is False
+
+        assert (
+            pnl_timeline._resolve_unrepresentable_family(
+                _empty_exact_cumulatives(),
+                ([f"I{idx:02d}" for idx in range(65)], [("manual", None)]),
+                pnl_timeline._new_flow_recoveries()[0],
+                public_read=True,
+            )
+            is None
+        )
+
+    def test_public_read_disclosure_covers_attribution_absorber_mark_incomplete_and_refusal(
+        self,
+    ) -> None:
+        """Disclose attribution absorbers, retain flow adjustment on mark gaps, and fail closed.
+
+        Given: An open-position PLN constellation missing its mark (mark-incomplete),
+            an attribution-absorber unit constellation, and an unrepresentable
+            >8u family under ``public_read=True``.
+        When: Point valuation runs across all three cases.
+        Then: Mark-incomplete retains ``total_rounding_adjusted=True``, attribution
+            absorbers populate ``attribution_absorber_key``, and >8u refuses cleanly.
+        """
+        executions, lineage = self._pln_realized_constellation()
+        open_fill = _exec("I0", 99, 0, "buy", 1.0, 100.0)
+        lineage[open_fill.order_public_id] = TimelineExecutionLineage(
+            "rest", None, None, "live", None
+        )
+        mark_incomplete = build_pnl_timeline(
+            (*executions, open_fill),
+            (),
+            {},
+            replace(_window(0, 0), public_read=True),
+            lineage=lineage,
+        ).points[0]
+        assert mark_incomplete.valuation_status == "incomplete"
+        assert _reason_rows(mark_incomplete) == [
+            ("mark_unavailable", "mark_incomplete", "instrument", "I0")
+        ]
+        assert mark_incomplete.realized_pnl == -0.07997460753815056
+        assert mark_incomplete.total_rounding_adjusted is True
+        assert mark_incomplete.instrument_absorber_id == "I0"
+        assert mark_incomplete.attribution_absorber_key is None
+
+        attr_family = _ExactCumulatives(
+            by_instrument={f"I{idx}": _exact(units) for idx, units in enumerate(self._PLN_ATTR)},
+            by_attribution={
+                ("manual", None): _exact(self._PLN_INST[0]),
+                ("plan", "dca"): _exact(self._PLN_INST[1]),
+                ("system", "s"): _exact(self._PLN_INST[2]),
+            },
+            total=_exact(self._PLN_TOTAL),
+        )
+        attr_cumulatives = _PointCumulatives(
+            realized_by_instrument={},
+            fee_by_instrument={},
+            accrual_by_instrument={},
+            realized_by_attribution={},
+            fee_by_attribution={},
+            accrual_by_attribution={},
+            realized_total=0.0,
+            fee_total=0.0,
+            accrual_total=0.0,
+            realized_exact=attr_family,
+            fee_exact=_empty_exact_cumulatives(),
+            accrual_exact=_empty_exact_cumulatives(),
+        )
+        attr_outcome = pnl_timeline._published_point_flows_outcome(
+            attr_cumulatives,
+            ["I0", "I1"],
+            [("manual", None), ("plan", "dca"), ("system", "s")],
+            public_read=True,
+        )
+        assert not isinstance(attr_outcome, str)
+        disclosure = attr_outcome[3]
+        assert disclosure.total_rounding_adjusted is True
+        assert disclosure.instrument_absorber_id is None
+        assert disclosure.attribution_absorber_key == ("manual", None)
+
+        too_far_execs = (
+            _exec("I1", 1, 0, "buy", 0.0, 100.0, fee=1e20),
+            _exec("I2", 2, 0, "buy", 0.0, 100.0, fee=-1e20),
+            _exec("I3", 3, 0, "buy", 0.0, 100.0, fee=1.0),
+        )
+        too_far_lineage = {
+            "order-I1-1": TimelineExecutionLineage("rest", None, None, "live", None),
+            "order-I2-2": TimelineExecutionLineage("strategy", None, "s1", "live", "momentum"),
+            "order-I3-3": TimelineExecutionLineage("strategy", None, "s1", "live", "momentum"),
+        }
+        refused = build_pnl_timeline(
+            too_far_execs,
+            (),
+            {},
+            replace(_window(0, 0), public_read=True),
+            lineage=too_far_lineage,
+        ).points[0]
+        assert refused.valuation_status == "incomplete"
+        assert _reason_rows(refused) == [
+            ("attribution_sum_unrepresentable", "untrusted", "global", None)
+        ]
+        assert refused.total_rounding_adjusted is False
+
+    def test_public_read_disclosure_merges_multiple_adjusted_families_and_legacy_helper(
+        self,
+    ) -> None:
+        """Aggregate multi-family disclosure maxima while keeping legacy helpers private.
+
+        Given: A point cumulatives object whose realized family adjusts on an
+            instrument absorber, whose fee family adjusts on an attribution
+            absorber, and a native exact family for the legacy helper.
+        When: ``_published_point_flows_outcome(..., public_read=True)`` and
+            legacy ``_published_point_flows(...)`` run.
+        Then: Point disclosure takes ``max`` deviations and reports absorber
+            identities only for the family with the largest total deviation
+            (ties resolved realized, fee, accrual), while legacy ``_published_point_flows``
+            still withholds the fixture under default ``public_read=False`` and
+            returns a three-tuple on exact inputs.
+        """
+        inst_family = _ExactCumulatives(
+            by_instrument={f"I{idx}": _exact(units) for idx, units in enumerate(self._PLN_INST)},
+            by_attribution={
+                ("manual", None): _exact(self._PLN_ATTR[0]),
+                ("plan", "dca"): _exact(self._PLN_ATTR[1]),
+            },
+            total=_exact(self._PLN_TOTAL),
+        )
+        attr_family = _ExactCumulatives(
+            by_instrument={f"I{idx}": _exact(units) for idx, units in enumerate(self._PLN_ATTR)},
+            by_attribution={
+                ("manual", None): _exact(self._PLN_INST[0]),
+                ("plan", "dca"): _exact(self._PLN_INST[1]),
+                ("system", "s"): _exact(self._PLN_INST[2]),
+            },
+            total=_exact(self._PLN_TOTAL),
+        )
+        multi = _PointCumulatives(
+            realized_by_instrument={},
+            fee_by_instrument={},
+            accrual_by_instrument={},
+            realized_by_attribution={},
+            fee_by_attribution={},
+            accrual_by_attribution={},
+            realized_total=0.0,
+            fee_total=0.0,
+            accrual_total=0.0,
+            realized_exact=inst_family,
+            fee_exact=attr_family,
+            accrual_exact=_empty_exact_cumulatives(),
+        )
+        assert (
+            pnl_timeline._published_point_flows(
+                multi, ["I0", "I1", "I2"], [("manual", None), ("plan", "dca"), ("system", "s")]
+            )
+            == "attribution_sum_unrepresentable"
+        )
+        merged = pnl_timeline._published_point_flows_outcome(
+            multi,
+            ["I0", "I1", "I2"],
+            [("manual", None), ("plan", "dca"), ("system", "s")],
+            public_read=True,
+        )
+        assert not isinstance(merged, str)
+        disclosure = merged[3]
+        assert disclosure.total_rounding_adjusted is True
+        assert disclosure.total_deviation_ulps == pytest.approx(1.85, abs=0.01)
+        assert disclosure.absorber_deviation_ulps == pytest.approx(1.77, abs=0.01)
+        assert disclosure.instrument_absorber_id == "I0"
+        assert disclosure.attribution_absorber_key is None
+
+        native = _PointCumulatives(
+            realized_by_instrument={},
+            fee_by_instrument={},
+            accrual_by_instrument={},
+            realized_by_attribution={},
+            fee_by_attribution={},
+            accrual_by_attribution={},
+            realized_total=0.0,
+            fee_total=0.0,
+            accrual_total=0.0,
+            realized_exact=_empty_exact_cumulatives(),
+            fee_exact=_empty_exact_cumulatives(),
+            accrual_exact=_empty_exact_cumulatives(),
+        )
+        legacy = pnl_timeline._published_point_flows(native, ["I0"], [("manual", None)])
+        assert isinstance(legacy, tuple)
+        assert len(legacy) == 3
+        assert legacy[0].total == 0.0
+
+
+def test_disclosure_reports_the_family_with_the_largest_exact_deviation() -> None:
+    """Pick the reported absorber by exact deviation units, not float quotients.
+
+    Given: Two adjusted families whose float ``total_deviation_ulps`` tie while
+        their exact deviation units differ, the larger one second.
+    When: The point disclosure is aggregated.
+    Then: The absorber identity comes from the family with the larger exact
+        deviation, and the earlier family wins a genuine exact tie.
+    """
+    first = AdjustedFlowProjection[str, AttributionKey](
+        total=0.0,
+        instruments={},
+        attributions={},
+        total_deviation_ulps=2.0,
+        absorber_deviation_ulps=1.0,
+        absorber_key="I0",
+        absorber_dimension="instrument",
+        total_deviation_units=10,
+    )
+    second = AdjustedFlowProjection[str, AttributionKey](
+        total=0.0,
+        instruments={},
+        attributions={},
+        total_deviation_ulps=2.0,
+        absorber_deviation_ulps=3.0,
+        absorber_key=("manual", None),
+        absorber_dimension="attribution",
+        total_deviation_units=11,
+    )
+    disclosure = pnl_timeline._disclosure_from_adjustments([first, second])
+    assert disclosure.attribution_absorber_key == ("manual", None)
+    assert disclosure.instrument_absorber_id is None
+    assert disclosure.absorber_deviation_ulps == 3.0
+    tied = pnl_timeline._disclosure_from_adjustments(
+        [first, replace(second, total_deviation_units=10)]
+    )
+    assert tied.instrument_absorber_id == "I0"
+    assert tied.attribution_absorber_key is None

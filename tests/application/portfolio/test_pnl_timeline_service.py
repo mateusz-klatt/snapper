@@ -106,6 +106,7 @@ from snapper.data.models import Instrument
 from snapper.data.models import Symbol
 from snapper.data.repository import PnlTimelineAnchorEvidenceMismatchError
 from snapper.data.repository import PortfolioPnlSampleQuery
+from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRatePlane
@@ -4401,7 +4402,7 @@ def test_provenance_constants_are_stable() -> None:
     Then: The documented source, version, and total-work limit remain stable.
     """
     assert PNL_TIMELINE_MARK_SOURCE == "finalized_1m_candle_close"
-    assert PNL_TIMELINE_CALC_VERSION == "5A.16"
+    assert PNL_TIMELINE_CALC_VERSION == "5A.18"
     assert PNL_ANCHOR_CALC_VERSION == "5A.13"
     assert PNL_TIMELINE_MAX_WORK_UNITS == 131_040
     assert PNL_TIMELINE_MARKER_LIMIT == 2_000
@@ -8383,3 +8384,66 @@ class TestSnapshotter5C6ServiceWiring:
             _event_fx_minutes(trusted_replayed_rows, accruals, flag_off),
         )
         assert _flatten_fx_requirements(flag_off_union) == {(_I1, ("EUR", "USD"), _m(1))}
+
+
+async def test_public_read_policy_threads_to_window_and_preserves_disclosure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Thread ``public_read`` into ``TimelineWindow`` and keep disclosure across display decoration.
+
+    Given: A valid seeded scope and a stubbed pure timeline returning one adjusted
+        ``PnlTimelinePoint`` with both instrument and attribution absorber metadata.
+    When: ``build_wallet_pnl_series`` runs with ``PnlSeriesReadPolicy(public_read=True)``.
+    Then: The pure builder receives ``window.public_read is True`` and the returned
+        point preserves all five ``(a″)`` disclosure fields after display decoration.
+    """
+    seen_windows: list[TimelineWindow] = []
+    adjusted_point = PnlTimelinePoint(
+        point_time=_m(0),
+        realized_pnl=-0.07997460753815056,
+        fee_pnl=0.0,
+        accrual_pnl=0.0,
+        unrealized_pnl=0.0,
+        net_pnl=-0.07997460753815056,
+        valuation_status="complete",
+        incompleteness_reasons=(),
+        per_instrument=(),
+        attribution=(),
+        total_rounding_adjusted=True,
+        total_deviation_ulps=1.85,
+        absorber_deviation_ulps=1.77,
+        instrument_absorber_id=_I1,
+        attribution_absorber_key=("manual", None),
+    )
+
+    def fake_build(
+        executions: object,
+        accruals: object,
+        marks: object,
+        window: TimelineWindow,
+        **_kwargs: object,
+    ) -> PnlTimelineResult:
+        """Capture the forwarded window and return the adjusted point fixture."""
+        del executions, accruals, marks
+        seen_windows.append(window)
+        return PnlTimelineResult(
+            points=(adjusted_point,),
+            granularity=window.granularity,
+            valuation_ccy=window.valuation_ccy,
+        )
+
+    monkeypatch.setattr(pnl_timeline_service, "_timed_build_pnl_timeline", fake_build)
+    repo = FakeRepo(executions=[_exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")])
+    result = await build_wallet_pnl_series(
+        cast(Repository, repo),
+        _W1,
+        "live",
+        _m(0),
+        _m(0),
+        "1m",
+        _m(0),
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False, public_read=True),
+    )
+    assert len(seen_windows) == 1
+    assert seen_windows[0].public_read is True
+    assert result.points == (adjusted_point,)

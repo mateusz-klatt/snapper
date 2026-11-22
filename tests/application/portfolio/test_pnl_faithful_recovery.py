@@ -7,8 +7,10 @@ from itertools import product
 
 import pytest
 
+from snapper.application.portfolio import pnl_faithful_recovery
 from snapper.application.portfolio.exact_sum import exact_units_of
 from snapper.application.portfolio.exact_sum import faithful_roundings
+from snapper.application.portfolio.pnl_adjusted_total import AdjustedFlowProjection
 from snapper.application.portfolio.pnl_faithful_recovery import MAX_RECOVERY_KEY_VISITS
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowInput
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowRecovery
@@ -373,3 +375,76 @@ def test_maximum_key_and_branch_counts_remain_bounded_and_reusable() -> None:
     assert budget.remaining_key_visits == 0
     assert recovery.recover(inputs) is projection
     assert budget.remaining_key_visits == 0
+
+
+def test_completed_refusal_distinguishes_exhaustive_failure_from_aborts() -> None:
+    """Report completed refusal only after an exhaustive search returned ``None``.
+
+    Given: Completed impossible, completed success, budget-aborted, branch-capped,
+        and key-capped inputs.
+    When: ``completed_refusal`` is queried after ``recover``.
+    Then: Only the exhaustive impossible input (and its cached replay) returns ``True``.
+    """
+    impossible = _class_i()
+    full_recovery = FaithfulFlowRecovery[str, str](FaithfulRecoveryBudget())
+    assert full_recovery.recover(impossible) is None
+    assert full_recovery.completed_refusal(impossible) is True
+    assert full_recovery.recover(replace(impossible)) is None
+    assert full_recovery.completed_refusal(impossible) is True
+
+    success_recovery = FaithfulFlowRecovery[str, str](FaithfulRecoveryBudget())
+    assert success_recovery.recover(_class_w()) is not None
+    assert success_recovery.completed_refusal(_class_w()) is False
+
+    aborted_recovery = FaithfulFlowRecovery[str, str](FaithfulRecoveryBudget(0))
+    assert aborted_recovery.recover(impossible) is None
+    assert aborted_recovery.completed_refusal(impossible) is False
+
+    units = exact_units_of(1.0) + 1
+    branch_capped = FaithfulFlowInput(
+        13 * units,
+        tuple((f"i-{idx}", units) for idx in range(13)),
+        (("a0", 13 * units),),
+    )
+    assert full_recovery.recover(branch_capped) is None
+    assert full_recovery.completed_refusal(branch_capped) is False
+
+
+def test_adjusted_reuses_the_last_identical_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Solve an unchanged cumulative family once per recovery object.
+
+    Given: A recovery object whose adjusted solver is wrapped by a call counter.
+    When: The same exact input is adjusted on several idle minutes, then a
+        different input is adjusted once.
+    Then: The solver runs once for the repeated input, every call returns the
+        cached result, and a changed input runs the solver again.
+    """
+    calls: list[int] = []
+    original = pnl_faithful_recovery.adjust_flow_family
+
+    def counting(
+        total_units: int,
+        instruments: tuple[tuple[str, int], ...],
+        attributions: tuple[tuple[str, int], ...],
+    ) -> AdjustedFlowProjection[str, str] | None:
+        """Count one solver call and delegate to the real solver.
+
+        Args:
+            total_units: Exact aggregate units.
+            instruments: Ordered instrument exact units.
+            attributions: Ordered attribution exact units.
+
+        Returns:
+            The real solver result.
+        """
+        calls.append(total_units)
+        return original(total_units, instruments, attributions)
+
+    monkeypatch.setattr(pnl_faithful_recovery, "adjust_flow_family", counting)
+    recovery = FaithfulFlowRecovery[str, str](FaithfulRecoveryBudget())
+    first = _class_i()
+    results = [recovery.adjusted(replace(first)) for _ in range(5)]
+    assert len(calls) == 1
+    assert all(result == results[0] for result in results)
+    recovery.adjusted(_class_w())
+    assert len(calls) == 2

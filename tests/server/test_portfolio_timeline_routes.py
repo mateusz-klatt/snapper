@@ -494,7 +494,7 @@ class TestHappyPath:
         assert payload["valuation_ccy"] == "USD"
         assert payload["mark_source"] == "finalized_1m_candle_close"
         assert payload["rate_sources"] == []
-        assert payload["calc_version"] == "5A.16"
+        assert payload["calc_version"] == "5A.18"
         points = payload["points"]
         assert len(points) == 3
         assert points[0]["valuation_status"] == "complete"
@@ -1547,9 +1547,68 @@ def test_point_payload_discloses_carried_inputs_and_their_largest_age() -> None:
     )
     assert payload.valuation_status == "complete"
     assert payload.max_carry_age_minutes == 9
+    assert payload.total_rounding_adjusted is None
     assert [
         (item.role, item.age_minutes, item.source_plane) for item in payload.carried_inputs
     ] == [
         ("fx", 9, "EUR/USD@kraken"),
         ("mark", 2, None),
     ]
+
+
+def test_routes_enable_public_read_and_project_adjusted_disclosure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass ``public_read=True`` on both public routes and project all disclosure fields.
+
+    Given: Spies wrapping ``build_wallet_pnl_series`` and ``build_wallet_pnl_timeline``
+        and a pure ``PnlTimelinePoint`` carrying ``(a″)`` disclosure metadata.
+    When: Both ``/api/portfolio/pnl/series`` and ``/api/portfolio/pnl/timeline`` are
+        called, and ``_point_payload`` projects an adjusted point.
+    Then: Both routes pass ``policy.public_read is True`` and ``_point_payload`` maps
+        all five disclosure fields including ``attribution_absorber_key``.
+    """
+    series_spy = AsyncMock(wraps=portfolio_timeline_routes.build_wallet_pnl_series)
+    timeline_spy = AsyncMock(wraps=portfolio_timeline_routes.build_wallet_pnl_timeline)
+    monkeypatch.setattr(portfolio_timeline_routes, "build_wallet_pnl_series", series_spy)
+    monkeypatch.setattr(portfolio_timeline_routes, "build_wallet_pnl_timeline", timeline_spy)
+
+    client = _create_client(_seeded_repo())
+    series_response = client.get(_url())
+    timeline_response = client.get(_timeline_url())
+    assert series_response.status_code == 200
+    assert timeline_response.status_code == 200
+    assert series_spy.await_args is not None
+    assert series_spy.await_args.kwargs["policy"].public_read is True
+    assert timeline_spy.await_args is not None
+    assert timeline_spy.await_args.kwargs["policy"].public_read is True
+
+    minute = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+    adjusted = PnlTimelinePoint(
+        point_time=minute,
+        realized_pnl=-0.07997460753815056,
+        fee_pnl=0.0,
+        accrual_pnl=0.0,
+        unrealized_pnl=0.0,
+        net_pnl=-0.07997460753815056,
+        valuation_status="complete",
+        incompleteness_reasons=(),
+        per_instrument=(),
+        attribution=(),
+        total_rounding_adjusted=True,
+        total_deviation_ulps=1.85,
+        absorber_deviation_ulps=1.77,
+        instrument_absorber_id="i1",
+        attribution_absorber_key=("plan", "dca"),
+    )
+    projected = portfolio_timeline_routes._point_payload(
+        adjusted,
+        PnlPointEquityOverlay(equity=None, cash=None, position_value=None, drawdown=None),
+    )
+    assert projected.total_rounding_adjusted is True
+    assert projected.total_deviation_ulps == 1.85
+    assert projected.absorber_deviation_ulps == 1.77
+    assert projected.instrument_absorber_id == "i1"
+    assert projected.attribution_absorber_key is not None
+    assert projected.attribution_absorber_key.origin == "plan"
+    assert projected.attribution_absorber_key.strategy_name == "dca"

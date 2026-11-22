@@ -220,7 +220,7 @@ _timed_build_pnl_timeline = pnl_read_core(build_pnl_timeline)
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.16"
+PNL_TIMELINE_CALC_VERSION = "5A.18"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, mark resolution, or public point
@@ -235,6 +235,12 @@ unchanged.
 flow-publication pass has failed. The request shares a deterministic candidate
 budget and reuses completed projections for unchanged exact inputs. Existing
 published flow bits remain unchanged; newly representable points may publish.
+
+``5A.18`` (``5A.17`` skipped after PR #384 closed) adds the ``(a″)``
+adjusted-total fallback on public reads when all historical and bounded
+faithful recovery passes complete without a projection. Every point published
+under ``5A.16`` keeps its exact bits; adjusted points disclose their total and
+absorber ULP deviations and chosen absorber identities additively.
 """
 
 PNL_ANCHOR_CALC_VERSION: Final[str] = "5A.13"
@@ -632,6 +638,11 @@ class PnlSeriesReadPolicy:
     close. Only the API routes grant it. It stays OFF for the snapshotter so a
     persisted sample keeps its exact-minute contract without a recompute from t0.
 
+    ``public_read`` unlocks the ``5A.18`` ``(a″)`` adjusted-total fallback on
+    flow families after faithful recovery completes without a solution. Only
+    the public series and timeline routes set it; the snapshotter, anchor, and
+    replay callers keep it ``False``.
+
     ``allow_anchor_creation`` still defaults ON, which is the one permissive
     default here and a known wart: it is a durable WRITE reachable from a GET, so
     a caller that forgets to state the capability receives it. Flipping it is a
@@ -645,6 +656,7 @@ class PnlSeriesReadPolicy:
     current_truth: bool = False
     current_truth_horizon: bool = False
     carry_valuation: bool = False
+    public_read: bool = False
 
 
 _DEFAULT_READ_POLICY: Final[PnlSeriesReadPolicy] = PnlSeriesReadPolicy()
@@ -2471,6 +2483,11 @@ def _with_point_instrument_display_identities(
         ),
         attribution=point.attribution,
         carried_inputs=point.carried_inputs,
+        total_rounding_adjusted=point.total_rounding_adjusted,
+        total_deviation_ulps=point.total_deviation_ulps,
+        absorber_deviation_ulps=point.absorber_deviation_ulps,
+        instrument_absorber_id=point.instrument_absorber_id,
+        attribution_absorber_key=point.attribution_absorber_key,
     )
 
 
@@ -7924,6 +7941,7 @@ async def build_wallet_pnl_series(
                 recovery_budget_per_point=options.replay_generation_tip is not None,
                 capture_checkpoint=(capture_request is not None and capture_request.active),
                 compensated_unrealized_fallback=engine_options.compensated_unrealized_fallback,
+                public_read=policy.public_read,
             )
             result = _timed_build_pnl_timeline(
                 executions,

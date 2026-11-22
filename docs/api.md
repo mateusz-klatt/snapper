@@ -1678,7 +1678,7 @@ cumulatives include that conversion. A minute whose own close is non-positive,
 non-finite or conflicting stays `incomplete`, and no candle is ever written to
 represent a carried value. On these reads, a point whose unrealized buckets can
 only reconcile by moving one bucket by one unit in the last place publishes instead
-of being withheld. Responses report `calc_version` `5A.16`. Setting
+of being withheld. Responses report `calc_version` `5A.18`. Setting
 `PNL_CARRY_VALUATION_ENABLED=false` returns both routes to exact-minute valuation
 without a new image.
 
@@ -1693,9 +1693,29 @@ families share at most 262144
 candidate-key visits per build. Completed results, including refusals, reuse
 only the last immutable exact-unit/key-order signature per family. A resource
 abort retains the historical incompleteness reason and is not cached as a
-mathematical impossibility. Existing successfully published flow bits remain
-unchanged. The version identifies the response contract; consumers requiring
-fresh validation must inspect a fresh response and its version.
+mathematical impossibility.
+
+On public timeline reads (`5A.18`), when both historical passes and bounded
+faithful recovery complete without finding a common faithful total, the engine
+applies a bounded adjusted-total fallback `(a″)` rather than withholding the
+point. The coarser dimension fixes faithful bucket choices (up to `2^8 = 256`
+combinations) to propose distinct `sum()` candidate totals within `8` ULPs of
+the exact aggregate (`u = ulp(exact_total)`). The finer dimension selects one
+nonzero inexact bucket with the finest ULP as its single absorber, checks up to
+`2^8 = 256` nearest-first non-absorber combinations, and scans up to `±4`
+`nextafter` steps around `cand - sum(others)` until key-ordered `sum(buckets)`
+equals the candidate identically within `4` ULPs (`u`) of the absorber's exact
+value. Exact and zero buckets stay fixed, and budget or structural aborts never
+trigger `(a″)`. The fallback changes only how flows publish, never the point's
+other completeness checks: an adjusted point that is otherwise complete stays
+`complete`, and one with, for example, a missing mark stays `incomplete`. Adjusted
+points disclose `total_rounding_adjusted` (`true`; `null` on unadjusted points),
+`total_deviation_ulps`, `absorber_deviation_ulps`, `instrument_absorber_id`, and
+`attribution_absorber_key`.
+
+Existing successfully published flow bits remain unchanged. The version
+identifies the response contract; consumers requiring fresh validation must
+inspect a fresh response and its version.
 
 ### POST /api/execution-plans
 
