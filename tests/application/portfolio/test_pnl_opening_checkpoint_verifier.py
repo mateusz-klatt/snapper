@@ -719,3 +719,30 @@ async def test_newer_suffix_witness_does_not_change_certified_prefix(
         _eligibility(request),
     )
     assert isinstance(outcome, PnlCheckpointResume)
+
+
+async def test_legacy_bundle_version_2_payload_fails_closed_as_corrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject a legacy bundle_version=2 payload under the bumped bundle schema.
+
+    Given: A valid captured checkpoint whose serialized payload is downgraded to
+        ``bundle_version=2``.
+    When: ``verify_checkpoint_for_resume`` verifies the record.
+    Then: It fails closed with ``checkpoint_payload_corrupt`` and ``delete_required=True``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    payload = cast(dict[str, object], json.loads(record.state_json))
+    payload["bundle_version"] = 2
+    legacy = replace(record, state_json=json.dumps(payload))
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        legacy,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)

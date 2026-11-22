@@ -285,7 +285,7 @@ def _populated_bundle() -> PnlCheckpointStateBundle:
     """
     event_state, mark_states, shadows = _real_walk_states()
     return PnlCheckpointStateBundle(
-        bundle_version=2,
+        bundle_version=3,
         identity=_identity_payload(),
         engine_state=_engine_state(),
         price_ref_spans_by_instrument={
@@ -401,7 +401,7 @@ def test_empty_collections_round_trip() -> None:
         untrusted_at={},
     )
     bundle = PnlCheckpointStateBundle(
-        bundle_version=2,
+        bundle_version=3,
         identity=_identity_payload(),
         engine_state=_engine_state(),
         price_ref_spans_by_instrument={},
@@ -433,11 +433,11 @@ def test_rejects_extra_field() -> None:
         bundle_from_json(json.dumps(payload))
 
 
-@pytest.mark.parametrize("version", [1, 3])
+@pytest.mark.parametrize("version", [1, 4])
 def test_rejects_wrong_bundle_version(version: int) -> None:
     """Reject legacy and unknown envelope versions.
 
-    Given: Otherwise valid bundle JSON with ``bundle_version`` set to 1 or 3.
+    Given: Otherwise valid bundle JSON with ``bundle_version`` set to 1 or 4.
     When: Strict decoding runs.
     Then: ``ValueError`` is raised.
 
@@ -523,8 +523,8 @@ def test_rejects_duplicate_json_keys() -> None:
     """
     encoded = bundle_to_json(_populated_bundle())
     duplicated = encoded.replace(
-        '"bundle_version":2',
-        '"bundle_version":2,"bundle_version":2',
+        '"bundle_version":3',
+        '"bundle_version":3,"bundle_version":3',
         1,
     )
     with pytest.raises(ValueError, match="duplicate JSON key"):
@@ -777,3 +777,67 @@ def test_rejects_unordered_or_equal_event_fx_pair(pair: list[str]) -> None:
     pair_entry["pair"] = pair
     with pytest.raises(ValueError, match="pair"):
         bundle_from_json(json.dumps(payload))
+
+
+def test_rejects_legacy_bundle_version_2() -> None:
+    """Reject legacy bundle_version=2 envelopes after bumping BUNDLE_VERSION.
+
+    Given: A serialized envelope whose ``bundle_version`` is downgraded to ``2``.
+    When: Strict decoding runs via ``bundle_from_json``.
+    Then: ``ValueError`` rejects the legacy bundle version.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    payload["bundle_version"] = 2
+    with pytest.raises(ValueError, match="bundle_version"):
+        bundle_from_json(json.dumps(payload))
+
+
+def test_conversion_requirements_round_trip_and_reject_unsorted() -> None:
+    """Round-trip prefix conversion-only minutes and enforce canonical ordering.
+
+    Given: An ``_EventFxReplayState`` carrying non-empty ``conversion_requirements``.
+    When: The bundle makes a canonical JSON round-trip and its conversion keys
+        are permuted or duplicated.
+    Then: Restored ``conversion_requirements`` match exactly, input permutation
+        produces identical JSON, and duplicate conversion keys are rejected.
+    """
+    event_state, mark_states, shadows = _real_walk_states()
+    conversion_reqs = {
+        "I2": {("EUR", "USD"): {_m(1), _m(3)}},
+        _INSTRUMENT: {("EUR", "USD"): {_m(2)}},
+    }
+    state_with_conversions = _EventFxReplayState(
+        requirements=event_state.requirements,
+        last_effective=event_state.last_effective,
+        position_qty=event_state.position_qty,
+        basis_unknown=event_state.basis_unknown,
+        untrusted_at=event_state.untrusted_at,
+        conversion_requirements=conversion_reqs,
+    )
+    bundle = _populated_bundle().model_copy(
+        update={
+            "event_walk_state": event_walk_state_from_replay(state_with_conversions),
+            "mark_walk_state": mark_walk_state_from_replay(mark_states, shadows),
+        }
+    )
+    encoded = bundle_to_json(bundle)
+    decoded = bundle_from_json(encoded)
+    assert event_walk_state_to_replay(decoded.event_walk_state) == state_with_conversions
+    reversed_state = _EventFxReplayState(
+        requirements=event_state.requirements,
+        last_effective=event_state.last_effective,
+        position_qty=event_state.position_qty,
+        basis_unknown=event_state.basis_unknown,
+        untrusted_at=event_state.untrusted_at,
+        conversion_requirements=dict(reversed(tuple(conversion_reqs.items()))),
+    )
+    permuted = bundle.model_copy(
+        update={"event_walk_state": event_walk_state_from_replay(reversed_state)}
+    )
+    assert bundle_to_json(permuted) == encoded
+    raw = _json_object(encoded)
+    event_walk = _nested_object(raw, "event_walk_state")
+    entries = cast(list[object], event_walk["conversion_requirements"])
+    event_walk["conversion_requirements"] = [entries[0], entries[0]]
+    with pytest.raises(ValueError, match="sorted and unique"):
+        bundle_from_json(json.dumps(raw))

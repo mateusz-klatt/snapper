@@ -1,6 +1,7 @@
 """Shared mutable state types for exact event and mark FX requirement walks."""
 
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 
 from snapper.application.portfolio.fx_rates import FxPairKey
@@ -24,6 +25,7 @@ class _EventFxReplayState:
     position_qty: dict[_PoolKey, float]
     basis_unknown: set[_PoolKey]
     untrusted_at: dict[str, datetime]
+    conversion_requirements: _FxInstrumentRequirements = field(default_factory=dict)
 
 
 @dataclass(slots=True)

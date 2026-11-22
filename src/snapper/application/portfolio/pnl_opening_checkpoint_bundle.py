@@ -16,6 +16,7 @@ from pydantic import field_validator
 from pydantic import model_validator
 
 from snapper.application.portfolio.pnl_fx_replay_state import _EventFxReplayState
+from snapper.application.portfolio.pnl_fx_replay_state import _FxInstrumentRequirements
 from snapper.application.portfolio.pnl_fx_replay_state import _MarkReplayState
 from snapper.application.portfolio.pnl_opening_checkpoint import _STRICT_CHECKPOINT_CONFIG
 from snapper.application.portfolio.pnl_opening_checkpoint import CarriedNumberPayload
@@ -33,7 +34,7 @@ from snapper.application.portfolio.pnl_opening_checkpoint import _require_strict
 from snapper.application.portfolio.pnl_opening_checkpoint import _unique_json_pairs
 from snapper.data.pnl_correction_state import IdAggregate
 
-BUNDLE_VERSION: Final[Literal[2]] = 2
+BUNDLE_VERSION: Final[Literal[3]] = 3
 """Current strict envelope version embedding scope and generation identity."""
 
 
@@ -202,6 +203,7 @@ class PnlEventFxReplayStatePayload(BaseModel):
     model_config = _STRICT_CHECKPOINT_CONFIG
 
     requirements: tuple[PnlEventFxInstrumentRequirementsPayload, ...]
+    conversion_requirements: tuple[PnlEventFxInstrumentRequirementsPayload, ...]
     last_effective: tuple[PoolLastEffectivePayload, ...]
     position_qty: tuple[PnlEventFxPoolQuantityPayload, ...]
     basis_unknown: tuple[PoolKeyPayload, ...]
@@ -214,6 +216,11 @@ class PnlEventFxReplayStatePayload(BaseModel):
             self.requirements,
             lambda item: item.instrument_public_id,
             "event_walk_state.requirements",
+        )
+        _require_strictly_sorted(
+            self.conversion_requirements,
+            lambda item: item.instrument_public_id,
+            "event_walk_state.conversion_requirements",
         )
         _require_strictly_sorted(
             self.last_effective,
@@ -363,7 +370,7 @@ class PnlCheckpointStateBundle(BaseModel):
 
     model_config = _STRICT_CHECKPOINT_CONFIG
 
-    bundle_version: Literal[2]
+    bundle_version: Literal[3]
     identity: PnlCheckpointBundleIdentityPayload
     engine_state: PnlOpeningCheckpointState
     price_ref_spans_by_instrument: dict[NonEmptyStr, tuple[UtcDateTime, UtcDateTime]]
@@ -426,6 +433,49 @@ class PnlCheckpointStateBundle(BaseModel):
         return value
 
 
+def _encode_instrument_fx_requirements(
+    requirements: _FxInstrumentRequirements,
+) -> tuple[PnlEventFxInstrumentRequirementsPayload, ...]:
+    """Encode per-instrument FX minute requirements into canonical payload entries.
+
+    Args:
+        requirements: Exact FX minutes grouped by instrument and currency pair.
+
+    Returns:
+        Sorted strict instrument requirement payloads.
+    """
+    return tuple(
+        PnlEventFxInstrumentRequirementsPayload(
+            instrument_public_id=instrument_public_id,
+            requirements=tuple(
+                PnlEventFxRequirementPayload(pair=pair, minutes=tuple(sorted(minutes)))
+                for pair, minutes in sorted(pair_requirements.items())
+            ),
+        )
+        for instrument_public_id, pair_requirements in sorted(requirements.items())
+    )
+
+
+def _decode_instrument_fx_requirements(
+    entries: Sequence[PnlEventFxInstrumentRequirementsPayload],
+) -> _FxInstrumentRequirements:
+    """Decode canonical instrument requirement payloads into mutable minute sets.
+
+    Args:
+        entries: Validated per-instrument requirement payloads.
+
+    Returns:
+        Mutable instrument-to-pair FX requirement mapping.
+    """
+    return {
+        instrument_entry.instrument_public_id: {
+            requirement.pair: set(requirement.minutes)
+            for requirement in instrument_entry.requirements
+        }
+        for instrument_entry in entries
+    }
+
+
 def event_walk_state_from_replay(state: _EventFxReplayState) -> PnlEventFxReplayStatePayload:
     """Convert a real event-FX replay state into its complete strict payload.
 
@@ -436,16 +486,8 @@ def event_walk_state_from_replay(state: _EventFxReplayState) -> PnlEventFxReplay
         Canonically ordered lossless event-walk payload.
     """
     return PnlEventFxReplayStatePayload(
-        requirements=tuple(
-            PnlEventFxInstrumentRequirementsPayload(
-                instrument_public_id=instrument_public_id,
-                requirements=tuple(
-                    PnlEventFxRequirementPayload(pair=pair, minutes=tuple(sorted(minutes)))
-                    for pair, minutes in sorted(pair_requirements.items())
-                ),
-            )
-            for instrument_public_id, pair_requirements in sorted(state.requirements.items())
-        ),
+        requirements=_encode_instrument_fx_requirements(state.requirements),
+        conversion_requirements=_encode_instrument_fx_requirements(state.conversion_requirements),
         last_effective=tuple(
             PoolLastEffectivePayload(
                 pool=_pool_key_to_payload(pool_key),
@@ -483,13 +525,8 @@ def event_walk_state_to_replay(payload: PnlEventFxReplayStatePayload) -> _EventF
         A mutable replay state equal to the state originally captured.
     """
     return _EventFxReplayState(
-        requirements={
-            instrument_entry.instrument_public_id: {
-                requirement.pair: set(requirement.minutes)
-                for requirement in instrument_entry.requirements
-            }
-            for instrument_entry in payload.requirements
-        },
+        requirements=_decode_instrument_fx_requirements(payload.requirements),
+        conversion_requirements=_decode_instrument_fx_requirements(payload.conversion_requirements),
         last_effective={
             _pool_key_from_payload(entry.pool): entry.last_effective_time
             for entry in payload.last_effective

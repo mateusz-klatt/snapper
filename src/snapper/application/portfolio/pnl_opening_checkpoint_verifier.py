@@ -39,8 +39,10 @@ PnlCheckpointFallbackReason = Literal[
     "checkpoint_accrual_prefix_changed",
     "checkpoint_lineage_prefix_changed",
     "checkpoint_symbol_refs_changed",
+    "checkpoint_price_provenance_changed",
     "checkpoint_event_fx_exchanges_changed",
     "checkpoint_event_fx_candles_changed",
+    "checkpoint_fx_venue_changed",
     "checkpoint_late_execution",
 ]
 """Closed fallback vocabulary for checkpoint resume refusal."""
@@ -56,8 +58,10 @@ _DELETE_REASONS: frozenset[str] = frozenset(
         "checkpoint_accrual_prefix_changed",
         "checkpoint_lineage_prefix_changed",
         "checkpoint_symbol_refs_changed",
+        "checkpoint_price_provenance_changed",
         "checkpoint_event_fx_exchanges_changed",
         "checkpoint_event_fx_candles_changed",
+        "checkpoint_fx_venue_changed",
         "checkpoint_late_execution",
     }
 )

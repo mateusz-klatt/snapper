@@ -8385,6 +8385,100 @@ class TestSnapshotter5C6ServiceWiring:
         )
         assert _flatten_fx_requirements(flag_off_union) == {(_I1, ("EUR", "USD"), _m(1))}
 
+    async def test_pointwise_5c6_cold_read_preserves_loaded_conversion_fx_for_deferred_execution(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Preserve master's loaded-row conversion union on cold 5C.6 reads with deferred fills.
+
+        Given PNL_SAMPLE_CALC_VERSION == "5C.6", a wallet read over [M0, M3], and a deferred
+            execution on I2 whose timestamp is M2 (inside [M0, M3]) while its effective_time
+            is clamped to M4 (> to_time=M3) with a foreign EUR fee priced on walutomat at M2.
+        When build_wallet_pnl_series runs a cold pointwise read over [M0, M3].
+        Then _conversion_fx_minutes receives all loaded executions, M2 enters event FX and
+            shadow requirements, walutomat is disclosed in rate_sources, M0..M1 are complete,
+            and M2..M3 carry the exact master scope_order_regression withholding.
+
+        Args:
+            monkeypatch: Pytest monkeypatch fixture.
+        """
+        assert PNL_SAMPLE_CALC_VERSION == "5C.6"
+        repo = FakeRepo(
+            executions=[
+                _exec_row(_I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD", shard_key="s1"),
+                _exec_row(_I1, 2, 1, "sell", 1.0, 100.0, 0.0, "USD", shard_key="s1"),
+                _exec_row(
+                    _I2, 1, 4, "buy", 1.0, 100.0, 0.0, "USD", exchange="kucoin", shard_key="s2"
+                ),
+                _exec_row(
+                    _I2, 2, 2, "buy", 1.0, 100.0, 1.0, "EUR", exchange="kucoin", shard_key="s2"
+                ),
+            ],
+            refs=[
+                _ref(_I1, "BTC-EUR", "EUR"),
+                _ref(_I2, "BTC-USD", "USD", exchange="kucoin"),
+            ],
+            candles=[_candle(_m(minute), 100.0, _I1) for minute in range(-1, 4)],
+            fx_rows=[
+                _fx_row("EUR", "USD", 0, 1.25),
+                _fx_row("EUR", "USD", 1, 1.25),
+                _fx_row("EUR", "USD", 2, 1.30, exchange="walutomat"),
+            ],
+        )
+        conversion_spy = Mock(wraps=_conversion_fx_minutes)
+        observed_event_reqs: list[dict[str, dict[tuple[str, str], set[datetime]]]] = []
+        original_load_fx = pnl_timeline_service._load_wallet_series_fx
+
+        async def spy_load_fx(
+            repo_arg: FakeRepo,
+            request: pnl_timeline_service._FxRequest,
+            options_arg: PnlSeriesReplayOptions,
+            policy_arg: PnlSeriesReadPolicy,
+        ) -> pnl_timeline_service._SeriesFxEvidence:
+            """Record event FX requirements requested by the cold 5C.6 read."""
+            observed_event_reqs.append(
+                {
+                    inst: {pair: set(mins) for pair, mins in pairs.items()}
+                    for inst, pairs in request.event_requirements.items()
+                }
+            )
+            return await original_load_fx(repo_arg, request, options_arg, policy_arg)
+
+        monkeypatch.setattr(pnl_timeline_service, "_conversion_fx_minutes", conversion_spy)
+        monkeypatch.setattr(pnl_timeline_service, "_load_wallet_series_fx", spy_load_fx)
+        shadow_ctx = FxShadowPinContext(calculation_version="5C.6", evaluations=[])
+        with activate_fx_shadow_context(shadow_ctx):
+            result = await build_wallet_pnl_series(
+                repo,
+                _W1,
+                "live",
+                _m(0),
+                _m(3),
+                "1m",
+                _m(6),
+                options=PnlSeriesReplayOptions(pointwise_exact_fx=True),
+            )
+        assert len(conversion_spy.call_args_list) == 1
+        assert len(conversion_spy.call_args_list[0].args[0]) == 4
+        assert _m(2) in observed_event_reqs[0].get(_I2, {}).get(("EUR", "USD"), set())
+        assert any(
+            ev.scope_kind == "shared_pair"
+            and _m(2) in ev.event_minutes
+            and _m(2) in ev.required_minutes
+            for ev in shadow_ctx.evaluations
+        )
+        assert "walutomat" in {source.exchange for source in result.rate_sources}
+        assert [point.valuation_status for point in result.points] == [
+            "complete",
+            "complete",
+            "incomplete",
+            "incomplete",
+        ]
+        assert [point.realized_pnl for point in result.points] == [0.0, 0.0, None, None]
+        assert [
+            tuple(entry.reason for entry in point.incompleteness_reasons) for point in result.points
+        ] == [(), (), ("scope_order_regression",), ("scope_order_regression",)]
+
 
 async def test_public_read_policy_threads_to_window_and_preserves_disclosure(
     monkeypatch: pytest.MonkeyPatch,
