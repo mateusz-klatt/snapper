@@ -96,7 +96,7 @@ def _certificate() -> PnlOpeningCheckpointCertificate:
     """Build a valid certificate matching ``_settled_frontier()``."""
     return PnlOpeningCheckpointCertificate(
         key=_KEY,
-        timeline_calc_version="5A.16",
+        timeline_calc_version="5A.17",
         fx_policy_version="pnl-fiat-pointwise-v1",
         schema_version=1,
         anchor_public_id="00000000-0000-7000-8000-000000000003",

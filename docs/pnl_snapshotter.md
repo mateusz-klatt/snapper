@@ -201,7 +201,9 @@ evidence independently for each mark, execution, accrual and basket minute.
 Evidence is loaded in batches. Other minutes in the batch cannot choose which
 venue prices a given minute. An instrument-owned canonical FX plane keeps its
 precedence. A missing required exact rate withholds the affected valuation.
-The public timeline keeps its existing `5A.16` calculation and FX policy.
+The public timeline uses calculation version `5A.17` (adding bounded
+branch-and-bound overflow recovery beyond 12 binary choices) and keeps its
+existing FX policy.
 
 The snapshotter checks price references and display identity through the
 generation's fixed target. A symbol or venue revision therefore produces the

@@ -13,12 +13,15 @@ from dataclasses import dataclass
 from itertools import product
 from typing import Final
 
+from snapper.application.portfolio.exact_sum import exact_units_of
 from snapper.application.portfolio.exact_sum import faithful_roundings
 from snapper.application.portfolio.exact_sum import project_units
 
 MAX_RECOVERY_KEYS: Final[int] = 64
 MAX_RECOVERY_BRANCH_KEYS: Final[int] = 12
 MAX_RECOVERY_KEY_VISITS: Final[int] = 262_144
+MAX_OVERFLOW_STEPS: Final[int] = 512
+MAX_OVERFLOW_NODES: Final[int] = 8_192
 
 
 @dataclass(frozen=True)
@@ -155,6 +158,231 @@ def _search[InstrumentKeyT: Hashable, AttributionKeyT: Hashable](
     return None
 
 
+def exceeds_branch_limit[KeyT: Hashable](keyed_units: tuple[tuple[KeyT, int], ...]) -> bool:
+    """Return whether a dimension exceeds the Cartesian brute-force branch cap.
+
+    Args:
+        keyed_units: Ordered key-and-exact-unit pairs for one flow dimension.
+
+    Returns:
+        Whether more than ``MAX_RECOVERY_BRANCH_KEYS`` buckets have two faithful
+        roundings.
+    """
+    return (
+        sum(len(faithful_roundings(units)) == 2 for _, units in keyed_units)
+        > MAX_RECOVERY_BRANCH_KEYS
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _OverflowBranch:
+    """One binary faithful-rounding flip and its exact scaled unit delta."""
+
+    index: int
+    alternate: float
+    delta_units: int
+
+
+@dataclass(frozen=True, slots=True)
+class _OverflowBounds:
+    """Precomputed suffix reachability and unit window for bounded search."""
+
+    target_units: int
+    low_units: int
+    high_units: int
+    rem_pos: tuple[int, ...]
+    rem_neg: tuple[int, ...]
+    suffix_gcd: tuple[int, ...]
+
+
+def _overflow_branches[KeyT: Hashable](
+    keyed_units: tuple[tuple[KeyT, int], ...],
+) -> tuple[list[float], list[_OverflowBranch], int, int]:
+    """Build nearest values, descending-magnitude binary flips, and unit stats."""
+    base_values: list[float] = []
+    branches: list[_OverflowBranch] = []
+    base_exact = 0
+    max_abs = 0
+    for idx, (_, units) in enumerate(keyed_units):
+        choices = faithful_roundings(units)
+        base = choices[0]
+        base_values.append(base)
+        unit_count = exact_units_of(base)
+        base_exact += unit_count
+        max_abs = max(max_abs, abs(unit_count))
+        if len(choices) == 2:
+            alt_units = exact_units_of(choices[1])
+            max_abs = max(max_abs, abs(alt_units))
+            branches.append(_OverflowBranch(idx, choices[1], alt_units - unit_count))
+    branches.sort(key=lambda branch: (-abs(branch.delta_units), branch.index))
+    return base_values, branches, base_exact, max_abs
+
+
+def _overflow_bounds(
+    branches: list[_OverflowBranch],
+    total: float,
+    max_abs: int,
+) -> _OverflowBounds:
+    """Precompute exact rounding window and suffix pruning bounds.
+
+    Python's builtin ``sum`` uses compensated summation whose worst-case error
+    across up to ``MAX_RECOVERY_KEYS`` (64) finite doubles is bounded by half an
+    ULP of the target plus ``max_abs >> 88`` (conservative bound on
+    ``n**3 * 2**-106 * max_abs`` for ``n <= 64``), plus one ULP slack for
+    boundary rounding.
+    """
+    count = len(branches)
+    rem_pos = [0] * (count + 1)
+    rem_neg = [0] * (count + 1)
+    suffix_gcd = [0] * (count + 1)
+    for idx in range(count - 1, -1, -1):
+        delta = branches[idx].delta_units
+        rem_pos[idx] = rem_pos[idx + 1] + (delta if delta > 0 else 0)
+        rem_neg[idx] = rem_neg[idx + 1] + (delta if delta < 0 else 0)
+        suffix_gcd[idx] = math.gcd(abs(delta), suffix_gcd[idx + 1])
+    target_units = exact_units_of(total)
+    prev_total = math.nextafter(total, -math.inf)
+    next_total = math.nextafter(total, math.inf)
+    next_ulp = abs(exact_units_of(next_total) - target_units) if math.isfinite(next_total) else 0
+    low_ulp = (
+        abs(target_units - exact_units_of(prev_total)) if math.isfinite(prev_total) else next_ulp
+    )
+    high_ulp = next_ulp if math.isfinite(next_total) else low_ulp
+    slack = max(low_ulp, high_ulp, max_abs >> 88)
+    return _OverflowBounds(
+        target_units=target_units,
+        low_units=target_units - (low_ulp // 2) - slack,
+        high_units=target_units + (high_ulp // 2) + slack,
+        rem_pos=tuple(rem_pos),
+        rem_neg=tuple(rem_neg),
+        suffix_gcd=tuple(suffix_gcd),
+    )
+
+
+@dataclass(slots=True)
+class _BoundedDimensionSearch[KeyT: Hashable]:
+    """Stateful depth-first exact-unit search over binary faithful choices."""
+
+    keyed_units: tuple[tuple[KeyT, int], ...]
+    base_values: list[float]
+    branches: list[_OverflowBranch]
+    bounds: _OverflowBounds
+    total: float
+    budget: FaithfulRecoveryBudget
+    values: list[float]
+    steps: int = 0
+    nodes: int = 0
+    exhausted: bool = False
+
+    def _pruned(self, depth: int, current_units: int) -> bool:
+        """Return whether remaining flips cannot reach the target unit window."""
+        if (
+            current_units + self.bounds.rem_pos[depth] < self.bounds.low_units
+            or current_units + self.bounds.rem_neg[depth] > self.bounds.high_units
+        ):
+            return True
+        modulus = self.bounds.suffix_gcd[depth]
+        if modulus == 0:
+            return False
+        diff_low = self.bounds.low_units - current_units
+        first_multiple = ((diff_low + modulus - 1) // modulus) * modulus
+        return first_multiple > self.bounds.high_units - current_units
+
+    def _evaluate_leaf(self, dirty: bool) -> tuple[tuple[KeyT, float], ...] | None:
+        """Charge one candidate scan and verify its ordered builtin sum."""
+        if not dirty:
+            return None
+        if not self.budget.reserve(len(self.keyed_units)):
+            raise _RecoveryBudgetExhaustedError
+        self.steps += 1
+        observed = sum(self.values)
+        if math.isfinite(observed) and observed == self.total:
+            return tuple(
+                (key, value) for (key, _), value in zip(self.keyed_units, self.values, strict=True)
+            )
+        return None
+
+    def search(
+        self, depth: int, current_units: int, dirty: bool
+    ) -> tuple[tuple[KeyT, float], ...] | None:
+        """Explore closer-to-target faithful roundings within the step and node limits."""
+        if self.steps >= MAX_OVERFLOW_STEPS or self.nodes >= MAX_OVERFLOW_NODES:
+            self.exhausted = True
+            return None
+        self.nodes += 1
+        if self._pruned(depth, current_units):
+            return None
+        if depth == len(self.branches):
+            return self._evaluate_leaf(dirty)
+        branch = self.branches[depth]
+        base = self.base_values[branch.index]
+        flipped_units = current_units + branch.delta_units
+        if abs(flipped_units - self.bounds.target_units) < abs(
+            current_units - self.bounds.target_units
+        ):
+            candidates = ((branch.alternate, flipped_units, True), (base, current_units, dirty))
+        else:
+            candidates = ((base, current_units, dirty), (branch.alternate, flipped_units, True))
+        for value, next_units, next_dirty in candidates:
+            self.values[branch.index] = value
+            matched = self.search(depth + 1, next_units, next_dirty)
+            if matched is not None:
+                return matched
+        self.values[branch.index] = base
+        return None
+
+
+def _project_dimension_bounded[KeyT: Hashable](
+    keyed_units: tuple[tuple[KeyT, int], ...],
+    total: float,
+    budget: FaithfulRecoveryBudget,
+) -> tuple[tuple[tuple[KeyT, float], ...] | None, bool]:
+    """Find one faithful dimension tuple via exact-unit branch-and-bound."""
+    base_values, branches, base_exact, max_abs = _overflow_branches(keyed_units)
+    if not budget.reserve(len(keyed_units)):
+        raise _RecoveryBudgetExhaustedError
+    observed = sum(base_values)
+    if math.isfinite(observed) and observed == total:
+        return (
+            tuple((key, value) for (key, _), value in zip(keyed_units, base_values, strict=True)),
+            True,
+        )
+    if not branches:
+        return None, True
+    bounds = _overflow_bounds(branches, total, max_abs)
+    runner = _BoundedDimensionSearch(
+        keyed_units=keyed_units,
+        base_values=base_values,
+        branches=branches,
+        bounds=bounds,
+        total=total,
+        budget=budget,
+        values=list(base_values),
+    )
+    matched = runner.search(0, base_exact, False)
+    return matched, not runner.exhausted
+
+
+def _search_overflow[InstrumentKeyT: Hashable, AttributionKeyT: Hashable](
+    request: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT],
+    budget: FaithfulRecoveryBudget,
+) -> tuple[FaithfulFlowProjection[InstrumentKeyT, AttributionKeyT] | None, bool]:
+    """Search overflow dimensions for a shared faithful total."""
+    completed = True
+    for total in faithful_roundings(request.total_units):
+        instruments, inst_complete = _project_dimension_bounded(request.instruments, total, budget)
+        completed = completed and inst_complete
+        if instruments is None:
+            continue
+        attributions, attr_complete = _project_dimension_bounded(
+            request.attributions, total, budget
+        )
+        completed = completed and attr_complete
+        if attributions is not None:
+            return FaithfulFlowProjection(total, instruments, attributions), True
+    return None, completed
+
+
 @dataclass
 class FaithfulFlowRecovery[InstrumentKeyT: Hashable, AttributionKeyT: Hashable]:
     """One family's last completed input/result, sharing its request allowance.
@@ -196,4 +424,32 @@ class FaithfulFlowRecovery[InstrumentKeyT: Hashable, AttributionKeyT: Hashable]:
             return None
         self._previous_input = request
         self._previous_projection = projection
+        return projection
+
+    def recover_overflow(
+        self, request: FaithfulFlowInput[InstrumentKeyT, AttributionKeyT]
+    ) -> FaithfulFlowProjection[InstrumentKeyT, AttributionKeyT] | None:
+        """Recover a faithful split when binary choices exceed the brute-force cap.
+
+        Args:
+            request: Complete ordered exact inputs for the already finite family.
+
+        Returns:
+            A coherent faithful projection, or ``None`` when no bounded split is
+            found. Completed searches cache terminal reuse at zero visit cost;
+            budget- or limit-interrupted searches leave cached state unchanged.
+        """
+        if not _valid_input(request):
+            return None
+        if request == self._previous_input:
+            return self._previous_projection
+        if self.budget.remaining_key_visits < len(request.instruments) + len(request.attributions):
+            return None
+        try:
+            projection, completed = _search_overflow(request, self.budget)
+        except _RecoveryBudgetExhaustedError:
+            return None
+        if completed:
+            self._previous_input = request
+            self._previous_projection = projection
         return projection

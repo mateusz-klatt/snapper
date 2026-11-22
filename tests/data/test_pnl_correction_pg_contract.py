@@ -299,7 +299,7 @@ def _pg_certificate(frontier: PnlCorrectionFrontier) -> PnlOpeningCheckpointCert
     """
     return PnlOpeningCheckpointCertificate(
         key=frontier.key,
-        timeline_calc_version="5A.16",
+        timeline_calc_version="5A.17",
         fx_policy_version="pnl-fiat-pointwise-v1",
         schema_version=1,
         anchor_public_id=str(uuid4()),

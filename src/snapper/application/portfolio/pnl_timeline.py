@@ -165,6 +165,7 @@ from snapper.application.portfolio.pnl_faithful_recovery import MAX_RECOVERY_KEY
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowInput
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulFlowRecovery
 from snapper.application.portfolio.pnl_faithful_recovery import FaithfulRecoveryBudget
+from snapper.application.portfolio.pnl_faithful_recovery import exceeds_branch_limit
 from snapper.core.numeric import is_positive_finite
 
 MAX_REPLAY_RECOVERY_KEY_VISITS: Final = MAX_RECOVERY_KEY_VISITS
@@ -2115,7 +2116,10 @@ def _recover_flow_family(
         _ordered_exact_units(exact.by_instrument, instrument_keys),
         _ordered_exact_units(exact.by_attribution, attribution_keys),
     )
-    projection = recovery.recover(request)
+    if exceeds_branch_limit(request.instruments) or exceeds_branch_limit(request.attributions):
+        projection = recovery.recover_overflow(request)
+    else:
+        projection = recovery.recover(request)
     if projection is None:
         return None
     return _PublishedFlowFamily(

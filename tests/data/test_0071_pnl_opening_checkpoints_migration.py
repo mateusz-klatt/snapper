@@ -77,7 +77,7 @@ def _row(**overrides: object) -> dict[str, object]:
         "valuation_ccy": "USD",
         "epoch_public_id": "00000000-0000-7000-8000-000000000125",
         "calc_version": "5C.5",
-        "timeline_calc_version": "5A.16",
+        "timeline_calc_version": "5A.17",
         "fx_policy_version": "pnl-fiat-pointwise-v1",
         "schema_version": 1,
         "source_generation": 1,

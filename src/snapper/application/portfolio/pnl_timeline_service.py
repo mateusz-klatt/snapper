@@ -217,7 +217,7 @@ _timed_build_pnl_timeline = pnl_read_core(build_pnl_timeline)
 PNL_TIMELINE_MARK_SOURCE = "finalized_1m_candle_close"
 """Provenance label for the mark plane the timeline values against."""
 
-PNL_TIMELINE_CALC_VERSION = "5A.16"
+PNL_TIMELINE_CALC_VERSION = "5A.17"
 """Reconstruction algorithm version stamped on every series response.
 
 Bumped whenever the pool replay, decomposition, mark resolution, or public point
@@ -232,6 +232,12 @@ unchanged.
 flow-publication pass has failed. The request shares a deterministic candidate
 budget and reuses completed projections for unchanged exact inputs. Existing
 published flow bits remain unchanged; newly representable points may publish.
+
+``5A.17`` adds overflow faithful recovery — a bounded branch-and-bound search —
+only when more than ``MAX_RECOVERY_BRANCH_KEYS`` buckets have two faithful
+roundings (typically valuations where every bucket is converted, such as PLN).
+Existing published bits are unchanged, and newly representable points may
+publish.
 """
 
 PNL_ANCHOR_CALC_VERSION: Final[str] = "5A.13"
