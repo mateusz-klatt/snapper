@@ -105,7 +105,7 @@ class TestCriticalSystemErrorRule:
         assert rows[0]["payload"]["body_loc_args"] == ["host", "disk", "error", 3]
         dedup_key = rows[0]["dedup_key"]
         assert dedup_key is not None
-        assert dedup_key.startswith("sys_error.host.disk.")
+        assert dedup_key == "sys_error.host.disk"
 
     @pytest.mark.asyncio
     async def test_ai_delegate_warning_burst_uses_existing_alert_path(self) -> None:
@@ -137,7 +137,7 @@ class TestCriticalSystemErrorRule:
             3,
         ]
         assert rows[0]["dedup_key"] is not None
-        assert rows[0]["dedup_key"].startswith("sys_error.ai_delegate.global.")
+        assert rows[0]["dedup_key"] == "sys_error.ai_delegate.global"
 
     @pytest.mark.asyncio
     async def test_healthy_heartbeat_resets_window(self) -> None:
@@ -359,65 +359,229 @@ class TestPerWalletExecutorTopics:
         assert len(rows) == 1
 
     @pytest.mark.asyncio
-    async def test_rolling_cooldown_spans_hour_bucket_boundary(self) -> None:
-        """A fire at 12:59 cannot re-page seconds later at 13:00.
+    async def test_chronic_warning_pages_once_per_reminder_interval(self) -> None:
+        """A component stuck in WARNING pages once, then at most every 24 h.
 
-        Given: A fire just before the hour flip and continued WARNING
-            frames just after it (new hour bucket = new DB dedup key),
-        When: The window re-fills,
-        Then: The in-memory rolling cooldown suppresses the second fire —
-            clock buckets alone allowed double pages across boundaries.
+        Given: A fired episode and continued WARNING frames afterwards,
+        When: The window re-fills one hour and 23 hours later, and again
+            after 24 hours,
+        Then: Only the 24 h reminder pages again; hourly re-pages are gone.
         """
         rule = CriticalSystemErrorRule()
         repo = MagicMock()
         repo.list_users_with_permission = AsyncMock(return_value=["admin-1"])
         repo.list_alert_events_with_dedup_key = AsyncMock(return_value=[])
         topic = "system.heartbeats.executor.kraken.abc123def456"
-        boundary = datetime(2026, 4, 24, 12, 59, 57, tzinfo=UTC)
-        rows: list[Any] = []
-        for i in range(3):
-            rows = await rule.evaluate(
-                topic, _heartbeat("warning"), repo, boundary + timedelta(seconds=i)
-            )
-        assert len(rows) == 1
-        after = await rule.evaluate(
-            topic,
-            _heartbeat("warning"),
-            repo,
-            datetime(2026, 4, 24, 13, 0, 1, tzinfo=UTC),
-        )
-        assert after == []
+        start = datetime(2026, 4, 24, 12, 59, 57, tzinfo=UTC)
+
+        async def fill(at: datetime) -> list[Any]:
+            """Feed three WARNING frames starting at ``at``.
+
+            Args:
+                at: Timestamp of the first frame.
+
+            Returns:
+                Rows from the third frame.
+            """
+            result: list[Any] = []
+            for i in range(3):
+                result = await rule.evaluate(
+                    topic, _heartbeat("warning"), repo, at + timedelta(seconds=i)
+                )
+            return result
+
+        assert len(await fill(start)) == 1
+        assert await fill(start + timedelta(hours=1)) == []
+        assert await fill(start + timedelta(hours=23)) == []
+        reminder = await fill(start + timedelta(hours=24, seconds=5))
+        assert len(reminder) == 1
+        assert reminder[0]["dedup_key"] == "sys_error.executor.kraken.abc123def456"
 
     @pytest.mark.asyncio
-    async def test_boundary_suppression_survives_sidecar_restart(self) -> None:
-        """The rolling guard holds even when in-memory state is wiped.
+    async def test_episode_suppression_survives_sidecar_restart(self) -> None:
+        """A persisted page inside the last 24 h suppresses a restarted rule.
 
-        Given: A fire persisted at 12:59 (DB row under the 12:00 bucket)
-            and a FRESH rule instance (sidecar restarted — _last_fired
-            gone) evaluating frames at 13:00,
-        When: The window re-fills seconds after the boundary,
-        Then: The previous-bucket DB probe suppresses the second page.
+        Given: A page persisted three hours ago under the stable episode key
+            and a FRESH rule instance (sidecar restarted, memory gone),
+        When: The window re-fills,
+        Then: The ``alert_events`` lookup since ``now - 24 h`` suppresses it.
         """
         repo = MagicMock()
         repo.list_users_with_permission = AsyncMock(return_value=["admin-1"])
+        now = datetime(2026, 4, 24, 13, 0, 0, tzinfo=UTC)
+        seen_since: list[datetime] = []
 
-        async def windowed_rows(user_public_id: str, dedup_key: str, since: datetime) -> list[Any]:
-            if "2026-04-24T12:00:00" in dedup_key:
-                return [{"created_at": datetime(2026, 4, 24, 12, 59, 59, tzinfo=UTC)}]
+        async def episode_rows(user_public_id: str, dedup_key: str, since: datetime) -> list[Any]:
+            """Return the earlier page for the episode key.
+
+            Args:
+                user_public_id: Recipient being checked.
+                dedup_key: Episode key under test.
+                since: Lower bound requested by the rule.
+
+            Returns:
+                One prior row when the key matches.
+            """
+            seen_since.append(since)
+            if dedup_key == "sys_error.executor.kraken.abc123def456":
+                return [{"created_at": now - timedelta(hours=3)}]
             return []
 
-        repo.list_alert_events_with_dedup_key = AsyncMock(side_effect=windowed_rows)
+        repo.list_alert_events_with_dedup_key = AsyncMock(side_effect=episode_rows)
         fresh_rule = CriticalSystemErrorRule()
         topic = "system.heartbeats.executor.kraken.abc123def456"
         rows: list[Any] = []
         for i in range(3):
             rows = await fresh_rule.evaluate(
-                topic,
-                _heartbeat("warning"),
-                repo,
-                datetime(2026, 4, 24, 13, 0, 0, tzinfo=UTC) + timedelta(seconds=i),
+                topic, _heartbeat("warning"), repo, now + timedelta(seconds=i)
             )
         assert rows == []
+        assert seen_since == [now + timedelta(seconds=2) - timedelta(hours=24)]
+
+    @pytest.mark.asyncio
+    async def test_flapping_component_pages_at_most_hourly(self) -> None:
+        """A single HEALTHY blip neither closes the episode nor re-pages.
+
+        Given: A paged episode followed by one HEALTHY frame,
+        When: The component degrades again 5 and 61 minutes later,
+        Then: Neither degradation pages, because the episode stayed open.
+        """
+        rule = CriticalSystemErrorRule()
+        repo = MagicMock()
+        repo.list_users_with_permission = AsyncMock(return_value=["admin-1"])
+        repo.list_alert_events_with_dedup_key = AsyncMock(return_value=[])
+        topic = "system.heartbeats.feed.kraken"
+        start = datetime(2026, 4, 24, 12, 0, 0, tzinfo=UTC)
+
+        async def warn(at: datetime) -> list[Any]:
+            """Feed three WARNING frames starting at ``at``.
+
+            Args:
+                at: Timestamp of the first frame.
+
+            Returns:
+                Rows from the third frame.
+            """
+            result: list[Any] = []
+            for i in range(3):
+                result = await rule.evaluate(
+                    topic, _heartbeat("warning"), repo, at + timedelta(seconds=i)
+                )
+            return result
+
+        assert len(await warn(start)) == 1
+        await rule.evaluate(topic, _heartbeat("healthy"), repo, start + timedelta(minutes=3))
+        assert await warn(start + timedelta(minutes=5)) == []
+        await rule.evaluate(topic, _heartbeat("healthy"), repo, start + timedelta(minutes=30))
+        assert await warn(start + timedelta(minutes=61)) == []
+
+    @pytest.mark.asyncio
+    async def test_sustained_recovery_reopens_after_hourly_floor(self) -> None:
+        """Three HEALTHY frames close the episode; re-paging waits for 1 h.
+
+        Given: A paged episode, a sustained HEALTHY recovery, and the earlier
+            page still present in ``alert_events``,
+        When: The component degrades 30 minutes and then 61 minutes after
+            the first page,
+        Then: The first degradation is held by the hourly floor and the
+            second pages.
+        """
+        repo = MagicMock()
+        repo.list_users_with_permission = AsyncMock(return_value=["admin-1"])
+        start = datetime(2026, 4, 24, 12, 0, 0, tzinfo=UTC)
+        paged_at = start + timedelta(seconds=2)
+
+        async def prior_page(user_public_id: str, dedup_key: str, since: datetime) -> list[Any]:
+            """Return the earlier page only when the window reaches back to it.
+
+            Args:
+                user_public_id: Recipient being checked.
+                dedup_key: Episode key under test.
+                since: Lower bound requested by the rule.
+
+            Returns:
+                The earlier page when ``since`` precedes it.
+            """
+            if since <= paged_at:
+                return [{"created_at": paged_at}]
+            return []
+
+        rule = CriticalSystemErrorRule()
+        topic = "system.heartbeats.host.disk"
+
+        async def warn(at: datetime) -> list[Any]:
+            """Feed three WARNING frames starting at ``at``.
+
+            Args:
+                at: Timestamp of the first frame.
+
+            Returns:
+                Rows from the third frame.
+            """
+            result: list[Any] = []
+            for i in range(3):
+                result = await rule.evaluate(
+                    topic, _heartbeat("warning"), repo, at + timedelta(seconds=i)
+                )
+            return result
+
+        repo.list_alert_events_with_dedup_key = AsyncMock(return_value=[])
+        assert len(await warn(start)) == 1
+        repo.list_alert_events_with_dedup_key = AsyncMock(side_effect=prior_page)
+        for i in range(4):
+            await rule.evaluate(
+                topic, _heartbeat("healthy"), repo, start + timedelta(minutes=5, seconds=i)
+            )
+        assert await warn(start + timedelta(minutes=30)) == []
+        again = await warn(start + timedelta(minutes=61))
+        assert len(again) == 1
+
+    @pytest.mark.asyncio
+    async def test_reopen_floor_holds_against_persisted_page(self) -> None:
+        """After a close, the DB lookup still reaches back one hour.
+
+        Given: A closed episode whose in-memory last page is older than 1 h,
+            but a persisted page for this user 30 minutes ago,
+        When: The component degrades,
+        Then: The lookup lower bound is ``now - 1 h`` and the page is held.
+        """
+        repo = MagicMock()
+        repo.list_users_with_permission = AsyncMock(return_value=["admin-1"])
+        rule = CriticalSystemErrorRule()
+        topic = "system.heartbeats.host.disk"
+        start = datetime(2026, 4, 24, 12, 0, 0, tzinfo=UTC)
+        repo.list_alert_events_with_dedup_key = AsyncMock(return_value=[])
+        for i in range(3):
+            await rule.evaluate(topic, _heartbeat("warning"), repo, start + timedelta(seconds=i))
+        for i in range(3):
+            await rule.evaluate(
+                topic, _heartbeat("healthy"), repo, start + timedelta(minutes=90, seconds=i)
+            )
+        now = start + timedelta(hours=2)
+        seen_since: list[datetime] = []
+
+        async def recent_page(user_public_id: str, dedup_key: str, since: datetime) -> list[Any]:
+            """Record the bound and report a page 30 minutes old.
+
+            Args:
+                user_public_id: Recipient being checked.
+                dedup_key: Episode key under test.
+                since: Lower bound requested by the rule.
+
+            Returns:
+                One persisted page.
+            """
+            seen_since.append(since)
+            return [{"created_at": now - timedelta(minutes=30)}]
+
+        repo.list_alert_events_with_dedup_key = AsyncMock(side_effect=recent_page)
+        rows: list[Any] = []
+        for i in range(3):
+            rows = await rule.evaluate(
+                topic, _heartbeat("warning"), repo, now + timedelta(seconds=i)
+            )
+        assert rows == []
+        assert seen_since == [now + timedelta(seconds=2) - timedelta(hours=1)]
 
     @pytest.mark.asyncio
     async def test_six_and_three_segment_topics_rejected(self) -> None:
