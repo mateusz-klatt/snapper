@@ -2448,7 +2448,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"[{exchange_name}] Rejecting order {order.client_order_id}: "
                 f"instrument {order.instrument} not tradeable"
             )
-            self.pending_orders.pop(order.client_order_id, None)
+            self._forget_pending_order(order.client_order_id)
             await self._publish_order_status(order, OrderEventEnum.REJECTED)
             return
         if await self._is_live_trading_interlocked(order, exchange_name):
@@ -2458,7 +2458,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await self._publish_order_status(order, OrderEventEnum.SUBMITTED)
             exchange_order_id = await self._execute_live_order(order)
         except TradeCommandMaterialUnavailableError as exc:
-            self.pending_orders.pop(order.client_order_id, None)
+            self._forget_pending_order(order.client_order_id)
             logger.critical(
                 "[{}] CREATE refused because durable request material is unproven: {}. "
                 "No venue rejection or retry CREATE is inferred.",
@@ -2474,7 +2474,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             return
         except Exception as e:
             logger.error(f"[{exchange_name}] Error processing order {order.client_order_id}: {e}")
-            self.pending_orders.pop(order.client_order_id, None)
+            self._forget_pending_order(order.client_order_id)
             await self._publish_order_status(order, OrderEventEnum.REJECTED)
             await self._record_venue_event(
                 {
@@ -2578,7 +2578,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"retrying via recon (intent must not silently stay held)"
             )
             return False
-        self.pending_orders.pop(cid, None)
+        self._forget_pending_order(cid)
         return True
 
     async def _fail_command_for_breaker(self, order: OrderRequestData) -> bool:
@@ -2822,7 +2822,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 f"— retrying via recon (intent must not silently stay held)"
             )
             return False
-        self.pending_orders.pop(cid, None)
+        self._forget_pending_order(cid)
         return True
 
     async def _fail_command_for_interlock(self, order: OrderRequestData) -> bool:
@@ -3133,7 +3133,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 "strategy_tag": order.strategy_tag,
             }
         )
-        self.pending_orders.pop(order.client_order_id, None)
+        self._forget_pending_order(order.client_order_id)
         return True
 
     @staticmethod
@@ -3451,7 +3451,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         async with holder.fill_lock:
             await self._record_confirmed_cancel_terminal(cancel, holder, exchange_name)
             self.client_by_exchange.pop(cancel.exchange_order_id, None)
-            pending = self.pending_orders.pop(client_id, None) if client_id else None
+            pending = self._forget_pending_order(client_id) if client_id else None
             if pending and pending.db_order_id is not None:
                 await self._mark_cancelled_order_row(pending.db_order_id, cancel, exchange_name)
 
@@ -3574,6 +3574,22 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._unrecorded_order_terminals.pop(client_order_id, None)
         self._unrecorded_order_terminal_dropped_cids.discard(client_order_id)
         return instrument
+
+    def _forget_pending_order(self, client_order_id: str) -> PendingOrderState | None:
+        """Remove the pending order and end its terminal-drop dedup episode.
+
+        Clearing the WARN and metric dedup entry here bounds the set to tracked
+        orders and lets a later episode for the same id report a drop again.
+
+        Args:
+            client_order_id: Id of the order to forget.
+
+        Returns:
+            The removed pending order state, if present.
+        """
+        pending = self.pending_orders.pop(client_order_id, None)
+        self._unrecorded_order_terminal_dropped_cids.discard(client_order_id)
+        return pending
 
     def _record_unrecorded_order_terminal_drop(
         self,
@@ -7686,8 +7702,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange_name=exchange_name,
             pending=pending,
         )
-        self.pending_orders.pop(client_order_id, None)
-        self._unrecorded_order_terminal_dropped_cids.discard(client_order_id)
+        self._forget_pending_order(client_order_id)
         self.client_by_exchange.pop(exchange_order_id, None)
         logger.info(
             f"[{exchange_name}] Order {client_order_id} {execution.exec_type}, "
@@ -8519,8 +8534,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange_name: Exchange name for logging.
         """
         if order_terminal:
-            self.pending_orders.pop(client_order_id, None)
-            self._unrecorded_order_terminal_dropped_cids.discard(client_order_id)
+            self._forget_pending_order(client_order_id)
             self.client_by_exchange.pop(exchange_order_id, None)
             logger.info(f"[{exchange_name}] Order {client_order_id} filled, removed from pending")
 

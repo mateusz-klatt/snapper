@@ -2306,6 +2306,7 @@ class TestBreakerOpenDisposition:
         """
         ex = self._order_executor(monkeypatch)
         order = order_request_from_command(_make_cmd_row())
+        ex._unrecorded_order_terminal_dropped_cids.add(order.client_order_id)
         await ex._process_order(order)
         events = [c.args[0] for c in ex._record_venue_event.await_args_list]
         breaker_events = [e for e in events if e["event_type"] == "order_breaker_open"]
@@ -2322,6 +2323,7 @@ class TestBreakerOpenDisposition:
         ]
         assert reject_calls[0].kwargs["reason"] == "circuit_breaker_open"
         assert "cid-1" not in ex.pending_orders
+        assert order.client_order_id not in ex._unrecorded_order_terminal_dropped_cids
 
     @pytest.mark.asyncio
     async def test_event_write_failure_parks_without_publish(
@@ -2670,6 +2672,7 @@ class TestInterlockBlockedDisposition:
         """
         ex = self._order_executor(monkeypatch)
         order = order_request_from_command(_make_cmd_row())
+        ex._unrecorded_order_terminal_dropped_cids.add(order.client_order_id)
         await ex._process_order(order)
         events = [c.args[0] for c in ex._record_venue_event.await_args_list]
         interlock_events = [e for e in events if e["event_type"] == "order_interlock_blocked"]
@@ -2686,6 +2689,7 @@ class TestInterlockBlockedDisposition:
         ]
         assert reject_calls[0].kwargs["reason"] == "live_trading_halted"
         assert "cid-1" not in ex.pending_orders
+        assert order.client_order_id not in ex._unrecorded_order_terminal_dropped_cids
 
     @pytest.mark.asyncio
     async def test_reduce_only_mode_uses_reduce_only_reason(

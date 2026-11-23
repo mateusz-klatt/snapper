@@ -482,7 +482,7 @@ async def test_process_order_rejects_non_tradeable(monkeypatch: pytest.MonkeyPat
 
     Given: An executor where is_tradeable returns False,
     When: _process_order is called,
-    Then: Order is rejected before reaching _execute_live_order.
+    Then: Order is rejected before reaching _execute_live_order and stale dedup state is cleared.
     """
     ex: Any = MergedDummyExecutor()
     ex.publisher = SimpleNamespace(send_multipart=AsyncMock())
@@ -497,7 +497,10 @@ async def test_process_order_rejects_non_tradeable(monkeypatch: pytest.MonkeyPat
         exchange="kraken",
         mode="live",
     )
+    ex._unrecorded_order_terminal_dropped_cids.add(order.client_order_id)
     await ex._process_order(order)
+    assert order.client_order_id not in ex.pending_orders
+    assert order.client_order_id not in ex._unrecorded_order_terminal_dropped_cids
     ex._execute_live_order.assert_not_awaited()
     ex._publish_order_status.assert_awaited_once()
     rejected_call = ex._publish_order_status.call_args
@@ -511,7 +514,7 @@ async def test_process_order_rejects_on_execute_error(monkeypatch: pytest.Monkey
 
     Given: A running executor with mocked execute that raises error,
     When: _process_order is called,
-    Then: Order status 'rejected' is published (no fill for syntactic rejection).
+    Then: Order status 'rejected' is published without a fill, and tracking is cleared.
     """
     ex: Any = MergedDummyExecutor()
     ex.publisher = SimpleNamespace(send_multipart=AsyncMock())
@@ -523,9 +526,12 @@ async def test_process_order_rejects_on_execute_error(monkeypatch: pytest.Monkey
     _given_durable_intent(ex, _durable_command("c1"))
     _enable_live_trading(ex)
     order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
+    ex._unrecorded_order_terminal_dropped_cids.add(order.client_order_id)
     await ex._process_order(order)
     ex._publish_execution.assert_not_awaited()
     ex._publish_order_status.assert_awaited()
+    assert order.client_order_id not in ex.pending_orders
+    assert order.client_order_id not in ex._unrecorded_order_terminal_dropped_cids
     cast(MagicMock, ex.repository).require_consistent_trade_command_material.assert_awaited()
 
 
@@ -7737,10 +7743,12 @@ class TestAmbiguousVerification:
         ex.exchange_client.find_order_by_client_id = AsyncMock(return_value=None)
         _given_durable_intent(ex, _durable_command())
         order = make_order(wallet_public_id=_INTENT_WALLET, exchange="kraken", mode="live")
+        ex._unrecorded_order_terminal_dropped_cids.add(order.client_order_id)
         await ex._handle_ambiguous_submit(order, self._ambiguous(order))
         statuses = [c.args[1] for c in ex._publish_order_status.await_args_list]
         assert statuses == ["rejected"]
         assert order.client_order_id not in ex.pending_orders
+        assert order.client_order_id not in ex._unrecorded_order_terminal_dropped_cids
         event = ex._record_venue_event.await_args_list[-1].args[0]
         assert event["event_type"] == "order_rejected"
         assert "venue verified order absent" in event["error"]
@@ -9144,6 +9152,7 @@ class TestOrderRowTerminalGate:
     async def test_full_fill_projects_closed_and_removes_tracking(self) -> None:
         """A fill reaching the order quantity writes CLOSED and drops tracking."""
         ex, order = self._executor_with_db_order()
+        ex._unrecorded_order_terminal_dropped_cids.add(order.client_order_id)
         fill = self._fill(FillStatusEnum.FILLED, 10.0)
         execution = SimpleNamespace(
             order_status=ExchangeOrderStatusEnum.OPEN, cum_qty=10.0, average_price=0.8
@@ -9158,6 +9167,7 @@ class TestOrderRowTerminalGate:
         call = ex.exchange_client._log_order_update_to_db.await_args
         assert call.kwargs["status"] == ExchangeOrderStatusEnum.CLOSED
         assert order.client_order_id not in ex.pending_orders
+        assert order.client_order_id not in ex._unrecorded_order_terminal_dropped_cids
         assert "ex1" not in ex.client_by_exchange
 
     @pytest.mark.asyncio
@@ -13068,6 +13078,47 @@ class TestConfirmedCancelTerminal:
         assert ex._unrecorded_order_terminals == {}
 
     @pytest.mark.asyncio
+    async def test_cancel_removal_allows_a_new_drop_episode_for_the_same_cid(self) -> None:
+        """Allow a fresh WARN and metric after a confirmed cancel forgets the order."""
+        ex, _ = _cancel_executor(tracked=True, exchange="paper")
+        order = ex.pending_orders[_CANCEL_CID].request
+        order.instrument = ""
+        params: RecordVenueEventParams = {
+            "event_type": "order_terminal",
+            "exchange_name": "paper",
+            "instrument": "",
+            "exchange_order_id": "ex-cancel",
+            "client_order_id": _CANCEL_CID,
+            "status": "canceled",
+        }
+
+        with (
+            patch.object(base_module.logger, "critical"),
+            patch.object(base_module.logger, "warning") as warning,
+        ):
+            ex._hold_unrecorded_order_terminal(_CANCEL_CID, params, "paper")
+            await ex._retry_unrecorded_order_terminals()
+            assert _CANCEL_CID in ex._unrecorded_order_terminal_dropped_cids
+            assert ex.unrecorded_order_terminal_drop_count == 1
+
+            await ex._process_cancel(_cancel_request(instrument=""))
+            assert _CANCEL_CID not in ex.pending_orders
+            assert _CANCEL_CID not in ex._unrecorded_order_terminal_dropped_cids
+            assert _CANCEL_CID in ex._unrecorded_order_terminals
+
+            ex.pending_orders[_CANCEL_CID] = base_module.PendingOrderState(request=order)
+            await ex._retry_unrecorded_order_terminals()
+
+        drop_warnings = [
+            entry.args[0]
+            for entry in warning.call_args_list
+            if "Order terminal without order_terminal evidence" in entry.args[0]
+        ]
+        assert len(drop_warnings) == 2
+        assert ex.unrecorded_order_terminal_drop_count == 2
+        assert _CANCEL_CID in ex._unrecorded_order_terminal_dropped_cids
+
+    @pytest.mark.asyncio
     async def test_insert_failing_after_commit_is_found_by_the_retry_probe(self) -> None:
         """Drop a held terminal whose ambiguous insert had in fact committed.
 
@@ -13746,8 +13797,9 @@ class TestStreamCancellationEvidenceFirst:
             steps.append("order_update")
 
         async def publish_bus(_topic: str, _payload: object) -> None:
-            """Record bus publish step before correlation maps are dropped."""
+            """Model a dedup marker set during publish before correlation maps are dropped."""
             assert _CANCEL_CID in ex.pending_orders
+            ex._unrecorded_order_terminal_dropped_cids.add(_CANCEL_CID)
             steps.append("publish")
 
         repo.insert_order_terminal_once = AsyncMock(side_effect=record_terminal)
@@ -13762,6 +13814,7 @@ class TestStreamCancellationEvidenceFirst:
         assert result is True
         assert steps == ["record", "order_update", "publish"]
         assert _CANCEL_CID not in ex.pending_orders
+        assert _CANCEL_CID not in ex._unrecorded_order_terminal_dropped_cids
         assert "ex-cancel" not in ex.client_by_exchange
 
         non_cancel = ExecutionUpdate(
