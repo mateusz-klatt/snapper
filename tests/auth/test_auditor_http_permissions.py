@@ -213,6 +213,8 @@ def test_administrative_reads_admit_auditor_and_legacy_admin(
     repo.get_settings = AsyncMock(return_value=[])
     repo.get_setting_categories = AsyncMock(return_value=[])
     repo.get_all_open_position_cycles = AsyncMock(return_value=[])
+    repo.get_positions = AsyncMock(return_value=[])
+    repo.get_position_display_facts = AsyncMock(return_value=[])
     users = MagicMock()
     users.get_all_users = AsyncMock(return_value=[])
     users.list_desk_members = AsyncMock(return_value=[])
