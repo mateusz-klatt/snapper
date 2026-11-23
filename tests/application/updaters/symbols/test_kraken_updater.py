@@ -12,6 +12,7 @@ from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import call
 from unittest.mock import patch
 
 import pytest
@@ -52,7 +53,10 @@ def _create_mock_settings() -> MagicMock:
 
 
 def _mock_snapshot_client(
-    instruments: list[dict[str, str]], *, hold_open: bool = False, error: Exception | None = None
+    instruments: list[dict[str, str]],
+    *,
+    hold_open: bool = False,
+    error: BaseException | None = None,
 ) -> MagicMock:
     """Create a client that emits the supplied instruments and then ends, waits, or raises."""
 
@@ -69,7 +73,6 @@ def _mock_snapshot_client(
     return MagicMock(
         subscribe_instruments=MagicMock(side_effect=subscribe),
         disconnect_websocket=AsyncMock(),
-        disconnect=AsyncMock(),
     )
 
 
@@ -241,15 +244,12 @@ class TestKrakenSymbolUpdater:
         mock_client = AsyncMock()
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = AsyncMock()
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch.object(kraken_updater_module, "KrakenExchangeClient") as retry_client,
-        ):
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory:
             verified, _ws_only = await updater.verify_websocket_symbols(ws_symbols_to_verify)
         assert len(verified) == 1
         assert "BTC/USD" in verified
         assert "ETH/USD" not in verified
-        retry_client.assert_not_called()
+        factory.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_exits_after_final_expected_pair(
@@ -278,16 +278,13 @@ class TestKrakenSymbolUpdater:
         mock_client = AsyncMock()
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = AsyncMock()
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch.object(kraken_updater_module, "KrakenExchangeClient") as retry_client,
-        ):
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory:
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols_to_verify)
         assert verified == ws_symbols_to_verify
         assert ws_only == []
         assert not resumed
         assert closed
-        retry_client.assert_not_called()
+        factory.assert_called_once_with()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -602,20 +599,18 @@ async def test_fetch_symbols_retries_a_short_read_with_a_fresh_client(
     monkeypatch.setattr(updater, "load_kraken_rest_symbols", AsyncMock(return_value=rest_pairs))
     monkeypatch.setattr(updater, "discover_btnl_symbols", AsyncMock(return_value={}))
     with (
-        patch.object(updater, "_create_exchange_client", return_value=first) as first_factory,
-        patch.object(kraken_updater_module, "KrakenExchangeClient", return_value=second) as retry,
+        patch.object(updater, "_create_exchange_client", side_effect=[first, second]) as factory,
         patch.object(kraken_updater_module.asyncio, "sleep", new_callable=AsyncMock) as backoff,
         patch.object(logger, "warning") as warning,
     ):
         symbols = await updater._fetch_symbols(MagicMock())
 
-    first_factory.assert_called_once_with()
-    retry.assert_called_once_with()
+    assert factory.call_args_list == [call(), call(fresh=True)]
     first.subscribe_instruments.assert_called_once_with(raw=True)
     second.subscribe_instruments.assert_called_once_with(raw=True)
     assert first is not second
     first.disconnect_websocket.assert_awaited_once_with()
-    second.disconnect.assert_awaited_once_with()
+    second.disconnect_websocket.assert_awaited_once_with()
     backoff.assert_awaited_once_with(2.0)
     warning.assert_any_call(
         "WebSocket verification retry: first attempt verified {}/{}, retry verified {}/{}, "
@@ -633,38 +628,42 @@ async def test_fetch_symbols_retries_a_short_read_with_a_fresh_client(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("immediate_verification_timeout")
+@pytest.mark.parametrize(
+    ("retry_error", "coverage"),
+    [(None, r"18/20 \(90\.0%\)"), (RuntimeError("retry subscription failed"), r"16/20 \(80\.0%\)")],
+    ids=("short-retry", "retry-error"),
+)
 async def test_fetch_symbols_reports_final_coverage_after_retry(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, retry_error: RuntimeError | None, coverage: str
 ) -> None:
-    """Verify a retry below the threshold reports the final union.
+    """Verify a retry below the threshold reports the usable evidence.
 
-    Given: Two short snapshots whose union contains 18 of 20 expected symbols,
+    Given: A short snapshot followed by a second short or failed snapshot,
     When: The updater fetches symbols,
-    Then: The update aborts and the error names the retry and its final coverage.
+    Then: The update aborts with the combined counts or the first counts if the retry failed.
     """
     updater = KrakenSymbolUpdaterService()
     rest_pairs = {f"ASSET{i}USD": {"base": f"ASSET{i}", "quote": "USD"} for i in range(20)}
     first = _mock_snapshot_client([{"symbol": f"ASSET{i}/USD"} for i in range(16)], hold_open=True)
     second = _mock_snapshot_client(
-        [{"symbol": f"ASSET{i}/USD"} for i in range(15, 18)], hold_open=True
+        [{"symbol": f"ASSET{i}/USD"} for i in range(15, 18)], hold_open=True, error=retry_error
     )
     monkeypatch.setattr(updater, "load_kraken_rest_symbols", AsyncMock(return_value=rest_pairs))
     discover_btnl = AsyncMock(return_value={})
     monkeypatch.setattr(updater, "discover_btnl_symbols", discover_btnl)
 
     with (
-        patch.object(updater, "_create_exchange_client", return_value=first),
-        patch.object(kraken_updater_module, "KrakenExchangeClient", return_value=second) as retry,
+        patch.object(updater, "_create_exchange_client", side_effect=[first, second]) as factory,
         patch.object(kraken_updater_module.asyncio, "sleep", new_callable=AsyncMock),
         pytest.raises(
             RuntimeError,
-            match=r"^WebSocket verification failed: coverage 18/20 \(90\.0%\) below 95%"
+            match=rf"^WebSocket verification failed: coverage {coverage} below 95%"
             r" after retry - aborting update$",
         ),
     ):
         await updater._fetch_symbols(MagicMock())
 
-    retry.assert_called_once_with()
+    assert factory.call_args_list == [call(), call(fresh=True)]
     discover_btnl.assert_not_awaited()
 
 
@@ -927,6 +926,24 @@ class TestKrakenUpdaterClientCaching:
         client2 = updater._create_exchange_client()
         assert client2 is client1
 
+    def test_create_exchange_client_fresh_keeps_cached_client(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify a fresh client request leaves the original cache entry intact.
+
+        Given: An updater with a cached client,
+        When: A fresh client is requested,
+        Then: The factory constructs a distinct client and subsequent default calls return the cache.
+        """
+        first = MagicMock(spec=KrakenExchangeClient)
+        second = MagicMock(spec=KrakenExchangeClient)
+        with patch.object(
+            kraken_updater_module, "KrakenExchangeClient", side_effect=[first, second]
+        ):
+            assert updater._create_exchange_client() is first
+            assert updater._create_exchange_client(fresh=True) is second
+            assert updater._create_exchange_client() is first
+
 
 class TestLoadKrakenRestSymbolsFallback:
     """Test cases for Kraken REST symbol loading fallback scenarios."""
@@ -1080,14 +1097,11 @@ class TestVerifyWebsocketSymbols:
             raise TimeoutError("subscribe")
 
         client = MagicMock(subscribe_instruments=subscribe, disconnect_websocket=AsyncMock())
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=client),
-            patch.object(kraken_updater_module, "KrakenExchangeClient") as retry_client,
-        ):
+        with patch.object(updater, "_create_exchange_client", return_value=client) as factory:
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert verified == ws_symbols
         assert ws_only == []
-        retry_client.assert_not_called()
+        factory.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_verify_exception_fallback(self, updater: KrakenSymbolUpdaterService) -> None:
@@ -1355,14 +1369,11 @@ class TestKrakenVerifyWebsocketSymbols:
         mock_client = _mock_snapshot_client(
             [{"symbol": symbol} for symbol in observed], hold_open=True
         )
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch.object(kraken_updater_module, "KrakenExchangeClient") as retry_client,
-        ):
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory:
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert verified == observed
         assert ws_only == []
-        retry_client.assert_not_called()
+        factory.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_cancelled(
@@ -1408,44 +1419,77 @@ class TestKrakenVerifyWebsocketSymbols:
         mock_client = MagicMock()
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = MagicMock()
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch.object(kraken_updater_module, "KrakenExchangeClient") as retry_client,
-        ):
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory:
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert verified == ws_symbols
         assert ws_only == []
-        retry_client.assert_not_called()
+        factory.assert_called_once_with()
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("immediate_verification_timeout")
-    async def test_verify_websocket_symbols_retry_exception_keeps_fallback(
+    async def test_verify_websocket_symbols_retry_exception_retains_first_evidence(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
-        """Verify the existing fail-open fallback applies to exceptions during a retry.
+        """Verify a retry exception preserves the first verification evidence.
 
-        Given: A local collection timeout followed by a connection error on a fresh client,
-        When: verify_websocket_symbols called,
-        Then: All expected symbols are assumed valid and the fresh client is disconnected.
+        Given: A short snapshot followed by a subscription failure and a disconnect failure,
+        When: The updater verifies WebSocket symbols,
+        Then: The first snapshot is returned and the subscription failure is logged at warning.
         """
         expected = {"BTC/USD", "ETH/USD"}
-        first = _mock_snapshot_client(
-            [{"symbol": "EXTRA/USD", "base": "EXTRA", "quote": "USD"}], hold_open=True
-        )
-        second = _mock_snapshot_client([], error=ConnectionError("retry subscription failed"))
+        extra = {"symbol": "EXTRA/USD", "base": "EXTRA", "quote": "USD"}
+        first = _mock_snapshot_client([{"symbol": "BTC/USD"}, extra], hold_open=True)
+        retry_error = RuntimeError("retry subscription failed")
+        second = _mock_snapshot_client([], error=retry_error)
+        second.disconnect_websocket.side_effect = ValueError("retry disconnect failed")
         with (
-            patch.object(updater, "_create_exchange_client", return_value=first),
             patch.object(
-                kraken_updater_module, "KrakenExchangeClient", return_value=second
-            ) as retry,
+                updater, "_create_exchange_client", side_effect=[first, second]
+            ) as factory,
             patch.object(kraken_updater_module.asyncio, "sleep", new_callable=AsyncMock),
+            patch.object(logger, "warning") as warning,
         ):
-            verified, ws_only = await updater.verify_websocket_symbols(expected)
+            verified, ws_only, retried = await updater._verify_websocket_symbols(expected)
 
-        assert verified == expected
-        assert ws_only == []
-        retry.assert_called_once_with()
-        second.disconnect.assert_awaited_once_with()
+        assert verified == {"BTC/USD"}
+        assert ws_only == [extra]
+        assert retried is True
+        assert factory.call_args_list == [call(), call(fresh=True)]
+        second.disconnect_websocket.assert_awaited_once_with()
+        warning.assert_any_call(
+            "WebSocket verification retry failed ({}): {}; first attempt verified {}/{}",
+            "RuntimeError",
+            retry_error,
+            1,
+            2,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("immediate_verification_timeout")
+    async def test_verify_websocket_symbols_retry_preserves_cancellation(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify retry cancellation propagates through the disconnect helper.
+
+        Given: A short snapshot followed by cancellation and a retry disconnect failure,
+        When: The updater verifies WebSocket symbols,
+        Then: CancelledError propagates and both disconnects are attempted.
+        """
+        first = _mock_snapshot_client([{"symbol": "BTC/USD"}], hold_open=True)
+        second = _mock_snapshot_client([], error=asyncio.CancelledError())
+        second.disconnect_websocket.side_effect = ValueError("retry disconnect failed")
+        with (
+            patch.object(
+                updater, "_create_exchange_client", side_effect=[first, second]
+            ) as factory,
+            patch.object(kraken_updater_module.asyncio, "sleep", new_callable=AsyncMock),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await updater.verify_websocket_symbols({"BTC/USD", "ETH/USD"})
+
+        assert factory.call_args_list == [call(), call(fresh=True)]
+        first.disconnect_websocket.assert_awaited_once_with()
+        second.disconnect_websocket.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_async_disconnect(
@@ -1487,14 +1531,11 @@ class TestKrakenVerifyWebsocketSymbols:
         """
         ws_symbols: set[str] = set()
         mock_client = _mock_snapshot_client([], hold_open=True)
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch.object(kraken_updater_module, "KrakenExchangeClient") as retry_client,
-        ):
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory:
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert verified == set()
         assert ws_only == []
-        retry_client.assert_not_called()
+        factory.assert_called_once_with()
 
 
 class TestKrakenBuildVerifiedMappings:

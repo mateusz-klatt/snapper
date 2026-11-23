@@ -394,15 +394,21 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         self._kraken_client: KrakenExchangeClient | None = None
         self._alias_claims = AliasClaims()
 
-    def _create_exchange_client(self) -> KrakenExchangeClient:
-        """Create Kraken exchange client.
+    def _create_exchange_client(self, *, fresh: bool = False) -> KrakenExchangeClient:
+        """Create a Kraken exchange client, reusing the cached client by default.
+
+        Args:
+            fresh: Give a verification retry its own client and instrument queue.
 
         Returns:
             KrakenExchangeClient instance.
         """
-        if self._kraken_client is None:
-            self._kraken_client = KrakenExchangeClient()
-        return self._kraken_client
+        if not fresh and self._kraken_client is not None:
+            return self._kraken_client
+        client = KrakenExchangeClient()
+        if not fresh:
+            self._kraken_client = client
+        return client
 
     def _get_setting_key(self) -> str:
         """Get settings key for last update timestamp.
@@ -651,7 +657,8 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
 
         Returns:
             Tuple of (verified symbols, WS-only instrument dicts).
-            On error fallback, returns (all ws_symbols, empty WS-only list).
+            A first collection error falls back to (all ws_symbols, empty
+            WS-only list). A retry error returns the first collection's results.
         """
         verified, ws_only, _ = await self._verify_websocket_symbols(ws_symbols)
         return verified, ws_only
@@ -671,23 +678,10 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         )
         client = self._create_exchange_client()
         verified: set[str] = set()
-        retried = False
         try:
-            try:
-                verified, ws_only, timed_out = await self._collect_verified_symbols(
-                    client, ws_symbols, timeout
-                )
-            finally:
-                await self._safe_disconnect_ws(client)
-            if (
-                timed_out
-                and expected_count
-                and len(verified) / expected_count < _VERIFICATION_THRESHOLD
-            ):
-                retried = True
-                verified, ws_only = await self._retry_websocket_verification(
-                    ws_symbols, timeout, verified, ws_only
-                )
+            verified, ws_only, timed_out = await self._collect_verified_symbols(
+                client, ws_symbols, timeout
+            )
         except asyncio.CancelledError:
             logger.info(
                 "WebSocket instrument verification cancelled ({}/{}) verified",
@@ -697,15 +691,28 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             raise
         except Exception as exc:
             logger.error("Error verifying symbols via WebSocket: {}", exc)
-            if retried:
+            logger.warning("Falling back to assume all symbols valid")
+            return ws_symbols, [], False
+        finally:
+            await self._safe_disconnect_ws(client)
+        retried = (
+            timed_out
+            and expected_count > 0
+            and len(verified) / expected_count < _VERIFICATION_THRESHOLD
+        )
+        if retried:
+            try:
+                verified, ws_only = await self._retry_websocket_verification(
+                    ws_symbols, timeout, verified, ws_only
+                )
+            except Exception as exc:
                 logger.warning(
-                    "WebSocket verification retry failed: first attempt verified {}/{}, "
-                    "retry count unavailable",
+                    "WebSocket verification retry failed ({}): {}; first attempt verified {}/{}",
+                    type(exc).__name__,
+                    exc,
                     len(verified),
                     expected_count,
                 )
-            logger.warning("Falling back to assume all symbols valid")
-            return ws_symbols, [], retried
         self._log_unverified_symbols(verified, ws_symbols)
         return verified, ws_only, retried
 
@@ -718,13 +725,13 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
     ) -> tuple[set[str], list[dict[str, str]]]:
         """Back off once, then merge evidence from a fresh client and queue."""
         await asyncio.sleep(_VERIFICATION_RETRY_BACKOFF_SECONDS)
-        retry_client = KrakenExchangeClient()
+        retry_client = self._create_exchange_client(fresh=True)
         try:
             retry_verified, retry_ws_only, _ = await self._collect_verified_symbols(
                 retry_client, ws_symbols, timeout, previously_verified=first_verified
             )
         finally:
-            await retry_client.disconnect()
+            await self._safe_disconnect_ws(retry_client)
         verified = first_verified | retry_verified
         instruments: dict[str, dict[str, str]] = {}
         for instrument in (*first_ws_only, *retry_ws_only):
