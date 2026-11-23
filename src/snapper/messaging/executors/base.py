@@ -551,9 +551,20 @@ _PORTFOLIO_RECONCILIATION_TIMEOUT_S = 60.0
 """Bound on the complete observer-side portfolio reconciliation branch."""
 _UNRECORDED_ORDER_TERMINAL_LIMIT = 1_000
 """Bound on the executor's retry map of confirmed terminals not yet recorded.
-When it is full, the oldest entry is dropped with a critical log; the map lives
-in memory only, so a restart loses it and the enqueue-time critical log is the
-trace."""
+When it is full, the oldest entry is dropped with a critical log and the WARN
+drop metric/log; the map lives in memory only, so a restart loses it and the
+enqueue-time critical log is the trace."""
+
+
+def _has_required_venue_event_identifiers(params: RecordVenueEventParams) -> bool:
+    """Return True when all identifiers required to build a venue event row exist."""
+    return None not in (
+        params.get("event_type"),
+        params.get("exchange_name"),
+        params.get("instrument"),
+    )
+
+
 _SPOT_ANCHOR_HISTORY_LIMIT = 100
 """Page size for the anchor bootstrap's account-history tip reads (OQ-3). The
 local execution tip must be on the page or the bootstrap refuses, so the page
@@ -827,6 +838,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self.orphan_drop_count: int = 0
         self._unhealed_accept_events: dict[str, RecordVenueEventParams] = {}
         self._unrecorded_order_terminals: dict[str, RecordVenueEventParams] = {}
+        self.unrecorded_order_terminal_drop_count: int = 0
         self._seen_exec_ids: OrderedDict[str, None] = OrderedDict()
         self._exec_stream_restarts: int = 0
         self._task_restarts: dict[str, int] = {}
@@ -1918,6 +1930,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange_name = self._get_exchange_name()
             logger.info(f"ExchangeExecutorService[{exchange_name}] stopped")
         self._release_zmq_resources()
+        self._drop_unrecorded_order_terminals_on_stop()
         client = self.exchange_client
         if client is not None and not self._client_context_active:
             try:
@@ -1927,6 +1940,20 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     f"ExchangeExecutorService[{self._get_exchange_name()}]: "
                     f"fallback exchange-client disconnect failed: {exc!r}"
                 )
+
+    def _drop_unrecorded_order_terminals_on_stop(self) -> None:
+        """Drop and warn on any held order terminals still unrecorded at shutdown."""
+        if not self._unrecorded_order_terminals:
+            return
+        exchange_name = self._get_exchange_name()
+        for client_order_id, held_params in list(self._unrecorded_order_terminals.items()):
+            self._unrecorded_order_terminals.pop(client_order_id, None)
+            self._record_unrecorded_order_terminal_drop(
+                client_order_id,
+                held_params,
+                exchange_name,
+                "executor stopped before retry completed",
+            )
 
     async def _dispatch_command(
         self, parsed_suffix: str, payload_str: str, exchange_name: OrderExchange, instrument: str
@@ -3488,15 +3515,77 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             "client_order_id": client_order_id,
             "status": "canceled",
         }
+        await self._record_or_hold_order_terminal(client_order_id, params, holder, exchange_name)
+
+    async def _record_or_hold_order_terminal(
+        self,
+        client_order_id: str,
+        params: RecordVenueEventParams,
+        holder: PendingOrderState | None,
+        exchange_name: OrderExchange,
+    ) -> str | None:
+        """Resolve terminal metadata and record once, holding for retry on ``Exception``.
+
+        Resolves the canonical instrument and strategy tag inside the ``try``
+        block so a metadata lookup failure leaves ``strategy_tag`` absent in
+        ``params`` and the reconciliation retry re-resolves it. Normal
+        exceptions enqueue into ``_unrecorded_order_terminals`` via
+        :meth:`_hold_unrecorded_order_terminal`; ``asyncio.CancelledError``
+        inherits from ``BaseException`` and propagates without being held.
+
+        Args:
+            client_order_id: Target order's client order id.
+            params: Base ``order_terminal`` params carrying fallback
+                ``instrument``, ``exchange_order_id``, ``client_order_id``,
+                ``exchange_name``, and ``status``.
+            holder: Tracked entry whose ``fill_lock`` the caller holds, or ``None``.
+            exchange_name: Executor exchange identifier.
+
+        Returns:
+            Resolved instrument when the durable write succeeded (or found an
+            existing terminal), or ``None`` when the terminal was held for retry.
+        """
+        fallback_instrument = params.get("instrument", "")
         try:
             instrument, strategy_tag = await self._order_terminal_metadata(
-                client_order_id, holder, exchange_name, cancel.instrument
+                client_order_id, holder, exchange_name, fallback_instrument
             )
             params["instrument"] = instrument
             params["strategy_tag"] = strategy_tag
             await self._record_order_terminal_once(params)
         except Exception:
             self._hold_unrecorded_order_terminal(client_order_id, params, exchange_name)
+            return None
+        self._unrecorded_order_terminals.pop(client_order_id, None)
+        return instrument
+
+    def _record_unrecorded_order_terminal_drop(
+        self,
+        client_order_id: str,
+        params: RecordVenueEventParams,
+        exchange_name: OrderExchange,
+        reason: str,
+    ) -> None:
+        """Record the WARN metric when a held terminal is evicted or dropped.
+
+        Increments ``unrecorded_order_terminal_drop_count`` (exposed in
+        heartbeat forensics) and logs at WARN level so operators know an
+        order may be terminal without ``order_terminal`` evidence and need
+        the G3-C repair tool (``snapper repair-cancel-targets``).
+
+        Args:
+            client_order_id: Dropped order's client order id.
+            params: Held terminal params for context.
+            exchange_name: Executor exchange, for logs.
+            reason: Why the held entry was dropped.
+        """
+        self.unrecorded_order_terminal_drop_count += 1
+        logger.warning(
+            f"[{exchange_name}] Order terminal without order_terminal evidence for "
+            f"{client_order_id} (exchange {params.get('exchange_order_id')}, "
+            f"reason={reason}); run G3-C repair tool (snapper repair-cancel-targets) "
+            f"(total drops: {self.unrecorded_order_terminal_drop_count})"
+        )
 
     def _hold_unrecorded_order_terminal(
         self,
@@ -3507,9 +3596,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """Queue a confirmed terminal for the reconciliation retry, bounded.
 
         The map is bounded by ``_UNRECORDED_ORDER_TERMINAL_LIMIT``; when it
-        is full the oldest entry is dropped with a critical log. The
-        enqueue itself logs at critical level with both order ids, because
-        the map does not survive a restart.
+        is full the oldest entry is dropped with a critical log and the
+        WARN drop metric/log pointing operators to G3-C repair. The enqueue
+        itself logs at critical level with both order ids, because the map
+        does not survive a restart.
 
         Args:
             client_order_id: Target order's client order id, the map key.
@@ -3521,14 +3611,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             and len(self._unrecorded_order_terminals) >= _UNRECORDED_ORDER_TERMINAL_LIMIT
         ):
             dropped = next(iter(self._unrecorded_order_terminals))
-            self._unrecorded_order_terminals.pop(dropped)
+            dropped_params = self._unrecorded_order_terminals.pop(dropped)
             logger.critical(
                 f"[{exchange_name}] Unrecorded order_terminal retry map full: dropped the "
                 f"oldest entry for {dropped}; its terminal must be recorded by repair"
             )
+            self._record_unrecorded_order_terminal_drop(
+                dropped, dropped_params, exchange_name, "retry map full"
+            )
         self._unrecorded_order_terminals[client_order_id] = params
         logger.critical(
-            f"[{exchange_name}] order_terminal for confirmed cancel of {client_order_id} "
+            f"[{exchange_name}] order_terminal for confirmed terminal of {client_order_id} "
             f"(exchange {params.get('exchange_order_id')}) not recorded; held for the "
             f"reconciliation retry, which a restart loses"
         )
@@ -3604,10 +3697,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         because another executor may have recorded it. Only otherwise is
         missing metadata resolved from the durable command and the
         record-once insert called, which rechecks atomically. An entry is
-        dropped once that call returns, and kept for the next cycle when
-        the probe, the lookup or the insert raises. An entry that a
-        concurrent enqueue evicted from the full map while an earlier
-        entry was awaited is skipped; the eviction has already logged it.
+        dropped once that call returns (emitting the WARN drop metric if
+        a SQL repository skipped recording because required identifiers
+        were missing), and kept for the next cycle when the probe, the
+        lookup or the insert raises. An entry that a concurrent enqueue
+        evicted from the full map while an earlier entry was awaited is
+        skipped; the eviction has already logged it.
         """
         exchange_name = self._get_exchange_name()
         for client_order_id in tuple(self._unrecorded_order_terminals):
@@ -3622,12 +3717,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     continue
                 if "strategy_tag" not in params:
                     instrument, strategy_tag = await self._order_terminal_metadata(
-                        client_order_id, None, exchange_name, params.get("instrument", "")
+                        client_order_id, None, exchange_name, params.get("instrument") or ""
                     )
                     params = params.copy()
                     params["instrument"] = instrument
                     params["strategy_tag"] = strategy_tag
-                await self._record_order_terminal_once(params)
+                recorded = await self._record_order_terminal_once(params)
             except Exception:
                 logger.warning(
                     f"[{exchange_name}] Recon: order_terminal for {client_order_id} still "
@@ -3635,6 +3730,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 )
                 continue
             self._unrecorded_order_terminals.pop(client_order_id, None)
+            if (
+                not recorded
+                and isinstance(self.repository, SQLAlchemyRepository)
+                and not _has_required_venue_event_identifiers(params)
+            ):
+                self._record_unrecorded_order_terminal_drop(
+                    client_order_id,
+                    params,
+                    exchange_name,
+                    "incomplete terminal identifiers",
+                )
 
     async def _process_replace(self, replace: OrderReplaceData) -> None:
         """Reject an order-replace request (replace is not implemented).
@@ -7460,15 +7566,39 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         client_order_id: str,
         exchange_name: OrderExchange,
     ) -> bool:
-        """Handle cancelled or expired execution by cleaning up maps.
+        """Handle cancelled or expired execution, writing durable evidence first.
 
-        Writes the durable ``order_terminal`` venue event FIRST (the
-        replay/fencing side), then publishes the stream-terminal bus
-        event (:meth:`_publish_stream_terminal_event`) so the engine's
-        in-flight guard releases promptly, then drops correlation.
-        Both the live venue stream and the reconciliation
-        disappeared-order path converge here, so one publish covers
-        both sinks.
+        Records the durable ``order_terminal`` venue event FIRST (with its
+        metadata lookup) before updating the local ``Order`` row, publishing
+        the stream-terminal bus event (:meth:`_publish_stream_terminal_event`)
+        so the engine's in-flight guard releases promptly, and popping
+        tracking correlation. Both the live venue stream and the
+        reconciliation disappeared-order path converge here.
+
+        On an ``Exception`` during metadata lookup or the record-once write,
+        the terminal is held in ``_unrecorded_order_terminals`` via
+        :meth:`_hold_unrecorded_order_terminal` (without ``strategy_tag`` if
+        metadata failed so the retry re-resolves it), and this method returns
+        ``True`` WITHOUT updating the ``Order`` row, publishing the stream
+        terminal, or popping ``pending_orders`` / ``client_by_exchange``.
+        Skipping those downstream steps while held guarantees an ``Order``
+        row never becomes ``CANCELED`` or ``EXPIRED`` without durable
+        ``order_terminal`` evidence, even across a process restart or retry-map
+        eviction: the next reconciliation cycle drains the retry map and
+        re-detects the still-tracked disappeared order, or startup recovery
+        picks up the still-active ``Order`` row and re-runs this handler
+        idempotently via ``insert_order_terminal_once``. ``asyncio.CancelledError``
+        propagates and is not held.
+
+        If execution crashes or fails AFTER ``order_terminal`` is recorded
+        and BEFORE the ``Order`` row updates ("evidence present, Order not
+        yet terminal"), the reconciler lifecycle fold and G2 cancel
+        retirement still converge the commands because both read only
+        ``venue_events`` and ``trade_commands``, and the next stream frame,
+        reconciliation disappeared-order pass, or startup recovery re-runs
+        this handler, finds the existing ``order_terminal`` idempotently,
+        updates the ``Order`` row, publishes the stream terminal, and drops
+        correlation.
 
         Args:
             execution: Execution update.
@@ -7477,11 +7607,27 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange_name: Exchange name for logging.
 
         Returns:
-            True if the execution was a cancellation and was handled.
+            True if the execution was a cancellation and was handled or held.
         """
         if execution.exec_type not in ("canceled", "expired"):
             return False
         pending = self.pending_orders.get(client_order_id)
+        fallback_instrument = getattr(execution, "symbol", "") or ""
+        if not fallback_instrument and pending is not None:
+            fallback_instrument = pending.request.instrument or ""
+        params: RecordVenueEventParams = {
+            "event_type": "order_terminal",
+            "exchange_name": exchange_name,
+            "instrument": fallback_instrument,
+            "exchange_order_id": exchange_order_id,
+            "client_order_id": client_order_id,
+            "status": execution.exec_type,
+        }
+        instrument = await self._record_or_hold_order_terminal(
+            client_order_id, params, pending, exchange_name
+        )
+        if instrument is None:
+            return True
         if pending and pending.db_order_id is not None and self.exchange_client is not None:
             status = (
                 ExchangeOrderStatusEnum.CANCELED
@@ -7491,23 +7637,6 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             await self.exchange_client._log_order_update_to_db(
                 db_order_id=pending.db_order_id, status=status
             )
-        instrument, tag = await self._order_terminal_metadata(
-            client_order_id,
-            pending,
-            exchange_name,
-            getattr(execution, "symbol", "") or "",
-        )
-        await self._record_order_terminal_once(
-            {
-                "event_type": "order_terminal",
-                "exchange_name": exchange_name,
-                "instrument": instrument,
-                "exchange_order_id": exchange_order_id,
-                "client_order_id": client_order_id,
-                "status": execution.exec_type or "cancelled",
-                "strategy_tag": tag,
-            }
-        )
         terminal_event: StreamTerminalEventType = (
             OrderEventEnum.CANCELLED
             if execution.exec_type == "canceled"
@@ -8601,6 +8730,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "exec_stream_restarts": self._exec_stream_restarts,
                     "unhealed_accept_events": len(self._unhealed_accept_events),
                     "unrecorded_order_terminals": len(self._unrecorded_order_terminals),
+                    "unrecorded_order_terminal_drop_count": self.unrecorded_order_terminal_drop_count,
                     "parked_unknown": sum(
                         1
                         for entry in self.pending_orders.values()
