@@ -8,16 +8,16 @@
   "alerts.argument.status.warning": "Rabhadh",
   "alerts.body.critical_system_error": "%@/%@ thuairiscigh %@ ar feadh %lld chomhartha heartbeat as a chéile",
   "alerts.body.margin_warning": "%@ %@ %@ blocáilte mar gheall ar chorrlach: %@",
-  "alerts.body.order_fill_full": "%@ %@ %@ @ %@ comhlíonta ar %@",
-  "alerts.body.order_fill_full_quoted": "%@ %@ %@ @ %@ comhlíonta ar %@",
+  "alerts.body.order_fill_full": "%@ %@ %@ @ %@ forghníomhaithe ar %@",
+  "alerts.body.order_fill_full_quoted": "%@ %@ %@ @ %@ forghníomhaithe ar %@",
   "alerts.body.order_rejected": "%@ %@ %@ diúltaithe: %@",
-  "alerts.body.order_unknown": "%@ %@ %@ stádas anaithnid: %@ — tá fíorú an mhalartáin ar feitheamh; ná glac leis go bhfuil an suíomh dúnta",
-  "alerts.body.order_unknown_unresolved": "%@ %@ %@ stádas anaithnid: %@ — tá fíorú an mhalartáin ar feitheamh; ná glac leis go bhfuil an suíomh dúnta",
-  "alerts.body.position_stop_loss_fired": "Spreagadh stopchaillteanas do %@ (%@)",
+  "alerts.body.order_unknown": "%@ %@ %@ stádas anaithnid: %@ — tá fíorú an ardáin ar feitheamh; ná glac leis go bhfuil an suíomh dúnta",
+  "alerts.body.order_unknown_unresolved": "%@ %@ %@ stádas anaithnid: %@ — tá fíorú an ardáin ar feitheamh; ná glac leis go bhfuil an suíomh dúnta",
+  "alerts.body.position_stop_loss_fired": "Spreagadh stad caillteanais do %@ (%@)",
   "alerts.title.critical_system_error": "Díghrádú córais: %@",
   "alerts.title.margin_warning": "Rabhadh corrlaigh",
-  "alerts.title.order_fill_full": "Ordú comhlíonta",
+  "alerts.title.order_fill_full": "Ordú forghníomhaithe",
   "alerts.title.order_rejected": "Ordú diúltaithe",
   "alerts.title.order_unknown": "Stádas an ordaithe anaithnid",
-  "alerts.title.position_stop_loss_fired": "Spreagadh stopchaillteanas"
+  "alerts.title.position_stop_loss_fired": "Spreagadh stad caillteanais"
 }

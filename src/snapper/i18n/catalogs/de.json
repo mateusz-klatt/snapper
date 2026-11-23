@@ -1,5 +1,5 @@
 {
-  "alerts.argument.reason.ambiguous": "Mehrdeutige Antwort des Handelsplatzes",
+  "alerts.argument.reason.ambiguous": "Mehrdeutige Antwort der Börse",
   "alerts.argument.reason.unknown": "Unbekannter Grund",
   "alerts.argument.side.buy": "KAUF",
   "alerts.argument.side.sell": "VERKAUF",
@@ -11,8 +11,8 @@
   "alerts.body.order_fill_full": "%@ %@ %@ @ %@ ausgeführt auf %@",
   "alerts.body.order_fill_full_quoted": "%@ %@ %@ @ %@ ausgeführt auf %@",
   "alerts.body.order_rejected": "%@ %@ %@ abgelehnt: %@",
-  "alerts.body.order_unknown": "%@ %@ %@ hat einen unbekannten Status: %@ — die Verifizierung durch den Handelsplatz steht noch aus; gehen Sie nicht davon aus, dass die Position geschlossen ist",
-  "alerts.body.order_unknown_unresolved": "%@ %@ %@ hat einen unbekannten Status: %@ — die Verifizierung durch den Handelsplatz steht noch aus; gehen Sie nicht davon aus, dass die Position geschlossen ist",
+  "alerts.body.order_unknown": "%@ %@ %@ hat einen unbekannten Status: %@ — die Verifizierung durch die Handelsplattform steht noch aus; gehen Sie nicht davon aus, dass die Position geschlossen ist",
+  "alerts.body.order_unknown_unresolved": "%@ %@ %@ hat einen unbekannten Status: %@ — die Verifizierung durch die Handelsplattform steht noch aus; gehen Sie nicht davon aus, dass die Position geschlossen ist",
   "alerts.body.position_stop_loss_fired": "Stop-Loss ausgelöst für %@ (%@)",
   "alerts.title.critical_system_error": "System beeinträchtigt: %@",
   "alerts.title.margin_warning": "Margin-Warnung",

@@ -1,5 +1,5 @@
 {
-  "alerts.argument.reason.ambiguous": "Respuesta ambigua del centro de negociación",
+  "alerts.argument.reason.ambiguous": "Respuesta ambigua de la plataforma de intercambio",
   "alerts.argument.reason.unknown": "Motivo desconocido",
   "alerts.argument.side.buy": "COMPRA",
   "alerts.argument.side.sell": "VENTA",
@@ -11,8 +11,8 @@
   "alerts.body.order_fill_full": "%@ %@ %@ @ %@ ejecutada en %@",
   "alerts.body.order_fill_full_quoted": "%@ %@ %@ @ %@ ejecutada en %@",
   "alerts.body.order_rejected": "%@ %@ %@ rechazada: %@",
-  "alerts.body.order_unknown": "%@ %@ %@ tiene un estado desconocido: %@ — la verificación por parte del centro de negociación está pendiente; no dé por cerrada la posición",
-  "alerts.body.order_unknown_unresolved": "%@ %@ %@ tiene un estado desconocido: %@ — la verificación por parte del centro de negociación está pendiente; no dé por cerrada la posición",
+  "alerts.body.order_unknown": "%@ %@ %@ tiene un estado desconocido: %@ — la verificación por parte de la plataforma está pendiente; no dé por cerrada la posición",
+  "alerts.body.order_unknown_unresolved": "%@ %@ %@ tiene un estado desconocido: %@ — la verificación por parte de la plataforma está pendiente; no dé por cerrada la posición",
   "alerts.body.position_stop_loss_fired": "Stop loss activado en %@ (%@)",
   "alerts.title.critical_system_error": "Sistema degradado: %@",
   "alerts.title.margin_warning": "Aviso de margen",

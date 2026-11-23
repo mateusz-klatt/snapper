@@ -11,13 +11,13 @@
   "alerts.body.order_fill_full": "%@ %@ %@ @ %@ dilaksanakan di %@",
   "alerts.body.order_fill_full_quoted": "%@ %@ %@ @ %@ dilaksanakan di %@",
   "alerts.body.order_rejected": "%@ %@ %@ ditolak: %@",
-  "alerts.body.order_unknown": "%@ %@ %@ status tidak diketahui: %@ — pengesahan dengan bursa masih belum selesai, jangan anggap posisi telah ditutup",
-  "alerts.body.order_unknown_unresolved": "%@ %@ %@ status tidak diketahui: %@ — pengesahan dengan bursa masih belum selesai, jangan anggap posisi telah ditutup",
-  "alerts.body.position_stop_loss_fired": "Stop-loss dicetuskan pada %@ (%@)",
+  "alerts.body.order_unknown": "%@ %@ %@ status tidak diketahui: %@ — pengesahan dengan platform masih belum selesai, jangan anggap posisi telah ditutup",
+  "alerts.body.order_unknown_unresolved": "%@ %@ %@ status tidak diketahui: %@ — pengesahan dengan platform masih belum selesai, jangan anggap posisi telah ditutup",
+  "alerts.body.position_stop_loss_fired": "Henti rugi dicetuskan pada %@ (%@)",
   "alerts.title.critical_system_error": "Sistem merosot: %@",
   "alerts.title.margin_warning": "Amaran margin",
-  "alerts.title.order_fill_full": "Pesanan dipenuhi",
+  "alerts.title.order_fill_full": "Pesanan dilaksanakan sepenuhnya",
   "alerts.title.order_rejected": "Pesanan ditolak",
   "alerts.title.order_unknown": "Status pesanan tidak diketahui",
-  "alerts.title.position_stop_loss_fired": "Stop-loss dicetuskan"
+  "alerts.title.position_stop_loss_fired": "Henti rugi dicetuskan"
 }
