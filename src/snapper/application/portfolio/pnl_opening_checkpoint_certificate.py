@@ -41,22 +41,23 @@ type PnlCheckpointWriteRefusal = Literal[
 """Closed vocabulary of deterministic checkpoint write-refusal reasons in precedence order."""
 
 
-def opening_checkpoint_fence(frontier: PnlCorrectionFrontier) -> datetime | None:
+def opening_checkpoint_fence(frontier: PnlCorrectionFrontier) -> datetime:
     """Return the earliest boundary that invalidates an opening checkpoint.
+
+    ``window_start`` is always set on a frontier, so the fence always exists;
+    the optional pending minute and repair boundary can only move it earlier.
 
     Args:
         frontier: Correction state whose open window and repair boundaries form the fence.
 
     Returns:
-        The minimum non-null window start, next minute, or repair boundary.
+        The minimum of the window start and any set next minute or repair boundary.
     """
     return min(
         (
-            value
-            for value in (frontier.window_start, frontier.next_minute, frontier.repair_from)
-            if value is not None
-        ),
-        default=None,
+            frontier.window_start,
+            *(value for value in (frontier.next_minute, frontier.repair_from) if value is not None),
+        )
     )
 
 

@@ -20792,13 +20792,11 @@ class SQLAlchemyRepository(Repository):
         Returns:
             Number of opening-checkpoint rows deleted by the repository fence.
         """
-        fence = opening_checkpoint_fence(frontier)
-        if fence is None:
-            return 0
         result = await s.execute(
             delete(PortfolioPnlOpeningCheckpoint).where(
                 *self._pnl_opening_checkpoint_filters(frontier.key),
-                PortfolioPnlOpeningCheckpoint.checkpoint_minute >= fence,
+                PortfolioPnlOpeningCheckpoint.checkpoint_minute
+                >= opening_checkpoint_fence(frontier),
             )
         )
         return cast(CursorResult[tuple[object, ...]], result).rowcount
