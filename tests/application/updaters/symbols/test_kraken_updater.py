@@ -12,14 +12,17 @@ from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import call
 from unittest.mock import patch
 
 import pytest
+from loguru import logger
 from sqlalchemy import create_engine
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
+from snapper.application.updaters.symbols import kraken as kraken_updater_module
 from snapper.application.updaters.symbols.base import SymbolUpdaterService
 from snapper.application.updaters.symbols.kraken import SPOT_ROLLOVER_RATES_EPOCH
 from snapper.application.updaters.symbols.kraken import KrakenSymbolUpdaterService
@@ -47,6 +50,37 @@ def _create_mock_settings() -> MagicMock:
     settings.db_url = BootstrapSettingsLoader().db_url
     settings.zmq_broker_xsub = "tcp://localhost:5555"
     return settings
+
+
+def _mock_snapshot_client(
+    instruments: list[dict[str, str]],
+    *,
+    hold_open: bool = False,
+    error: BaseException | None = None,
+) -> MagicMock:
+    """Create a client that emits the supplied instruments and then ends, waits, or raises."""
+
+    async def subscribe(*, raw: bool) -> AsyncIterator[dict[str, str]]:
+        """Emit instruments before yielding control to the collector's deadline."""
+        assert raw
+        for instrument in instruments:
+            yield instrument
+        if error is not None:
+            raise error
+        if hold_open:
+            await asyncio.Event().wait()
+
+    return MagicMock(
+        subscribe_instruments=MagicMock(side_effect=subscribe),
+        disconnect_websocket=AsyncMock(),
+    )
+
+
+@pytest.fixture
+def immediate_verification_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Expire snapshot collection on its first blocking wait."""
+    monkeypatch.setattr(kraken_updater_module, "_VERIFICATION_BASE_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(kraken_updater_module, "_VERIFICATION_SECONDS_PER_SYMBOL", 0.0)
 
 
 class TestKrakenSymbolUpdater:
@@ -210,34 +244,67 @@ class TestKrakenSymbolUpdater:
         mock_client = AsyncMock()
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = AsyncMock()
-        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory:
             verified, _ws_only = await updater.verify_websocket_symbols(ws_symbols_to_verify)
         assert len(verified) == 1
         assert "BTC/USD" in verified
         assert "ETH/USD" not in verified
+        factory.assert_called_once_with()
 
     @pytest.mark.asyncio
-    async def test_verify_websocket_symbols_all_verified_via_timeout(
+    async def test_build_verified_mappings_includes_ws_only_after_final_rest_pair(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
-        """Verify verify_websocket_symbols completes before timeout.
+        """Verify late WS-only instruments reach the final symbol mappings.
 
-        Given: Single symbol that gets verified immediately,
-        When: verify_websocket_symbols called,
-        Then: Symbol verified and returned.
+        Given: A stream with a WS-only instrument after the final REST pair,
+        When: The updater builds verified mappings,
+        Then: Both instruments are present, with the discovered instrument marked WS-only.
         """
-        ws_symbols_to_verify = {"BTC/USD"}
+        rest_pairs = {"XXBTZUSD": {"base": "XXBT", "quote": "ZUSD", "ccxt_symbol": "BTC/USD"}}
+        client = _mock_snapshot_client(
+            [
+                {"symbol": "BTC/USD"},
+                {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"},
+            ]
+        )
+        with (
+            patch.object(updater, "load_kraken_rest_symbols", return_value=rest_pairs),
+            patch.object(updater, "_create_exchange_client", return_value=client) as factory,
+        ):
+            mappings, success = await updater.build_verified_mappings()
 
-        async def mock_subscribe(raw: bool = False) -> AsyncIterator[dict[str, Any]]:
-            yield {"symbol": "BTC/USD", "base": "XBT", "quote": "USD", "status": "online"}
+        assert success is True
+        assert set(mappings) == {"BTC-USD", "BTGOX-USD"}
+        assert mappings["BTGOX-USD"]["ws_only"] == "true"
+        assert mappings["BTGOX-USD"]["kraken_websocket_symbol"] == "BTGOx/USD"
+        factory.assert_called_once_with()
+        client.disconnect_websocket.assert_awaited_once_with()
 
-        mock_client = AsyncMock()
-        mock_client.subscribe_instruments = mock_subscribe
-        mock_client.disconnect_websocket = AsyncMock()
-        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            verified, _ws_only = await updater.verify_websocket_symbols(ws_symbols_to_verify)
-        assert len(verified) == 1
-        assert "BTC/USD" in verified
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("symbol_count", "timeout"), [(100, 5.0), (1614, 16.14), (10000, 30.0)]
+    )
+    async def test_verify_websocket_symbols_scales_collection_budget(
+        self, updater: KrakenSymbolUpdaterService, symbol_count: int, timeout: float
+    ) -> None:
+        """Verify the base, per-symbol, and maximum collection budgets.
+
+        Given: An expected catalog of known size,
+        When: Verify WebSocket symbols starts collection,
+        Then: The collector receives the budget for that catalog size.
+        """
+        expected = {f"ASSET{index}/USD" for index in range(symbol_count)}
+        client = MagicMock()
+        with (
+            patch.object(updater, "_create_exchange_client", return_value=client),
+            patch.object(
+                updater, "_collect_verified_symbols", return_value=(expected, [], False)
+            ) as collect,
+        ):
+            await updater.verify_websocket_symbols(expected)
+
+        collect.assert_awaited_once_with(client, expected, pytest.approx(timeout))
 
     @pytest.mark.asyncio
     async def test_build_verified_mappings(self, updater: KrakenSymbolUpdaterService) -> None:
@@ -256,7 +323,9 @@ class TestKrakenSymbolUpdater:
         }
         with (
             patch.object(updater, "load_kraken_rest_symbols", return_value=mock_rest),
-            patch.object(updater, "verify_websocket_symbols", return_value=({"BTC-USD"}, [])),
+            patch.object(
+                updater, "_verify_websocket_symbols", return_value=({"BTC-USD"}, [], False)
+            ),
         ):
             mappings, success = await updater.build_verified_mappings()
         assert success is True
@@ -287,7 +356,7 @@ class TestKrakenSymbolUpdater:
         }
         mock_client = AsyncMock()
         with (
-            patch.object(updater, "build_verified_mappings", return_value=(mock_mappings, True)),
+            patch.object(updater, "_build_verified_mappings", return_value=(mock_mappings, None)),
             patch.object(updater, "discover_btnl_symbols", return_value={}),
         ):
             result = await updater._fetch_symbols(mock_client)
@@ -423,7 +492,9 @@ async def test_build_verified_mappings_verification_threshold(
         },
     }
     monkeypatch.setattr(svc, "load_kraken_rest_symbols", AsyncMock(return_value=fake_symbols))
-    monkeypatch.setattr(svc, "verify_websocket_symbols", AsyncMock(return_value=({"BTC/USD"}, [])))
+    monkeypatch.setattr(
+        svc, "_verify_websocket_symbols", AsyncMock(return_value=({"BTC/USD"}, [], False))
+    )
     mappings, success = await svc.build_verified_mappings()
     assert not success
     assert "XBT-USD" in mappings
@@ -449,51 +520,167 @@ async def test_build_verified_mappings_skips_invalid_tokenized(
         },
     }
     monkeypatch.setattr(svc, "load_kraken_rest_symbols", AsyncMock(return_value=fake_symbols))
-    monkeypatch.setattr(svc, "verify_websocket_symbols", AsyncMock(return_value=(set(), [])))
+    monkeypatch.setattr(
+        svc, "_verify_websocket_symbols", AsyncMock(return_value=(set(), [], False))
+    )
     mappings, success = await svc.build_verified_mappings()
     assert mappings == {}
     assert success is False
 
 
 @pytest.mark.asyncio
-async def test_fetch_symbols_requires_verification(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify _fetch_symbols raises when verification fails.
+async def test_fetch_symbols_reports_coverage_below_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _fetch_symbols reports the coverage of an incomplete snapshot.
 
-    Given: build_verified_mappings returns success=False,
+    Given: A WebSocket snapshot confirms 410 of 450 REST pairs,
     When: _fetch_symbols called,
-    Then: RuntimeError raised.
+    Then: The error includes the counts, rate and threshold.
     """
     svc = KrakenSymbolUpdaterService()
-    monkeypatch.setattr(svc, "build_verified_mappings", AsyncMock(return_value=({}, False)))
-    with pytest.raises(RuntimeError):
-        await svc._fetch_symbols(None)
+    rest_pairs = {
+        f"ASSET{index}USD": {"base": f"ASSET{index}", "quote": "ZUSD"} for index in range(450)
+    }
+    verified = {f"ASSET{index}/USD" for index in range(410)}
+    monkeypatch.setattr(svc, "load_kraken_rest_symbols", AsyncMock(return_value=rest_pairs))
+    monkeypatch.setattr(
+        svc, "_verify_websocket_symbols", AsyncMock(return_value=(verified, [], False))
+    )
+    discover_btnl = AsyncMock(return_value={})
+    monkeypatch.setattr(svc, "discover_btnl_symbols", discover_btnl)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^WebSocket verification failed: coverage 410/450 \(91\.1%\) below 95%"
+        r" - aborting update$",
+    ):
+        await svc._fetch_symbols(MagicMock())
+
+    discover_btnl.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("immediate_verification_timeout")
+async def test_fetch_symbols_retries_a_short_read_with_a_fresh_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the second snapshot completes verification when combined with the first.
+
+    Given: A timed-out snapshot and a fresh snapshot with overlapping and new instruments,
+    When: The updater fetches symbols,
+    Then: Their union meets the threshold and retains WS-only instruments from both snapshots.
+    """
+    updater = KrakenSymbolUpdaterService()
+    rest_pairs = {f"ASSET{i}USD": {"base": f"ASSET{i}", "quote": "USD"} for i in range(20)}
+    shared = {"symbol": "SHARED/USD", "base": "SHARED", "quote": "USD"}
+    first = _mock_snapshot_client(
+        [
+            *[{"symbol": f"ASSET{i}/USD"} for i in range(18)],
+            shared,
+            {"symbol": "FIRST/USD", "base": "FIRST", "quote": "USD"},
+        ],
+        hold_open=True,
+    )
+    second = _mock_snapshot_client(
+        [
+            shared,
+            {"symbol": "SECOND/USD", "base": "SECOND", "quote": "USD"},
+            {"symbol": "ASSET0/USD"},
+            {"symbol": "ASSET18/USD"},
+        ],
+        hold_open=True,
+    )
+    monkeypatch.setattr(updater, "load_kraken_rest_symbols", AsyncMock(return_value=rest_pairs))
+    monkeypatch.setattr(updater, "discover_btnl_symbols", AsyncMock(return_value={}))
+    with (
+        patch.object(updater, "_create_exchange_client", side_effect=[first, second]) as factory,
+        patch.object(kraken_updater_module.asyncio, "sleep", new_callable=AsyncMock) as backoff,
+        patch.object(logger, "warning") as warning,
+    ):
+        symbols = await updater._fetch_symbols(MagicMock())
+
+    assert factory.call_args_list == [call(), call(fresh=True)]
+    first.subscribe_instruments.assert_called_once_with(raw=True)
+    second.subscribe_instruments.assert_called_once_with(raw=True)
+    assert first is not second
+    first.disconnect_websocket.assert_awaited_once_with()
+    second.disconnect_websocket.assert_awaited_once_with()
+    backoff.assert_awaited_once_with(2.0)
+    warning.assert_any_call(
+        "WebSocket verification retry: first attempt verified {}/{}, retry verified {}/{}, "
+        "combined verified {}/{}",
+        18,
+        20,
+        2,
+        20,
+        19,
+        20,
+    )
+    ws_only = [record["kraken_websocket_symbol"] for record in symbols if record.get("ws_only")]
+    assert ws_only == ["SHARED/USD", "FIRST/USD", "SECOND/USD"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("immediate_verification_timeout")
+@pytest.mark.parametrize(
+    ("retry_error", "coverage"),
+    [(None, r"18/20 \(90\.0%\)"), (RuntimeError("retry subscription failed"), r"16/20 \(80\.0%\)")],
+    ids=("short-retry", "retry-error"),
+)
+async def test_fetch_symbols_reports_final_coverage_after_retry(
+    monkeypatch: pytest.MonkeyPatch, retry_error: RuntimeError | None, coverage: str
+) -> None:
+    """Verify a retry below the threshold reports the usable evidence.
+
+    Given: A short snapshot followed by a second short or failed snapshot,
+    When: The updater fetches symbols,
+    Then: The update aborts with the combined counts or the first counts if the retry failed.
+    """
+    updater = KrakenSymbolUpdaterService()
+    rest_pairs = {f"ASSET{i}USD": {"base": f"ASSET{i}", "quote": "USD"} for i in range(20)}
+    first = _mock_snapshot_client([{"symbol": f"ASSET{i}/USD"} for i in range(16)], hold_open=True)
+    second = _mock_snapshot_client(
+        [{"symbol": f"ASSET{i}/USD"} for i in range(15, 18)], hold_open=True, error=retry_error
+    )
+    monkeypatch.setattr(updater, "load_kraken_rest_symbols", AsyncMock(return_value=rest_pairs))
+    discover_btnl = AsyncMock(return_value={})
+    monkeypatch.setattr(updater, "discover_btnl_symbols", discover_btnl)
+
+    with (
+        patch.object(updater, "_create_exchange_client", side_effect=[first, second]) as factory,
+        patch.object(kraken_updater_module.asyncio, "sleep", new_callable=AsyncMock),
+        pytest.raises(
+            RuntimeError,
+            match=rf"^WebSocket verification failed: coverage {coverage} below 95%"
+            r" after retry - aborting update$",
+        ),
+    ):
+        await updater._fetch_symbols(MagicMock())
+
+    assert factory.call_args_list == [call(), call(fresh=True)]
+    discover_btnl.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_fetch_symbols_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify _fetch_symbols returns mapping dictionaries on success.
 
-    Given: Valid verified mappings,
+    Given: A REST pair confirmed by the WebSocket snapshot,
     When: _fetch_symbols called,
     Then: List of mapping dicts returned.
     """
     svc = KrakenSymbolUpdaterService()
-    fake_mapping = {
-        "native_symbol": "BTC-USD",
-        "kraken_websocket_symbol": "BTC/USD",
-        "kraken_rest_symbol": "XXBTZUSD",
-        "ccxt_symbol": "BTC/USD",
-        "base_currency": "BTC",
-        "quote_currency": "USD",
-    }
+    rest_pairs = {"XXBTZUSD": {"base": "XXBT", "quote": "ZUSD", "ccxt_symbol": "BTC/USD"}}
+    monkeypatch.setattr(svc, "load_kraken_rest_symbols", AsyncMock(return_value=rest_pairs))
     monkeypatch.setattr(
-        svc,
-        "build_verified_mappings",
-        AsyncMock(return_value=({"BTC-USD": fake_mapping}, True)),
+        svc, "_verify_websocket_symbols", AsyncMock(return_value=({"BTC/USD"}, [], False))
     )
     monkeypatch.setattr(svc, "discover_btnl_symbols", AsyncMock(return_value={}))
-    symbols = await svc._fetch_symbols(None)
+    symbols = await svc._fetch_symbols(MagicMock())
+    assert len(symbols) == 1
     assert symbols[0]["kraken_rest_symbol"] == "XXBTZUSD"
+    assert symbols[0]["kraken_websocket_symbol"] == "BTC/USD"
 
 
 @pytest.mark.asyncio
@@ -734,6 +921,24 @@ class TestKrakenUpdaterClientCaching:
         client2 = updater._create_exchange_client()
         assert client2 is client1
 
+    def test_create_exchange_client_fresh_keeps_cached_client(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify a fresh client request leaves the original cache entry intact.
+
+        Given: An updater with a cached client,
+        When: A fresh client is requested,
+        Then: The factory constructs a distinct client and subsequent default calls return the cache.
+        """
+        first = MagicMock(spec=KrakenExchangeClient)
+        second = MagicMock(spec=KrakenExchangeClient)
+        with patch.object(
+            kraken_updater_module, "KrakenExchangeClient", side_effect=[first, second]
+        ):
+            assert updater._create_exchange_client() is first
+            assert updater._create_exchange_client(fresh=True) is second
+            assert updater._create_exchange_client() is first
+
 
 class TestLoadKrakenRestSymbolsFallback:
     """Test cases for Kraken REST symbol loading fallback scenarios."""
@@ -863,34 +1068,35 @@ class TestVerifyWebsocketSymbols:
         assert verified == ws_symbols
 
     @pytest.mark.asyncio
-    async def test_verify_timeout_partial_verification(
-        self, updater: KrakenSymbolUpdaterService
+    @pytest.mark.usefixtures("immediate_verification_timeout")
+    @pytest.mark.parametrize("during_deadline", [False, True])
+    async def test_verify_upstream_timeout_falls_back_without_retry(
+        self, updater: KrakenSymbolUpdaterService, during_deadline: bool
     ) -> None:
-        """Verify partial verification on timeout.
+        """Verify a subscription timeout uses the normal exception fallback.
 
-        Given: Slow WebSocket that times out,
+        Given: A subscription raises TimeoutError before or while handling the deadline,
         When: verify_websocket_symbols called,
-        Then: Partial result set returned.
+        Then: All expected symbols are returned without retrying.
         """
         ws_symbols = {"BTC/USD", "ETH/EUR", "XRP/USD"}
 
-        async def slow_subscribe(raw: bool = False) -> AsyncIterator[dict[str, Any]]:
-            yield {"symbol": "BTC/USD", "status": "online"}
-            await asyncio.sleep(10)
-            yield {"symbol": "ETH/EUR", "status": "online"}
+        async def subscribe(*, raw: bool) -> AsyncIterator[dict[str, str]]:
+            """Raise an upstream timeout immediately or during cancellation cleanup."""
+            yield {"symbol": "BTC/USD"}
+            if during_deadline:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    raise TimeoutError("subscribe cleanup")
+            raise TimeoutError("subscribe")
 
-        mock_client = AsyncMock()
-        mock_client.subscribe_instruments = slow_subscribe
-        mock_client.disconnect_websocket = MagicMock()
-        with (
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-            patch(
-                "snapper.application.updaters.symbols.kraken.asyncio.timeout",
-                side_effect=asyncio.TimeoutError,
-            ),
-        ):
-            verified, _ws_only = await updater.verify_websocket_symbols(ws_symbols)
-        assert isinstance(verified, set)
+        client = MagicMock(subscribe_instruments=subscribe, disconnect_websocket=AsyncMock())
+        with patch.object(updater, "_create_exchange_client", return_value=client) as factory:
+            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
+        assert verified == ws_symbols
+        assert ws_only == []
+        factory.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_verify_exception_fallback(self, updater: KrakenSymbolUpdaterService) -> None:
@@ -951,7 +1157,7 @@ class TestTokenizedAssetWarnings:
         }
         with (
             patch.object(updater, "load_kraken_rest_symbols", return_value=kraken_rest_symbols),
-            patch.object(updater, "verify_websocket_symbols", return_value=(set(), [])),
+            patch.object(updater, "_verify_websocket_symbols", return_value=(set(), [], False)),
         ):
             result, _changed = await updater.build_verified_mappings()
         assert len(result) == 0
@@ -975,7 +1181,7 @@ class TestTokenizedAssetWarnings:
         }
         with (
             patch.object(updater, "load_kraken_rest_symbols", return_value=kraken_rest_symbols),
-            patch.object(updater, "verify_websocket_symbols", return_value=(set(), [])),
+            patch.object(updater, "_verify_websocket_symbols", return_value=(set(), [], False)),
         ):
             result, _changed = await updater.build_verified_mappings()
         assert len(result) == 0
@@ -1143,32 +1349,26 @@ class TestKrakenVerifyWebsocketSymbols:
         assert ws_only == []
 
     @pytest.mark.asyncio
-    async def test_verify_websocket_symbols_timeout_partial(
+    @pytest.mark.usefixtures("immediate_verification_timeout")
+    async def test_verify_websocket_symbols_timeout_at_threshold_skips_retry(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
-        """Verify partial symbols on WebSocket timeout.
+        """Verify the retry gate accepts exactly 95% coverage.
 
-        Given: Slow WebSocket with partial symbols before timeout,
+        Given: A stream delivers 19 of 20 symbols before the collection timeout,
         When: verify_websocket_symbols called,
-        Then: Only verified symbols returned.
+        Then: The observed symbols are returned and a retry client is never created.
         """
-        ws_symbols = {"BTC/USD", "ETH/EUR", "SOL/USD"}
-
-        async def mock_subscribe(raw: bool = False) -> Any:
-            yield {"symbol": "BTC/USD"}
-            await asyncio.sleep(10)
-
-        mock_client = MagicMock()
-        mock_client.subscribe_instruments = mock_subscribe
-        mock_client.disconnect_websocket = MagicMock()
-        with (
-            patch.object(updater, "VERIFICATION_TIMEOUT_SECONDS", 0.05),
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-        ):
+        observed = {f"ASSET{i}/USD" for i in range(19)}
+        ws_symbols = observed | {"OTHER/USD"}
+        mock_client = _mock_snapshot_client(
+            [{"symbol": symbol} for symbol in observed], hold_open=True
+        )
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory:
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
-        assert "BTC/USD" in verified
-        assert len(verified) < len(ws_symbols)
+        assert verified == observed
         assert ws_only == []
+        factory.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_cancelled(
@@ -1214,10 +1414,77 @@ class TestKrakenVerifyWebsocketSymbols:
         mock_client = MagicMock()
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = MagicMock()
-        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory:
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert verified == ws_symbols
         assert ws_only == []
+        factory.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("immediate_verification_timeout")
+    async def test_verify_websocket_symbols_retry_exception_retains_first_evidence(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify a retry exception preserves the first verification evidence.
+
+        Given: A short snapshot followed by a subscription failure and a disconnect failure,
+        When: The updater verifies WebSocket symbols,
+        Then: The first snapshot is returned and the subscription failure is logged at warning.
+        """
+        expected = {"BTC/USD", "ETH/USD"}
+        extra = {"symbol": "EXTRA/USD", "base": "EXTRA", "quote": "USD"}
+        first = _mock_snapshot_client([{"symbol": "BTC/USD"}, extra], hold_open=True)
+        retry_error = RuntimeError("retry subscription failed")
+        second = _mock_snapshot_client([], error=retry_error)
+        second.disconnect_websocket.side_effect = ValueError("retry disconnect failed")
+        with (
+            patch.object(
+                updater, "_create_exchange_client", side_effect=[first, second]
+            ) as factory,
+            patch.object(kraken_updater_module.asyncio, "sleep", new_callable=AsyncMock),
+            patch.object(logger, "warning") as warning,
+        ):
+            verified, ws_only, retried = await updater._verify_websocket_symbols(expected)
+
+        assert verified == {"BTC/USD"}
+        assert ws_only == [extra]
+        assert retried is True
+        assert factory.call_args_list == [call(), call(fresh=True)]
+        second.disconnect_websocket.assert_awaited_once_with()
+        warning.assert_any_call(
+            "WebSocket verification retry failed ({}): {}; first attempt verified {}/{}",
+            "RuntimeError",
+            retry_error,
+            1,
+            2,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.usefixtures("immediate_verification_timeout")
+    async def test_verify_websocket_symbols_retry_preserves_cancellation(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify retry cancellation propagates through the disconnect helper.
+
+        Given: A short snapshot followed by cancellation and a retry disconnect failure,
+        When: The updater verifies WebSocket symbols,
+        Then: CancelledError propagates and both disconnects are attempted.
+        """
+        first = _mock_snapshot_client([{"symbol": "BTC/USD"}], hold_open=True)
+        second = _mock_snapshot_client([], error=asyncio.CancelledError())
+        second.disconnect_websocket.side_effect = ValueError("retry disconnect failed")
+        with (
+            patch.object(
+                updater, "_create_exchange_client", side_effect=[first, second]
+            ) as factory,
+            patch.object(kraken_updater_module.asyncio, "sleep", new_callable=AsyncMock),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await updater.verify_websocket_symbols({"BTC/USD", "ETH/USD"})
+
+        assert factory.call_args_list == [call(), call(fresh=True)]
+        first.disconnect_websocket.assert_awaited_once_with()
+        second.disconnect_websocket.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_verify_websocket_symbols_async_disconnect(
@@ -1247,28 +1514,23 @@ class TestKrakenVerifyWebsocketSymbols:
         assert ws_only == []
 
     @pytest.mark.asyncio
-    async def test_verify_websocket_symbols_empty_set_branch(
+    @pytest.mark.usefixtures("immediate_verification_timeout")
+    async def test_verify_websocket_symbols_empty_set_skips_retry(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
-        """Verify empty symbol set returns empty result.
+        """Verify collection with no expected symbols is never retried.
 
-        Given: Empty symbol set to verify,
+        Given: An empty expected symbol set and a stream that runs past the budget,
         When: verify_websocket_symbols called,
-        Then: Empty set returned immediately.
+        Then: The verifier returns an empty set without a retry.
         """
         ws_symbols: set[str] = set()
-
-        async def mock_subscribe(raw: bool = False) -> Any:
-            if False:
-                yield
-
-        mock_client = MagicMock()
-        mock_client.subscribe_instruments = mock_subscribe
-        mock_client.disconnect_websocket = MagicMock()
-        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
+        mock_client = _mock_snapshot_client([], hold_open=True)
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory:
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert verified == set()
         assert ws_only == []
+        factory.assert_called_once_with()
 
 
 class TestKrakenBuildVerifiedMappings:
@@ -1301,11 +1563,11 @@ class TestKrakenBuildVerifiedMappings:
         with (
             patch.object(updater, "load_kraken_rest_symbols", new_callable=AsyncMock) as mock_load,
             patch.object(
-                updater, "verify_websocket_symbols", new_callable=AsyncMock
+                updater, "_verify_websocket_symbols", new_callable=AsyncMock
             ) as mock_verify,
         ):
             mock_load.return_value = mock_rest_symbols
-            mock_verify.return_value = (set(), [])
+            mock_verify.return_value = (set(), [], False)
             mappings, _success = await updater.build_verified_mappings()
             assert len(mappings) == 0
 
@@ -1330,11 +1592,11 @@ class TestKrakenBuildVerifiedMappings:
         with (
             patch.object(updater, "load_kraken_rest_symbols", new_callable=AsyncMock) as mock_load,
             patch.object(
-                updater, "verify_websocket_symbols", new_callable=AsyncMock
+                updater, "_verify_websocket_symbols", new_callable=AsyncMock
             ) as mock_verify,
         ):
             mock_load.return_value = mock_rest_symbols
-            mock_verify.return_value = (set(), [])
+            mock_verify.return_value = (set(), [], False)
             mappings, _success = await updater.build_verified_mappings()
             assert len(mappings) == 0
 
@@ -1365,11 +1627,11 @@ class TestKrakenBuildVerifiedMappings:
         with (
             patch.object(updater, "load_kraken_rest_symbols", new_callable=AsyncMock) as mock_load,
             patch.object(
-                updater, "verify_websocket_symbols", new_callable=AsyncMock
+                updater, "_verify_websocket_symbols", new_callable=AsyncMock
             ) as mock_verify,
         ):
             mock_load.return_value = mock_rest_symbols
-            mock_verify.return_value = ({"BTC/USD"}, [])
+            mock_verify.return_value = ({"BTC/USD"}, [], False)
             mappings, success = await updater.build_verified_mappings()
             assert len(mappings) == 2
             assert success is False
@@ -1423,11 +1685,11 @@ class TestKrakenBuildVerifiedMappings:
         with (
             patch.object(updater, "load_kraken_rest_symbols", new_callable=AsyncMock) as mock_load,
             patch.object(
-                updater, "verify_websocket_symbols", new_callable=AsyncMock
+                updater, "_verify_websocket_symbols", new_callable=AsyncMock
             ) as mock_verify,
         ):
             mock_load.return_value = mock_rest_symbols
-            mock_verify.return_value = ({"BTC/USD"}, [])
+            mock_verify.return_value = ({"BTC/USD"}, [], False)
             mappings, _success = await updater.build_verified_mappings()
             assert len(mappings) == 1
             assert "BTC-USD" in mappings
@@ -1443,32 +1705,50 @@ class TestKrakenFetchSymbols:
             return KrakenSymbolUpdaterService()
 
     @pytest.mark.asyncio
-    async def test_fetch_symbols_verification_failed(
+    async def test_fetch_symbols_reports_mapping_exception(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
-        """Verify _fetch_symbols raises on verification failure.
+        """Verify _fetch_symbols names a mapping exception and logs its traceback.
 
-        Given: build_verified_mappings returns success=False,
+        Given: Loading the REST catalog raises ValueError,
         When: _fetch_symbols called,
-        Then: RuntimeError raised with verification failed message.
+        Then: The RuntimeError names ValueError and the error log retains the traceback.
         """
-        mock_mappings: dict[str, dict[str, str]] = {}
-        with patch.object(updater, "build_verified_mappings", new_callable=AsyncMock) as mock_build:
-            mock_build.return_value = (mock_mappings, False)
-            mock_client = MagicMock()
-            with pytest.raises(RuntimeError, match="WebSocket verification failed"):
-                await updater._fetch_symbols(mock_client)
+        captured: list[str] = []
+        sink_id = logger.add(captured.append, format="{message}", level="ERROR", diagnose=False)
+        try:
+            with (
+                patch.object(
+                    updater,
+                    "load_kraken_rest_symbols",
+                    side_effect=ValueError("malformed REST catalog"),
+                ),
+                patch.object(updater, "discover_btnl_symbols", return_value={}) as discover_btnl,
+                pytest.raises(
+                    RuntimeError,
+                    match=r"^WebSocket verification failed: ValueError while building mappings"
+                    r" - aborting update$",
+                ),
+            ):
+                await updater._fetch_symbols(MagicMock())
+        finally:
+            logger.remove(sink_id)
+
+        discover_btnl.assert_not_awaited()
+        assert len(captured) == 1
+        assert "ValueError" in captured[0].splitlines()[0]
+        assert "Traceback (most recent call last)" in captured[0]
+        assert "ValueError: malformed REST catalog" in captured[0]
 
     @pytest.mark.asyncio
     async def test_fetch_symbols_no_mappings(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify _fetch_symbols raises when no mappings generated.
 
-        Given: build_verified_mappings returns empty dict,
+        Given: Verification succeeds with no mappings,
         When: _fetch_symbols called,
         Then: RuntimeError raised with no mappings message.
         """
-        with patch.object(updater, "build_verified_mappings", new_callable=AsyncMock) as mock_build:
-            mock_build.return_value = ({}, True)
+        with patch.object(updater, "_build_verified_mappings", return_value=({}, None)):
             mock_client = MagicMock()
             with pytest.raises(RuntimeError, match="No mappings generated"):
                 await updater._fetch_symbols(mock_client)
@@ -1490,10 +1770,11 @@ class TestKrakenFetchSymbols:
             "quote_currency": "USD",
         }
         with (
-            patch.object(updater, "build_verified_mappings", new_callable=AsyncMock) as mock_build,
+            patch.object(
+                updater, "_build_verified_mappings", return_value=({"BTC-USD": mock_mapping}, None)
+            ),
             patch.object(updater, "discover_btnl_symbols", new_callable=AsyncMock) as mock_btnl,
         ):
-            mock_build.return_value = ({"BTC-USD": mock_mapping}, True)
             mock_btnl.return_value = {}
             mock_client = MagicMock()
             symbols = await updater._fetch_symbols(mock_client)
@@ -1786,22 +2067,17 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
         """Verify missing disconnect_websocket is handled.
 
         Given: Client without disconnect_websocket method,
-        When: verify_websocket_symbols times out,
+        When: verify_websocket_symbols finishes reading the stream,
         Then: Partial results returned without error.
         """
         ws_symbols = {"BTC/USD", "ETH/EUR"}
 
         async def mock_subscribe(raw: bool = False) -> Any:
             yield {"symbol": "BTC/USD"}
-            await asyncio.sleep(10)
-            yield {"symbol": "ETH/EUR"}
 
         mock_client = MagicMock(spec=["subscribe_instruments"])
         mock_client.subscribe_instruments = mock_subscribe
-        with (
-            patch.object(updater, "VERIFICATION_TIMEOUT_SECONDS", 0.05),
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-        ):
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert "BTC/USD" in verified
         assert len(verified) < len(ws_symbols)
@@ -1813,23 +2089,18 @@ class TestKrakenVerifyWebsocketSymbolsBranches:
         """Verify non-callable disconnect_websocket is handled.
 
         Given: Client with disconnect_websocket as string,
-        When: verify_websocket_symbols times out,
+        When: verify_websocket_symbols finishes reading the stream,
         Then: Partial results returned without error.
         """
         ws_symbols = {"BTC/USD", "ETH/EUR"}
 
         async def mock_subscribe(raw: bool = False) -> Any:
             yield {"symbol": "BTC/USD"}
-            await asyncio.sleep(10)
-            yield {"symbol": "ETH/EUR"}
 
         mock_client = MagicMock(spec=["subscribe_instruments", "disconnect_websocket"])
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = "not_a_callable_string"
-        with (
-            patch.object(updater, "VERIFICATION_TIMEOUT_SECONDS", 0.05),
-            patch.object(updater, "_create_exchange_client", return_value=mock_client),
-        ):
+        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
         assert "BTC/USD" in verified
 
@@ -2570,6 +2841,66 @@ class TestKrakenCollectVerifiedSymbolsWsOnly:
             return KrakenSymbolUpdaterService()
 
     @pytest.mark.asyncio
+    async def test_collect_verified_symbols_waits_for_deadline_after_final_rest_pair(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify an open stream is collected through the deadline at full verification.
+
+        Given: A stream that emits the final REST pair and a WS-only instrument, then waits,
+        When: The collector reads the stream,
+        Then: Both observations are returned once the deadline expires.
+        """
+        extra = {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"}
+        client = _mock_snapshot_client([{"symbol": "BTC/USD"}, extra], hold_open=True)
+        verified, ws_only, timed_out = await updater._collect_verified_symbols(
+            client, {"BTC/USD"}, 0.0
+        )
+
+        assert verified == {"BTC/USD"}
+        assert ws_only == [extra]
+        assert timed_out
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("verified_count", "expected_count", "expected_status"),
+        [(19, 20, "window closed"), (18, 20, "timeout"), (0, 0, "timeout")],
+    )
+    async def test_collect_verified_symbols_logs_deadline_status(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        verified_count: int,
+        expected_count: int,
+        expected_status: str,
+    ) -> None:
+        """Verify the deadline log describes the observed snapshot coverage.
+
+        Given: An open stream that verifies some or none of the expected symbols,
+        When: The collection deadline expires,
+        Then: The INFO message names the outcome and includes the observed counts.
+        """
+        symbols = [f"TOKEN{index}/USD" for index in range(expected_count)]
+        extra = {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"}
+        client = _mock_snapshot_client(
+            [{"symbol": symbol} for symbol in symbols[:verified_count]] + [extra],
+            hold_open=True,
+        )
+        captured: list[str] = []
+        sink_id = logger.add(captured.append, format="{level}: {message}", level="INFO")
+        try:
+            _, _, timed_out = await updater._collect_verified_symbols(client, set(symbols), 0.0)
+        finally:
+            logger.remove(sink_id)
+
+        expected_message = (
+            f"INFO: Snapshot collection {expected_status} (0.0s): "
+            f"verified {verified_count}/{expected_count} symbols, 1 WS-only discovered\n"
+        )
+        assert timed_out
+        assert [entry for entry in captured if "Snapshot collection " in entry] == [
+            expected_message
+        ]
+
+    @pytest.mark.asyncio
     async def test_collect_verified_symbols_discovers_ws_only(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
@@ -2582,12 +2913,15 @@ class TestKrakenCollectVerifiedSymbolsWsOnly:
         ws_symbols = {"BTC/USD"}
 
         async def mock_subscribe(raw: bool = False) -> Any:
-            yield {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"}
             yield {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"}
+            yield {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"}
 
         mock_client = MagicMock()
         mock_client.subscribe_instruments = mock_subscribe
-        verified, ws_only = await updater._collect_verified_symbols(mock_client, ws_symbols, 5.0)
+        verified, ws_only, timed_out = await updater._collect_verified_symbols(
+            mock_client, ws_symbols, 5.0
+        )
+        assert not timed_out
         assert verified == {"BTC/USD"}
         assert len(ws_only) == 1
         assert ws_only[0] == {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"}
@@ -2605,14 +2939,17 @@ class TestKrakenCollectVerifiedSymbolsWsOnly:
         ws_symbols = {"BTC/USD"}
 
         async def mock_subscribe(raw: bool = False) -> Any:
-            yield {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"}
             yield {"symbol": "UNKNOWN/X", "base": "", "quote": "USD"}
             yield {"symbol": "ANOTHER/Y", "base": "FOO", "quote": ""}
             yield {"symbol": "NOQUOTE/Z"}
+            yield {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"}
 
         mock_client = MagicMock()
         mock_client.subscribe_instruments = mock_subscribe
-        verified, ws_only = await updater._collect_verified_symbols(mock_client, ws_symbols, 5.0)
+        verified, ws_only, timed_out = await updater._collect_verified_symbols(
+            mock_client, ws_symbols, 5.0
+        )
+        assert not timed_out
         assert verified == {"BTC/USD"}
         assert ws_only == []
 
@@ -2629,13 +2966,16 @@ class TestKrakenCollectVerifiedSymbolsWsOnly:
         ws_symbols = {"BTC/USD"}
 
         async def mock_subscribe(raw: bool = False) -> Any:
-            yield {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"}
             yield {"symbol": "FOO/USD", "base": "FOO", "quote": "USD"}
             yield {"symbol": "BAR/EUR", "base": "BAR", "quote": "EUR"}
+            yield {"symbol": "BTC/USD", "base": "BTC", "quote": "USD"}
 
         mock_client = MagicMock()
         mock_client.subscribe_instruments = mock_subscribe
-        verified, ws_only = await updater._collect_verified_symbols(mock_client, ws_symbols, 5.0)
+        verified, ws_only, timed_out = await updater._collect_verified_symbols(
+            mock_client, ws_symbols, 5.0
+        )
+        assert not timed_out
         assert verified == {"BTC/USD"}
         assert len(ws_only) == 2
         ws_only_symbols = {w["symbol"] for w in ws_only}
@@ -2675,11 +3015,11 @@ class TestKrakenBuildVerifiedMappingsWsOnly:
         with (
             patch.object(updater, "load_kraken_rest_symbols", new_callable=AsyncMock) as mock_load,
             patch.object(
-                updater, "verify_websocket_symbols", new_callable=AsyncMock
+                updater, "_verify_websocket_symbols", new_callable=AsyncMock
             ) as mock_verify,
         ):
             mock_load.return_value = mock_rest_symbols
-            mock_verify.return_value = ({"BTC/USD"}, ws_only_instruments)
+            mock_verify.return_value = ({"BTC/USD"}, ws_only_instruments, False)
             mappings, success = await updater.build_verified_mappings()
 
         assert success is True
@@ -2713,11 +3053,11 @@ class TestKrakenBuildVerifiedMappingsWsOnly:
         with (
             patch.object(updater, "load_kraken_rest_symbols", new_callable=AsyncMock) as mock_load,
             patch.object(
-                updater, "verify_websocket_symbols", new_callable=AsyncMock
+                updater, "_verify_websocket_symbols", new_callable=AsyncMock
             ) as mock_verify,
         ):
             mock_load.return_value = mock_rest_symbols
-            mock_verify.return_value = ({"BTC/USD"}, ws_only_instruments)
+            mock_verify.return_value = ({"BTC/USD"}, ws_only_instruments, False)
             mappings, success = await updater.build_verified_mappings()
 
         assert success is True
@@ -4107,7 +4447,7 @@ class TestKrakenBtnlDiscovery:
             "is_btnl": "true",
         }
         with (
-            patch.object(updater, "build_verified_mappings", return_value=(rest_mappings, True)),
+            patch.object(updater, "_build_verified_mappings", return_value=(rest_mappings, None)),
             patch.object(
                 updater, "discover_btnl_symbols", return_value={"BTC-USD-BTNL": btnl_record}
             ),
@@ -4148,7 +4488,7 @@ class TestKrakenBtnlDiscovery:
             "is_btnl": "true",
         }
         with (
-            patch.object(updater, "build_verified_mappings", return_value=(rest_mappings, True)),
+            patch.object(updater, "_build_verified_mappings", return_value=(rest_mappings, None)),
             patch.object(
                 updater, "discover_btnl_symbols", return_value={"BTC-USD-BTNL": btnl_record}
             ),
@@ -4304,7 +4644,7 @@ class TestKrakenBtnlDiscovery:
             }
         }
         with (
-            patch.object(updater, "build_verified_mappings", return_value=(rest_mappings, True)),
+            patch.object(updater, "_build_verified_mappings", return_value=(rest_mappings, None)),
             patch.object(updater, "discover_btnl_symbols", side_effect=RuntimeError("ws down")),
         ):
             result = await updater._fetch_symbols(AsyncMock())

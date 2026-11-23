@@ -11,6 +11,7 @@ import inspect
 import json
 import math
 from collections.abc import Mapping
+from contextlib import aclosing
 from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
@@ -65,6 +66,12 @@ _TOKENIZED_NOT_READY_REASON = "Tokenized asset requires online status and comple
 _TOKENIZED_ACCOUNTING_REASON = (
     "Tokenized asset unit and corporate-action rebase accounting is not integrated"
 )
+
+_VERIFICATION_BASE_TIMEOUT_SECONDS = 5.0
+_VERIFICATION_SECONDS_PER_SYMBOL = 0.010
+_VERIFICATION_MAX_TIMEOUT_SECONDS = 30.0
+_VERIFICATION_RETRY_BACKOFF_SECONDS = 2.0
+_VERIFICATION_THRESHOLD = 0.95
 
 _SPOT_ROLLOVER_RATE_LONG = 0.00025
 _SPOT_ROLLOVER_RATE_SHORT = 0.00010
@@ -361,8 +368,6 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
     Registered as one-shot task process with 6-hour update threshold.
     """
 
-    VERIFICATION_TIMEOUT_SECONDS = 5.0
-
     @staticmethod
     def get_default_parameters(settings: AppSettings) -> dict[str, Any]:
         """Get default parameters.
@@ -389,15 +394,21 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         self._kraken_client: KrakenExchangeClient | None = None
         self._alias_claims = AliasClaims()
 
-    def _create_exchange_client(self) -> KrakenExchangeClient:
-        """Create Kraken exchange client.
+    def _create_exchange_client(self, *, fresh: bool = False) -> KrakenExchangeClient:
+        """Create a Kraken exchange client, reusing the cached client by default.
+
+        Args:
+            fresh: Give a verification retry its own client and instrument queue.
 
         Returns:
             KrakenExchangeClient instance.
         """
-        if self._kraken_client is None:
-            self._kraken_client = KrakenExchangeClient()
-        return self._kraken_client
+        if not fresh and self._kraken_client is not None:
+            return self._kraken_client
+        client = KrakenExchangeClient()
+        if not fresh:
+            self._kraken_client = client
+        return client
 
     def _get_setting_key(self) -> str:
         """Get settings key for last update timestamp.
@@ -633,51 +644,121 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
     ) -> tuple[set[str], list[dict[str, str]]]:
         """Verify symbols and discover WS-only instruments via WebSocket v2 API.
 
-        Subscribes to instrument feed, verifies REST-derived symbols exist,
-        and collects symbols present only on WebSocket (not in REST markets).
+        The collection budget grows with the REST catalog so a cold snapshot
+        of 1,614 symbols has about 16 seconds to arrive. A floor gives small
+        catalogs time to connect and a ceiling bounds each collection.
+        A deadline expiry below the coverage threshold for a nonempty catalog
+        permits one fresh subscription. Each collection runs until its
+        deadline or the stream ends to include WS-only instruments sent later
+        in the snapshot.
 
         Args:
             ws_symbols: Set of REST-derived symbols to verify.
 
         Returns:
             Tuple of (verified symbols, WS-only instrument dicts).
-            On error fallback, returns (all ws_symbols, empty WS-only list).
+            A first collection error falls back to (all ws_symbols, empty
+            WS-only list). A retry error returns the first collection's results.
         """
-        logger.info("Verifying {} symbols against WebSocket v2 API", len(ws_symbols))
-        verified_symbols: set[str] = set()
-        ws_only_instruments: list[dict[str, str]] = []
-        max_snapshot_time = self.VERIFICATION_TIMEOUT_SECONDS
+        verified, ws_only, _ = await self._verify_websocket_symbols(ws_symbols)
+        return verified, ws_only
+
+    async def _verify_websocket_symbols(
+        self, ws_symbols: set[str]
+    ) -> tuple[set[str], list[dict[str, str]], bool]:
+        """Return verification results and whether a short read prompted a retry."""
+        expected_count = len(ws_symbols)
+        logger.info("Verifying {} symbols against WebSocket v2 API", expected_count)
+        timeout = min(
+            _VERIFICATION_MAX_TIMEOUT_SECONDS,
+            max(
+                _VERIFICATION_BASE_TIMEOUT_SECONDS,
+                _VERIFICATION_SECONDS_PER_SYMBOL * expected_count,
+            ),
+        )
         client = self._create_exchange_client()
+        verified: set[str] = set()
         try:
-            verified_symbols, ws_only_instruments = await self._collect_verified_symbols(
-                client, ws_symbols, max_snapshot_time
+            verified, ws_only, timed_out = await self._collect_verified_symbols(
+                client, ws_symbols, timeout
             )
         except asyncio.CancelledError:
             logger.info(
                 "WebSocket instrument verification cancelled ({}/{}) verified",
-                len(verified_symbols),
-                len(ws_symbols),
+                len(verified),
+                expected_count,
             )
             raise
-        except Exception as e:
-            logger.error(f"Error verifying symbols via WebSocket: {e}")
+        except Exception as exc:
+            logger.error("Error verifying symbols via WebSocket: {}", exc)
             logger.warning("Falling back to assume all symbols valid")
-            return ws_symbols, []
+            return ws_symbols, [], False
         finally:
             await self._safe_disconnect_ws(client)
-        self._log_unverified_symbols(verified_symbols, ws_symbols)
-        return verified_symbols, ws_only_instruments
+        retried = (
+            timed_out
+            and expected_count > 0
+            and len(verified) / expected_count < _VERIFICATION_THRESHOLD
+        )
+        if retried:
+            try:
+                verified, ws_only = await self._retry_websocket_verification(
+                    ws_symbols, timeout, verified, ws_only
+                )
+            except Exception as exc:
+                logger.warning(
+                    "WebSocket verification retry failed ({}): {}; first attempt verified {}/{}",
+                    type(exc).__name__,
+                    exc,
+                    len(verified),
+                    expected_count,
+                )
+        self._log_unverified_symbols(verified, ws_symbols)
+        return verified, ws_only, retried
+
+    async def _retry_websocket_verification(
+        self,
+        ws_symbols: set[str],
+        timeout: float,
+        first_verified: set[str],
+        first_ws_only: list[dict[str, str]],
+    ) -> tuple[set[str], list[dict[str, str]]]:
+        """Back off once, then merge evidence from a fresh client and queue."""
+        await asyncio.sleep(_VERIFICATION_RETRY_BACKOFF_SECONDS)
+        retry_client = self._create_exchange_client(fresh=True)
+        try:
+            retry_verified, retry_ws_only, _ = await self._collect_verified_symbols(
+                retry_client, ws_symbols, timeout
+            )
+        finally:
+            await self._safe_disconnect_ws(retry_client)
+        verified = first_verified | retry_verified
+        instruments: dict[str, dict[str, str]] = {}
+        for instrument in (*first_ws_only, *retry_ws_only):
+            instruments.setdefault(instrument["symbol"], instrument)
+        expected_count = len(ws_symbols)
+        logger.warning(
+            "WebSocket verification retry: first attempt verified {}/{}, retry verified {}/{}, "
+            "combined verified {}/{}",
+            len(first_verified),
+            expected_count,
+            len(retry_verified),
+            expected_count,
+            len(verified),
+            expected_count,
+        )
+        return verified, list(instruments.values())
 
     async def _collect_verified_symbols(
         self,
         client: Any,
         ws_symbols: set[str],
         timeout_seconds: float,
-    ) -> tuple[set[str], list[dict[str, str]]]:
+    ) -> tuple[set[str], list[dict[str, str]], bool]:
         """Collect verified symbols and WS-only instruments from feed.
 
-        Reads the full instrument snapshot to both verify REST-derived symbols
-        and discover symbols present only on WebSocket (not in REST markets).
+        Reads until the deadline or stream end to collect WS-only instruments
+        throughout the snapshot.
 
         Args:
             client: Kraken exchange client.
@@ -685,31 +766,50 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             timeout_seconds: Maximum time to spend collecting.
 
         Returns:
-            Tuple of (verified REST symbols, WS-only instrument dicts).
-            Each WS-only dict has keys: symbol, base, quote.
+            Verified REST symbols, WS-only instruments with symbol, base and
+            quote, and whether the collection deadline expired.
         """
         verified: set[str] = set()
         ws_only: list[dict[str, str]] = []
+        deadline = asyncio.timeout(timeout_seconds)
+        upstream_timeout = False
         try:
-            async with asyncio.timeout(timeout_seconds):
-                async for raw_instrument in client.subscribe_instruments(raw=True):
-                    ws_symbol = raw_instrument.get("symbol")
-                    if not isinstance(ws_symbol, str):
-                        continue
-                    if ws_symbol in ws_symbols:
-                        verified.add(ws_symbol)
-                    else:
-                        base = raw_instrument.get("base", "")
-                        quote = raw_instrument.get("quote", "")
-                        if base and quote:
-                            ws_only.append({"symbol": ws_symbol, "base": base, "quote": quote})
+            async with deadline:
+                try:
+                    async with aclosing(client.subscribe_instruments(raw=True)) as instruments:
+                        async for raw_instrument in instruments:
+                            ws_symbol = raw_instrument.get("symbol")
+                            if not isinstance(ws_symbol, str):
+                                continue
+                            if ws_symbol in ws_symbols:
+                                verified.add(ws_symbol)
+                            else:
+                                base = raw_instrument.get("base", "")
+                                quote = raw_instrument.get("quote", "")
+                                if base and quote:
+                                    ws_only.append(
+                                        {"symbol": ws_symbol, "base": base, "quote": quote}
+                                    )
+                except TimeoutError:
+                    upstream_timeout = True
+                    raise
         except TimeoutError:
+            if upstream_timeout or not deadline.expired():
+                raise
+            verified_count = len(verified)
+            expected_count = len(ws_symbols)
+            outcome = (
+                "window closed"
+                if expected_count > 0 and verified_count / expected_count >= _VERIFICATION_THRESHOLD
+                else "timeout"
+            )
             logger.info(
-                "Snapshot collection timeout ({:.1f}s): verified {}/{} symbols, "
+                "Snapshot collection {} ({:.1f}s): verified {}/{} symbols, "
                 "{} WS-only discovered",
+                outcome,
                 timeout_seconds,
-                len(verified),
-                len(ws_symbols),
+                verified_count,
+                expected_count,
                 len(ws_only),
             )
         if len(verified) == len(ws_symbols) and ws_symbols:
@@ -718,7 +818,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 len(ws_symbols),
                 len(ws_only),
             )
-        return verified, ws_only
+        return verified, ws_only, deadline.expired()
 
     @staticmethod
     async def _safe_disconnect_ws(client: Any) -> None:
@@ -1122,38 +1222,40 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         Returns:
             Tuple of (mappings dict keyed by native_symbol, success boolean).
         """
+        mappings, verification_failure = await self._build_verified_mappings()
+        return mappings, verification_failure is None
+
+    async def _build_verified_mappings(self) -> tuple[dict[str, KrakenSymbolRecord], str | None]:
+        """Build symbol mappings and return the verification failure detail, if any."""
         try:
             kraken_rest_symbols = await self.load_kraken_rest_symbols()
             logger.info(f"Loaded {len(kraken_rest_symbols)} symbols from REST API")
             mappings, ws_symbols_to_verify = self._build_mappings_from_rest(kraken_rest_symbols)
-            verified_ws_symbols, ws_only_instruments = await self.verify_websocket_symbols(
-                ws_symbols_to_verify,
-            )
-            verification_threshold = 0.95
-            verification_rate = (
-                len(verified_ws_symbols) / len(ws_symbols_to_verify)
-                if ws_symbols_to_verify
-                else 0.0
-            )
-            verification_success = verification_rate >= verification_threshold
-            if not verification_success:
-                logger.warning(
-                    f"Verification rate {verification_rate:.1%} below threshold "
-                    f"{verification_threshold:.0%}"
+            verified, ws_only, retried = await self._verify_websocket_symbols(ws_symbols_to_verify)
+            verified_count = len(verified)
+            expected_count = len(ws_symbols_to_verify)
+            verification_rate = verified_count / expected_count if expected_count else 0.0
+            verification_failure = None
+            if verification_rate < _VERIFICATION_THRESHOLD:
+                retry_detail = " after retry" if retried else ""
+                verification_failure = (
+                    f"coverage {verified_count}/{expected_count} ({verification_rate:.1%}) "
+                    f"below {_VERIFICATION_THRESHOLD:.0%}{retry_detail}"
                 )
+                logger.warning("WebSocket verification {}", verification_failure)
             ws_only_count, spv_skipped = self._merge_ws_only_instruments(
-                mappings, ws_only_instruments, verified_ws_symbols
+                mappings, ws_only, verified
             )
             logger.info(
                 f"Built {len(mappings)} mappings ({ws_only_count} WS-only, "
                 f"{spv_skipped} SPV duplicate wire names skipped), "
-                f"verification: {len(verified_ws_symbols)}/{len(ws_symbols_to_verify)} "
-                f"({verification_rate:.1%})"
+                f"verification: {verified_count}/{expected_count} ({verification_rate:.1%})"
             )
-            return mappings, verification_success
-        except Exception as e:
-            logger.error(f"Error building verified mappings: {e}")
-            return {}, False
+            return mappings, verification_failure
+        except Exception as exc:
+            exception_name = type(exc).__name__
+            logger.exception("Error building verified mappings ({}): {}", exception_name, exc)
+            return {}, f"{exception_name} while building mappings"
 
     async def _fetch_symbols(self, client: KrakenExchangeClient) -> list[dict[str, Any]]:
         """Fetch and verify symbols from Kraken, then run BTNL discovery.
@@ -1174,9 +1276,11 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         Raises:
             RuntimeError: If WebSocket verification fails or no mappings.
         """
-        mappings, verification_success = await self.build_verified_mappings()
-        if not verification_success:
-            raise RuntimeError("WebSocket verification failed - aborting update")
+        mappings, verification_failure = await self._build_verified_mappings()
+        if verification_failure is not None:
+            raise RuntimeError(
+                f"WebSocket verification failed: {verification_failure} - aborting update"
+            )
         if not mappings:
             raise RuntimeError("No mappings generated - aborting update")
         btnl_count = 0
