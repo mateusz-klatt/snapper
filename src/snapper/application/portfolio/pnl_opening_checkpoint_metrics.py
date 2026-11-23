@@ -332,6 +332,20 @@ def record_checkpoint_shadow_skipped(
         target.shadow_skipped[reason] = target.shadow_skipped.get(reason, 0) + 1
 
 
+def record_checkpoint_shadow_failure(
+    reason: str,
+    scope: PnlCheckpointScope | PnlCheckpointScopeKey | None = None,
+) -> None:
+    """Count one isolated shadow failure by exception-type reason.
+
+    Args:
+        reason: Stable ``shadow_error:<Type>`` failure token.
+        scope: Optional scope owning the failed shadow branch.
+    """
+    for target in _targets(scope):
+        target.shadow_skipped[reason] = target.shadow_skipped.get(reason, 0) + 1
+
+
 def format_checkpoint_metrics_summary(
     scope: PnlCheckpointScope | PnlCheckpointScopeKey,
     metrics: PnlCheckpointMetrics,

@@ -345,6 +345,13 @@ Mode semantics:
     prefix execution reads, falling back to anchor replay (and bounded
     recapture when needed) on any closed verifier refusal.
 
+Shadow verification and resumed replay are limited to two wallets per tick,
+with budget-consuming wallets rotating the next tick's starting position.
+Wallets beyond that limit use the exact `off` cold-replay path for the tick.
+Shadow errors increment `shadow_skipped` with reason `shadow_error:<Type>`,
+log one warning per scope failure episode, and never prevent the authoritative
+anchor samples and frontier from committing.
+
 Rollout and rollback:
 
 1. **Pre-flight probe**: the deployed environment must **not** set
@@ -423,6 +430,11 @@ mappings and allocator arenas do not trigger spurious `MemoryError`; it never
 raises `RLIMIT_AS` above the existing hard limit and skips `RLIMIT_AS` when the
 hard limit is lower than the computed target or `/proc/self/status` is
 unreadable.
+
+`--max-runtime-seconds` is enforced at asynchronous cancellation points. A
+CPU-bound replay may therefore overrun the configured ceiling until its next
+`await`; PostgreSQL statement timeouts and the memory limits remain independent
+hard-safety controls.
 
 Exit codes:
 

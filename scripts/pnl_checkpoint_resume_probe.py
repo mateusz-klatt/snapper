@@ -18,6 +18,7 @@ Safety architecture:
     * Note: ``lock_timeout`` (1 s) bounds lock acquisition only; statement execution
       and idle lock retention are bounded by ``statement_timeout``,
       ``idle_in_transaction_session_timeout``, and ``--max-runtime-seconds``.
+      A CPU-bound replay can overrun the runtime ceiling until its next await.
     * Redacts credentials/DSNs from all error and CLI output.
 
 Exit codes:
@@ -56,6 +57,7 @@ from sqlalchemy import func
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import text
+from sqlalchemy import tuple_
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
@@ -95,13 +97,18 @@ from snapper.core.json_types import JsonValue
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
 from snapper.data.models import Candle
+from snapper.data.models import Instrument
+from snapper.data.models import Symbol
 from snapper.data.models import VenueEvent
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository import _pnl_fx_symbol_proof_filters
 from snapper.data.repository import where_active
+from snapper.data.repository_types import InstrumentSymbolRefRow
+from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PortfolioPnlAnchorRow
@@ -130,7 +137,11 @@ _SQL_STRING_RE = re.compile(r"'(?:''|[^'])*'")
 _VMSIZE_LINE_RE = re.compile(r"^VmSize:\s*(\d+)\s*kB\s*$", re.MULTILINE)
 _LIT_TOKEN_RE = re.compile(r"'__LIT_(\d+)__'")
 _FOR_LOCK_RE = re.compile(r"\bFOR\s+(?:(?:NO\s+KEY\s+)?UPDATE|(?:KEY\s+)?SHARE)\b")
-_FORBIDDEN_SQL_CALL_RE = re.compile(r"\b(?:SET_CONFIG\s*\(|PG_SLEEP(?:_FOR|_UNTIL)?\b)")
+_SELECT_INTO_RE = re.compile(r"\bSELECT\b[\s\S]*\bINTO\b")
+_EXPLAIN_ANALYZE_RE = re.compile(r"\bANALYZE\b")
+_FORBIDDEN_SQL_CALL_RE = re.compile(
+    r"\b(?:SET_CONFIG\s*\(|SETVAL\s*\(|PG_ADVISORY(?:_[A-Z]+)*\s*\(|PG_SLEEP(?:_FOR|_UNTIL)?\b)"
+)
 _BOUND_TX_CONFIG_RE = re.compile(
     r"^SELECT\s+set_config\('statement_timeout',\s*CASE\s+WHEN\s+"
     r"current_setting\('statement_timeout'\)::interval\s*=\s*interval\s*'0'\s+OR\s+"
@@ -472,12 +483,11 @@ def _assert_read_only_set(
         raise CheckpointResumeProbeError("write_sql_refused:SET")
 
 
-def _allow_bound_pg_timeout_select(raw_fragment: str, statement_timeout_ms: int) -> bool:
-    """Allow only ``_bound_pnl_correction_transaction`` when intervals stay within caps.
+def _allow_bound_pg_timeout_select(raw_fragment: str) -> bool:
+    """Allow only the repository's downward timeout clamp within hard safety caps.
 
     Args:
         raw_fragment: Whitespace-collapsed literal-restored SQL fragment.
-        statement_timeout_ms: Probe configured statement-timeout ceiling in milliseconds.
 
     Returns:
         ``True`` when the fragment matches the exact timeout clamp query within bounds, else ``False``.
@@ -500,12 +510,28 @@ def _allow_bound_pg_timeout_select(raw_fragment: str, statement_timeout_ms: int)
         or stmt_cmp != stmt_then
         or lock_cmp != lock_then
         or stmt_then <= 0
-        or stmt_then > statement_timeout_ms
+        or stmt_then > MAX_STATEMENT_TIMEOUT_MS
         or lock_then <= 0
         or lock_then > LOCK_TIMEOUT_MS
     ):
         raise CheckpointResumeProbeError("write_or_unbounded_sql:set_config_timeout")
     return True
+
+
+def _assert_query_read_only(normalized: str, tokens: Sequence[str], verb: str) -> None:
+    """Reject writes hidden inside SELECT, WITH, or EXPLAIN statements."""
+    if _SELECT_INTO_RE.search(normalized):
+        raise CheckpointResumeProbeError("write_sql_refused:SELECT_INTO")
+    if verb == "EXPLAIN":
+        if _EXPLAIN_ANALYZE_RE.search(normalized):
+            raise CheckpointResumeProbeError("write_sql_refused:EXPLAIN_ANALYZE")
+        return
+    if verb not in {"SELECT", "WITH"}:
+        return
+    if _FOR_LOCK_RE.search(normalized):
+        raise CheckpointResumeProbeError("write_sql_refused:FOR_UPDATE")
+    if verb == "WITH" and (_WRITE_KEYWORDS & set(tokens)):
+        raise CheckpointResumeProbeError("write_sql_refused:WITH")
 
 
 def _assert_fragment_read_only(
@@ -524,7 +550,7 @@ def _assert_fragment_read_only(
         CheckpointResumeProbeError: When the fragment violates read-only or timeout invariants.
     """
     raw_fragment = " ".join(_unstash_literals(fragment, literals).split())
-    if _allow_bound_pg_timeout_select(raw_fragment, statement_timeout_ms):
+    if _allow_bound_pg_timeout_select(raw_fragment):
         return
     normalized = " ".join(fragment.split()).upper()
     if _FORBIDDEN_SQL_CALL_RE.search(normalized):
@@ -533,11 +559,8 @@ def _assert_fragment_read_only(
     if not tokens:
         return
     verb = tokens[0]
-    if verb in {"SELECT", "WITH"}:
-        if _FOR_LOCK_RE.search(normalized):
-            raise CheckpointResumeProbeError("write_sql_refused:FOR_UPDATE")
-        if verb == "WITH" and (_WRITE_KEYWORDS & set(tokens)):
-            raise CheckpointResumeProbeError("write_sql_refused:WITH")
+    _assert_query_read_only(normalized, tokens, verb)
+    if verb in {"SELECT", "WITH", "EXPLAIN"}:
         return
     if verb in _READ_ONLY_VERBS:
         return
@@ -994,9 +1017,9 @@ async def _enforce_max_executions(
         watermarks,
     )
     exec_count = sum(count for count, _max_seq in counts.values())
-    _require(exec_count <= max_executions, f"max_executions_exceeded:{exec_count}>{max_executions}")
+    _require(exec_count <= max_executions, "caps_exceeded:executions")
     fill_count = await _count_scope_fill_events(repo, scope)
-    _require(fill_count <= max_executions, f"max_executions_exceeded:{fill_count}>{max_executions}")
+    _require(fill_count <= max_executions, "caps_exceeded:executions")
 
 
 async def _count_scope_accruals(
@@ -1016,22 +1039,180 @@ async def _count_scope_accruals(
     return int(count)
 
 
+async def _replay_instrument_refs(
+    repo: SQLAlchemyRepository,
+    scope: PortfolioPnlSampleScope,
+    frontier: PnlCorrectionFrontier,
+) -> list[InstrumentSymbolRefRow]:
+    """Resolve wallet instruments through the same prefix, accrual, and reference reads."""
+    watermarks = frontier.raw_execution_watermarks
+    assert watermarks is not None
+    prefix = await repo.get_pnl_timeline_execution_prefix_at_watermarks(
+        scope.wallet_public_id,
+        scope.mode,
+        watermarks,
+        frontier.as_of,
+        fill_witness_cut=_frontier_witness_cut(frontier),
+    )
+    accruals = await repo.get_accruals_for_pnl(
+        scope.wallet_public_id,
+        scope.mode,
+        frontier.as_of,
+    )
+    instrument_ids = sorted(
+        {row["instrument_public_id"] for row in prefix["executions"]}
+        | {row["instrument_public_id"] for row in accruals}
+    )
+    return await repo.get_instrument_symbol_refs(instrument_ids, frontier.as_of)
+
+
+def _fx_candidate_pairs(
+    refs: Sequence[InstrumentSymbolRefRow],
+    valuation_ccy: str,
+) -> list[tuple[str, str]]:
+    """Return both orientations of every non-identity quote-to-valuation conversion."""
+    return sorted(
+        {
+            orientation
+            for ref in refs
+            if (quote := ref["quote_currency"]) is not None and quote != valuation_ccy
+            for orientation in ((quote, valuation_ccy), (valuation_ccy, quote))
+        }
+    )
+
+
+async def _count_mark_candles(
+    repo: SQLAlchemyRepository,
+    refs: Sequence[InstrumentSymbolRefRow],
+    start: datetime,
+    end: datetime,
+    as_of: datetime,
+) -> int:
+    """Count physical mark rows selected by the repository's reference-series predicate."""
+    if not refs:
+        return 0
+    series = sorted(
+        {
+            (
+                ref["native_symbol"],
+                ref["exchange"],
+                ref["base_currency"],
+                ref["quote_currency"],
+            )
+            for ref in refs
+        }
+    )
+    stmt = (
+        select(func.count(Candle.id))
+        .select_from(Candle)
+        .join(
+            Instrument,
+            and_(
+                Candle.instrument_public_id == Instrument.public_id,
+                Instrument.timestamp <= Candle.timestamp,
+                Instrument.known_to > Candle.timestamp,
+            ),
+        )
+        .join(
+            Symbol,
+            and_(
+                Instrument.symbol_public_id == Symbol.public_id,
+                Symbol.timestamp <= Candle.timestamp,
+                Symbol.known_to > Candle.timestamp,
+            ),
+        )
+        .where(
+            tuple_(
+                Symbol.native_symbol,
+                Instrument.exchange,
+                Symbol.base,
+                Symbol.quote,
+            ).in_(series),
+            Candle.timeframe == "1m",
+            Candle.open_at >= start,
+            Candle.open_at <= end,
+            Candle.complete.is_(True),
+            *where_active(Candle, as_of),
+        )
+    )
+    async with repo.session() as session:
+        count = (await session.execute(stmt)).scalar_one()
+    return int(count)
+
+
+async def _count_fx_candles(
+    repo: SQLAlchemyRepository,
+    planes: Sequence[PnlFxRatePlane],
+    start: datetime,
+    end: datetime,
+    as_of: datetime,
+) -> int:
+    """Count candidate-FX rows under the repository's ownership and symbol proofs."""
+    if not planes:
+        return 0
+    stmt = (
+        select(func.count(Candle.id))
+        .select_from(Candle)
+        .join(
+            Instrument,
+            and_(
+                Candle.instrument_public_id == Instrument.public_id,
+                Instrument.timestamp <= Candle.timestamp,
+                Instrument.known_to > Candle.timestamp,
+            ),
+        )
+        .join(
+            Symbol,
+            and_(
+                Instrument.symbol_public_id == Symbol.public_id,
+                Symbol.timestamp <= Candle.timestamp,
+                Symbol.known_to > Candle.timestamp,
+            ),
+        )
+        .where(
+            tuple_(Symbol.base, Symbol.quote, Instrument.exchange).in_(list(dict.fromkeys(planes))),
+            *_pnl_fx_symbol_proof_filters(as_of),
+            Candle.timeframe == "1m",
+            Candle.open_at >= start,
+            Candle.open_at <= end,
+            Candle.complete.is_(True),
+            *where_active(Candle, as_of),
+        )
+    )
+    async with repo.session() as session:
+        count = (await session.execute(stmt)).scalar_one()
+    return int(count)
+
+
 async def _count_scope_candles(
     repo: SQLAlchemyRepository,
     scope: PortfolioPnlSampleScope,
     frontier: PnlCorrectionFrontier,
 ) -> int:
-    """Count active 1m candles across ``[t0, frontier.tip]`` before loading mark/FX candles."""
-    stmt = select(func.count(Candle.id)).where(
-        Candle.timeframe == "1m",
-        Candle.open_at >= scope.anchor_point_time,
-        Candle.open_at <= frontier.tip,
-        Candle.complete.is_(True),
-        *where_active(Candle, frontier.as_of),
+    """Count only wallet mark and candidate-FX candles across the cold replay window."""
+    refs = await _replay_instrument_refs(repo, scope, frontier)
+    pairs = _fx_candidate_pairs(refs, scope.valuation_ccy)
+    planes = await repo.get_pnl_fx_rate_exchanges(
+        pairs,
+        scope.anchor_point_time,
+        frontier.tip,
+        frontier.as_of,
     )
-    async with repo.session() as session:
-        count = (await session.execute(stmt)).scalar_one()
-    return int(count)
+    mark_count = await _count_mark_candles(
+        repo,
+        refs,
+        scope.anchor_point_time,
+        frontier.tip,
+        frontier.as_of,
+    )
+    fx_count = await _count_fx_candles(
+        repo,
+        planes,
+        scope.anchor_point_time,
+        frontier.tip,
+        frontier.as_of,
+    )
+    return mark_count + fx_count
 
 
 async def _enforce_scope_caps(
@@ -1152,13 +1333,13 @@ async def _load_prepared_scope(
         and frontier.fill_witness_digest is not None,
         "frontier_incomplete_cut",
     )
-    await _enforce_scope_caps(repo, scope, frontier, config)
     earliest_checkpoint = t0 + _MINUTE
     checkpoint_minute = max(
         earliest_checkpoint,
         frontier.tip - timedelta(minutes=config.window_minutes),
     )
     _require(frontier.tip > checkpoint_minute, "frontier_window_too_short")
+    await _enforce_scope_caps(repo, scope, frontier, config)
     capture_as_of = min(frontier.as_of, checkpoint_minute + FINALIZATION_LAG)
     return _PreparedScope(
         scope=scope,
@@ -1727,7 +1908,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-runtime-seconds",
         type=float,
         default=DEFAULT_MAX_RUNTIME_SECONDS,
-        help="Overall probe runtime wall-clock ceiling in seconds (0 < s <= 600).",
+        help=(
+            "Overall probe runtime wall-clock ceiling in seconds (0 < s <= 600); "
+            "CPU-bound replay may overrun it until the next await."
+        ),
     )
     parser.add_argument("--max-executions", type=int, default=DEFAULT_MAX_EXECUTIONS)
     parser.add_argument("--max-accruals", type=int, default=DEFAULT_MAX_ACCRUALS)

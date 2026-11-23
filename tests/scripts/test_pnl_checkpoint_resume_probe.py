@@ -43,6 +43,7 @@ from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
 from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from tests.application.portfolio import test_pnl_snapshotter_checkpoint_e2e as e2e
 from tests.application.portfolio import test_pnl_snapshotter_lower_id_rewind as idless
+from tests.data import test_pnl_crypto_usd_plane_repository as prices
 from tests.data import test_pnl_opening_checkpoint_repository as checkpoint_repository
 from tests.data import test_pnl_timeline_execution_prefix_repository as prefix
 from tests.data import test_pnl_timeline_sample_repository as samples
@@ -415,8 +416,14 @@ def test_postgres_shaped_statement_allowlist_and_duration_parsing() -> None:
         "SELECT set_config('statement_timeout', '0', true)",
         "SELECT set_config ('lock_timeout', '0', true)",
         "SELECT pg_sleep(5)",
+        "SELECT pg_advisory_lock(1)",
+        "SELECT pg_advisory_unlock(1)",
+        "SELECT setval('candles_id_seq', 1)",
+        "SELECT 1 INTO TEMP probe_mutation",
         "WITH s AS (SELECT pg_sleep(1)) SELECT * FROM s",
         "WITH x AS (SELECT * FROM orders FOR UPDATE) SELECT * FROM x",
+        "EXPLAIN ANALYZE SELECT 1",
+        "EXPLAIN (ANALYZE, COSTS) SELECT 1",
     ):
         with pytest.raises(probe.CheckpointResumeProbeError, match="write_sql_refused"):
             probe._assert_read_only_sql(forbidden)
@@ -494,6 +501,7 @@ def test_read_only_sql_dialect_and_orm_guards_reject_every_mutation() -> None:
         "SELECT 1; BEGIN; COMMIT; ROLLBACK; SAVEPOINT sp1; RELEASE sp1",
         "SELECT 'DELETE FROM t'; -- INSERT INTO t VALUES (1)\nSELECT 1",
         "WITH prefix AS (SELECT 1) SELECT * FROM prefix",
+        "EXPLAIN SELECT 1",
         "PRAGMA query_only",
         "PRAGMA query_only = ON",
         "PRAGMA table_info(symbols)",
@@ -1057,7 +1065,9 @@ async def test_probe_enforces_hard_bounds_max_executions_and_memory_caps(
             "get_pnl_execution_prefix_counts",
             AsyncMock(return_value={"kraken": (5, 5)}),
         )
-        with pytest.raises(probe.CheckpointResumeProbeError, match="max_executions_exceeded:5>2"):
+        with pytest.raises(
+            probe.CheckpointResumeProbeError, match="^caps_exceeded:executions$"
+        ) as exc:
             await probe.probe_with_repository(
                 repo,
                 probe.CheckpointResumeProbeConfig(
@@ -1065,9 +1075,10 @@ async def test_probe_enforces_hard_bounds_max_executions_and_memory_caps(
                     max_executions=2,
                 ),
             )
+        assert probe._classify_failure(exc.value) == (3, "RESULT: REFUSED caps_exceeded:executions")
         monkeypatch.setattr(repo, "get_pnl_execution_prefix_counts", orig_counts)
 
-        with pytest.raises(probe.CheckpointResumeProbeError, match="max_executions_exceeded:3>2"):
+        with pytest.raises(probe.CheckpointResumeProbeError, match="^caps_exceeded:executions$"):
             await probe.probe_with_repository(
                 repo,
                 probe.CheckpointResumeProbeConfig(
@@ -1842,13 +1853,15 @@ async def test_bound_pg_timeout_set_config_and_production_read_audit(
         "THEN '1s' ELSE current_setting('lock_timeout') END, true)"
     )
     probe._assert_read_only_sql(pg_bound_sql, statement_timeout_ms=30_000)
+    probe._assert_read_only_sql(pg_bound_sql, statement_timeout_ms=5_000)
 
-    with pytest.raises(probe.CheckpointResumeProbeError, match="write_or_unbounded_sql:set_config"):
-        probe._assert_read_only_sql(pg_bound_sql, statement_timeout_ms=15_000)
     with pytest.raises(probe.CheckpointResumeProbeError, match="write_or_unbounded_sql:set_config"):
         probe._assert_read_only_sql(pg_bound_sql.replace("'20s'", "'15s'"))
     with pytest.raises(probe.CheckpointResumeProbeError, match="write_or_unbounded_sql:set_config"):
         probe._assert_read_only_sql(pg_bound_sql.replace("'20 seconds'", "'1 minute'"))
+    over_hard_cap = pg_bound_sql.replace("'20 seconds'", "'61 seconds'").replace("'20s'", "'61s'")
+    with pytest.raises(probe.CheckpointResumeProbeError, match="write_or_unbounded_sql:set_config"):
+        probe._assert_read_only_sql(over_hard_cap, statement_timeout_ms=5_000)
     for bad_set_config in (
         pg_bound_sql.replace(", true)", ", false)"),
         pg_bound_sql.replace("'statement_timeout'", "'work_mem'"),
@@ -1892,6 +1905,74 @@ async def test_bound_pg_timeout_set_config_and_production_read_audit(
     assert any("WITH pnl_fx_candidate_instruments" in sql for sql in recorded_pg)
     for sql in recorded_pg:
         probe._assert_read_only_sql(sql, statement_timeout_ms=30_000)
+
+
+async def test_candle_cap_counts_only_wallet_marks_and_candidate_fx(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exclude unrelated instruments without dropping relevant candidate-FX candles.
+
+    Given: A caught-up wallet, an unrelated crypto series, and a candidate forex series.
+    When: Scope and direct candle counts run before and after adding those rows.
+    Then: The scope count is unchanged while the repository-proof FX count sees its rows.
+
+    Args:
+        tmp_path: Pytest isolated directory for the SQLite fixture.
+        monkeypatch: Pytest fixture configuring the bounded off-mode seed.
+    """
+    url, scope = await _seed_and_catchup(tmp_path / "scoped_candles.db", monkeypatch)
+    async with idless._repository(url) as repo:
+        frontier = await repo.get_portfolio_pnl_correction_frontier(scope)
+        assert frontier is not None
+        before = await probe._count_scope_candles(repo, scope, frontier)
+        assert before > 0
+        unrelated_symbol = "00000000-0000-7000-8000-00000000f101"
+        unrelated_instrument = "00000000-0000-7000-8000-00000000f102"
+        fx_symbol_id = "00000000-0000-7000-8000-00000000f103"
+        fx_instrument_id = "00000000-0000-7000-8000-00000000f104"
+        fx_symbol = prices._symbol(fx_symbol_id, "USD-EUR", "USD", "EUR")
+        fx_symbol.asset_type = "forex"
+        async with repo.session() as session:
+            session.add_all(
+                (
+                    prices._symbol(unrelated_symbol, "ETH-USD", "ETH", "USD"),
+                    prices._instrument(unrelated_instrument, unrelated_symbol, "kraken"),
+                    fx_symbol,
+                    prices._instrument(fx_instrument_id, fx_symbol_id, "kraken"),
+                )
+            )
+            for offset in range(25):
+                minute = samples._T0 + offset * _MINUTE
+                for instrument_id in (unrelated_instrument, fx_instrument_id):
+                    session.add(prices._candle(instrument_id, minute, 1.1))
+            await session.commit()
+
+        assert await probe._count_scope_candles(repo, scope, frontier) == before
+        fx_refs = await repo.get_instrument_symbol_refs([fx_instrument_id], frontier.as_of)
+        assert probe._fx_candidate_pairs(fx_refs, "USD") == [("EUR", "USD"), ("USD", "EUR")]
+        assert (
+            await probe._count_mark_candles(
+                repo, [], scope.anchor_point_time, frontier.tip, frontier.as_of
+            )
+            == 0
+        )
+        assert (
+            await probe._count_fx_candles(
+                repo, [], scope.anchor_point_time, frontier.tip, frontier.as_of
+            )
+            == 0
+        )
+        assert (
+            await probe._count_fx_candles(
+                repo,
+                [("USD", "EUR", "kraken")],
+                scope.anchor_point_time,
+                frontier.tip,
+                frontier.as_of,
+            )
+            == 11
+        )
 
 
 def test_accrual_candle_and_cut_moved_caps_refuse_with_exit_three(

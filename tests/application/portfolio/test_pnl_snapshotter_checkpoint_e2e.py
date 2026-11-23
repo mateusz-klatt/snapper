@@ -11,6 +11,7 @@ from typing import Literal
 
 import pytest
 from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.application.portfolio import pnl_engine_options
 from snapper.application.portfolio import pnl_snapshotter
@@ -26,6 +27,7 @@ from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesRe
 from snapper.data.models import Execution
 from snapper.data.models import PortfolioPnlOpeningCheckpoint
 from snapper.data.models import VenueEvent
+from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import PortfolioPnlSampleQuery
@@ -692,3 +694,53 @@ async def test_real_sqlite_shadow_mode_compares_persists_cold_and_reports_zero_m
     assert metrics.shadow_mismatches == 0
     assert metrics.shadow_skipped == {}
     assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+async def test_real_sqlite_capture_db_error_rolls_back_and_commits_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the authoritative commit usable after a capture evidence DB failure.
+
+    Given: A real active-mode capture whose accrual fingerprint read raises SQLAlchemyError.
+    When: The capture session rolls back and the snapshotter commits its anchor plan.
+    Then: Samples and frontier persist without a checkpoint, and the refusal is counted.
+
+    Args:
+        tmp_path: Private test directory for the real SQLite database.
+        monkeypatch: Environment, capture-permission, and repository failure seams.
+    """
+    _permit_capture(monkeypatch)
+    reset_checkpoint_metrics()
+    url = f"sqlite+aiosqlite:///{(tmp_path / 'capture_db_error.db').as_posix()}"
+    scope = await idless._seed(url, complete=False)
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
+    monkeypatch.delenv("PNL_FX_SHADOW_PINNING_ENABLED", raising=False)
+    async with idless._repository(url) as repo:
+
+        async def fail_fingerprint(
+            wallet_public_id: str,
+            mode: str,
+            after_exclusive: datetime,
+            through: datetime,
+            as_of: datetime,
+        ) -> IdAggregate:
+            """Simulate a database failure that invalidates only this read transaction."""
+            del wallet_public_id, mode, after_exclusive, through, as_of
+            raise SQLAlchemyError("capture evidence transaction aborted")
+
+        monkeypatch.setattr(repo, "get_pnl_accrual_prefix_fingerprint", fail_fingerprint)
+        snap = PortfolioPnlSnapshotter(repo=repo, disabled=False, clock=lambda: _TICK1_AS_OF)
+        await snap._tick_once()
+
+        rows = await repo.get_portfolio_pnl_samples(
+            _query(scope),
+            samples._T0 + _MINUTE,
+            samples._T0 + _MINUTE,
+        )
+        frontier = await repo.get_portfolio_pnl_correction_frontier(scope)
+        assert len(rows) == 1
+        assert frontier is not None
+        assert frontier.next_minute is None
+        assert await repo.get_portfolio_pnl_opening_checkpoint(scope) is None
+        assert checkpoint_metrics().capture_refusals == {"capture_evidence_error": 1}
