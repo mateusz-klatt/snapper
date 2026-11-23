@@ -12,10 +12,9 @@ Safety architecture:
       On SQLite, ``PRAGMA query_only = ON`` and ``PRAGMA busy_timeout = 1000``
       are applied on connect.
     * Verifies read-only mode and timeout bounds on every pooled checkout.
-    * Recommends running as a least-privilege read-only DB role; enforces
-      ``has_table_privilege`` read-only checks on key P&L tables by default
-      (override only via ``--allow-writable-role-with-readonly-session``).
-      The override relies on both the read-only session settings and the SQL guard.
+    * Uses PostgreSQL ``has_table_privilege`` to refuse roles with ``INSERT``,
+      ``UPDATE``, or ``DELETE`` privileges on key P&L tables. Use a dedicated
+      read-only role such as ``snapper_ro``.
     * Note: ``lock_timeout`` (1 s) bounds lock acquisition only; statement execution
       and idle lock retention are bounded by ``statement_timeout``,
       ``idle_in_transaction_session_timeout``, and ``--max-runtime-seconds``.
@@ -357,7 +356,6 @@ class CheckpointResumeProbeConfig:
     max_accruals: int = DEFAULT_MAX_ACCRUALS
     max_candles: int = DEFAULT_MAX_CANDLES
     max_rss_mb: int = DEFAULT_MAX_RSS_MB
-    allow_writable_role: bool = False
 
 
 @dataclass(frozen=True)
@@ -989,14 +987,8 @@ async def _verify_connection_state(
     raise CheckpointResumeProbeError(f"unsupported_dialect:{dialect_name}")
 
 
-async def _verify_postgres_role_privileges(
-    session: AsyncSession,
-    *,
-    allow_writable_role: bool,
-) -> None:
-    """Refuse PostgreSQL roles with write privileges unless explicitly overridden."""
-    if allow_writable_role:
-        return
+async def _verify_postgres_role_privileges(session: AsyncSession) -> None:
+    """Refuse PostgreSQL roles with write privileges on key P&L tables."""
     writable = (await session.execute(_ROLE_PRIVILEGE_QUERY)).first()
     if writable is not None:
         raise CheckpointResumeProbeError(f"writable_role_refused:{writable[0]}:{writable[1]}")
@@ -1007,7 +999,6 @@ async def _preflight_read_only(
     policy: PnlSeriesReadPolicy,
     *,
     statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
-    allow_writable_role: bool = False,
 ) -> None:
     """Verify read policy, SQL/ORM hooks, session settings, and DB role privileges.
 
@@ -1015,7 +1006,6 @@ async def _preflight_read_only(
         repo: Guarded SQLAlchemy repository instance.
         policy: Series read policy that will govern all probe service calls.
         statement_timeout_ms: Expected PostgreSQL ``statement_timeout`` in milliseconds.
-        allow_writable_role: Skip PostgreSQL table write-privilege refusal when ``True``.
 
     Raises:
         CheckpointResumeProbeError: When any write hazard or missing guard is detected.
@@ -1032,10 +1022,7 @@ async def _preflight_read_only(
     async with repo.session() as session:
         await _verify_connection_state(session, repo.dialect_name, statement_timeout_ms)
         if repo.dialect_name == "postgresql":
-            await _verify_postgres_role_privileges(
-                session,
-                allow_writable_role=allow_writable_role,
-            )
+            await _verify_postgres_role_privileges(session)
 
 
 _PROC_STATM_PATH: Final[Path] = Path("/proc/self/statm")
@@ -1652,7 +1639,6 @@ async def _execute_probe_pipeline(
         sa_repo,
         policy,
         statement_timeout_ms=config.statement_timeout_ms,
-        allow_writable_role=config.allow_writable_role,
     )
     prepared = await _load_prepared_scope(sa_repo, config)
     _check_rss_mb(config.max_rss_mb, rss_baseline_mb)
@@ -1862,7 +1848,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser for the read-only checkpoint resume probe.
 
     Returns:
-        Configured argument parser accepting wallet, scope, window, bounds, and role flags.
+        Configured argument parser accepting wallet, scope, window, and probe bounds.
     """
     parser = _RedactingArgumentParser(description=__doc__)
     parser.add_argument("--wallet", required=True, help="Wallet public ID to probe.")
@@ -1875,8 +1861,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--db-url",
         default=None,
         help=(
-            "Database URL overriding PNL_PROBE_DB_URL and app DB_URL for the probe's own "
-            "engine only (recommended: dedicated read-only role snapper_ro)."
+            "Database URL overriding PNL_PROBE_DB_URL and app DB_URL for the probe's own engine. "
+            "PostgreSQL roles must lack INSERT, UPDATE, and DELETE on key P&L tables."
         ),
     )
     parser.add_argument(
@@ -1908,20 +1894,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Use a container memory limit for hard enforcement."
         ),
     )
-    role_group = parser.add_mutually_exclusive_group()
-    role_group.add_argument(
+    parser.add_argument(
         "--require-readonly-role",
-        action="store_false",
-        dest="allow_writable_role",
-        help="Require non-writable DB role on key P&L tables (recommended & default).",
-    )
-    role_group.add_argument(
-        "--allow-writable-role-with-readonly-session",
         action="store_true",
-        dest="allow_writable_role",
-        help="Permit a writable DB role while relying on read-only session settings and the SQL guard.",
+        help="Accepted for compatibility. PostgreSQL write privileges are always checked.",
     )
-    parser.set_defaults(allow_writable_role=False)
     return parser
 
 
@@ -1947,7 +1924,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_accruals=arguments.max_accruals,
         max_candles=arguments.max_candles,
         max_rss_mb=arguments.max_rss_mb,
-        allow_writable_role=bool(arguments.allow_writable_role),
     )
     if not _has_probe_db_override(config.db_url):
         print(READONLY_ROLE_WARNING)
