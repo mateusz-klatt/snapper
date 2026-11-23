@@ -483,3 +483,57 @@ async def test_verification_flag_tracks_verifier_entry_not_earlier_lookup_failur
     assert inside_verifier.recapture == "fallback"
     assert inside_verifier.verification_attempted is True
     assert checkpoint_metrics().fallbacks == {"checkpoint_verify_error": 2}
+
+
+async def test_verifier_cancellation_propagates_unwrapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate a cancellation raised inside the live verifier unchanged.
+
+    Given: A stored checkpoint whose live verifier raises ``CancelledError``.
+    When: Resume preparation runs.
+    Then: ``CancelledError`` itself reaches the caller, is not wrapped as a
+        verifier failure, and no fallback is recorded.
+
+    Args:
+        monkeypatch: Pytest fixture injecting the stored row and cancelled verifier.
+    """
+    reset_checkpoint_metrics()
+    cases._permit_capture(monkeypatch)
+    repo = fixtures._FakeRepo()
+    frontier = cases._pending(repo)
+    resume = await cases._resume(monkeypatch)
+    cases._permit_capture(monkeypatch)
+    monkeypatch.setattr(
+        repo,
+        "get_portfolio_pnl_opening_checkpoint",
+        AsyncMock(
+            return_value=replace(
+                resume.record,
+                certificate=replace(
+                    resume.record.certificate,
+                    key=frontier.key,
+                    source_generation=frontier.generation,
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "verify_checkpoint_for_resume",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    request = dispatch.PnlCheckpointResumeRequest(
+        cast(Repository, repo),
+        fixtures._sample_scope(),
+        fixtures._anchor(),
+        frontier,
+        fixtures._minute(3),
+        "shadow",
+    )
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await dispatch.prepare_checkpoint_resume(request)
+
+    assert raised.value.__cause__ is None
+    assert checkpoint_metrics().fallbacks == {}
