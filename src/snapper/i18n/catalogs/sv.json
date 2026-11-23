@@ -1,5 +1,5 @@
 {
-  "alerts.argument.reason.ambiguous": "Tvetydigt svar från handelsplatsen",
+  "alerts.argument.reason.ambiguous": "Tvetydigt svar från börsen",
   "alerts.argument.reason.unknown": "Okänd orsak",
   "alerts.argument.side.buy": "KÖP",
   "alerts.argument.side.sell": "FÖRSÄLJNING",
@@ -11,8 +11,8 @@
   "alerts.body.order_fill_full": "%@ %@ %@ @ %@ utförd på %@",
   "alerts.body.order_fill_full_quoted": "%@ %@ %@ @ %@ utförd på %@",
   "alerts.body.order_rejected": "%@ %@ %@ avvisad: %@",
-  "alerts.body.order_unknown": "%@ %@ %@ status är okänd: %@ — verifiering hos handelsplatsen inväntas; anta inte att positionen är stängd",
-  "alerts.body.order_unknown_unresolved": "%@ %@ %@ status är okänd: %@ — verifiering hos handelsplatsen inväntas; anta inte att positionen är stängd",
+  "alerts.body.order_unknown": "%@ %@ %@ status är okänd: %@ — verifiering hos handelsplattformen inväntas; anta inte att positionen är stängd",
+  "alerts.body.order_unknown_unresolved": "%@ %@ %@ status är okänd: %@ — verifiering hos handelsplattformen inväntas; anta inte att positionen är stängd",
   "alerts.body.position_stop_loss_fired": "Stop-loss utlöst för %@ (%@)",
   "alerts.title.critical_system_error": "System degraderat: %@",
   "alerts.title.margin_warning": "Marginalvarning",
