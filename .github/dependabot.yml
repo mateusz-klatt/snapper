@@ -6,6 +6,11 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    ignore:
+      # ccxt 4.5.93 pins multidict==6.9.1; revisit the major when ccxt supports 7.x.
+      - dependency-name: "multidict"
+        update-types:
+          - "version-update:semver-major"
     labels:
       - "dependencies"
       - "python"
