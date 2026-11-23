@@ -324,16 +324,155 @@ opening-checkpoint behavior (`off` by default, or `shadow`, or `active`):
 
 Migration `0071` adds the `portfolio_pnl_opening_checkpoints` sidecar table
 keyed by `(wallet_public_id, mode, valuation_ccy, epoch_public_id, calc_version)`
-without changing existing financial sample rows or altering `candles`. Leaving
-`PNL_SNAPSHOTTER_CHECKPOINT_MODE` at its default `off` preserves existing
-anchor-replay behavior. `shadow` and `active` are currently disabled in code
-(`CHECKPOINT_MODES_ENABLED = frozenset({"off"})` in
-`pnl_snapshotter_config.py`) and resolve to an effective mode of `off`, logging
-a once-per-process warning naming both the configured and effective modes until
-checkpoint capture is enabled; startup info logs both `checkpoint_mode` and
-`configured_checkpoint_mode`. Consequently, the snapshotter performs no
-checkpoint reads, resumes, shadow comparisons, or captures and plans once per
-chunk even when `shadow` or `active` is configured. However,
-correction-invalidation deletes during frontier writes still run even when the
-effective checkpoint mode is `off`, retiring any previously persisted opening
-checkpoint whose generation or window is invalidated by a rewrite.
+without changing existing financial sample rows or altering `candles`. Both
+`CHECKPOINT_MODES_ENABLED = frozenset({"off", "shadow", "active"})` in
+`pnl_snapshotter_config.py` and `capture_permitted=True` for `5C.6` in
+`pnl_engine_options.py` are now enabled in code; startup info logs both
+`checkpoint_mode` and `configured_checkpoint_mode`.
+
+Mode semantics:
+
+- `off` (default when unset): preserves pure cold anchor replay with zero
+    checkpoint reads, captures, resumes, or shadow comparisons, and plans once
+    per chunk.
+- `shadow`: replays cold from anchor to persist authoritative chunks and
+    captures checkpoints at settling tips (on the pointwise, no-carry `5C.6`
+    read profile), while also replaying verified checkpoints on later suffix
+    ticks to compare outputs against anchor replay without altering persisted
+    samples.
+- `active`: captures opening checkpoints at clean settling tips and resumes
+    subsequent suffix chunks directly from verified checkpoints without
+    prefix execution reads, falling back to anchor replay (and bounded
+    recapture when needed) on any closed verifier refusal.
+
+Shadow verification and resumed replay are limited to two wallets per tick,
+with budget-consuming wallets rotating the next tick's starting position.
+A wallet consumes a slot as soon as live checkpoint verification runs, even
+when the verifier then refuses, so the cap bounds verification cost as well as
+comparisons. Wallets beyond that limit use the exact `off` cold-replay path for
+the tick.
+Shadow errors increment `shadow_skipped` with reason `shadow_error:<Type>`,
+log one warning per scope failure episode, and never prevent the authoritative
+anchor samples and frontier from committing.
+In shadow mode, live checkpoint verification still runs before the chunk is
+replayed, but the cold anchor plan then commits before any resumed replay or
+comparison starts. No resumed-side outcome can therefore skip or delay the
+authoritative write, including a valuation worker thread that cannot be
+cancelled and outlives every deadline. The resumed side then runs under its
+own nested deadline that ends a quarter of the loop interval
+(`SHADOW_TICK_RESERVE_FRACTION`) before the tick deadline, which normally
+leaves time for the tick's later wallets. A resumed side that overruns it is
+counted as `shadow_error:TimeoutError`; when no shadow budget remains, the
+comparison is skipped as `tick_budget`. External task cancellation is never
+converted into a shadow failure. If an uncancellable worker outlives the whole
+tick, the tick deadline wins: no `shadow_error:TimeoutError` is recorded, the
+tick ends after that wallet's commit, its replay chunk limit is kept with a
+warning, and the remaining wallets run on the next tick.
+A resume fallback found by the shadow branch deletes the stored checkpoint but
+neither recaptures inline nor counts a recapture, because the chunk has already
+committed. A fresh checkpoint is captured by the next eligible clean-tip replay
+on the cold path; at a stationary tip that waits until new evidence opens a
+replay chunk.
+The cold anchor and the resumed side are planned from one shared read of the
+chunk's observation, valuation and position evidence, so a write committed
+between two reads cannot appear as a mismatch that deletes a valid checkpoint.
+
+Rollout and rollback:
+
+1. **Pre-flight probe**: the deployed environment must **not** set
+    `PNL_SNAPSHOTTER_CHECKPOINT_MODE` (leave it unset so default `off`
+    applies) until the operator's shadow call. First run the read-only probe
+    script
+    `PYTHONPATH=src python scripts/pnl_checkpoint_resume_probe.py --wallet <ID> --mode live --valuation-ccy USD`
+    against a replica or production read path to compare cold anchor replay vs.
+    in-memory capture and suffix resume bit-for-bit before enabling writes.
+2. **Shadow soak**: set `PNL_SNAPSHOTTER_CHECKPOINT_MODE=shadow` and restart
+    the service; monitor `checkpoint_metrics_summary` logs to confirm
+    `captures_committed > 0`, `resumes_succeeded > 0`, and
+    `shadow_mismatches=0` before promoting.
+3. **Active rollout**: set `PNL_SNAPSHOTTER_CHECKPOINT_MODE=active` and restart
+    to switch catch-up and incremental ticks to suffix-only resume.
+4. **Immediate rollback**: unset `PNL_SNAPSHOTTER_CHECKPOINT_MODE` (or set it
+    to `off`) and restart the service. No schema rollback is needed;
+    correction-invalidation deletes during frontier writes continue to retire any
+    previously persisted opening checkpoint invalidated by a rewrite.
+
+## Running the probe in production
+
+Create a dedicated least-privilege PostgreSQL role (`snapper_ro`) with read-only
+transaction defaults (replace every `<...>` placeholder before running):
+
+```sql
+CREATE ROLE snapper_ro LOGIN PASSWORD '<set-me>';
+GRANT CONNECT ON DATABASE <database> TO snapper_ro;
+GRANT USAGE ON SCHEMA public TO snapper_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO snapper_ro;
+ALTER ROLE snapper_ro SET default_transaction_read_only = on;
+```
+
+Pass the `snapper_ro` connection string via `--db-url` (or `PNL_PROBE_DB_URL`
+as the environment fallback). This overrides only the probe's isolated engine
+without modifying the application's `DB_URL`, passes the default writable-role
+check without `--allow-writable-role-with-readonly-session`, and redacts
+credentials across all outputs. If neither `--db-url` nor `PNL_PROBE_DB_URL` is
+set, the probe prints one `WARNING` line recommending the dedicated read-only
+role and continues with its existing checks:
+
+Keep the password out of the URL, argv and the environment: asyncpg reads it
+from `~/.pgpass` (or the file named by `PGPASSFILE`, mode `0600`) when the
+DSN carries none, and the `.pgpass` host field must match the DSN host.
+
+`snapper_ro` may connect from the database host's loopback (`127.0.0.1`) or
+the LAN (`192.168.5.0/24`) but never from a container on the Docker bridge,
+which is reserved for the application role. Run the probe either from a LAN
+host's virtualenv or from a one-off container on the host network, where
+`<db-host>` defaults to `127.0.0.1`:
+
+```bash
+docker run --rm --network host --user "$(id -u)" \
+    -v ~/.pgpass:/run/secrets/pgpass:ro \
+    -e PGPASSFILE=/run/secrets/pgpass \
+    -e PNL_PROBE_DB_URL='postgresql+asyncpg://snapper_ro@<db-host>:5432/<database>' \
+    <image> python scripts/pnl_checkpoint_resume_probe.py \
+    --wallet <WALLET_PUBLIC_ID> --mode live --valuation-ccy USD --window-minutes 60
+```
+
+The same run from a LAN host's virtualenv uses `--db-url` instead:
+
+```bash
+PYTHONPATH=src python scripts/pnl_checkpoint_resume_probe.py \
+    --wallet <WALLET_PUBLIC_ID> --mode live --valuation-ccy USD --window-minutes 60 \
+    --db-url 'postgresql+asyncpg://snapper_ro@<db-host>:5432/<database>'
+```
+
+The `--max-rss-mb` guard (default `2048` MiB) bounds current-RSS growth over a
+baseline captured at probe start (`/proc/self/statm` resident pages on Linux,
+with `ru_maxrss` fallback on macOS), so a parent process's inherited peak does
+not trip the memory cap. On Linux, the CLI also sets soft `RLIMIT_AS` relative
+to current virtual size read from `/proc/self/status` (`VmSize`), capped at
+`current_vmsize + max(max_rss_mb, 4 * max_rss_mb)` bytes so shared library
+mappings and allocator arenas do not trigger spurious `MemoryError`; it never
+raises `RLIMIT_AS` above the existing hard limit and skips `RLIMIT_AS` when the
+hard limit is lower than the computed target or `/proc/self/status` is
+unreadable.
+
+`--max-runtime-seconds` is enforced at asynchronous cancellation points. A
+CPU-bound replay may therefore overrun the configured ceiling until its next
+`await`; PostgreSQL statement timeouts and the memory limits remain independent
+hard-safety controls.
+
+Exit codes:
+
+- `0`: `RESULT: PASS` — cold replay and checkpoint-resumed replay matched
+    bit-for-bit.
+- `1`: `RESULT: FAIL <mismatch_detail>` — cold vs. resumed points or rate
+    sources diverged.
+- `2`: `RESULT: FAIL <reason>` — missing anchor or `no_frontier`, safety/cap or
+    writable-role refusal, `timeout`, `interrupted`, or configuration/DB error.
+- `3`: `RESULT: REFUSED <reason>` — closed checkpoint or frontier refusal (for
+    example `frontier_has_fill_gap`, `capture_fill_gap`, or
+    `checkpoint_verify_fallback:...`), `caps_exceeded:<kind>` from the
+    pre-run counts, or `cut_moved`. `cut_moved` is a post-load re-check: the
+    capture prefix is already read when it runs, so the overshoot beyond the
+    pre-run count is bounded only by the executions ingested during the probe,
+    within the statement timeout and the memory caps.

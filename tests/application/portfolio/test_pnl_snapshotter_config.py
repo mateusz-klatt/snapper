@@ -64,14 +64,14 @@ class TestResolveCheckpointMode:
         """Reset the process-wide disabled-mode warning latch around each test."""
         monkeypatch.setattr(pnl_snapshotter_config._KILL_SWITCH_WARNING_STATE, "logged", False)
 
-    def test_checkpoint_modes_enabled_defaults_to_off_only(self) -> None:
-        """Only ``off`` is enabled in code until checkpoint capture is re-enabled.
+    def test_checkpoint_modes_enabled_includes_shadow_and_active(self) -> None:
+        """All three checkpoint modes are enabled in production configuration.
 
         Given: Production module defaults in ``pnl_snapshotter_config``.
         When: Inspecting ``CHECKPOINT_MODES_ENABLED``.
-        Then: It contains only ``"off"``.
+        Then: It contains ``"off"``, ``"shadow"``, and ``"active"``.
         """
-        assert frozenset({"off"}) == CHECKPOINT_MODES_ENABLED
+        assert frozenset({"off", "shadow", "active"}) == CHECKPOINT_MODES_ENABLED
 
     @pytest.mark.parametrize("raw", [None, "", "   ", "off", "OFF", " Off "])
     def test_unset_blank_or_off_resolves_to_off_without_warning(
@@ -89,16 +89,22 @@ class TestResolveCheckpointMode:
             assert resolve_checkpoint_modes(raw) == ResolvedCheckpointMode("off", "off")
         assert caplog.records == []
 
-    def test_shadow_resolves_to_effective_off_and_logs_warning_once(
+    def test_shadow_under_kill_switch_resolves_to_effective_off_and_logs_warning_once(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Disabled ``shadow`` resolves to ``off`` and warns once per process.
+        """Disabled ``shadow`` under a narrowed kill switch resolves to ``off`` and warns once.
 
-        Given: ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` values requesting ``shadow``.
-        When: Resolved twice in the same process under the default kill switch.
+        Given: ``CHECKPOINT_MODES_ENABLED`` narrowed to ``{"off"}`` and ``shadow`` values.
+        When: Resolved twice in the same process under the kill switch.
         Then: Effective mode is ``"off"``, configured is ``"shadow"``, and one WARNING logs.
         """
+        monkeypatch.setattr(
+            pnl_snapshotter_config,
+            "CHECKPOINT_MODES_ENABLED",
+            frozenset({"off"}),
+        )
         with caplog.at_level(logging.WARNING, logger=pnl_snapshotter_config.__name__):
             first = resolve_checkpoint_modes(" Shadow\t")
             second = resolve_checkpoint_modes("shadow")
@@ -112,17 +118,23 @@ class TestResolveCheckpointMode:
         assert "checkpoint modes are disabled until capture is enabled" in message
 
     @pytest.mark.parametrize("raw", ["active", "ACTIVE", " active "])
-    def test_active_resolves_to_effective_off(
+    def test_active_under_kill_switch_resolves_to_effective_off(
         self,
+        monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
         raw: str,
     ) -> None:
-        """Disabled ``active`` resolves to effective ``off`` while preserving configured.
+        """Disabled ``active`` under a narrowed kill switch resolves to effective ``off``.
 
-        Given: Valid ``active`` env values with mixed case or surrounding whitespace.
-        When: Resolved under the default kill switch.
+        Given: ``CHECKPOINT_MODES_ENABLED`` narrowed to ``{"off"}`` and mixed-case ``active``.
+        When: Resolved under the kill switch.
         Then: Configured is ``"active"``, effective is ``"off"``, and one warning logs.
         """
+        monkeypatch.setattr(
+            pnl_snapshotter_config,
+            "CHECKPOINT_MODES_ENABLED",
+            frozenset({"off"}),
+        )
         with caplog.at_level(logging.WARNING, logger=pnl_snapshotter_config.__name__):
             resolved = resolve_checkpoint_modes(raw)
         assert resolved == ResolvedCheckpointMode(configured="active", effective="off")
@@ -139,24 +151,18 @@ class TestResolveCheckpointMode:
             (" active ", "active"),
         ],
     )
-    def test_shadow_and_active_accept_case_and_whitespace_when_enabled(
+    def test_shadow_and_active_accept_case_and_whitespace_unpatched(
         self,
-        monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
         raw: str,
         expected: str,
     ) -> None:
         """Enabled ``shadow`` and ``active`` values strip whitespace and match case-insensitively.
 
-        Given: ``CHECKPOINT_MODES_ENABLED`` widened via monkeypatch and mixed-case tokens.
+        Given: Production ``CHECKPOINT_MODES_ENABLED`` and mixed-case mode tokens.
         When: ``resolve_checkpoint_modes`` parses the setting value.
         Then: It returns the canonical lowercase literal with no kill-switch warning.
         """
-        monkeypatch.setattr(
-            pnl_snapshotter_config,
-            "CHECKPOINT_MODES_ENABLED",
-            frozenset({"off", "shadow", "active"}),
-        )
         with caplog.at_level(logging.WARNING, logger=pnl_snapshotter_config.__name__):
             assert resolve_checkpoint_modes(raw) == ResolvedCheckpointMode(
                 configured=expected,

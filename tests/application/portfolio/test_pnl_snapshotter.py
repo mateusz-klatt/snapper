@@ -18,10 +18,8 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.application.portfolio import pnl_correction_planner
-from snapper.application.portfolio import pnl_engine_options
 from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio import pnl_snapshotter_config
-from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     PnlCheckpointWriteRefusalError,
 )
@@ -1106,26 +1104,26 @@ class TestConstructorAndProperties:
     def test_checkpoint_mode_resolves_configured_value(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Configured valid checkpoint modes parse cleanly while gated by the kill switch.
+        """Configured valid checkpoint modes activate directly and obey kill-switch narrowing.
 
         Given: ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` set to ``" Shadow "``.
-        When: ``PortfolioPnlSnapshotter`` is constructed under default and widened flags.
-        Then: ``configured_checkpoint_mode`` is ``"shadow"`` while ``checkpoint_mode``
-            stays ``"off"`` until ``CHECKPOINT_MODES_ENABLED`` permits ``"shadow"``.
+        When: ``PortfolioPnlSnapshotter`` is constructed under default and narrowed flags.
+        Then: Both configured and effective modes are ``"shadow"`` under defaults, while a
+            narrowed ``CHECKPOINT_MODES_ENABLED`` forces ``checkpoint_mode`` back to ``"off"``.
         """
         monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", " Shadow ")
-        gated = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()))
-        assert gated.configured_checkpoint_mode == "shadow"
-        assert gated.checkpoint_mode == "off"
+        enabled = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()))
+        assert enabled.configured_checkpoint_mode == "shadow"
+        assert enabled.checkpoint_mode == "shadow"
 
         monkeypatch.setattr(
             pnl_snapshotter_config,
             "CHECKPOINT_MODES_ENABLED",
-            frozenset({"off", "shadow", "active"}),
+            frozenset({"off"}),
         )
-        enabled = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()))
-        assert enabled.configured_checkpoint_mode == "shadow"
-        assert enabled.checkpoint_mode == "shadow"
+        gated = PortfolioPnlSnapshotter(repo=cast(Repository, _FakeRepo()))
+        assert gated.configured_checkpoint_mode == "shadow"
+        assert gated.checkpoint_mode == "off"
 
     def test_checkpoint_mode_rejects_invalid_value_at_startup(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1144,9 +1142,10 @@ class TestConstructorAndProperties:
     async def test_shadow_env_under_kill_switch_reads_no_checkpoint_and_plans_once(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Shadow env under the kill switch matches off: zero checkpoint reads, one plan.
+        """Shadow env under a narrowed kill switch matches off: zero checkpoint reads, one plan.
 
-        Given: ``PNL_SNAPSHOTTER_CHECKPOINT_MODE=shadow`` with default ``CHECKPOINT_MODES_ENABLED``.
+        Given: ``PNL_SNAPSHOTTER_CHECKPOINT_MODE=shadow`` with ``CHECKPOINT_MODES_ENABLED``
+            narrowed to ``{"off"}``.
         When: ``_tick_once`` replays and commits a chunk against a spied repository.
         Then: ``get_portfolio_pnl_opening_checkpoint`` is unawaited, ``_plan_chunk`` runs once,
             and committed rows including ``sequence_id`` match an ``off`` run.
@@ -1159,9 +1158,9 @@ class TestConstructorAndProperties:
 
         monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
         monkeypatch.setattr(
-            pnl_engine_options,
-            "_engine_options_table",
-            lambda: {PNL_SAMPLE_CALC_VERSION: PnlEngineOptions(True, False, False)},
+            pnl_snapshotter_config,
+            "CHECKPOINT_MODES_ENABLED",
+            frozenset({"off"}),
         )
         shadow_repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor())
         checkpoint_read = mock.AsyncMock(wraps=shadow_repo.get_portfolio_pnl_opening_checkpoint)

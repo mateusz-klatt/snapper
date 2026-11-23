@@ -160,6 +160,7 @@ async def test_prepare_resume_returns_verified_state_and_handles_start_at_tip(
     monkeypatch.setattr(repo, "get_portfolio_pnl_opening_checkpoint", read)
     empty = await dispatch.prepare_checkpoint_resume(request)
     assert empty.recapture == "absent"
+    assert empty.verification_attempted is False
     read.assert_awaited_once()
     read.side_effect = None
     read.return_value = replace(
@@ -173,6 +174,7 @@ async def test_prepare_resume_returns_verified_state_and_handles_start_at_tip(
     monkeypatch.setattr(dispatch, "verify_checkpoint_for_resume", AsyncMock(return_value=resume))
     decision = await dispatch.prepare_checkpoint_resume(replace(request, start=fixtures._minute(3)))
     assert decision.resume is resume
+    assert decision.verification_attempted is True
     monkeypatch.setattr(
         dispatch,
         "verify_checkpoint_for_resume",
@@ -183,7 +185,7 @@ async def test_prepare_resume_returns_verified_state_and_handles_start_at_tip(
     exhausted = await dispatch.prepare_checkpoint_resume(
         replace(request, start=fixtures._minute(3), recapture_budget_exhausted=True)
     )
-    assert exhausted == dispatch.PnlCheckpointDecision()
+    assert exhausted == dispatch.PnlCheckpointDecision(verification_attempted=True)
 
 
 async def test_resume_fallback_reason_and_delete_fence_miss(
@@ -427,3 +429,111 @@ async def test_every_recapture_trigger_and_forward_resume_decision(
         dispatch.recapture_trigger(forward, record, dispatch.RECAPTURE_SUFFIX_FILLS)
         == "suffix_size"
     )
+
+
+async def test_verification_flag_tracks_verifier_entry_not_earlier_lookup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Charge verification only once the live verifier has actually been entered.
+
+    Given: A clean generation whose stored-row lookup raises first, and then a
+        stored row whose live verifier raises.
+    When: Resume preparation runs for each failure.
+    Then: Both fall back as ``checkpoint_verify_error``, but only the verifier
+        failure reports ``verification_attempted``.
+
+    Args:
+        monkeypatch: Pytest fixture injecting the lookup and verifier failures.
+    """
+    reset_checkpoint_metrics()
+    cases._permit_capture(monkeypatch)
+    repo = fixtures._FakeRepo()
+    frontier = cases._pending(repo)
+    resume = await cases._resume(monkeypatch)
+    cases._permit_capture(monkeypatch)
+    request = dispatch.PnlCheckpointResumeRequest(
+        cast(Repository, repo),
+        fixtures._sample_scope(),
+        fixtures._anchor(),
+        frontier,
+        fixtures._minute(3),
+        "shadow",
+    )
+    lookup = AsyncMock(side_effect=RuntimeError("checkpoint lookup timeout"))
+    monkeypatch.setattr(repo, "get_portfolio_pnl_opening_checkpoint", lookup)
+    before_verifier = await dispatch.prepare_checkpoint_resume(request)
+    assert before_verifier.recapture == "fallback"
+    assert before_verifier.verification_attempted is False
+
+    lookup.side_effect = None
+    lookup.return_value = replace(
+        resume.record,
+        certificate=replace(
+            resume.record.certificate,
+            key=frontier.key,
+            source_generation=frontier.generation,
+        ),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "verify_checkpoint_for_resume",
+        AsyncMock(side_effect=RuntimeError("verifier timeout")),
+    )
+    inside_verifier = await dispatch.prepare_checkpoint_resume(request)
+    assert inside_verifier.recapture == "fallback"
+    assert inside_verifier.verification_attempted is True
+    assert checkpoint_metrics().fallbacks == {"checkpoint_verify_error": 2}
+
+
+async def test_verifier_cancellation_propagates_unwrapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate a cancellation raised inside the live verifier unchanged.
+
+    Given: A stored checkpoint whose live verifier raises ``CancelledError``.
+    When: Resume preparation runs.
+    Then: ``CancelledError`` itself reaches the caller, is not wrapped as a
+        verifier failure, and no fallback is recorded.
+
+    Args:
+        monkeypatch: Pytest fixture injecting the stored row and cancelled verifier.
+    """
+    reset_checkpoint_metrics()
+    cases._permit_capture(monkeypatch)
+    repo = fixtures._FakeRepo()
+    frontier = cases._pending(repo)
+    resume = await cases._resume(monkeypatch)
+    cases._permit_capture(monkeypatch)
+    monkeypatch.setattr(
+        repo,
+        "get_portfolio_pnl_opening_checkpoint",
+        AsyncMock(
+            return_value=replace(
+                resume.record,
+                certificate=replace(
+                    resume.record.certificate,
+                    key=frontier.key,
+                    source_generation=frontier.generation,
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "verify_checkpoint_for_resume",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    request = dispatch.PnlCheckpointResumeRequest(
+        cast(Repository, repo),
+        fixtures._sample_scope(),
+        fixtures._anchor(),
+        frontier,
+        fixtures._minute(3),
+        "shadow",
+    )
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await dispatch.prepare_checkpoint_resume(request)
+
+    assert raised.value.__cause__ is None
+    assert checkpoint_metrics().fallbacks == {}

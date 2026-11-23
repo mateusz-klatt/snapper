@@ -1,5 +1,7 @@
 """Real-SQLite snapshotter checkpoint differentials across off, shadow, and active."""
 
+import logging
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,11 +11,11 @@ from typing import Literal
 
 import pytest
 from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.application.portfolio import pnl_engine_options
 from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio import pnl_snapshotter_checkpoint as dispatch
-from snapper.application.portfolio import pnl_snapshotter_config
 from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_metrics
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import reset_checkpoint_metrics
@@ -25,6 +27,7 @@ from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesRe
 from snapper.data.models import Execution
 from snapper.data.models import PortfolioPnlOpeningCheckpoint
 from snapper.data.models import VenueEvent
+from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import PortfolioPnlSampleQuery
@@ -249,12 +252,6 @@ async def _run_mode(
     path.parent.mkdir(parents=True, exist_ok=True)
     url = f"sqlite+aiosqlite:///{path.as_posix()}"
     scope = await idless._seed(url, complete=False)
-    if mode != "off":
-        monkeypatch.setattr(
-            pnl_snapshotter_config,
-            "CHECKPOINT_MODES_ENABLED",
-            frozenset({"off", "shadow", "active"}),
-        )
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", mode)
     monkeypatch.delenv("PNL_FX_SHADOW_PINNING_ENABLED", raising=False)
     async with idless._repository(url) as repo:
@@ -446,12 +443,6 @@ async def _run_three_tick_lifecycle(
     path.parent.mkdir(parents=True, exist_ok=True)
     url = f"sqlite+aiosqlite:///{path.as_posix()}"
     scope = await idless._seed(url, complete=False)
-    if mode != "off":
-        monkeypatch.setattr(
-            pnl_snapshotter_config,
-            "CHECKPOINT_MODES_ENABLED",
-            frozenset({"off", "active"}),
-        )
     monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", mode)
     monkeypatch.delenv("PNL_FX_SHADOW_PINNING_ENABLED", raising=False)
     capture_tip = samples._T0 + _MINUTE
@@ -511,3 +502,245 @@ async def test_real_sqlite_three_tick_capture_resume_and_age_recapture_equal_col
     assert metrics.resumes_attempted == 1
     assert metrics.resumes_succeeded == 1
     assert metrics.recaptures == {"absent": 1, "age": 1}
+
+
+def _assert_value_bit_equal(expected: object, actual: object) -> None:
+    """Assert two canonical row field values are bit-identical including NaN and -0.0."""
+    if isinstance(expected, float) and isinstance(actual, float):
+        if math.isnan(expected) or math.isnan(actual):
+            assert math.isnan(expected) and math.isnan(actual)
+            return
+        assert expected.hex() == actual.hex()
+        return
+    assert expected == actual
+
+
+def _assert_rows_bit_equal(
+    expected: tuple[dict[str, object], ...],
+    actual: tuple[dict[str, object], ...],
+) -> None:
+    """Assert two projected sample sequences match bit-for-bit at every minute and field."""
+    assert len(actual) == len(expected)
+    for expected_row, actual_row in zip(expected, actual, strict=True):
+        assert actual_row.keys() == expected_row.keys()
+        for key, expected_value in expected_row.items():
+            _assert_value_bit_equal(expected_value, actual_row[key])
+
+
+async def _add_valuation_minutes(
+    repo: SQLAlchemyRepository,
+    start_offset: int,
+    end_offset: int,
+) -> None:
+    """Append continuous BTC/USD observations and candles across minute offsets."""
+    async with repo.session() as session:
+        for offset in range(start_offset, end_offset + 1):
+            minute = samples._T0 + offset * _MINUTE
+            observation = samples._observation(
+                timestamp=minute,
+                balances_json='[{"currency":"USD","total":1000},{"currency":"BTC","total":2}]',
+            )
+            observation.sequence_id = offset
+            observation.public_id = f"00000000-0000-7000-8000-{offset + 300:012x}"
+            session.add(observation)
+            session.add(
+                prices._candle(
+                    prefix._INSTRUMENT,
+                    minute - _MINUTE,
+                    100.0 + offset,
+                    spec=prices._CandleSpec(
+                        timestamp=minute,
+                        public_id=f"00000000-0000-7000-8000-{offset + 400:012x}",
+                    ),
+                )
+            )
+        await session.commit()
+
+
+async def _add_flip_suffix(repo: SQLAlchemyRepository) -> None:
+    """Append valuation minutes 7..10 plus suffix buy and sell fills after checkpoint C."""
+    await _add_valuation_minutes(repo, 7, 10)
+    async with repo.session() as session:
+        for sequence, minute, side in ((2, 7, "buy"), (3, 9, "sell")):
+            session.add_all(_matched_execution(sequence, minute, side))
+        await session.commit()
+
+
+async def _run_catchup_flip_sequence(
+    path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    flip_active: bool,
+) -> _RunOutcome:
+    """Run two cold chunks, optional active flip on chunk three, and two suffix chunks."""
+    monkeypatch.setattr(pnl_snapshotter, "MAX_CORRECTION_CHUNK_MINUTES", 2)
+    monkeypatch.delenv("PNL_FX_SHADOW_PINNING_ENABLED", raising=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    url = f"sqlite+aiosqlite:///{path.as_posix()}"
+    scope = await idless._seed(url, complete=False)
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "off")
+    replay_calls: list[int] = []
+    prefix_reads: list[int] = []
+    as_of_phase1 = samples._T0 + 8 * _MINUTE
+    as_of_phase2 = samples._T0 + 12 * _MINUTE
+    async with idless._repository(url) as repo:
+        await _add_valuation_minutes(repo, 6, 6)
+        for _ in range(2):
+            calls, reads = await _tick_with_spies(repo, as_of_phase1, monkeypatch)
+            replay_calls.append(calls)
+            prefix_reads.append(reads)
+        assert await repo.get_portfolio_pnl_opening_checkpoint(scope) is None
+        if flip_active:
+            monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
+        calls, reads = await _tick_with_spies(repo, as_of_phase1, monkeypatch)
+        replay_calls.append(calls)
+        prefix_reads.append(reads)
+        checkpoint_after_flip = await repo.get_portfolio_pnl_opening_checkpoint(scope)
+        if flip_active:
+            assert isinstance(checkpoint_after_flip, PnlOpeningCheckpointRecord)
+            assert checkpoint_after_flip.certificate.checkpoint_minute == samples._T0 + 6 * _MINUTE
+        else:
+            assert checkpoint_after_flip is None
+        await _add_flip_suffix(repo)
+        for _ in range(2):
+            calls, reads = await _tick_with_spies(repo, as_of_phase2, monkeypatch)
+            replay_calls.append(calls)
+            prefix_reads.append(reads)
+        rows = await repo.get_portfolio_pnl_samples(
+            _query(scope),
+            samples._T0 + _MINUTE,
+            samples._T0 + 10 * _MINUTE,
+        )
+    return _RunOutcome(_canonical_rows(rows), tuple(replay_calls), tuple(prefix_reads))
+
+
+async def test_real_sqlite_mid_catchup_flip_captures_and_resumes_bit_equal_to_cold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prove mid-catch-up flip under unpatched 5C.6 matches pure-cold bit-for-bit.
+
+    Given: An unpatched 5C.6 SQLite scope that advances two chunks in ``off`` mode.
+    When: ``PNL_SNAPSHOTTER_CHECKPOINT_MODE`` flips to ``active`` before chunk three at C,
+        and two suffix chunks follow after appending fills and candles.
+    Then: Chunk three captures at C, both suffix chunks resume without prefix reads,
+        and all 10 persisted sample rows equal a pure-cold run bit-for-bit.
+
+    Args:
+        tmp_path: Private temporary directory for isolated SQLite databases.
+        monkeypatch: Pytest fixture managing chunk size and mode environment variables.
+    """
+    reset_checkpoint_metrics()
+    cold = await _run_catchup_flip_sequence(
+        tmp_path / "cold.db",
+        monkeypatch,
+        flip_active=False,
+    )
+    assert checkpoint_metrics().captures_committed == 0
+    assert checkpoint_metrics().resumes_attempted == 0
+
+    reset_checkpoint_metrics()
+    flipped = await _run_catchup_flip_sequence(
+        tmp_path / "flipped.db",
+        monkeypatch,
+        flip_active=True,
+    )
+    assert len(cold.rows) == 10
+    _assert_rows_bit_equal(cold.rows, flipped.rows)
+    assert flipped.replay_calls == (1, 1, 1, 1, 1)
+    assert flipped.prefix_reads == (1, 1, 2, 0, 0)
+    metrics = checkpoint_metrics()
+    assert metrics.captures_committed == 1
+    assert metrics.resumes_attempted == 2
+    assert metrics.resumes_succeeded == 2
+    assert metrics.capture_refusals == {}
+
+
+async def test_real_sqlite_shadow_mode_compares_persists_cold_and_reports_zero_mismatches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Prove unpatched shadow mode compares suffix resumes against cold with zero mismatches.
+
+    Given: Identical real SQLite histories with suffix buy/sell fills across two ticks.
+    When: One runs under unpatched ``off`` mode and the other under unpatched ``shadow`` mode.
+    Then: Shadow compares and commits without error, reports ``shadow_mismatches == 0``,
+        and persists sample rows bit-identical to pure cold.
+
+    Args:
+        tmp_path: Private temporary directory for isolated SQLite databases.
+        monkeypatch: Pytest fixture setting the checkpoint mode environment variable.
+        caplog: Log capture verifying no errors or shadow mismatches are emitted.
+    """
+    monkeypatch.delenv("PNL_FX_SHADOW_PINNING_ENABLED", raising=False)
+    reset_checkpoint_metrics()
+    cold_outcome = await _run_mode("off", tmp_path / "shadow_cold.db", monkeypatch, "buy_sell")
+    reset_checkpoint_metrics()
+    with caplog.at_level(logging.WARNING, logger="snapper"):
+        shadow_outcome = await _run_mode(
+            "shadow",
+            tmp_path / "shadow_live.db",
+            monkeypatch,
+            "buy_sell",
+        )
+    assert len(cold_outcome.rows) == 5
+    _assert_rows_bit_equal(cold_outcome.rows, shadow_outcome.rows)
+    metrics = checkpoint_metrics()
+    assert metrics.captures_committed == 1
+    assert metrics.resumes_attempted >= 1
+    assert metrics.resumes_succeeded == metrics.resumes_attempted
+    assert metrics.shadow_comparisons >= 1
+    assert metrics.shadow_mismatches == 0
+    assert metrics.shadow_skipped == {}
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+async def test_real_sqlite_capture_db_error_rolls_back_and_commits_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the authoritative commit usable after a capture evidence DB failure.
+
+    Given: A real active-mode capture whose accrual fingerprint read raises SQLAlchemyError.
+    When: The capture session rolls back and the snapshotter commits its anchor plan.
+    Then: Samples and frontier persist without a checkpoint, and the refusal is counted.
+
+    Args:
+        tmp_path: Private test directory for the real SQLite database.
+        monkeypatch: Environment, capture-permission, and repository failure seams.
+    """
+    _permit_capture(monkeypatch)
+    reset_checkpoint_metrics()
+    url = f"sqlite+aiosqlite:///{(tmp_path / 'capture_db_error.db').as_posix()}"
+    scope = await idless._seed(url, complete=False)
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "active")
+    monkeypatch.delenv("PNL_FX_SHADOW_PINNING_ENABLED", raising=False)
+    async with idless._repository(url) as repo:
+
+        async def fail_fingerprint(
+            wallet_public_id: str,
+            mode: str,
+            after_exclusive: datetime,
+            through: datetime,
+            as_of: datetime,
+        ) -> IdAggregate:
+            """Simulate a database failure that invalidates only this read transaction."""
+            del wallet_public_id, mode, after_exclusive, through, as_of
+            raise SQLAlchemyError("capture evidence transaction aborted")
+
+        monkeypatch.setattr(repo, "get_pnl_accrual_prefix_fingerprint", fail_fingerprint)
+        snap = PortfolioPnlSnapshotter(repo=repo, disabled=False, clock=lambda: _TICK1_AS_OF)
+        await snap._tick_once()
+
+        rows = await repo.get_portfolio_pnl_samples(
+            _query(scope),
+            samples._T0 + _MINUTE,
+            samples._T0 + _MINUTE,
+        )
+        frontier = await repo.get_portfolio_pnl_correction_frontier(scope)
+        assert len(rows) == 1
+        assert frontier is not None
+        assert frontier.next_minute is None
+        assert await repo.get_portfolio_pnl_opening_checkpoint(scope) is None
+        assert checkpoint_metrics().capture_refusals == {"capture_evidence_error": 1}

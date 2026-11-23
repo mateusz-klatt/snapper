@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import Mock
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.application.portfolio import pnl_engine_options
 from snapper.application.portfolio import pnl_opening_checkpoint_capture
@@ -787,18 +788,17 @@ async def test_pre_5c6_conversion_minute_gap_becomes_capture_refusal(
     assert result.checkpoint_capture_refusal == "conversion_uses_mark_evidence"
 
 
-async def test_5c6_capture_is_not_permitted_under_unpatched_resolver() -> None:
-    """Refuse 5C.6 capture under the unpatched resolver.
+async def test_5c6_capture_is_permitted_under_unpatched_resolver() -> None:
+    """Permit 5C.6 capture under the unpatched resolver when pointwise exact FX is active.
 
-    Given: The unpatched engine-options resolver and a 5C.6 capture request.
+    Given: The unpatched engine-options resolver and a 5C.6 settling capture request.
     When: ``build_wallet_pnl_series`` evaluates the settling window.
-    Then: It produces ``checkpoint_write is None`` and
-        ``checkpoint_capture_refusal == "capture_not_permitted"``.
+    Then: It produces a certified ``checkpoint_write`` with ``checkpoint_capture_refusal is None``.
     """
     assert fixtures.PNL_SAMPLE_CALC_VERSION == "5C.6"
     result = await _build(_CaptureRepo(), _request(fixtures.PNL_SAMPLE_CALC_VERSION))
-    assert result.checkpoint_write is None
-    assert result.checkpoint_capture_refusal == "capture_not_permitted"
+    assert result.checkpoint_write is not None
+    assert result.checkpoint_capture_refusal is None
 
 
 @pytest.mark.parametrize(("pointwise_exact_fx", "carry_valuation"), [(False, False), (True, True)])
@@ -954,6 +954,76 @@ async def test_collector_value_errors_are_soft_refusals(
     await request.capture_event_fx(repo, {}, _AS_OF)
     assert request.refusal == "capture_value_error"
     assert not request.active
+
+
+async def test_collector_database_errors_are_soft_refusals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Contain SQLAlchemyError from every certificate evidence read.
+
+    Given: An active request and repository methods planted to raise database errors.
+    When: Each collector reaches its failing read.
+    Then: The request becomes inactive with ``capture_evidence_error`` and never raises.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    _permit_capture(monkeypatch)
+    request = _request()
+    repo = AsyncMock()
+    request.activate(_C, _C)
+    repo.get_pnl_execution_prefix_counts.side_effect = SQLAlchemyError("counts")
+    await request.capture_execution_prefix(repo, fixtures._W1, "live", _AS_OF)
+    assert request.refusal == "capture_evidence_error"
+
+    request.activate(_C, _C)
+    repo.get_pnl_accrual_prefix_fingerprint.side_effect = SQLAlchemyError("accruals")
+    await request.capture_accrual_prefix(
+        repo,
+        _AccrualPrefixRequest(fixtures._W1, "live", fixtures._m(0), _C, _AS_OF),
+    )
+    assert request.refusal == "capture_evidence_error"
+
+    request.activate(_C, _C)
+    repo.get_pnl_timeline_execution_lineage.side_effect = SQLAlchemyError("lineage")
+    await request.capture_prefix_lineage(repo, (), _AS_OF)
+    assert request.refusal == "capture_evidence_error"
+
+    request.activate(_C, _C)
+    repo.get_instrument_symbol_refs.side_effect = SQLAlchemyError("refs")
+    await request.capture_symbol_refs(repo, (), _AS_OF)
+    assert request.refusal == "capture_evidence_error"
+
+    request.activate(_C, _C)
+    repo.get_pnl_fx_rate_exchanges_at.side_effect = SQLAlchemyError("planes")
+    await request.capture_event_fx(repo, {}, _AS_OF)
+    assert request.refusal == "capture_evidence_error"
+    assert not request.active
+
+
+async def test_capture_database_error_completes_series_without_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return the financial series after a capture-only database read fails.
+
+    Given: A permitted capture whose accrual fingerprint read raises SQLAlchemyError.
+    When: The real series loader continues with its independent domain reads.
+    Then: The series completes with ``capture_evidence_error`` and no checkpoint write.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    _permit_capture(monkeypatch)
+    repo = _CaptureRepo()
+    monkeypatch.setattr(
+        repo,
+        "get_pnl_accrual_prefix_fingerprint",
+        AsyncMock(side_effect=SQLAlchemyError("aborted capture transaction")),
+    )
+    result = await _build(repo, _request())
+    assert result.points
+    assert result.checkpoint_write is None
+    assert result.checkpoint_capture_refusal == "capture_evidence_error"
 
 
 async def test_missing_execution_witness_is_soft_refusal(

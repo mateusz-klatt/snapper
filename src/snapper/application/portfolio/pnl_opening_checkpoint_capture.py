@@ -9,6 +9,8 @@ from datetime import timedelta
 from typing import Literal
 from typing import Protocol
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from snapper.application.portfolio.execution_chain import ExecutionChainError
 from snapper.application.portfolio.execution_chain import execution_chain_genesis
 from snapper.application.portfolio.fx_conversion_shadow import POINTWISE_FX_ELECTION_POLICY_VERSION
@@ -204,6 +206,7 @@ def prefix_fx_coverage_payloads(
 
 type PnlCheckpointCaptureRefusal = Literal[
     "capture_value_error",
+    "capture_evidence_error",
     "capture_not_permitted",
     "capture_not_at_tip",
     "capture_execution_chain_error",
@@ -406,6 +409,8 @@ class PnlCheckpointCaptureRequest:
             self._refuse("capture_execution_chain_error")
         except ValueError:
             self._refuse("capture_value_error")
+        except SQLAlchemyError:
+            self._refuse("capture_evidence_error")
 
     async def capture_accrual_prefix(
         self,
@@ -432,6 +437,8 @@ class PnlCheckpointCaptureRequest:
             )
         except ValueError:
             self._refuse("capture_value_error")
+        except SQLAlchemyError:
+            self._refuse("capture_evidence_error")
 
     async def capture_prefix_lineage(
         self,
@@ -455,6 +462,8 @@ class PnlCheckpointCaptureRequest:
             self._evidence.lineage_digest = prefix_lineage_digest(rows)
         except ValueError:
             self._refuse("capture_value_error")
+        except SQLAlchemyError:
+            self._refuse("capture_evidence_error")
 
     async def capture_symbol_refs(
         self,
@@ -478,6 +487,8 @@ class PnlCheckpointCaptureRequest:
             self._evidence.symbol_refs = tuple(refs)
         except ValueError:
             self._refuse("capture_value_error")
+        except SQLAlchemyError:
+            self._refuse("capture_evidence_error")
 
     async def capture_event_fx(
         self,
@@ -529,6 +540,8 @@ class PnlCheckpointCaptureRequest:
             )
         except ValueError:
             self._refuse("capture_value_error")
+        except SQLAlchemyError:
+            self._refuse("capture_evidence_error")
 
     def set_walk_states(
         self,

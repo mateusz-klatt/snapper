@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime
 from datetime import timedelta
 from typing import Final
@@ -239,10 +240,19 @@ class PnlCheckpointResumeRequest:
 
 @dataclass(frozen=True)
 class PnlCheckpointDecision:
-    """One pre-replay choice: verified suffix resume or anchor recapture."""
+    """One pre-replay choice: verified suffix resume or anchor recapture.
+
+    ``verification_attempted`` is ``True`` whenever the expensive live
+    verification of a stored checkpoint was entered, whatever its verdict and
+    including an unexpected error raised inside it. A failure in the stored
+    record lookup or suffix count before verification leaves it ``False``. Shadow mode charges its
+    per-tick comparison budget on that flag, so a checkpoint that refuses
+    late still consumes a slot.
+    """
 
     resume: PnlCheckpointResume | None = None
     recapture: PnlCheckpointRecaptureTrigger | None = None
+    verification_attempted: bool = False
 
 
 def recapture_trigger(
@@ -353,6 +363,15 @@ async def _verify_stored_checkpoint(
     return _recapture(scope, "fallback")
 
 
+class _VerifierEnteredError(Exception):
+    """Wrap a failure raised after live checkpoint verification has started.
+
+    Shadow mode charges its comparison slot only for verification work, so a
+    lookup or suffix-count failure before the verifier must stay uncharged
+    while a failure inside the verifier is charged.
+    """
+
+
 async def _prepare_with_record(
     request: PnlCheckpointResumeRequest,
 ) -> PnlCheckpointDecision:
@@ -382,7 +401,13 @@ async def _prepare_with_record(
     bounded = recapture_trigger(frontier, record, suffix)
     if bounded is not None and not request.recapture_budget_exhausted:
         return _recapture(scope, bounded)
-    return await _verify_stored_checkpoint(request, record)
+    try:
+        verified = await _verify_stored_checkpoint(request, record)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise _VerifierEnteredError from exc
+    return replace(verified, verification_attempted=True)
 
 
 async def prepare_checkpoint_resume(
@@ -412,17 +437,22 @@ async def prepare_checkpoint_resume(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        entered = isinstance(exc, _VerifierEnteredError)
+        cause = exc.__cause__ if entered and exc.__cause__ is not None else exc
         logger.warning(
             "PortfolioPnlSnapshotter: checkpoint verify failed; wallet=%s generation=%s (%s)",
             checkpoint_wallet_alias(scope.wallet_public_id),
             frontier.generation,
-            type(exc).__name__,
+            type(cause).__name__,
         )
         _log_fallback(scope, frontier, PnlCheckpointFallback("checkpoint_verify_error", False))
-        return (
-            _exhausted_recapture_decision(scope)
-            if request.recapture_budget_exhausted
-            else _recapture(scope, "fallback")
+        return replace(
+            (
+                _exhausted_recapture_decision(scope)
+                if request.recapture_budget_exhausted
+                else _recapture(scope, "fallback")
+            ),
+            verification_attempted=entered,
         )
 
 
@@ -435,6 +465,10 @@ async def handle_resume_fallback(
 ) -> None:
     """Count a service-detected fallback through the closed verifier verdict and retire stale state.
 
+    The fallback itself does not count a recapture: only a caller that then
+    selects one does, so shadow mode, which never recaptures inline, does not
+    report a recapture it did not request.
+
     Args:
         repo: Repository used to retire the stored checkpoint row.
         scope: Scope owning the checkpoint row.
@@ -444,7 +478,6 @@ async def handle_resume_fallback(
     """
     fallback = service_resume_fallback(reason)
     _log_fallback(scope, frontier, fallback)
-    record_checkpoint_recapture("fallback", scope)
     if fallback.delete_required:
         await delete_checkpoint(repo, scope, resume.record)
 

@@ -27,7 +27,7 @@ type PnlCheckpointRecaptureTrigger = Literal[
     "suffix_size",
 ]
 
-type PnlCheckpointShadowSkipReason = Literal["window_mismatch"]
+type PnlCheckpointShadowSkipReason = Literal["window_mismatch", "tick_budget"]
 """Closed vocabulary for skipped checkpoint shadow comparisons."""
 
 type PnlCheckpointScopeKey = tuple[str, str, str]
@@ -327,6 +327,20 @@ def record_checkpoint_shadow_skipped(
     Args:
         reason: Closed skip reason token (for example ``"window_mismatch"``).
         scope: Optional scope owning the skipped comparison.
+    """
+    for target in _targets(scope):
+        target.shadow_skipped[reason] = target.shadow_skipped.get(reason, 0) + 1
+
+
+def record_checkpoint_shadow_failure(
+    reason: str,
+    scope: PnlCheckpointScope | PnlCheckpointScopeKey | None = None,
+) -> None:
+    """Count one isolated shadow failure by exception-type reason.
+
+    Args:
+        reason: Stable ``shadow_error:<Type>`` failure token.
+        scope: Optional scope owning the failed shadow branch.
     """
     for target in _targets(scope):
         target.shadow_skipped[reason] = target.shadow_skipped.get(reason, 0) + 1
