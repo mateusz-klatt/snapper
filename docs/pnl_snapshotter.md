@@ -413,6 +413,11 @@ PYTHONPATH=src python scripts/pnl_checkpoint_resume_probe.py \
     --db-url 'postgresql+asyncpg://snapper_ro@<db-host>:5432/<database>'
 ```
 
+The `--max-rss-mb` guard (default `2048` MiB) bounds current-RSS growth over a
+baseline captured at probe start (`/proc/self/statm` resident pages on Linux,
+with `ru_maxrss` fallback on macOS), so a parent process's inherited peak does
+not trip the memory cap.
+
 Exit codes:
 
 - `0`: `RESULT: PASS` — cold replay and checkpoint-resumed replay matched

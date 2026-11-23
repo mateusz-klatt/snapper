@@ -43,6 +43,7 @@ from dataclasses import fields
 from dataclasses import is_dataclass
 from datetime import datetime
 from datetime import timedelta
+from pathlib import Path
 from typing import Final
 from typing import NoReturn
 from typing import Protocol
@@ -867,28 +868,37 @@ async def _preflight_read_only(
             )
 
 
+_PROC_STATM_PATH: Final[Path] = Path("/proc/self/statm")
+
+
 def _current_rss_mb() -> float:
-    """Return process peak/resident memory usage in MiB for macOS and Linux."""
-    rss_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    divisor = 1024.0 * 1024.0 if sys.platform == "darwin" else 1024.0
-    return float(rss_raw) / divisor
+    """Return current resident memory in MiB (Linux statm, macOS ``ru_maxrss``, or ``0.0``)."""
+    if sys.platform.startswith("linux"):
+        fields_raw = _PROC_STATM_PATH.read_text(encoding="utf-8").split()
+        resident_pages = int(fields_raw[1]) if len(fields_raw) > 1 else 0
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return float(resident_pages * page_size) / (1024.0 * 1024.0)
+    if sys.platform == "darwin":
+        return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / (1024.0 * 1024.0)
+    return 0.0
 
 
-def _check_rss_mb(max_rss_mb: int) -> None:
-    """Abort the probe if process memory exceeds ``max_rss_mb``.
+def _check_rss_mb(max_rss_mb: int, baseline_rss_mb: float = 0.0) -> None:
+    """Abort the probe if RSS growth over ``baseline_rss_mb`` exceeds ``max_rss_mb``.
 
     Args:
-        max_rss_mb: Configured RSS memory ceiling in MiB.
+        max_rss_mb: Maximum allowed RSS growth in MiB over startup baseline.
+        baseline_rss_mb: Resident memory reading captured at probe start in MiB.
     """
-    rss_mb = _current_rss_mb()
-    _require(rss_mb <= max_rss_mb, f"max_rss_exceeded:{rss_mb:.1f}>{max_rss_mb}")
+    growth_mb = max(0.0, _current_rss_mb() - baseline_rss_mb)
+    _require(growth_mb <= max_rss_mb, f"max_rss_exceeded:{growth_mb:.1f}>{max_rss_mb}")
 
 
 def _apply_address_space_limit(max_rss_mb: int) -> None:
-    """Apply ``RLIMIT_AS`` on platforms where POSIX virtual-memory limits are enforceable."""
+    """Apply ``RLIMIT_AS`` on Linux hosts where POSIX virtual-memory caps are enforceable."""
     limit_bytes = max_rss_mb * 1024 * 1024
     rlimit_as = getattr(resource, "RLIMIT_AS", None)
-    if rlimit_as is None or sys.platform == "darwin":
+    if rlimit_as is None or not sys.platform.startswith("linux"):
         return
     try:
         _soft, hard = resource.getrlimit(rlimit_as)
@@ -1161,6 +1171,7 @@ async def _capture_and_verify_in_memory(
     prepared: _PreparedScope,
     read_policy: PnlSeriesReadPolicy,
     config: CheckpointResumeProbeConfig,
+    rss_baseline_mb: float,
 ) -> tuple[PnlCheckpointResume, float, float]:
     """Capture a checkpoint at C purely in memory and verify it against frontier T.
 
@@ -1169,6 +1180,7 @@ async def _capture_and_verify_in_memory(
         prepared: Prepared scope, frontier, and window bounds.
         read_policy: Read policy with ``allow_anchor_creation=False``.
         config: Operator configuration holding RSS and execution bounds.
+        rss_baseline_mb: Resident memory baseline captured at probe start in MiB.
 
     Returns:
         Tuple of verified resume state, capture seconds, and verification seconds.
@@ -1234,7 +1246,7 @@ async def _capture_and_verify_in_memory(
         capture_result.checkpoint_write is not None,
         f"checkpoint_capture_refused:{capture_result.checkpoint_capture_refusal}",
     )
-    _check_rss_mb(config.max_rss_mb)
+    _check_rss_mb(config.max_rss_mb, rss_baseline_mb)
     assert capture_result.checkpoint_write is not None
     write = capture_result.checkpoint_write
     record = PnlOpeningCheckpointRecord(
@@ -1267,7 +1279,7 @@ async def _capture_and_verify_in_memory(
     verify_seconds = time.perf_counter() - verify_started
     if isinstance(verified, PnlCheckpointFallback):
         raise CheckpointResumeProbeError(f"checkpoint_verify_fallback:{verified.reason}")
-    _check_rss_mb(config.max_rss_mb)
+    _check_rss_mb(config.max_rss_mb, rss_baseline_mb)
     return verified, capture_seconds, verify_seconds
 
 
@@ -1460,7 +1472,8 @@ async def _execute_probe_pipeline(
     policy: PnlSeriesReadPolicy,
 ) -> CheckpointResumeProbeReport:
     """Run guarded preflight, cold replay, in-memory capture, resume, and compare."""
-    _check_rss_mb(config.max_rss_mb)
+    rss_baseline_mb = _current_rss_mb()
+    _check_rss_mb(config.max_rss_mb, rss_baseline_mb)
     await _preflight_read_only(
         sa_repo,
         policy,
@@ -1468,14 +1481,15 @@ async def _execute_probe_pipeline(
         allow_writable_role=config.allow_writable_role,
     )
     prepared = await _load_prepared_scope(sa_repo, config)
-    _check_rss_mb(config.max_rss_mb)
+    _check_rss_mb(config.max_rss_mb, rss_baseline_mb)
     cold_result, cold_seconds = await _run_window_series(sa_repo, prepared, policy, None)
-    _check_rss_mb(config.max_rss_mb)
+    _check_rss_mb(config.max_rss_mb, rss_baseline_mb)
     verified, capture_seconds, verify_seconds = await _capture_and_verify_in_memory(
         sa_repo,
         prepared,
         policy,
         config,
+        rss_baseline_mb,
     )
     resumed_result, resume_seconds = await _run_window_series(
         sa_repo,
@@ -1487,7 +1501,7 @@ async def _execute_probe_pipeline(
         resumed_result.checkpoint_resume_fallback is None,
         f"checkpoint_resume_fallback:{resumed_result.checkpoint_resume_fallback}",
     )
-    _check_rss_mb(config.max_rss_mb)
+    _check_rss_mb(config.max_rss_mb, rss_baseline_mb)
     mismatch = _compare_series(cold_result, resumed_result)
     return CheckpointResumeProbeReport(
         wallet_public_id=prepared.scope.wallet_public_id,
@@ -1697,7 +1711,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-executions", type=int, default=DEFAULT_MAX_EXECUTIONS)
     parser.add_argument("--max-accruals", type=int, default=DEFAULT_MAX_ACCRUALS)
     parser.add_argument("--max-candles", type=int, default=DEFAULT_MAX_CANDLES)
-    parser.add_argument("--max-rss-mb", type=int, default=DEFAULT_MAX_RSS_MB)
+    parser.add_argument(
+        "--max-rss-mb",
+        type=int,
+        default=DEFAULT_MAX_RSS_MB,
+        help="Maximum RSS growth in MiB allowed over probe startup baseline (default: 2048).",
+    )
     role_group = parser.add_mutually_exclusive_group()
     role_group.add_argument(
         "--require-readonly-role",

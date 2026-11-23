@@ -52,18 +52,16 @@ _MINUTE = timedelta(minutes=1)
 
 @pytest.fixture(autouse=True)
 def _contain_address_space_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the probe's RLIMIT_AS from leaking into the pytest worker process.
+    """Keep the probe's ``RLIMIT_AS`` from leaking into the pytest worker process.
 
     ``main()`` applies ``resource.setrlimit(RLIMIT_AS, ...)`` to the current
     process on Linux; without this fixture the cap would persist for the rest
     of an xdist worker's lifetime and crash unrelated tests with MemoryError.
-    Tests that assert the limit patch ``setrlimit`` themselves, which wins.
-    The RSS guard reads the whole process's peak RSS, which in a long-lived
-    worker under coverage already exceeds the probe's cap, so ``getrusage``
-    reports a fresh-process figure here as well.
+    Tests that verify ``_apply_address_space_limit`` override ``setrlimit`` inside
+    the test itself, while RSS checks measure growth over startup baseline and
+    require no ``getrusage`` stub.
     """
     monkeypatch.setattr(probe.resource, "setrlimit", lambda _kind, _bounds: None)
-    monkeypatch.setattr(probe.resource, "getrusage", lambda _who: SimpleNamespace(ru_maxrss=65536))
 
 
 class _RecordingCursor:
@@ -1039,13 +1037,19 @@ async def test_probe_enforces_hard_bounds_max_executions_and_memory_caps(
             with pytest.raises(probe.CheckpointResumeProbeError, match=expected_error):
                 await probe.probe_with_repository(repo, bad_config)
 
-        monkeypatch.setattr(probe, "_current_rss_mb", lambda: 5000.0)
-        with pytest.raises(probe.CheckpointResumeProbeError, match="max_rss_exceeded:5000.0>2048"):
-            await probe.probe_with_repository(
-                repo,
-                probe.CheckpointResumeProbeConfig(wallet_public_id=scope.wallet_public_id),
-            )
-        monkeypatch.undo()
+        orig_current_rss = probe._current_rss_mb
+        rss_values = iter((3000.0, 3000.0, 5500.0))
+        monkeypatch.setattr(probe, "_current_rss_mb", lambda: next(rss_values))
+        try:
+            with pytest.raises(
+                probe.CheckpointResumeProbeError, match="max_rss_exceeded:2500.0>2048"
+            ):
+                await probe.probe_with_repository(
+                    repo,
+                    probe.CheckpointResumeProbeConfig(wallet_public_id=scope.wallet_public_id),
+                )
+        finally:
+            monkeypatch.setattr(probe, "_current_rss_mb", orig_current_rss)
 
         orig_counts = repo.get_pnl_execution_prefix_counts
         monkeypatch.setattr(
@@ -1087,30 +1091,6 @@ async def test_probe_enforces_hard_bounds_max_executions_and_memory_caps(
                     max_runtime_seconds=0.02,
                 ),
             )
-
-    monkeypatch.setattr(probe.sys, "platform", "darwin")
-    darwin_rss = probe._current_rss_mb()
-    probe._apply_address_space_limit(1024)
-    monkeypatch.setattr(probe.sys, "platform", "linux")
-    assert probe._current_rss_mb() > darwin_rss
-    rlimit_calls: list[tuple[int, int]] = []
-    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, resource.RLIM_INFINITY))
-    monkeypatch.setattr(
-        probe.resource, "setrlimit", lambda _kind, bounds: rlimit_calls.append(bounds)
-    )
-    probe._apply_address_space_limit(256)
-    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, 64 * 1024 * 1024))
-    probe._apply_address_space_limit(256)
-    assert rlimit_calls == [
-        (256 * 1024 * 1024, resource.RLIM_INFINITY),
-        (64 * 1024 * 1024, 64 * 1024 * 1024),
-    ]
-    monkeypatch.setattr(
-        probe.resource,
-        "setrlimit",
-        lambda _kind, _bounds: (_ for _ in ()).throw(ValueError("not supported")),
-    )
-    probe._apply_address_space_limit(256)
 
 
 async def test_probe_refuses_invalid_configs_and_incomplete_frontiers(
@@ -2294,3 +2274,139 @@ def test_opt_in_real_postgres_probe_e2e(
         assert io.out.strip().splitlines()[-1] == "RESULT: PASS"
     finally:
         asyncio.run(_pg_drop_ro_db(async_base, db_name, role_name))
+
+
+def test_rss_readers_statm_darwin_fallback_and_baseline_growth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measure current RSS on Linux statm, macOS ``ru_maxrss``, and unsupported fallbacks cleanly.
+
+    Given: A fake ``/proc/self/statm`` file on Linux, ``darwin`` ``getrusage``, an unsupported OS,
+        and large startup RSS baselines.
+    When: ``_current_rss_mb`` and ``_check_rss_mb`` evaluate current memory and delta over start.
+    Then: Linux computes ``resident_pages * SC_PAGE_SIZE`` in MiB, macOS converts bytes, fallback
+        returns ``0.0``, high baselines with low growth pass, and excessive growth refuses.
+
+    Args:
+        tmp_path: Pytest isolated directory hosting a fake ``/proc/self/statm`` file.
+        monkeypatch: Pytest fixture overriding platform, proc path, ``sysconf``, and ``getrusage``.
+    """
+    statm_file = tmp_path / "statm"
+    statm_file.write_text("10000 2048 500 10 0 8000 0\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "_PROC_STATM_PATH", statm_file)
+    monkeypatch.setattr(probe.os, "sysconf", lambda _name: 4096)
+    monkeypatch.setattr(probe.sys, "platform", "linux")
+    assert probe._current_rss_mb() == pytest.approx(8.0)
+
+    statm_file.write_text("", encoding="utf-8")
+    assert probe._current_rss_mb() == 0.0
+
+    monkeypatch.setattr(probe.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        probe.resource,
+        "getrusage",
+        lambda _who: SimpleNamespace(ru_maxrss=64 * 1024 * 1024),
+    )
+    assert probe._current_rss_mb() == pytest.approx(64.0)
+
+    monkeypatch.setattr(probe.sys, "platform", "win32")
+    assert probe._current_rss_mb() == 0.0
+
+    monkeypatch.setattr(probe, "_current_rss_mb", lambda: 3600.0)
+    probe._check_rss_mb(200, baseline_rss_mb=3500.0)
+    monkeypatch.setattr(probe, "_current_rss_mb", lambda: 3400.0)
+    probe._check_rss_mb(1, baseline_rss_mb=3500.0)
+    monkeypatch.setattr(probe, "_current_rss_mb", lambda: 3800.0)
+    with pytest.raises(probe.CheckpointResumeProbeError, match="max_rss_exceeded:300.0>200"):
+        probe._check_rss_mb(200, baseline_rss_mb=3500.0)
+
+
+def test_apply_address_space_limit_real_getrlimit_and_non_linux_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise ``_apply_address_space_limit`` with real ``getrlimit`` and non-Linux skips.
+
+    Given: Real ``resource.getrlimit(RLIMIT_AS)``, a local ``setrlimit`` recorder overriding the
+        autouse worker fixture, erroring ``setrlimit``, and non-Linux platform configurations.
+    When: Calling ``_apply_address_space_limit`` across Linux and non-Linux branches.
+    Then: Linux computes bounds from real ``getrlimit`` without mutating process limits, finite
+        vs infinite hard limits and ``ValueError`` errors are handled, and non-Linux skips cleanly.
+
+    Args:
+        monkeypatch: Pytest fixture patching platform and recording ``resource.setrlimit`` calls.
+    """
+    recorded: list[tuple[int, tuple[int, int]]] = []
+    monkeypatch.setattr(
+        probe.resource,
+        "setrlimit",
+        lambda kind, bounds: recorded.append((kind, bounds)),
+    )
+
+    monkeypatch.setattr(probe.sys, "platform", "darwin")
+    probe._apply_address_space_limit(256)
+    monkeypatch.setattr(probe.sys, "platform", "win32")
+    probe._apply_address_space_limit(256)
+    assert recorded == []
+
+    monkeypatch.setattr(probe.sys, "platform", "linux")
+    _soft, real_hard = resource.getrlimit(resource.RLIMIT_AS)
+    limit_bytes = 256 * 1024 * 1024
+    expected_capped = (
+        limit_bytes if real_hard == resource.RLIM_INFINITY else min(limit_bytes, real_hard)
+    )
+    probe._apply_address_space_limit(256)
+    assert recorded[-1] == (resource.RLIMIT_AS, (expected_capped, real_hard))
+
+    recorded.clear()
+    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, resource.RLIM_INFINITY))
+    probe._apply_address_space_limit(256)
+    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, 64 * 1024 * 1024))
+    probe._apply_address_space_limit(256)
+    assert recorded == [
+        (resource.RLIMIT_AS, (256 * 1024 * 1024, resource.RLIM_INFINITY)),
+        (resource.RLIMIT_AS, (64 * 1024 * 1024, 64 * 1024 * 1024)),
+    ]
+
+    monkeypatch.setattr(
+        probe.resource,
+        "setrlimit",
+        lambda _kind, _bounds: (_ for _ in ()).throw(ValueError("not supported")),
+    )
+    probe._apply_address_space_limit(256)
+
+    recorded.clear()
+    monkeypatch.delattr(probe.resource, "RLIMIT_AS", raising=False)
+    probe._apply_address_space_limit(256)
+    assert recorded == []
+
+
+async def test_probe_with_repository_timeout_raises_timeout_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Translate ``TimeoutError`` inside ``probe_with_repository`` to ``CheckpointResumeProbeError``.
+
+    Given: A SQLite repository and an ``_execute_probe_pipeline`` coroutine raising ``TimeoutError``.
+    When: ``probe_with_repository`` executes inside ``asyncio.timeout``.
+    Then: ``CheckpointResumeProbeError('timeout')`` is raised cleanly with guards removed.
+
+    Args:
+        monkeypatch: Pytest fixture replacing ``_execute_probe_pipeline``.
+    """
+    repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    monkeypatch.setattr(
+        probe,
+        "_execute_probe_pipeline",
+        AsyncMock(side_effect=TimeoutError("deadline exceeded")),
+    )
+    try:
+        with pytest.raises(probe.CheckpointResumeProbeError, match="^timeout$"):
+            await probe.probe_with_repository(
+                repo,
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=prefix._WALLET,
+                    max_runtime_seconds=1.0,
+                ),
+            )
+    finally:
+        await repo.engine.dispose()
