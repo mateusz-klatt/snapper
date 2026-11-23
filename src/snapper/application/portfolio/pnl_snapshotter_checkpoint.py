@@ -465,6 +465,10 @@ async def handle_resume_fallback(
 ) -> None:
     """Count a service-detected fallback through the closed verifier verdict and retire stale state.
 
+    The fallback itself does not count a recapture: only a caller that then
+    selects one does, so shadow mode, which never recaptures inline, does not
+    report a recapture it did not request.
+
     Args:
         repo: Repository used to retire the stored checkpoint row.
         scope: Scope owning the checkpoint row.
@@ -474,7 +478,6 @@ async def handle_resume_fallback(
     """
     fallback = service_resume_fallback(reason)
     _log_fallback(scope, frontier, fallback)
-    record_checkpoint_recapture("fallback", scope)
     if fallback.delete_required:
         await delete_checkpoint(repo, scope, resume.record)
 

@@ -905,6 +905,7 @@ async def test_shadow_fallback_retires_checkpoint_without_inline_recapture(
     assert checkpoint_metrics().invalidations_deleted == 1
     assert checkpoint_metrics().capture_refusals == {}
     assert checkpoint_metrics().captures_committed == 0
+    assert checkpoint_metrics().recaptures == {}
 
 
 @pytest.mark.parametrize("mode", ["active", "shadow"])
@@ -2286,3 +2287,28 @@ async def test_recapture_budget_rotates_fairly_across_ticks_including_on_failure
         )
         is not None
     )
+
+
+def test_post_commit_cancellation_keeps_the_replay_chunk_limit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Back off replay work only for wallets whose authoritative chunk did not commit.
+
+    Given: One wallet marked as committed this iteration and another that was not.
+    When: A tick cancellation reaches each wallet's handler.
+    Then: The committed wallet keeps its replay chunk limit and logs the shadow
+        overrun, while the uncommitted wallet's limit is halved as before.
+
+    Args:
+        caplog: Log capture for the shadow overrun warning.
+    """
+    repo = fixtures._FakeRepo()
+    snap = fixtures._snapshotter(repo, fixtures._minute(5))
+    full = snap._replay_chunk_limit("committed")
+    snap._post_commit_wallet = "committed"
+    with caplog.at_level(logging.WARNING, logger=pnl_snapshotter.__name__):
+        snap._reduce_replay_chunk_after_cancel("committed")
+    assert snap._replay_chunk_limit("committed") == full
+    assert "replay chunk limit kept" in caplog.text
+    snap._reduce_replay_chunk_after_cancel("pending")
+    assert snap._replay_chunk_limit("pending") == max(1, full // 2)

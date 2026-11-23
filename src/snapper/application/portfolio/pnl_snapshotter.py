@@ -77,6 +77,7 @@ from snapper.application.portfolio.pnl_opening_checkpoint_metrics import prune_c
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     record_checkpoint_capture_committed,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import record_checkpoint_recapture
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     record_checkpoint_resume_attempted,
 )
@@ -426,6 +427,7 @@ class PortfolioPnlSnapshotter:
         self._tick_shadow_comparisons: int = 0
         self._tick_last_budgeted_wallet: str | None = None
         self._tick_deadline: float | None = None
+        self._post_commit_wallet: str | None = None
 
     @property
     def disabled(self) -> bool:
@@ -552,6 +554,7 @@ class PortfolioPnlSnapshotter:
         order = self._wallet_order(venues_by_wallet)
         for wallet in order:
             self._last_scheduled_wallet = wallet
+            self._post_commit_wallet = None
             try:
                 conflicted = await self._process_wallet(
                     repo,
@@ -561,7 +564,7 @@ class PortfolioPnlSnapshotter:
                     wallet in mint_excluded_wallets,
                 )
             except asyncio.CancelledError:
-                self._reduce_replay_chunk(wallet)
+                self._reduce_replay_chunk_after_cancel(wallet)
                 raise
             except Exception as exc:
                 if isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "57014":
@@ -590,6 +593,22 @@ class PortfolioPnlSnapshotter:
     def _replay_chunk_limit(self, wallet: str) -> int:
         """Return the scope's retry limit without changing its durable cursor."""
         return self._replay_chunk_limits.get(wallet, MAX_CORRECTION_CHUNK_MINUTES)
+
+    def _reduce_replay_chunk_after_cancel(self, wallet: str) -> None:
+        """Back off authoritative replay work unless the wallet already committed.
+
+        A cancellation that lands in shadow work after the wallet's
+        authoritative chunk committed says nothing about the replay chunk size,
+        so the limit is kept and the overrun is logged instead.
+        """
+        if self._post_commit_wallet == wallet:
+            logger.warning(
+                "PortfolioPnlSnapshotter: shadow work outlived the tick after the "
+                "authoritative commit; wallet=%s replay chunk limit kept",
+                checkpoint_wallet_alias(wallet),
+            )
+            return
+        self._reduce_replay_chunk(wallet)
 
     def _reduce_replay_chunk(self, wallet: str) -> None:
         """Retry less valuation work after cancellation or a database query deadline."""
@@ -1344,6 +1363,7 @@ class PortfolioPnlSnapshotter:
         fallback = result.checkpoint_resume_fallback
         if resume is not None and fallback is not None:
             await handle_resume_fallback(repo, ctx.scope, frontier, resume, fallback)
+            record_checkpoint_recapture("fallback", ctx.scope)
             recapture = capture or self._consume_recapture(request, chunk.end)
             if recapture is not None:
                 chunk, result = await self._replay_series(
@@ -1431,6 +1451,7 @@ class PortfolioPnlSnapshotter:
         basis = _PlanBasis(evidence, inputs)
         anchor_plan = await self._plan_chunk(repo, ctx, anchor, basis)
         await self._commit_checkpoint_plan(request, anchor_chunk, anchor, anchor_plan)
+        self._post_commit_wallet = ctx.wallet_public_id
         budget = self._shadow_budget_seconds()
         if budget is not None and budget <= 0:
             record_checkpoint_shadow_skipped("tick_budget", ctx.scope)

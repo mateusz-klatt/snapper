@@ -354,19 +354,24 @@ the tick.
 Shadow errors increment `shadow_skipped` with reason `shadow_error:<Type>`,
 log one warning per scope failure episode, and never prevent the authoritative
 anchor samples and frontier from committing.
-In shadow mode the cold anchor plan commits before any shadow work starts, so
-no shadow outcome can skip or delay the authoritative write. That includes a
-valuation worker thread that cannot be cancelled and outlives every deadline.
-Shadow work then runs under its own nested deadline that ends a quarter of the
-loop interval (`SHADOW_TICK_RESERVE_FRACTION`) before the tick deadline, which
-leaves time for the tick's later wallets. A shadow branch that overruns it is
+In shadow mode, live checkpoint verification still runs before the chunk is
+replayed, but the cold anchor plan then commits before any resumed replay or
+comparison starts. No resumed-side outcome can therefore skip or delay the
+authoritative write, including a valuation worker thread that cannot be
+cancelled and outlives every deadline. The resumed side then runs under its
+own nested deadline that ends a quarter of the loop interval
+(`SHADOW_TICK_RESERVE_FRACTION`) before the tick deadline, which normally
+leaves time for the tick's later wallets. A resumed side that overruns it is
 counted as `shadow_error:TimeoutError`; when no shadow budget remains, the
 comparison is skipped as `tick_budget`. External task cancellation is never
-converted into a shadow failure.
+converted into a shadow failure. If an uncancellable worker outlives the whole
+tick, the tick still ends after that wallet's commit: its replay chunk limit is
+kept, a warning is logged, and the remaining wallets run on the next tick.
 A resume fallback found by the shadow branch deletes the stored checkpoint but
-does not recapture inline, because the chunk has already committed. The next
-tick finds no checkpoint and captures a fresh one on the cold path, so shadow
-mode recaptures one tick later than active mode does.
+neither recaptures inline nor counts a recapture, because the chunk has already
+committed. A fresh checkpoint is captured by the next eligible clean-tip replay
+on the cold path; at a stationary tip that waits until new evidence opens a
+replay chunk.
 The cold anchor and the resumed side are planned from one shared read of the
 chunk's observation, valuation and position evidence, so a write committed
 between two reads cannot appear as a mismatch that deletes a valid checkpoint.
