@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from loguru import logger
 from sqlalchemy import create_engine
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -287,7 +288,7 @@ class TestKrakenSymbolUpdater:
         }
         mock_client = AsyncMock()
         with (
-            patch.object(updater, "build_verified_mappings", return_value=(mock_mappings, True)),
+            patch.object(updater, "_build_verified_mappings", return_value=(mock_mappings, None)),
             patch.object(updater, "discover_btnl_symbols", return_value={}),
         ):
             result = await updater._fetch_symbols(mock_client)
@@ -456,44 +457,52 @@ async def test_build_verified_mappings_skips_invalid_tokenized(
 
 
 @pytest.mark.asyncio
-async def test_fetch_symbols_requires_verification(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify _fetch_symbols raises when verification fails.
+async def test_fetch_symbols_reports_coverage_below_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify _fetch_symbols reports the coverage of an incomplete snapshot.
 
-    Given: build_verified_mappings returns success=False,
+    Given: A WebSocket snapshot confirms 410 of 450 REST pairs,
     When: _fetch_symbols called,
-    Then: RuntimeError raised.
+    Then: The error includes the counts, rate and threshold.
     """
     svc = KrakenSymbolUpdaterService()
-    monkeypatch.setattr(svc, "build_verified_mappings", AsyncMock(return_value=({}, False)))
-    with pytest.raises(RuntimeError):
-        await svc._fetch_symbols(None)
+    rest_pairs = {
+        f"ASSET{index}USD": {"base": f"ASSET{index}", "quote": "ZUSD"} for index in range(450)
+    }
+    verified = {f"ASSET{index}/USD" for index in range(410)}
+    monkeypatch.setattr(svc, "load_kraken_rest_symbols", AsyncMock(return_value=rest_pairs))
+    monkeypatch.setattr(svc, "verify_websocket_symbols", AsyncMock(return_value=(verified, [])))
+    discover_btnl = AsyncMock(return_value={})
+    monkeypatch.setattr(svc, "discover_btnl_symbols", discover_btnl)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^WebSocket verification failed: coverage 410/450 \(91\.1%\) below 95%"
+        r" - aborting update$",
+    ):
+        await svc._fetch_symbols(MagicMock())
+
+    discover_btnl.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_fetch_symbols_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify _fetch_symbols returns mapping dictionaries on success.
 
-    Given: Valid verified mappings,
+    Given: A REST pair confirmed by the WebSocket snapshot,
     When: _fetch_symbols called,
     Then: List of mapping dicts returned.
     """
     svc = KrakenSymbolUpdaterService()
-    fake_mapping = {
-        "native_symbol": "BTC-USD",
-        "kraken_websocket_symbol": "BTC/USD",
-        "kraken_rest_symbol": "XXBTZUSD",
-        "ccxt_symbol": "BTC/USD",
-        "base_currency": "BTC",
-        "quote_currency": "USD",
-    }
-    monkeypatch.setattr(
-        svc,
-        "build_verified_mappings",
-        AsyncMock(return_value=({"BTC-USD": fake_mapping}, True)),
-    )
+    rest_pairs = {"XXBTZUSD": {"base": "XXBT", "quote": "ZUSD", "ccxt_symbol": "BTC/USD"}}
+    monkeypatch.setattr(svc, "load_kraken_rest_symbols", AsyncMock(return_value=rest_pairs))
+    monkeypatch.setattr(svc, "verify_websocket_symbols", AsyncMock(return_value=({"BTC/USD"}, [])))
     monkeypatch.setattr(svc, "discover_btnl_symbols", AsyncMock(return_value={}))
-    symbols = await svc._fetch_symbols(None)
+    symbols = await svc._fetch_symbols(MagicMock())
+    assert len(symbols) == 1
     assert symbols[0]["kraken_rest_symbol"] == "XXBTZUSD"
+    assert symbols[0]["kraken_websocket_symbol"] == "BTC/USD"
 
 
 @pytest.mark.asyncio
@@ -1443,32 +1452,50 @@ class TestKrakenFetchSymbols:
             return KrakenSymbolUpdaterService()
 
     @pytest.mark.asyncio
-    async def test_fetch_symbols_verification_failed(
+    async def test_fetch_symbols_reports_mapping_exception(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
-        """Verify _fetch_symbols raises on verification failure.
+        """Verify _fetch_symbols names a mapping exception and logs its traceback.
 
-        Given: build_verified_mappings returns success=False,
+        Given: Loading the REST catalog raises ValueError,
         When: _fetch_symbols called,
-        Then: RuntimeError raised with verification failed message.
+        Then: The RuntimeError names ValueError and the error log retains the traceback.
         """
-        mock_mappings: dict[str, dict[str, str]] = {}
-        with patch.object(updater, "build_verified_mappings", new_callable=AsyncMock) as mock_build:
-            mock_build.return_value = (mock_mappings, False)
-            mock_client = MagicMock()
-            with pytest.raises(RuntimeError, match="WebSocket verification failed"):
-                await updater._fetch_symbols(mock_client)
+        captured: list[str] = []
+        sink_id = logger.add(captured.append, format="{message}", level="ERROR", diagnose=False)
+        try:
+            with (
+                patch.object(
+                    updater,
+                    "load_kraken_rest_symbols",
+                    side_effect=ValueError("malformed REST catalog"),
+                ),
+                patch.object(updater, "discover_btnl_symbols", return_value={}) as discover_btnl,
+                pytest.raises(
+                    RuntimeError,
+                    match=r"^WebSocket verification failed: ValueError while building mappings"
+                    r" - aborting update$",
+                ),
+            ):
+                await updater._fetch_symbols(MagicMock())
+        finally:
+            logger.remove(sink_id)
+
+        discover_btnl.assert_not_awaited()
+        assert len(captured) == 1
+        assert "ValueError" in captured[0].splitlines()[0]
+        assert "Traceback (most recent call last)" in captured[0]
+        assert "ValueError: malformed REST catalog" in captured[0]
 
     @pytest.mark.asyncio
     async def test_fetch_symbols_no_mappings(self, updater: KrakenSymbolUpdaterService) -> None:
         """Verify _fetch_symbols raises when no mappings generated.
 
-        Given: build_verified_mappings returns empty dict,
+        Given: Verification succeeds with no mappings,
         When: _fetch_symbols called,
         Then: RuntimeError raised with no mappings message.
         """
-        with patch.object(updater, "build_verified_mappings", new_callable=AsyncMock) as mock_build:
-            mock_build.return_value = ({}, True)
+        with patch.object(updater, "_build_verified_mappings", return_value=({}, None)):
             mock_client = MagicMock()
             with pytest.raises(RuntimeError, match="No mappings generated"):
                 await updater._fetch_symbols(mock_client)
@@ -1490,10 +1517,11 @@ class TestKrakenFetchSymbols:
             "quote_currency": "USD",
         }
         with (
-            patch.object(updater, "build_verified_mappings", new_callable=AsyncMock) as mock_build,
+            patch.object(
+                updater, "_build_verified_mappings", return_value=({"BTC-USD": mock_mapping}, None)
+            ),
             patch.object(updater, "discover_btnl_symbols", new_callable=AsyncMock) as mock_btnl,
         ):
-            mock_build.return_value = ({"BTC-USD": mock_mapping}, True)
             mock_btnl.return_value = {}
             mock_client = MagicMock()
             symbols = await updater._fetch_symbols(mock_client)
@@ -4107,7 +4135,7 @@ class TestKrakenBtnlDiscovery:
             "is_btnl": "true",
         }
         with (
-            patch.object(updater, "build_verified_mappings", return_value=(rest_mappings, True)),
+            patch.object(updater, "_build_verified_mappings", return_value=(rest_mappings, None)),
             patch.object(
                 updater, "discover_btnl_symbols", return_value={"BTC-USD-BTNL": btnl_record}
             ),
@@ -4148,7 +4176,7 @@ class TestKrakenBtnlDiscovery:
             "is_btnl": "true",
         }
         with (
-            patch.object(updater, "build_verified_mappings", return_value=(rest_mappings, True)),
+            patch.object(updater, "_build_verified_mappings", return_value=(rest_mappings, None)),
             patch.object(
                 updater, "discover_btnl_symbols", return_value={"BTC-USD-BTNL": btnl_record}
             ),
@@ -4304,7 +4332,7 @@ class TestKrakenBtnlDiscovery:
             }
         }
         with (
-            patch.object(updater, "build_verified_mappings", return_value=(rest_mappings, True)),
+            patch.object(updater, "_build_verified_mappings", return_value=(rest_mappings, None)),
             patch.object(updater, "discover_btnl_symbols", side_effect=RuntimeError("ws down")),
         ):
             result = await updater._fetch_symbols(AsyncMock())

@@ -1122,6 +1122,11 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         Returns:
             Tuple of (mappings dict keyed by native_symbol, success boolean).
         """
+        mappings, verification_failure = await self._build_verified_mappings()
+        return mappings, verification_failure is None
+
+    async def _build_verified_mappings(self) -> tuple[dict[str, KrakenSymbolRecord], str | None]:
+        """Build symbol mappings and return the verification failure detail, if any."""
         try:
             kraken_rest_symbols = await self.load_kraken_rest_symbols()
             logger.info(f"Loaded {len(kraken_rest_symbols)} symbols from REST API")
@@ -1130,30 +1135,29 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                 ws_symbols_to_verify,
             )
             verification_threshold = 0.95
-            verification_rate = (
-                len(verified_ws_symbols) / len(ws_symbols_to_verify)
-                if ws_symbols_to_verify
-                else 0.0
-            )
-            verification_success = verification_rate >= verification_threshold
-            if not verification_success:
-                logger.warning(
-                    f"Verification rate {verification_rate:.1%} below threshold "
-                    f"{verification_threshold:.0%}"
+            verified_count = len(verified_ws_symbols)
+            expected_count = len(ws_symbols_to_verify)
+            verification_rate = verified_count / expected_count if expected_count else 0.0
+            verification_failure = None
+            if verification_rate < verification_threshold:
+                verification_failure = (
+                    f"coverage {verified_count}/{expected_count} ({verification_rate:.1%}) "
+                    f"below {verification_threshold:.0%}"
                 )
+                logger.warning("WebSocket verification {}", verification_failure)
             ws_only_count, spv_skipped = self._merge_ws_only_instruments(
                 mappings, ws_only_instruments, verified_ws_symbols
             )
             logger.info(
                 f"Built {len(mappings)} mappings ({ws_only_count} WS-only, "
                 f"{spv_skipped} SPV duplicate wire names skipped), "
-                f"verification: {len(verified_ws_symbols)}/{len(ws_symbols_to_verify)} "
-                f"({verification_rate:.1%})"
+                f"verification: {verified_count}/{expected_count} ({verification_rate:.1%})"
             )
-            return mappings, verification_success
-        except Exception as e:
-            logger.error(f"Error building verified mappings: {e}")
-            return {}, False
+            return mappings, verification_failure
+        except Exception as exc:
+            exception_name = type(exc).__name__
+            logger.exception("Error building verified mappings ({}): {}", exception_name, exc)
+            return {}, f"{exception_name} while building mappings"
 
     async def _fetch_symbols(self, client: KrakenExchangeClient) -> list[dict[str, Any]]:
         """Fetch and verify symbols from Kraken, then run BTNL discovery.
@@ -1174,9 +1178,11 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         Raises:
             RuntimeError: If WebSocket verification fails or no mappings.
         """
-        mappings, verification_success = await self.build_verified_mappings()
-        if not verification_success:
-            raise RuntimeError("WebSocket verification failed - aborting update")
+        mappings, verification_failure = await self._build_verified_mappings()
+        if verification_failure is not None:
+            raise RuntimeError(
+                f"WebSocket verification failed: {verification_failure} - aborting update"
+            )
         if not mappings:
             raise RuntimeError("No mappings generated - aborting update")
         btnl_count = 0
