@@ -416,6 +416,7 @@ class ReconciliationLoop:
         self._max_hydrate_per_cycle = max_hydrate_per_cycle
         self._stale_held_alerted: set[str] = set()
         self._hydration_error_logged: set[str] = set()
+        self._hydrate_cursor: int = 0
         self._stale_awaiting_target_count: int = 0
         self._heartbeat_sequence: int = 0
 
@@ -750,7 +751,10 @@ class ReconciliationLoop:
         ``commands`` is already scoped to ``self._exchange`` and filtered by
         ``self._ownership``. Processing is capped by ``_max_hydrate_per_cycle``
         per pass, and repeated lookup/CAS errors for the same row log once per
-        failing episode while leaving the row held.
+        failing episode while leaving the row held. The capped window starts at
+        a rotating cursor over the held rows ordered by creation time and
+        public id, so rows that stay unresolved at the head of the list cannot
+        starve the rows behind them when more than the cap are held.
 
         Args:
             commands: Owned active commands for this exchange.
@@ -769,8 +773,12 @@ class ReconciliationLoop:
             self._hydration_error_logged.clear()
             return set()
         self._hydration_error_logged.intersection_update({cmd["public_id"] for cmd in awaiting})
+        awaiting.sort(key=lambda cmd: (cmd["created_at"], cmd["public_id"]))
+        start = self._hydrate_cursor % len(awaiting)
+        window = (awaiting[start:] + awaiting[:start])[: self._max_hydrate_per_cycle]
+        self._hydrate_cursor = start + len(window)
         hydrated: set[str] = set()
-        for cmd in awaiting[: self._max_hydrate_per_cycle]:
+        for cmd in window:
             public_id = cmd["public_id"]
             stamp = CancelHydrationStamp(
                 bus_time=now,

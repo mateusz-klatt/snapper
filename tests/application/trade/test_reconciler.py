@@ -1601,6 +1601,41 @@ class TestRuntimeAwaitingTargetHydration:
         assert repo.advance_trade_command_lifecycle.await_args.kwargs["public_id"] == "cancel-cap-3"
 
     @pytest.mark.asyncio
+    async def test_hydration_window_rotates_past_unresolved_head_rows(self) -> None:
+        """Unresolved held rows at the head cannot starve the rows behind them.
+
+        Given: Three held cancels whose targets never resolve and ``max_hydrate_per_cycle=2``,
+        When: Three reconciliation cycles run,
+        Then: Each cycle looks up a rotating window, so every row is attempted within two cycles.
+        """
+        c1 = _awaiting_target_cmd("cancel-rot-1", age_seconds=30.0)
+        c2 = _awaiting_target_cmd("cancel-rot-2", age_seconds=20.0)
+        c3 = _awaiting_target_cmd("cancel-rot-3", age_seconds=10.0)
+        for index, cmd in enumerate((c1, c2, c3), start=1):
+            cmd["client_order_id"] = f"cid-rot-{index}"
+        repo = _make_repo(cmds=[c3, c1, c2])
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+        recon = ReconciliationLoop("kraken", repo, TradeService(), max_hydrate_per_cycle=2)
+
+        windows: list[list[str]] = []
+        for _ in range(3):
+            repo.get_exchange_order_id_for_client_order_id.reset_mock()
+            await recon._reconcile_cycle()
+            windows.append(
+                [
+                    call.args[0]
+                    for call in repo.get_exchange_order_id_for_client_order_id.await_args_list
+                ]
+            )
+
+        assert windows == [
+            ["cid-rot-1", "cid-rot-2"],
+            ["cid-rot-3", "cid-rot-1"],
+            ["cid-rot-2", "cid-rot-3"],
+        ]
+        repo.advance_trade_command_lifecycle.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_shared_hydration_helper_handles_cas_error_race_and_quiet_log(
         self, loguru_warnings: list[str]
     ) -> None:
