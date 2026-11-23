@@ -47,6 +47,7 @@ Example:
         TRADE_COMMAND_DISPATCH_TTL_S=30.0
 """
 
+from decimal import Decimal
 from typing import Any
 from typing import Self
 from urllib.parse import urlparse
@@ -64,6 +65,7 @@ __all__ = ["BootstrapSettingsLoader"]
 
 
 DEFAULT_MASTER_PASSWORD = "snapper_default_master_password_v1"
+DEFAULT_POSITION_DUST_NOTIONAL_THRESHOLD = Decimal("0.50")
 DEVELOPMENT_ENVIRONMENTS = frozenset({"development", "dev", "test", "testing", "ci"})
 PRODUCTION_ENVIRONMENTS = frozenset({"production", "prod", "staging"})
 SUPPORTED_ENVIRONMENTS = DEVELOPMENT_ENVIRONMENTS | PRODUCTION_ENVIRONMENTS
@@ -187,6 +189,10 @@ class BootstrapSettingsLoader(BaseSettings):
             ``PlanExecutorService`` startup recovery. Default ``False``
             keeps startup recovery from settling historical plans without
             an explicit operator preview and digest confirmation.
+        position_dust_notional_threshold: Quote-currency notional below
+            which a position is dust, as a finite non-negative decimal.
+            Default ``0.50``. A position is also dust when its lot-rounded
+            absolute quantity is below the venue minimum order size.
     """
 
     model_config = SettingsConfigDict(
@@ -283,6 +289,14 @@ class BootstrapSettingsLoader(BaseSettings):
         default=False,
         alias="PLAN_RECOVERY_AUTO_SETTLE_ENABLED",
     )
+    position_dust_notional_threshold: Decimal = Field(
+        default=DEFAULT_POSITION_DUST_NOTIONAL_THRESHOLD,
+        alias="POSITION_DUST_NOTIONAL_THRESHOLD",
+        description=(
+            "Quote-currency notional below which a position is dust. "
+            "The quantity rule still applies when this threshold is zero."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -298,6 +312,26 @@ class BootstrapSettingsLoader(BaseSettings):
         """
         validate_env_file()
         return data
+
+    @field_validator("position_dust_notional_threshold")
+    @classmethod
+    def _validate_position_dust_notional_threshold(cls, value: Decimal) -> Decimal:
+        """Reject a non-finite or negative dust notional threshold.
+
+        Args:
+            value: Parsed threshold in quote-currency units.
+
+        Returns:
+            The accepted threshold.
+
+        Raises:
+            ValueError: When the threshold is not a finite, non-negative decimal.
+        """
+        if not value.is_finite() or value < 0:
+            raise ValueError(
+                "POSITION_DUST_NOTIONAL_THRESHOLD must be a finite, non-negative decimal"
+            )
+        return value
 
     @field_validator("snapper_env")
     @classmethod

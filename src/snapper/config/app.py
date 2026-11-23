@@ -37,6 +37,7 @@ Example:
 """
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from loguru import logger
@@ -449,6 +450,19 @@ class AppSettings:
             TTL in seconds; values ``<= 0`` mean disabled.
         """
         return self._bootstrap.trade_command_dispatch_ttl_s
+
+    @property
+    def position_dust_notional_threshold(self) -> Decimal:
+        """Return the quote-currency notional below which a position is dust.
+
+        The position API also marks a position as dust when its lot-rounded
+        absolute quantity is below the instrument's venue minimum order size.
+        The default is ``0.50`` quote-currency units.
+
+        Returns:
+            Finite, non-negative decimal threshold.
+        """
+        return self._bootstrap.position_dust_notional_threshold
 
     @property
     def plan_recovery_auto_settle_enabled(self) -> bool:

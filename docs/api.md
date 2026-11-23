@@ -1434,7 +1434,10 @@ GET /api/positions
             "marked_at": "2026-01-18T11:59:30Z",
             "source_venue_event_id": 4711,
             "mode": "live",
-            "position_cycle_public_id": "019e1a2b-4d5e-7f6a-8b9c-0d1e2f3a4b5c"
+            "position_cycle_public_id": "019e1a2b-4d5e-7f6a-8b9c-0d1e2f3a4b5c",
+            "is_dust": false,
+            "quantity_decimals": 8,
+            "price_decimals": 1
         }
     ],
     "count": 1
@@ -1456,6 +1459,14 @@ truthful entry (or a component entry is unknown). `mark_price` / `marked_at`
 on historical rows echo the active market snapshot captured by the triggering
 projection event; both are `null` together with `unrealized_pnl` when no usable
 mark exists.
+`is_dust` is true when the lot-rounded absolute quantity is below the
+instrument's venue `min_order_size`, or when the absolute notional in the
+position's quote currency is below `POSITION_DUST_NOTIONAL_THRESHOLD`
+(default `0.50`). `quantity_decimals` and `price_decimals` are the decimal
+places of the instrument lot step and tick size. Either precision is `null`
+when that spec field is missing. The same three fields are present on
+`GET /api/position-cycles/open`, where dust uses the cycle peak quantity
+and the venue minimum.
 `source_venue_event_id` is the maximum durable venue-event watermark consumed
 into the row's state (a recovery watermark, not the exact causal fill), `null`
 when unknown.
@@ -1913,7 +1924,8 @@ read scope. This diagnostic endpoint returns a global inventory; a token without
 **Response (200):** `PositionCycleListResponse` envelope whose payload
 items carry `cycle_public_id`, `shard_key`, `instrument_public_id`,
 `exchange`, `mode`, `wallet_public_id`, `operator_public_id`, `direction`, `max_qty`
-(per-cycle peak, not lifetime), `opened_at`, and `age_hours`.
+(per-cycle peak, not lifetime), `opened_at`, `age_hours`, `is_dust`,
+`quantity_decimals`, and `price_decimals`.
 
 ### POST /api/position-cycles/close-orphan
 

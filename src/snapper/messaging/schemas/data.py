@@ -39,6 +39,7 @@ from typing import Self
 
 from pydantic import Field
 from pydantic import model_validator
+from pydantic.config import JsonDict
 
 from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
@@ -58,6 +59,11 @@ from snapper.interface.websocket.schemas import FillStatus
 from snapper.interface.websocket.schemas import HealthStatus
 from snapper.interface.websocket.schemas import OrderType
 from snapper.interface.websocket.schemas import TradeSide
+
+
+def _omit_json_schema_default(schema: JsonDict) -> None:
+    """Drop a runtime default so generated clients can omit the field."""
+    schema.pop("default", None)
 
 
 class TickData(StrictDataSchema[Literal["tick"]]):
@@ -439,6 +445,13 @@ class PositionData(StrictDataSchema[Literal["position"]]):
             UI clients can wallet-scope the position list without an
             extra position-cycle join (the wallet-scoped position-cycle
             join shortcut).
+        is_dust: True when the lot-rounded absolute quantity is below
+            the venue minimum order size, or the absolute quote notional
+            is below ``POSITION_DUST_NOTIONAL_THRESHOLD``.
+        quantity_decimals: Decimal places of the instrument lot step.
+            None when the spec has no positive lot size.
+        price_decimals: Decimal places of the instrument tick size.
+            None when the spec has no positive tick size.
     """
 
     type: Literal["position"] = "position"
@@ -455,6 +468,23 @@ class PositionData(StrictDataSchema[Literal["position"]]):
     source_venue_event_id: int | None = None
     position_cycle_public_id: str | None = None
     wallet_public_id: str = ""
+    is_dust: bool = Field(
+        default=False,
+        json_schema_extra=_omit_json_schema_default,
+        description=(
+            "True when the lot-rounded absolute quantity is below the venue "
+            "minimum order size, or the absolute quote notional is below "
+            "POSITION_DUST_NOTIONAL_THRESHOLD."
+        ),
+    )
+    quantity_decimals: int | None = Field(
+        default=None,
+        description="Decimal places of the instrument lot step. Null when lot size is absent.",
+    )
+    price_decimals: int | None = Field(
+        default=None,
+        description="Decimal places of the instrument tick size. Null when tick size is absent.",
+    )
 
 
 class AccountBalanceEntry(StrictBody):
