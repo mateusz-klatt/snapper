@@ -1,10 +1,12 @@
 """Tests for ordered checkpoint resume eligibility and evidence verification."""
 
+import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import datetime
+from datetime import timedelta
 from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
@@ -12,20 +14,27 @@ from unittest.mock import AsyncMock
 import pytest
 
 from snapper.application.portfolio.execution_chain import ExecutionChainError
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_from_json
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import PnlCheckpointCaptureRequest
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointFallback
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointResume
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
     PnlCheckpointResumeEligibility,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_verifier import _effective_times_match
+from snapper.application.portfolio.pnl_opening_checkpoint_verifier import service_resume_fallback
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
     verify_checkpoint_for_resume,
 )
+from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
+from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
+from snapper.application.portfolio.pnl_timeline_service import build_wallet_pnl_series
 from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineFillWitnessCut
+from tests.application.portfolio import test_pnl_opening_checkpoint as checkpoint_fixtures
 from tests.application.portfolio import test_pnl_opening_checkpoint_capture as capture
 from tests.application.portfolio import test_pnl_timeline_service as fixtures
 
@@ -72,7 +81,7 @@ def _eligibility(request: PnlCheckpointCaptureRequest) -> PnlCheckpointResumeEli
         from_time=fixtures._m(6),
         frontier_tip=fixtures._m(8),
         has_fill_gap=False,
-        has_late_execution=False,
+        expected_execution_manifest_digest=request.execution_manifest_digest,
     )
 
 
@@ -239,10 +248,10 @@ def _cases() -> tuple[_FallbackCase, ...]:
             repository_value={},
         ),
         _FallbackCase(
-            "checkpoint_late_execution",
+            "checkpoint_execution_manifest_changed",
             True,
-            eligibility_field="has_late_execution",
-            eligibility_value=True,
+            eligibility_field="expected_execution_manifest_digest",
+            eligibility_value="f" * 64,
         ),
     )
 
@@ -548,15 +557,15 @@ async def test_bundle_engine_header_mismatch_returns_corrupt_with_delete(
     assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
 
 
-async def test_legacy_bundle_version_1_payload_fails_closed_as_corrupt(
+async def test_legacy_bundle_version_1_payload_refused_with_bundle_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reject an old bundle_version=1 payload without embedded identity.
+    """Refuse an old bundle_version=1 payload without embedded identity as bundle version.
 
     Given: A captured checkpoint whose ``state_json`` is downgraded to
         ``bundle_version=1`` without an ``identity`` block.
     When: ``verify_checkpoint_for_resume`` verifies the record.
-    Then: It fails closed with ``checkpoint_payload_corrupt`` and ``delete_required=True``.
+    Then: It fails closed with ``checkpoint_bundle_version`` and ``delete_required=True``.
 
     Args:
         monkeypatch: Pytest monkeypatch fixture.
@@ -573,7 +582,168 @@ async def test_legacy_bundle_version_1_payload_fails_closed_as_corrupt(
         _RESUMING_AS_OF,
         _eligibility(request),
     )
-    assert outcome == PnlCheckpointFallback("checkpoint_payload_corrupt", delete_required=True)
+    assert outcome == PnlCheckpointFallback("checkpoint_bundle_version", delete_required=True)
+
+
+async def test_verifier_refuses_manifest_and_prefix_assignment_drift_against_live_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify frozen manifest and effective prefix assignments against live prefix reads.
+
+    Given: A valid captured checkpoint at C mutated along (1) suffix annulment changing
+        live generation manifest while keeping 1..W_C prefix annulments identical,
+        and (2) applied_watermarks_by_exchange disagreeing with live prefix executions.
+    When: ``verify_checkpoint_for_resume`` verifies against live repository evidence.
+    Then: Both refuse with closed delete-required fallback codes rather than resuming.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    suffix_annulment = fixtures._applied_annulment(scope_sequence=99)
+    repo._applied_annulments = [suffix_annulment]
+    manifest_outcome = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert manifest_outcome == PnlCheckpointFallback(
+        "checkpoint_execution_manifest_changed",
+        delete_required=True,
+    )
+
+    clean_record, clean_request, clean_repo = await _valid_capture(monkeypatch)
+    bad_applied = replace(
+        clean_record,
+        certificate=replace(
+            clean_record.certificate,
+            applied_watermarks_by_exchange={"kraken": 0},
+        ),
+    )
+    assignment_outcome = await verify_checkpoint_for_resume(
+        clean_repo,
+        bad_applied,
+        _scope(clean_request),
+        _RESUMING_AS_OF,
+        _eligibility(clean_request),
+    )
+    assert assignment_outcome == PnlCheckpointFallback(
+        "checkpoint_prefix_assignments_changed",
+        delete_required=True,
+    )
+
+
+async def test_effective_time_validation_covers_activation_and_deferred_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject missing activation and deferred assignments that disagree with event timing.
+
+    Given: A captured bundle and prefix rows at or after activation and checkpoint boundaries.
+    When: Effective-time validation evaluates absent activation and deferred flags.
+    Then: Only the non-deferred row at activation passes and every inconsistent case fails.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    bundle = bundle_from_json(record.state_json)
+    prefix = repo._execution_prefix_at(capture._AS_OF)
+    missing_activation = bundle.model_copy(
+        update={"engine_state": bundle.engine_state.model_copy(update={"activation_time": None})}
+    )
+    assert _effective_times_match(record.certificate, missing_activation, prefix) is False
+    activation = bundle.engine_state.activation_time
+    assert activation is not None
+    certificate = replace(record.certificate, deferred_execution_sequences={})
+    early = fixtures._exec_row(fixtures._I1, 1, 0, "buy", 1.0, 100.0, 0.0, "USD")
+    early["timestamp"] = activation
+    prefix["executions"] = [early]
+    assert _effective_times_match(certificate, bundle, prefix) is True
+    deferred = replace(certificate, deferred_execution_sequences={"kraken": (1,)})
+    assert _effective_times_match(deferred, bundle, prefix) is False
+    late = fixtures._exec_row(fixtures._I1, 1, 5, "buy", 1.0, 100.0, 0.0, "USD")
+    late["timestamp"] = certificate.checkpoint_minute + timedelta(minutes=1)
+    prefix["executions"] = [late]
+    assert _effective_times_match(certificate, bundle, prefix) is False
+
+
+async def test_verifier_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preserve cancellation raised by a repository read during verification.
+
+    Given: A valid stored checkpoint and a cancelled prefix-count read.
+    When: Verification awaits that repository read.
+    Then: ``CancelledError`` propagates without conversion to a fallback.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    monkeypatch.setattr(
+        repo,
+        "get_pnl_execution_prefix_counts",
+        AsyncMock(side_effect=asyncio.CancelledError),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await verify_checkpoint_for_resume(
+            repo,
+            record,
+            _scope(request),
+            _RESUMING_AS_OF,
+            _eligibility(request),
+        )
+
+
+async def test_verifier_converts_unexpected_error_and_exposes_single_late_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Convert unexpected verify exceptions to closed refusals and avoid duplicate late flag.
+
+    Given: A verification repository call raising RuntimeError.
+    When: ``verify_checkpoint_for_resume`` runs, and ``PnlCheckpointResumeEligibility`` is inspected.
+    Then: Verification returns ``checkpoint_verify_error`` with ``delete_required=False``,
+        ``has_late_execution`` is absent from eligibility, and ``service_resume_fallback``
+        resolves closed service reasons uniformly.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    monkeypatch.setattr(
+        repo,
+        "get_pnl_execution_prefix_counts",
+        AsyncMock(side_effect=RuntimeError("db timeout")),
+    )
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert outcome == PnlCheckpointFallback("checkpoint_verify_error", delete_required=False)
+    assert not hasattr(PnlCheckpointResumeEligibility, "has_late_execution")
+    assert service_resume_fallback("checkpoint_late_execution") == PnlCheckpointFallback(
+        "checkpoint_late_execution",
+        delete_required=True,
+    )
+    assert service_resume_fallback("checkpoint_ineligible") == PnlCheckpointFallback(
+        "checkpoint_ineligible",
+        delete_required=False,
+    )
+    assert service_resume_fallback(
+        "checkpoint_verification_horizon_mismatch"
+    ) == PnlCheckpointFallback(
+        "checkpoint_verification_horizon_mismatch",
+        delete_required=False,
+    )
+    assert service_resume_fallback("unknown_code") == PnlCheckpointFallback(
+        "checkpoint_payload_corrupt",
+        delete_required=True,
+    )
 
 
 async def test_mutated_execution_chain_tip_returns_fallback_with_delete(
@@ -719,3 +889,96 @@ async def test_newer_suffix_witness_does_not_change_certified_prefix(
         _eligibility(request),
     )
     assert isinstance(outcome, PnlCheckpointResume)
+
+
+@pytest.mark.parametrize("legacy_version", [2, 3])
+async def test_legacy_bundle_version_payload_refused_with_checkpoint_bundle_version(
+    monkeypatch: pytest.MonkeyPatch,
+    legacy_version: int,
+) -> None:
+    """Refuse legacy bundle_version 2 and 3 payloads with ``checkpoint_bundle_version``.
+
+    Given: A valid captured checkpoint whose serialized payload is downgraded to
+        ``bundle_version=2`` or ``bundle_version=3``.
+    When: ``verify_checkpoint_for_resume`` verifies the record.
+    Then: It refuses with ``checkpoint_bundle_version`` and ``delete_required=True``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        legacy_version: Downgraded bundle schema version under test.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    payload = cast(dict[str, object], json.loads(record.state_json))
+    payload["bundle_version"] = legacy_version
+    legacy = replace(record, state_json=json.dumps(payload))
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        legacy,
+        _scope(request),
+        _RESUMING_AS_OF,
+        _eligibility(request),
+    )
+    assert outcome == PnlCheckpointFallback("checkpoint_bundle_version", delete_required=True)
+
+
+@pytest.mark.parametrize("offset_seconds", [-30, 30])
+async def test_verifier_refuses_subminute_from_time_before_service_window_check(
+    monkeypatch: pytest.MonkeyPatch,
+    offset_seconds: int,
+) -> None:
+    """Refuse ``from_time`` in the same floored minute as ``C`` before series replay runs.
+
+    Given: A valid captured checkpoint at ``C`` and a requested window starting at
+        ``C - 30s`` or ``C + 30s``.
+    When: ``verify_checkpoint_for_resume`` verifies eligibility and the dispatch decision
+        feeds ``build_wallet_pnl_series``.
+    Then: Verification refuses with ``checkpoint_ineligible`` without deleting, so
+        neither ``C - 30s`` nor ``C + 30s`` crashes and the series equals cold replay.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        offset_seconds: Sub-minute offset relative to ``C``.
+    """
+    record, request, repo = await _valid_capture(monkeypatch)
+    from_time = record.certificate.checkpoint_minute + timedelta(seconds=offset_seconds)
+    eligibility = replace(_eligibility(request), from_time=from_time)
+    outcome = await verify_checkpoint_for_resume(
+        repo,
+        record,
+        _scope(request),
+        _RESUMING_AS_OF,
+        eligibility,
+    )
+    assert outcome == PnlCheckpointFallback("checkpoint_ineligible", delete_required=False)
+    options = PnlSeriesReplayOptions(
+        pointwise_exact_fx=True,
+        replay_generation_tip=eligibility.frontier_tip,
+        frozen_execution_watermarks=dict(request.raw_execution_watermarks),
+        frozen_execution_manifest_digest=request.execution_manifest_digest,
+        checkpoint_resume=outcome if isinstance(outcome, PnlCheckpointResume) else None,
+    )
+    dispatched = await build_wallet_pnl_series(
+        repo,
+        fixtures._W1,
+        "live",
+        from_time,
+        eligibility.frontier_tip,
+        "1m",
+        _RESUMING_AS_OF,
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=options,
+    )
+    cold = await build_wallet_pnl_series(
+        repo,
+        fixtures._W1,
+        "live",
+        from_time,
+        eligibility.frontier_tip,
+        "1m",
+        _RESUMING_AS_OF,
+        "USD",
+        policy=PnlSeriesReadPolicy(allow_anchor_creation=False),
+        options=replace(options, checkpoint_resume=None),
+    )
+    checkpoint_fixtures._assert_points_bit_identical(cold.points, dispatched.points)

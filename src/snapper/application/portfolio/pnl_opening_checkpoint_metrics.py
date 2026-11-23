@@ -1,7 +1,11 @@
 """Process-local counters and summary logging for durable opening-checkpoint dispatch."""
 
+import hashlib
+import hmac
 import logging
+import os
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Final
@@ -10,6 +14,9 @@ from typing import Protocol
 
 CHECKPOINT_SUMMARY_EVERY_TICKS: Final[int] = 10
 """Number of active snapshotter ticks between per-scope checkpoint summary logs."""
+
+_WALLET_ALIAS_KEY: Final[bytes] = os.urandom(32)
+"""Process-local secret key used for keyed wallet-id aliases in logs and metrics."""
 
 type PnlCheckpointRecaptureTrigger = Literal[
     "absent",
@@ -20,8 +27,47 @@ type PnlCheckpointRecaptureTrigger = Literal[
     "suffix_size",
 ]
 
+type PnlCheckpointShadowSkipReason = Literal["window_mismatch"]
+"""Closed vocabulary for skipped checkpoint shadow comparisons."""
+
 type PnlCheckpointScopeKey = tuple[str, str, str]
-"""Process-local scope identity ``(wallet_public_id, mode, valuation_ccy)``."""
+"""Process-local aliased scope identity ``(wallet_alias, mode, valuation_ccy)``."""
+
+
+def checkpoint_wallet_alias(wallet_public_id: str) -> str:
+    """Return a deterministic process-local keyed HMAC alias for a wallet id.
+
+    Args:
+        wallet_public_id: Raw wallet identifier from configuration or scope state.
+
+    Returns:
+        16-character hexadecimal keyed HMAC digest safe for logs and metric labels.
+    """
+    return hmac.new(
+        _WALLET_ALIAS_KEY,
+        wallet_public_id.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:16]
+
+
+def checkpoint_scope_key(
+    scope: PnlCheckpointScope | PnlCheckpointScopeKey,
+) -> PnlCheckpointScopeKey:
+    """Resolve one scope object or raw key tuple into an aliased metrics key.
+
+    Args:
+        scope: Protocol scope instance or ``(wallet_public_id, mode, valuation_ccy)`` tuple.
+
+    Returns:
+        Aliased ``(wallet_alias, mode, valuation_ccy)`` scope key.
+    """
+    if isinstance(scope, tuple):
+        return (checkpoint_wallet_alias(scope[0]), scope[1], scope[2])
+    return (
+        checkpoint_wallet_alias(scope.wallet_public_id),
+        scope.mode,
+        scope.valuation_ccy,
+    )
 
 
 class PnlCheckpointScope(Protocol):
@@ -64,6 +110,7 @@ class PnlCheckpointMetrics:
     invalidations_deleted: int = 0
     shadow_comparisons: int = 0
     shadow_mismatches: int = 0
+    shadow_skipped: dict[str, int] = field(default_factory=dict)
     recaptures: dict[PnlCheckpointRecaptureTrigger, int] = field(default_factory=dict)
 
 
@@ -82,6 +129,7 @@ def _snapshot(metrics: PnlCheckpointMetrics) -> PnlCheckpointMetrics:
         invalidations_deleted=metrics.invalidations_deleted,
         shadow_comparisons=metrics.shadow_comparisons,
         shadow_mismatches=metrics.shadow_mismatches,
+        shadow_skipped=dict(metrics.shadow_skipped),
         recaptures=dict(metrics.recaptures),
     )
 
@@ -92,11 +140,7 @@ def _targets(
     """Return the global bucket and, when ``scope`` is given, the matching scope bucket."""
     if scope is None:
         return (_METRICS,)
-    key = (
-        scope
-        if isinstance(scope, tuple)
-        else (scope.wallet_public_id, scope.mode, scope.valuation_ccy)
-    )
+    key = checkpoint_scope_key(scope)
     scoped = _SCOPE_METRICS.get(key)
     if scoped is None:
         scoped = PnlCheckpointMetrics()
@@ -117,10 +161,26 @@ def checkpoint_metrics_by_scope() -> dict[PnlCheckpointScopeKey, PnlCheckpointMe
     """Return detached per-scope checkpoint counter snapshots sorted by scope key.
 
     Returns:
-        Mapping from ``(wallet_public_id, mode, valuation_ccy)`` to detached
+        Mapping from aliased ``(wallet_alias, mode, valuation_ccy)`` to detached
         cumulative metrics for each observed scope.
     """
     return {key: _snapshot(_SCOPE_METRICS[key]) for key in sorted(_SCOPE_METRICS)}
+
+
+def prune_checkpoint_metrics(active_wallets: AbstractSet[str]) -> int:
+    """Drop per-scope metrics entries whose wallet is absent from active wallets.
+
+    Args:
+        active_wallets: Currently scheduled raw wallet identifiers for this tick.
+
+    Returns:
+        Number of disappeared scope buckets pruned from memory.
+    """
+    active_aliases = {checkpoint_wallet_alias(wallet) for wallet in active_wallets}
+    stale = [key for key in _SCOPE_METRICS if key[0] not in active_aliases]
+    for key in stale:
+        del _SCOPE_METRICS[key]
+    return len(stale)
 
 
 def reset_checkpoint_metrics() -> None:
@@ -133,6 +193,7 @@ def reset_checkpoint_metrics() -> None:
     _METRICS.invalidations_deleted = 0
     _METRICS.shadow_comparisons = 0
     _METRICS.shadow_mismatches = 0
+    _METRICS.shadow_skipped.clear()
     _METRICS.recaptures.clear()
     _SCOPE_METRICS.clear()
 
@@ -257,23 +318,37 @@ def _format_reason_counts[ReasonT: str](counts: Mapping[ReasonT, int]) -> str:
     return f"{{{entries}}}"
 
 
+def record_checkpoint_shadow_skipped(
+    reason: PnlCheckpointShadowSkipReason,
+    scope: PnlCheckpointScope | PnlCheckpointScopeKey | None = None,
+) -> None:
+    """Count one skipped shadow comparison by closed reason code.
+
+    Args:
+        reason: Closed skip reason token (for example ``"window_mismatch"``).
+        scope: Optional scope owning the skipped comparison.
+    """
+    for target in _targets(scope):
+        target.shadow_skipped[reason] = target.shadow_skipped.get(reason, 0) + 1
+
+
 def format_checkpoint_metrics_summary(
-    scope: PnlCheckpointScopeKey,
+    scope: PnlCheckpointScope | PnlCheckpointScopeKey,
     metrics: PnlCheckpointMetrics,
 ) -> str:
     """Format one deterministic ``checkpoint_metrics_summary`` line for a scope.
 
     Args:
-        scope: Scope tuple ``(wallet_public_id, mode, valuation_ccy)``.
+        scope: Protocol scope or aliased scope tuple ``(wallet_alias, mode, valuation_ccy)``.
         metrics: Cumulative counters for that scope.
 
     Returns:
         Single-line log string starting with ``checkpoint_metrics_summary``.
     """
-    wallet, mode, ccy = scope
+    wallet_alias, mode, ccy = scope if isinstance(scope, tuple) else checkpoint_scope_key(scope)
     return (
         f"checkpoint_metrics_summary "
-        f"wallet={wallet} "
+        f"wallet={wallet_alias} "
         f"mode={mode} "
         f"ccy={ccy} "
         f"captures_committed={metrics.captures_committed} "
@@ -284,6 +359,7 @@ def format_checkpoint_metrics_summary(
         f"invalidations_deleted={metrics.invalidations_deleted} "
         f"shadow_comparisons={metrics.shadow_comparisons} "
         f"shadow_mismatches={metrics.shadow_mismatches} "
+        f"shadow_skipped={_format_reason_counts(metrics.shadow_skipped)} "
         f"recaptures={_format_reason_counts(metrics.recaptures)}"
     )
 
@@ -300,7 +376,7 @@ def emit_checkpoint_metrics_summary(target_logger: logging.Logger) -> None:
             format_checkpoint_metrics_summary(scope, metrics),
             extra={
                 "checkpoint_metrics_summary": True,
-                "wallet_public_id": scope[0],
+                "wallet_alias": scope[0],
                 "mode": scope[1],
                 "valuation_ccy": scope[2],
             },

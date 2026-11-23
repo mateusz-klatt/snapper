@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from snapper.application.portfolio import pnl_conversion_mark_evidence as conversion
 from snapper.application.portfolio import pnl_timeline_service as service
 from snapper.application.portfolio.fx_rates import currency_pair_key
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointFallback
@@ -23,6 +22,7 @@ from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
 )
 from snapper.application.portfolio.pnl_timeline import TimelineAccrual
 from snapper.application.portfolio.pnl_timeline import TimelineExecution
+from snapper.core.numeric import is_exact_zero
 from snapper.core.numeric import is_positive_finite
 from snapper.data.pnl_correction_state import IdAggregate
 from snapper.data.pnl_correction_state import PnlOpeningCheckpointRecord
@@ -86,7 +86,7 @@ def _execution_conversions(
     result: set[_Requirement] = set()
     minute = row["timestamp"].replace(second=0, microsecond=0)
     currencies = []
-    if math.isfinite(row["fee"]) and row["fee"] != 0.0:
+    if math.isfinite(row["fee"]) and not is_exact_zero(row["fee"]):
         currencies.append(row["fee_asset"])
     if price_currency is not None and is_positive_finite(row["price"]):
         currencies.append(price_currency)
@@ -108,8 +108,8 @@ def _install_requirement_spies(
         log: Mutable per-build requirement log.
     """
     original_fx = service._load_wallet_series_fx
-    original_execution = conversion._execution_with_conversion_mark_evidence
-    original_accrual = conversion._accrual_with_conversion_mark_evidence
+    original_execution = service._execution_with_conversion_mark_evidence
+    original_accrual = service._accrual_with_conversion_mark_evidence
 
     async def spy_fx(
         repo: Repository,
@@ -130,6 +130,7 @@ def _install_requirement_spies(
         """
         log.marks.append(_flatten_requirements(dict(request.mark_requirements)))
         log.events.append(_flatten_requirements(dict(request.event_requirements)))
+        log.conversions.append(set())
         return await original_fx(repo, request, options, policy)
 
     def spy_execution(
@@ -172,7 +173,7 @@ def _install_requirement_spies(
             The real mapper's accrual.
         """
         minute = row["accrued_at"].replace(second=0, microsecond=0)
-        if math.isfinite(row["amount"]) and row["amount"] != 0.0:
+        if math.isfinite(row["amount"]) and not is_exact_zero(row["amount"]):
             currency = row["amount_asset"]
             if currency != valuation_ccy:
                 pair = currency_pair_key(currency, valuation_ccy)
@@ -180,8 +181,8 @@ def _install_requirement_spies(
         return original_accrual(converted, row, requirements, valuation_ccy)
 
     monkeypatch.setattr(service, "_load_wallet_series_fx", spy_fx)
-    monkeypatch.setattr(conversion, "_execution_with_conversion_mark_evidence", spy_execution)
-    monkeypatch.setattr(conversion, "_accrual_with_conversion_mark_evidence", spy_accrual)
+    monkeypatch.setattr(service, "_execution_with_conversion_mark_evidence", spy_execution)
+    monkeypatch.setattr(service, "_accrual_with_conversion_mark_evidence", spy_accrual)
 
 
 def _restricted(requirements: set[_Requirement], tip: datetime) -> set[_Requirement]:
@@ -214,7 +215,6 @@ async def _read_width(
     Returns:
         The completed wallet series result.
     """
-    log.conversions.append(set())
     tip = resume_fixtures._C + timedelta(minutes=width)
     options = replace(
         resume_fixtures._resume_options(resume),
@@ -252,16 +252,23 @@ async def test_width_and_requirement_sets_match_anchor_replay(
         monkeypatch: Pytest monkeypatch fixture.
         width: Chunk width in minutes.
     """
+    tip = resume_fixtures._C + timedelta(minutes=width)
     repo = resume_fixtures._ResumeRepo()
-    resume = await resume_fixtures._verified_resume(monkeypatch, repo)
+    resume = await resume_fixtures._verified_resume(
+        monkeypatch,
+        repo,
+        as_of=tip + timedelta(minutes=1),
+    )
     log = _RequirementLog()
     _install_requirement_spies(monkeypatch, log)
-    tip = resume_fixtures._C + timedelta(minutes=width)
     anchor = await _read_width(resume_fixtures._ResumeRepo(), None, width, log)
     resumed = await _read_width(repo, resume, width, log)
     checkpoint_fixtures._assert_points_bit_identical(anchor.points, resumed.points)
     assert log.marks == [_restricted(log.marks[0], tip), _restricted(log.marks[0], tip)]
     assert _restricted(log.events[1], tip) == _restricted(log.events[0], tip)
+    assert (fixtures._I1, "EUR", "USD", fixtures._m(5)) in log.conversions[0]
+    if width >= 7:
+        assert (fixtures._I1, "EUR", "USD", fixtures._m(6)) in log.conversions[0]
     assert log.conversions[1] == log.conversions[0]
     repo._assert_no_prefix_read()
     assert repo.resume_accrual_bounds == [(resume_fixtures._C, tip)]
@@ -602,3 +609,35 @@ async def test_resume_mark_requirements_seeds_last_effective_from_checkpoint(
     expected_cursor = dict(service.resume_engine_opening(resume).last_effective_by_pool)
     assert (fixtures._I2, repo._executions[1]["shard_key"]) in expected_cursor
     assert seen_initial == [expected_cursor]
+
+
+async def test_requirement_spies_catch_missing_conversion_in_negative_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prove conversion spies detect an omitted suffix conversion via negative control.
+
+    Given: An anchor replay with EUR fee/accrual conversions and a mutated suffix
+        execution that removes its EUR fee conversion on resume.
+    When: ``_install_requirement_spies`` records both reads.
+    Then: Both logs are non-empty and ``log.conversions[1] != log.conversions[0]``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+    """
+    repo = resume_fixtures._ResumeRepo()
+    resume = await resume_fixtures._verified_resume(
+        monkeypatch,
+        repo,
+        as_of=resume_fixtures._C + timedelta(minutes=8),
+    )
+    log = _RequirementLog()
+    _install_requirement_spies(monkeypatch, log)
+    await _read_width(repo, None, 7, log)
+    repo._executions[1]["fee"] = 0.0
+    await _read_width(repo, resume, 7, log)
+    assert log.conversions[0] == {
+        (fixtures._I1, "EUR", "USD", fixtures._m(5)),
+        (fixtures._I1, "EUR", "USD", fixtures._m(6)),
+    }
+    assert log.conversions[1] == {(fixtures._I1, "EUR", "USD", fixtures._m(6))}
+    assert log.conversions[1] != log.conversions[0]

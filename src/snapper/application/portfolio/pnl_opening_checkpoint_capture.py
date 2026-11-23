@@ -26,9 +26,16 @@ from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlEvent
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlFxRateSourcePayload
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlIdAggregatePayload
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlMarkFxReplayStatePayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlPrefixFxCoveragePayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlPrefixFxElectionPayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlPrefixRefBindingPayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlRefBindingPayload
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_to_json
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     event_fx_exchanges_digest,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    partition_execution_watermarks,
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import prefix_annulment_digest
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import prefix_lineage_digest
@@ -61,6 +68,9 @@ class _EventFxEvidence(Protocol):
     def venues_at(self, instrument_public_id: str, minute: datetime) -> FxVenueMap:
         """Return the venue pins for one instrument and exact event minute."""
 
+    def has_usable_rate(self, plane: PnlFxRatePlane, minute: datetime) -> bool:
+        """Return whether ``plane`` carries a positive finite close at ``minute``."""
+
 
 def event_rate_source_payloads(
     requirements: Mapping[str, Mapping[tuple[str, str], set[datetime]]],
@@ -71,7 +81,7 @@ def event_rate_source_payloads(
 
     Args:
         requirements: Event-only minutes grouped by instrument and pair.
-        evidence: Per-minute venue pins and the planes with usable evidence.
+        evidence: Per-minute venue pins, usable rate check, and used planes.
         valuation_ccy: Target series currency.
 
     Returns:
@@ -82,7 +92,11 @@ def event_rate_source_payloads(
         for (first, second), minutes in pair_requirements.items():
             for minute in minutes:
                 plane = evidence.venues_at(instrument_public_id, minute).get((first, second))
-                if plane is None or ((first, second), plane) not in evidence.used_planes:
+                if (
+                    plane is None
+                    or ((first, second), plane) not in evidence.used_planes
+                    or not evidence.has_usable_rate(plane, minute)
+                ):
                     continue
                 payload = PnlFxRateSourcePayload(
                     source_currency=second if first == valuation_ccy else first,
@@ -102,11 +116,100 @@ def event_rate_source_payloads(
     return tuple(sources[key] for key in sorted(sources))
 
 
+def prefix_fx_election_payloads(
+    requirements: Mapping[str, Mapping[tuple[str, str], set[datetime]]],
+    evidence: _EventFxEvidence,
+) -> tuple[PnlPrefixFxElectionPayload, ...]:
+    """Record the exact FX plane elected for every prefix event conversion minute.
+
+    Args:
+        requirements: Prefix event conversion minutes grouped by instrument and pair.
+        evidence: Elected FX venue pins captured for this replay.
+
+    Returns:
+        Canonically sorted per-(instrument, pair, minute) election records.
+    """
+    return tuple(
+        PnlPrefixFxElectionPayload(
+            instrument_public_id=instrument_public_id,
+            pair=pair,
+            minute=minute,
+            elected_plane=evidence.venues_at(instrument_public_id, minute).get(pair),
+        )
+        for instrument_public_id, pair_requirements in sorted(requirements.items())
+        for pair, minutes in sorted(pair_requirements.items())
+        for minute in sorted(minutes)
+    )
+
+
+def prefix_ref_binding_payloads(
+    requirements: Mapping[str, Mapping[tuple[str, str], set[datetime]]],
+    reference_spans: Mapping[str, tuple[datetime, datetime]],
+    trusted_refs: Sequence[InstrumentSymbolRefRow],
+) -> tuple[PnlPrefixRefBindingPayload, ...]:
+    """Record exact trusted symbol-reference bindings for prefix-active instruments.
+
+    Args:
+        requirements: Prefix event conversion requirements grouped by instrument.
+        reference_spans: Prefix execution price-reference spans by instrument.
+        trusted_refs: Trusted symbol references resolved at capture time.
+
+    Returns:
+        Sorted per-instrument binding snapshots covering proven and unproven instruments.
+    """
+    trusted_by_instrument = {ref["instrument_public_id"]: ref for ref in trusted_refs}
+    instrument_ids = sorted(set(requirements) | set(reference_spans))
+    return tuple(
+        PnlPrefixRefBindingPayload(
+            instrument_public_id=instrument_public_id,
+            binding=(
+                PnlRefBindingPayload(
+                    native_symbol=ref["native_symbol"],
+                    exchange=ref["exchange"],
+                    instrument_exchange=ref["instrument_exchange"],
+                    base_currency=ref["base_currency"],
+                    quote_currency=ref["quote_currency"],
+                )
+                if (ref := trusted_by_instrument.get(instrument_public_id)) is not None
+                and ref["quote_currency"] is not None
+                else None
+            ),
+        )
+        for instrument_public_id in instrument_ids
+    )
+
+
+def prefix_fx_coverage_payloads(
+    coverage_by_plane: Mapping[PnlFxRatePlane, set[datetime]],
+) -> tuple[PnlPrefixFxCoveragePayload, ...]:
+    """Encode usable per-plane FX coverage minutes observed at capture.
+
+    Args:
+        coverage_by_plane: Usable published minutes keyed by oriented FX plane.
+
+    Returns:
+        Canonically sorted coverage entries excluding empty minute sets.
+    """
+    return tuple(
+        PnlPrefixFxCoveragePayload(
+            base=plane[0],
+            quote=plane[1],
+            exchange=plane[2],
+            minutes=tuple(sorted(minutes)),
+        )
+        for plane, minutes in sorted(coverage_by_plane.items())
+        if minutes
+    )
+
+
 type PnlCheckpointCaptureRefusal = Literal[
     "capture_value_error",
     "capture_not_permitted",
     "capture_not_at_tip",
     "capture_execution_chain_error",
+    "capture_write_failed",
+    "capture_upsert_failed",
+    "capture_recapture_budget_exceeded",
     "global_withhold",
     "engine_checkpoint_missing",
     "carried_event_inputs",
@@ -162,6 +265,9 @@ class PnlCheckpointCaptureAssembly:
     price_ref_spans_by_instrument: Mapping[str, tuple[datetime, datetime]]
     display_activity_spans_by_instrument: Mapping[str, tuple[datetime, datetime]]
     rate_sources_prefix: tuple[PnlFxRateSourcePayload, ...]
+    prefix_fx_elections: tuple[PnlPrefixFxElectionPayload, ...]
+    prefix_ref_bindings: tuple[PnlPrefixRefBindingPayload, ...]
+    prefix_fx_coverage: tuple[PnlPrefixFxCoveragePayload, ...]
 
 
 @dataclass(frozen=True)
@@ -492,6 +598,9 @@ class PnlCheckpointCaptureRequest:
                 )
                 for plane, aggregate in sorted(by_plane.items())
             ),
+            prefix_fx_elections=assembly.prefix_fx_elections,
+            prefix_ref_bindings=assembly.prefix_ref_bindings,
+            prefix_fx_coverage=assembly.prefix_fx_coverage,
         )
         return PnlOpeningCheckpointWrite(certificate=certificate, state_json=bundle_to_json(bundle))
 
@@ -592,6 +701,8 @@ class PnlCheckpointCaptureFinalization:
     checkpoint_minute: datetime
     as_of: datetime
     timeline_calc_version: str
+    trusted_refs: Sequence[InstrumentSymbolRefRow] = ()
+    coverage_by_plane: Mapping[PnlFxRatePlane, set[datetime]] = field(default_factory=dict)
 
 
 def capture_checkpoint_write(
@@ -615,6 +726,7 @@ def capture_checkpoint_write(
     engine_state = final.result.closing_checkpoint
     if engine_state is None:
         return None, final.result.closing_checkpoint_refusal or "engine_checkpoint_missing"
+    reference_spans = price_ref_spans(final.reference_execution_rows)
     try:
         write = request.assemble(
             PnlCheckpointCaptureAssembly(
@@ -622,16 +734,26 @@ def capture_checkpoint_write(
                 checkpoint_minute=final.checkpoint_minute,
                 as_of=final.as_of,
                 engine_state=engine_state,
-                price_ref_spans_by_instrument=price_ref_spans(final.reference_execution_rows),
+                price_ref_spans_by_instrument=reference_spans,
                 display_activity_spans_by_instrument=final.display_activity_spans,
                 rate_sources_prefix=event_rate_source_payloads(
                     final.event_requirements,
                     final.fx_evidence,
                     final.valuation_ccy,
                 ),
+                prefix_fx_elections=prefix_fx_election_payloads(
+                    final.event_requirements,
+                    final.fx_evidence,
+                ),
+                prefix_ref_bindings=prefix_ref_binding_payloads(
+                    final.event_requirements,
+                    reference_spans,
+                    final.trusted_refs,
+                ),
+                prefix_fx_coverage=prefix_fx_coverage_payloads(final.coverage_by_plane),
             )
         )
-    except ValueError:
+    except (ValueError, TypeError, KeyError):
         return None, "capture_value_error"
     return write, None
 
@@ -690,14 +812,7 @@ def _execution_watermark_partitions(
     Returns:
         Applied maximum watermarks and sorted deferred sequences by exchange.
     """
-    deferred_set = set(engine_state.deferred_execution_keys)
-    applied: dict[str, int] = {}
-    deferred: dict[str, list[int]] = {}
-    for row in prefix["executions"]:
-        exchange = row["exchange"]
-        sequence = row["scope_sequence"]
-        if (exchange, sequence) in deferred_set:
-            deferred.setdefault(exchange, []).append(sequence)
-        else:
-            applied[exchange] = max(applied.get(exchange, 0), sequence)
-    return applied, {exchange: tuple(sequences) for exchange, sequences in sorted(deferred.items())}
+    return partition_execution_watermarks(
+        prefix["executions"],
+        engine_state.deferred_execution_keys,
+    )

@@ -51,7 +51,6 @@ dropped.
 """
 
 import asyncio
-import hashlib
 import json
 import math
 from bisect import bisect_left
@@ -138,6 +137,7 @@ from snapper.application.portfolio.pnl_fx_replay_state import _FxInstrumentRequi
 from snapper.application.portfolio.pnl_fx_replay_state import _FxMinuteRequirements
 from snapper.application.portfolio.pnl_fx_replay_state import _MarkReplayState
 from snapper.application.portfolio.pnl_fx_replay_state import _PoolKey
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlCheckpointStateBundle
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlMarkFxReplayStatePayload
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import event_walk_state_from_replay
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import event_walk_state_to_replay
@@ -149,11 +149,17 @@ from snapper.application.portfolio.pnl_opening_checkpoint_capture import (
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import PnlCheckpointCaptureRequest
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import _AccrualPrefixRequest
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import capture_checkpoint_write
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    execution_manifest_digest,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_resume import PnlCheckpointSuffixBounds
 from snapper.application.portfolio.pnl_opening_checkpoint_resume import has_late_resume_execution
 from snapper.application.portfolio.pnl_opening_checkpoint_resume import load_checkpoint_suffix
 from snapper.application.portfolio.pnl_opening_checkpoint_resume import merge_resume_spans
 from snapper.application.portfolio.pnl_opening_checkpoint_resume import resume_engine_opening
+from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
+    PnlCheckpointFallbackReason,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointResume
 from snapper.application.portfolio.pnl_read_timing import pnl_read_core
 from snapper.application.portfolio.pnl_read_timing import pnl_read_count
@@ -745,8 +751,17 @@ class _SeriesMarketRefs:
     untrusted_price_reasons_by_instrument: dict[str, set[PnlIncompletenessReason]]
 
 
-class _CheckpointLateExecutionError(Exception):
-    """Internal signal requesting an anchor replay after a late resumed row."""
+class _CheckpointResumeFallbackError(Exception):
+    """Internal signal requesting an anchor replay after a resume soundness fallback."""
+
+    def __init__(self, reason: PnlCheckpointFallbackReason) -> None:
+        """Bind the closed resume fallback reason to emit on anchor replay.
+
+        Args:
+            reason: Closed fallback reason explaining why resume cannot serve the suffix.
+        """
+        super().__init__(reason)
+        self.reason: PnlCheckpointFallbackReason = reason
 
 
 class PnlAnchorEvidenceError(ValueError):
@@ -1689,9 +1704,7 @@ def _applied_annulment_identity(
 
 def _execution_manifest_digest(annulments: Sequence[PnlTimelineAppliedAnnulment]) -> str:
     """Hash all certified correction identities in canonical order, including an empty set."""
-    identities = sorted(_applied_annulment_identity(annulment) for annulment in annulments)
-    canonical = json.dumps(identities, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    return execution_manifest_digest(annulments)
 
 
 async def _new_annulments_inside_replay_cut(
@@ -3724,11 +3737,57 @@ def _capture_mark_walk_state(request: _MarkCarryRequest) -> PnlMarkFxReplayState
     return mark_walk_state_from_replay(states, regression_shadows)
 
 
+def _conversion_only_fx_requirements(
+    event: _FxInstrumentRequirements,
+    causal: _FxInstrumentRequirements,
+) -> _FxInstrumentRequirements:
+    """Return stateless conversion minutes absent from the causal event-FX walk.
+
+    Args:
+        event: Complete event FX requirements computed for the prefix window.
+        causal: Causal event FX requirements tracked by ``_replay_event_fx_state``.
+
+    Returns:
+        Per-instrument conversion-only minutes that suffix replay must preserve.
+    """
+    result: _FxInstrumentRequirements = {}
+    for instrument_public_id, pair_requirements in event.items():
+        causal_pairs = causal.get(instrument_public_id, {})
+        for pair, minutes in pair_requirements.items():
+            extra = minutes - causal_pairs.get(pair, set())
+            if extra:
+                result.setdefault(instrument_public_id, {})[pair] = set(extra)
+    return result
+
+
+def _has_fx_minute_after(
+    requirements: _FxInstrumentRequirements,
+    checkpoint_minute: datetime,
+) -> bool:
+    """Return whether any FX minute requires a candle opening after the checkpoint.
+
+    Args:
+        requirements: Event FX requirements grouped by instrument, pair, and minute.
+        checkpoint_minute: Inclusive certificate ceiling for ``open_at`` queries.
+
+    Returns:
+        ``True`` when at least one required minute has ``open_at > checkpoint_minute``.
+    """
+    cutoff_minute = checkpoint_minute + timedelta(minutes=1)
+    return any(
+        minute > cutoff_minute
+        for pairs in requirements.values()
+        for minutes in pairs.values()
+        for minute in minutes
+    )
+
+
 def _capture_walk_states(
     options: PnlSeriesReplayOptions,
     replay: _SeriesReplayInputs,
     trusted_replayed_rows: Sequence[PnlTimelineOpeningExecutionRow],
     mark_request: _MarkCarryRequest,
+    event: _FxInstrumentRequirements,
 ) -> None:
     """Capture real event and mark walk states without changing ordinary replay.
 
@@ -3737,9 +3796,13 @@ def _capture_walk_states(
         replay: Loaded accounting evidence for the current prefix.
         trusted_replayed_rows: Event rows with trusted denomination evidence.
         mark_request: Complete mark replay inputs and bounds.
+        event: Complete prefix event FX requirements including stateless conversions.
     """
     request = options.checkpoint_capture
     if request is None or not request.active:
+        return
+    if _has_fx_minute_after(event, mark_request.to_time):
+        request.refuse_value_error()
         return
     try:
         event_state = _replay_event_fx_state(
@@ -3747,6 +3810,10 @@ def _capture_walk_states(
             replay.accrual_rows,
             mark_request.fx_context,
             mark_request.opening,
+        )
+        event_state.conversion_requirements = _conversion_only_fx_requirements(
+            event,
+            event_state.requirements,
         )
         request.set_walk_states(
             event_walk_state_from_replay(event_state),
@@ -3762,7 +3829,7 @@ def _resume_event_requirements(
     trusted_replayed_rows: Sequence[PnlTimelineOpeningExecutionRow],
     request: _MarkCarryRequest,
 ) -> _FxInstrumentRequirements:
-    """Walk only suffix event inputs from the verified carried event state."""
+    """Walk suffix event inputs, add suffix conversions, and merge carried prefix conversions."""
     state = event_walk_state_to_replay(resume.bundle.event_walk_state)
     event_requirements = _replay_event_fx_state(
         trusted_replayed_rows,
@@ -3770,7 +3837,10 @@ def _resume_event_requirements(
         request.fx_context,
         initial_state=state,
     ).requirements
-    return _with_conversion_fx_minutes(event_requirements, replay, request.fx_context)
+    return _merge_instrument_fx_minutes(
+        _with_conversion_fx_minutes(event_requirements, replay, request.fx_context),
+        state.conversion_requirements,
+    )
 
 
 def _resume_mark_requirements(
@@ -3855,6 +3925,129 @@ def _series_requirements_for_replay(
     return mark, event
 
 
+@dataclass(frozen=True, slots=True)
+class _ResumeFxElectionInputs:
+    """Complete suffix election evidence checked against captured prefix elections."""
+
+    event_requirements: Mapping[str, _FxMinuteRequirements]
+    mark_requirements: Mapping[str, _FxMinuteRequirements]
+    fx_evidence: _SeriesFxEvidence
+    trusted_refs: Sequence[InstrumentSymbolRefRow]
+    identity_planes: Mapping[str, PnlFxRatePlane]
+    valuation_ccy: str
+    pointwise_exact_fx: bool
+
+
+def _ref_binding_tuple(ref: InstrumentSymbolRefRow) -> tuple[str, str, str, str, str] | None:
+    """Project one symbol reference row into its canonical denomination binding."""
+    quote_currency = ref["quote_currency"]
+    if quote_currency is None:
+        return None
+    return (
+        ref["native_symbol"],
+        ref["exchange"],
+        ref["instrument_exchange"],
+        ref["base_currency"],
+        quote_currency,
+    )
+
+
+def _validate_prefix_ref_bindings(
+    bundle: PnlCheckpointStateBundle,
+    trusted_refs: Sequence[InstrumentSymbolRefRow],
+) -> None:
+    """Refuse resume if any prefix-active instrument's trusted ref binding changed."""
+    actual_by_instrument = {
+        ref["instrument_public_id"]: _ref_binding_tuple(ref) for ref in trusted_refs
+    }
+    for entry in bundle.prefix_ref_bindings:
+        expected = (
+            None
+            if entry.binding is None
+            else (
+                entry.binding.native_symbol,
+                entry.binding.exchange,
+                entry.binding.instrument_exchange,
+                entry.binding.base_currency,
+                entry.binding.quote_currency,
+            )
+        )
+        if actual_by_instrument.get(entry.instrument_public_id) != expected:
+            raise _CheckpointResumeFallbackError("checkpoint_fx_election_changed")
+
+
+def _window_elected_venues_with_prefix_coverage(
+    bundle: PnlCheckpointStateBundle,
+    inputs: _ResumeFxElectionInputs,
+) -> _FxPlanesByInstrument:
+    """Re-run window-wide FX election over unioned prefix coverage and suffix loads."""
+    observed: dict[PnlFxRatePlane, set[datetime]] = {
+        plane: set(minutes) for plane, minutes in inputs.fx_evidence.coverage_by_plane.items()
+    }
+    for cov in bundle.prefix_fx_coverage:
+        observed.setdefault((cov.base, cov.quote, cov.exchange), set()).update(cov.minutes)
+    exact = _merge_instrument_fx_minutes(inputs.mark_requirements, inputs.event_requirements)
+    general = _general_fx_minutes(exact, inputs.identity_planes)
+    general_events = _general_fx_minutes(inputs.event_requirements, inputs.identity_planes)
+    candidate_planes = _candidate_planes(list(observed), inputs.identity_planes)
+    shared = _resolve_fx_planes_from_observations(
+        general,
+        candidate_planes,
+        observed,
+        inputs.valuation_ccy,
+        general_events,
+    )
+    resolved_identity = _resolve_identity_fx_planes_from_observations(
+        exact,
+        inputs.identity_planes,
+        observed,
+        inputs.event_requirements,
+    )
+    return _fx_planes_by_instrument(exact, shared, inputs.identity_planes, resolved_identity)
+
+
+def _validate_resume_fx_election(
+    resume: PnlCheckpointResume | None,
+    inputs: _ResumeFxElectionInputs,
+) -> None:
+    """Refuse resume whenever any prefix conversion's FX election or ref binding diverges.
+
+    Executes after FX loading runs the active election function over the merged
+    prefix-plus-suffix requirement sets and compares every prefix consumer-minute
+    election and trusted ref binding against what capture actually recorded. This
+    general invariant subsumes unproven opening-pool checks, span-reclassification
+    switches, and shared-plane moves across peers.
+
+    Args:
+        resume: Verified checkpoint resume state, or ``None`` on cold/anchor replay.
+        inputs: Resumed election results, requirements, and resolved market references.
+
+    Raises:
+        _CheckpointResumeFallbackError: With ``"checkpoint_fx_election_changed"`` when any
+            prefix conversion's elected plane or instrument ref binding changed.
+    """
+    if resume is None:
+        return
+    _validate_prefix_ref_bindings(resume.bundle, inputs.trusted_refs)
+    window_venues = (
+        None
+        if inputs.pointwise_exact_fx
+        else _window_elected_venues_with_prefix_coverage(resume.bundle, inputs)
+    )
+    for entry in resume.bundle.prefix_fx_elections:
+        actual = inputs.fx_evidence.venues_at(entry.instrument_public_id, entry.minute).get(
+            entry.pair
+        )
+        if actual != entry.elected_plane:
+            raise _CheckpointResumeFallbackError("checkpoint_fx_election_changed")
+        if (
+            window_venues is not None
+            and window_venues.get(entry.instrument_public_id, {}).get(entry.pair)
+            != entry.elected_plane
+        ):
+            raise _CheckpointResumeFallbackError("checkpoint_fx_election_changed")
+
+
 async def _series_requirement_plan(
     repo: Repository,
     inputs: _SeriesRequirementInput,
@@ -3891,6 +4084,7 @@ async def _series_requirement_plan(
         inputs.replay,
         inputs.trusted_replayed_rows,
         request,
+        event,
     )
     return _SeriesRequirementPlan(mark, event, carry, identity)
 
@@ -4583,19 +4777,14 @@ def _carried_minutes_for_plane(
     return carried
 
 
-def _covered_fx_minutes(
+def _covered_fx_minutes_from_observations(
     requirements: Mapping[FxPairKey, set[datetime]],
-    rows: Sequence[PnlFxRateRow],
+    observed: Mapping[PnlFxRatePlane, set[datetime]],
     bound: timedelta = _FX_CARRY_WINDOW,
 ) -> dict[PnlFxRatePlane, _PlaneCoverage]:
-    """Collect exact and bounded-carry requirement coverage for each plane.
-
-    Carry coverage is what makes a gapped venue electable at all: a conversion
-    minute whose candle is missing leaves every plane at zero exact coverage,
-    and without this the pair would be refused instead of carried.
-    """
+    """Collect exact and bounded-carry requirement coverage from observed plane minutes."""
     covered: dict[PnlFxRatePlane, _PlaneCoverage] = {}
-    for plane, published in _plane_observations(rows).items():
+    for plane, published in observed.items():
         pair = currency_pair_key(plane[0], plane[1])
         required = requirements.get(pair, set())
         exact = published & required
@@ -4607,6 +4796,20 @@ def _covered_fx_minutes(
                 carry_cost=sum(distances.values()),
             )
     return covered
+
+
+def _covered_fx_minutes(
+    requirements: Mapping[FxPairKey, set[datetime]],
+    rows: Sequence[PnlFxRateRow],
+    bound: timedelta = _FX_CARRY_WINDOW,
+) -> dict[PnlFxRatePlane, _PlaneCoverage]:
+    """Collect exact and bounded-carry requirement coverage for each plane.
+
+    Carry coverage is what makes a gapped venue electable at all: a conversion
+    minute whose candle is missing leaves every plane at zero exact coverage,
+    and without this the pair would be refused instead of carried.
+    """
+    return _covered_fx_minutes_from_observations(requirements, _plane_observations(rows), bound)
 
 
 def _plane_rank(
@@ -4779,6 +4982,41 @@ def _event_complete_fx_planes(
     return complete or planes
 
 
+def _resolve_fx_planes_from_observations(
+    requirements: Mapping[FxPairKey, set[datetime]],
+    candidate_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
+    observed: Mapping[PnlFxRatePlane, set[datetime]],
+    valuation_ccy: str,
+    event_requirements: Mapping[FxPairKey, set[datetime]],
+) -> dict[FxPairKey, PnlFxRatePlane]:
+    """Resolve one oriented shared plane per pair from precomputed plane observations."""
+    covered = _covered_fx_minutes_from_observations(requirements, observed)
+    resolved: dict[FxPairKey, PnlFxRatePlane] = {}
+    for pair, minutes in requirements.items():
+        planes = _event_complete_fx_planes(
+            candidate_planes.get(pair, set()),
+            event_requirements.get(pair, set()),
+            covered,
+        )
+        selected = _preferred_fx_plane(
+            pair,
+            minutes,
+            planes,
+            covered,
+            valuation_ccy,
+        )
+        if selected is not None:
+            resolved[pair] = selected
+        _observe_shared_fx_election(
+            pair,
+            candidate_planes.get(pair, set()),
+            covered,
+            event_requirements.get(pair, set()),
+            selected,
+        )
+    return resolved
+
+
 def _resolve_fx_planes(
     requirements: Mapping[FxPairKey, set[datetime]],
     candidate_planes: Mapping[FxPairKey, set[PnlFxRatePlane]],
@@ -4807,31 +5045,13 @@ def _resolve_fx_planes(
     Returns:
         One selected oriented plane for each resolvable unordered pair.
     """
-    covered = _covered_fx_minutes(requirements, rows)
-    resolved: dict[FxPairKey, PnlFxRatePlane] = {}
-    for pair, minutes in requirements.items():
-        planes = _event_complete_fx_planes(
-            candidate_planes.get(pair, set()),
-            event_requirements.get(pair, set()),
-            covered,
-        )
-        selected = _preferred_fx_plane(
-            pair,
-            minutes,
-            planes,
-            covered,
-            valuation_ccy,
-        )
-        if selected is not None:
-            resolved[pair] = selected
-        _observe_shared_fx_election(
-            pair,
-            candidate_planes.get(pair, set()),
-            covered,
-            event_requirements.get(pair, set()),
-            selected,
-        )
-    return resolved
+    return _resolve_fx_planes_from_observations(
+        requirements,
+        candidate_planes,
+        _plane_observations(rows),
+        valuation_ccy,
+        event_requirements,
+    )
 
 
 def _observe_shared_fx_election(
@@ -4893,6 +5113,24 @@ def _observe_identity_fx_elections(
         return
 
 
+def _resolve_identity_fx_planes_from_observations(
+    requirements: Mapping[str, _FxMinuteRequirements],
+    identity_planes: Mapping[str, PnlFxRatePlane],
+    observed: Mapping[PnlFxRatePlane, set[datetime]],
+    event_requirements: Mapping[str, _FxMinuteRequirements] | None = None,
+) -> _FxIdentityPlanes:
+    """Pin instrument-owned planes using precomputed usable plane observations."""
+    resolved: _FxIdentityPlanes = {}
+    for instrument_public_id, plane in identity_planes.items():
+        pair = currency_pair_key(plane[0], plane[1])
+        minutes = requirements.get(instrument_public_id, {}).get(pair, set())
+        published = observed.get(plane, set())
+        if published & minutes or _carried_minutes_for_plane(published, minutes):
+            resolved[instrument_public_id] = plane
+    _observe_identity_fx_elections(event_requirements or {}, identity_planes, observed, resolved)
+    return resolved
+
+
 def _resolve_identity_fx_planes(
     requirements: Mapping[str, _FxMinuteRequirements],
     identity_planes: Mapping[str, PnlFxRatePlane],
@@ -4919,16 +5157,12 @@ def _resolve_identity_fx_planes(
     Returns:
         Canonical planes with nonzero usable coverage keyed by instrument.
     """
-    observed = _plane_observations(rows)
-    resolved: _FxIdentityPlanes = {}
-    for instrument_public_id, plane in identity_planes.items():
-        pair = currency_pair_key(plane[0], plane[1])
-        minutes = requirements.get(instrument_public_id, {}).get(pair, set())
-        published = observed.get(plane, set())
-        if published & minutes or _carried_minutes_for_plane(published, minutes):
-            resolved[instrument_public_id] = plane
-    _observe_identity_fx_elections(event_requirements or {}, identity_planes, observed, resolved)
-    return resolved
+    return _resolve_identity_fx_planes_from_observations(
+        requirements,
+        identity_planes,
+        _plane_observations(rows),
+        event_requirements,
+    )
 
 
 def _fx_planes_by_instrument(
@@ -5008,6 +5242,7 @@ class _SeriesFxEvidence:
     planes_by_instrument: _FxPlanesByInstrument
     used_planes: set[tuple[FxPairKey, PnlFxRatePlane]]
     planes_by_instrument_minute: _FxPlanesByInstrumentMinute | None = None
+    coverage_by_plane: Mapping[PnlFxRatePlane, set[datetime]] = field(default_factory=dict)
 
     def venues_at(self, instrument_public_id: str, minute: datetime) -> FxVenueMap:
         """Return the pins applying to an event at its own conversion minute."""
@@ -5017,6 +5252,10 @@ class _SeriesFxEvidence:
             instrument_public_id,
             minute,
         )
+
+    def has_usable_rate(self, plane: PnlFxRatePlane, minute: datetime) -> bool:
+        """Return whether ``plane`` carries a positive finite exact close at ``minute``."""
+        return is_positive_finite(self.book.exact.get((*plane, minute)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -5580,7 +5819,6 @@ async def _load_gap_predecessors(
     return fetched
 
 
-@pnl_read_stage("fx")
 async def _load_request_fx_book(repo: Repository, request: _FxRequest) -> _SeriesFxEvidence:
     """Elect planes as an exact read would, then add carry evidence for the gaps.
 
@@ -5613,6 +5851,7 @@ async def _load_request_fx_book(repo: Repository, request: _FxRequest) -> _Serie
         book=build_fx_carry_book(build_fx_rates(selected_rows)),
         planes_by_instrument=election.planes_by_instrument,
         used_planes=election.used_planes,
+        coverage_by_plane=_plane_observations([*rows, *gap_rows]),
     )
 
 
@@ -5657,7 +5896,6 @@ def _series_pointwise_shadow_requirements(
             )
 
 
-@pnl_read_stage("fx")
 async def _load_pointwise_series_fx(repo: Repository, request: _FxRequest) -> _SeriesFxEvidence:
     """Read FX in batches and choose causal minute pins for exact replay only.
 
@@ -5708,9 +5946,16 @@ async def _load_pointwise_series_fx(repo: Repository, request: _FxRequest) -> _S
         for pair, plane in selections.items()
         if is_positive_finite(rates.get((*plane, minute)))
     }
-    return _SeriesFxEvidence(exact_fx_book(rates), {}, used_planes, venues)
+    return _SeriesFxEvidence(
+        exact_fx_book(rates),
+        {},
+        used_planes,
+        venues,
+        coverage_by_plane=_plane_observations(rows),
+    )
 
 
+@pnl_read_stage("fx")
 async def _load_series_fx(
     repo: Repository,
     request: _FxRequest,
@@ -5723,15 +5968,13 @@ async def _load_series_fx(
         return await _load_request_fx_book(repo, request)
     if pointwise_exact_fx:
         return await _load_pointwise_series_fx(repo, request)
-    rates, planes_by_instrument, used_planes = await _load_request_fx_rates(
-        repo,
-        request.mark_requirements,
-        request.event_requirements,
-        request.identity_planes,
-        request.as_of,
-        request.valuation_ccy,
+    election = await _elect_fx_planes(repo, request)
+    return _SeriesFxEvidence(
+        exact_fx_book(election.rates),
+        election.planes_by_instrument,
+        election.used_planes,
+        coverage_by_plane=_plane_observations(election.rows),
     )
-    return _SeriesFxEvidence(exact_fx_book(rates), planes_by_instrument, used_planes)
 
 
 def _series_mark_evidence(
@@ -6470,7 +6713,7 @@ async def _load_checkpoint_resume_inputs(
         Replay inputs carrying the checkpoint cursors and prefix spans.
 
     Raises:
-        _CheckpointLateExecutionError: When a suffix or deferred row reaches C or t0.
+        _CheckpointResumeFallbackError: When a suffix or deferred row reaches C or t0.
     """
     resume = options.checkpoint_resume
     frozen = options.frozen_execution_watermarks
@@ -6498,7 +6741,7 @@ async def _load_checkpoint_resume_inputs(
     if manifest is not None and _execution_manifest_digest(evidence.annulments) != manifest:
         raise PnlFrozenReplayEvidenceChangedError("P&L frozen execution manifest changed")
     if has_late_resume_execution(resume, evidence.executions, anchor.opening.t0):
-        raise _CheckpointLateExecutionError
+        raise _CheckpointResumeFallbackError("checkpoint_late_execution")
     opening = resume_engine_opening(resume)
     replayed, reference = _series_replay_execution_windows(
         evidence.executions,
@@ -6771,9 +7014,8 @@ async def _load_series_accounting_tail(
 
 def _validate_checkpoint_resume_policy(
     options: PnlSeriesReplayOptions,
-    policy: PnlSeriesReadPolicy,
 ) -> None:
-    """Require frozen exact non-probe reads for checkpoint resume.
+    """Require frozen non-probe reads for checkpoint resume.
 
     A late-fill probe must never run over a resumed suffix: on a resumed read,
     ``earliest_affected_minute`` only sees suffix rows. Rejecting both
@@ -6782,19 +7024,15 @@ def _validate_checkpoint_resume_policy(
 
     Args:
         options: Replay options carrying optional verified resume state.
-        policy: Series read policy controlling carry valuation.
 
     Raises:
-        ValueError: When checkpoint resume omits a frozen execution cut, enables
-            carry valuation, sets ``previous_replay_as_of``, or enables
-            ``metadata_only``.
+        ValueError: When checkpoint resume omits a frozen execution cut, sets
+            ``previous_replay_as_of``, or enables ``metadata_only``.
     """
     if options.checkpoint_resume is None:
         return
     if options.frozen_execution_watermarks is None:
         raise ValueError("A P&L checkpoint resume requires a captured raw execution cut")
-    if policy.carry_valuation:
-        raise ValueError("A P&L checkpoint resume does not permit carry valuation")
     if options.previous_replay_as_of is not None:
         raise ValueError("A P&L checkpoint resume does not permit previous_replay_as_of")
     if options.metadata_only:
@@ -6805,7 +7043,7 @@ def _validate_frozen_replay_policy(
     options: PnlSeriesReplayOptions, policy: PnlSeriesReadPolicy, to_time: datetime, as_of: datetime
 ) -> None:
     """Keep generation admission and resumed evidence reads historically scoped."""
-    _validate_checkpoint_resume_policy(options, policy)
+    _validate_checkpoint_resume_policy(options)
     frozen = options.frozen_execution_watermarks
     if frozen is None and options.frozen_execution_manifest_digest is not None:
         raise ValueError("A frozen P&L execution manifest requires its captured raw cut")
@@ -7372,6 +7610,61 @@ def _series_engine_options(options: PnlSeriesReplayOptions) -> PnlEngineOptions:
     )
 
 
+def _checkpoint_read_profile_supported(
+    options: PnlSeriesReplayOptions,
+    policy: PnlSeriesReadPolicy,
+) -> bool:
+    """Return whether the active read profile is pointwise exact FX without carry."""
+    return options.pointwise_exact_fx and not policy.carry_valuation
+
+
+def _require_resume_verified_horizon(
+    resume: PnlCheckpointResume,
+    as_of: datetime,
+) -> tuple[PnlFxRatePlane, ...]:
+    """Require verifier-stamped FX planes and exact horizon agreement on resume.
+
+    Args:
+        resume: Checkpoint resume state passed to the timeline read.
+        as_of: Replay knowledge horizon used for the series read.
+
+    Returns:
+        The verifier-observed event-FX planes for ``as_of``.
+
+    Raises:
+        _CheckpointResumeFallbackError: With
+            ``"checkpoint_verification_horizon_mismatch"`` when verification
+            metadata is absent or belongs to a different horizon.
+    """
+    if (
+        resume.verified_at is None
+        or resume.verified_fx_planes is None
+        or resume.verified_at != as_of
+    ):
+        raise _CheckpointResumeFallbackError("checkpoint_verification_horizon_mismatch")
+    return resume.verified_fx_planes
+
+
+def _enforce_checkpoint_resume_read_profile(
+    options: PnlSeriesReplayOptions,
+    policy: PnlSeriesReadPolicy,
+    from_time: datetime,
+    as_of: datetime,
+) -> None:
+    """Fall back softly unless read profile, window, and horizon match resume."""
+    resume = options.checkpoint_resume
+    if resume is None:
+        return
+    if not _checkpoint_read_profile_supported(options, policy):
+        raise _CheckpointResumeFallbackError("checkpoint_ineligible")
+    if (
+        from_time.utcoffset() != timedelta(0)
+        or from_time.replace(second=0, microsecond=0) <= resume.record.certificate.checkpoint_minute
+    ):
+        raise _CheckpointResumeFallbackError("checkpoint_ineligible")
+    _require_resume_verified_horizon(resume, as_of)
+
+
 def _activate_checkpoint_capture(
     options: PnlSeriesReplayOptions,
     policy: PnlSeriesReadPolicy,
@@ -7390,7 +7683,7 @@ def _activate_checkpoint_capture(
     request = options.checkpoint_capture
     if request is not None:
         request.activate(to_time, options.replay_generation_tip)
-        if not options.pointwise_exact_fx or policy.carry_valuation:
+        if not _checkpoint_read_profile_supported(options, policy):
             request.refuse_read_policy()
     return request
 
@@ -7629,6 +7922,161 @@ async def _load_wallet_series_fx(
     )
 
 
+def _validate_loaded_event_fx_planes(
+    resume: PnlCheckpointResume,
+    fx_evidence: _SeriesFxEvidence,
+    verified_planes: tuple[PnlFxRatePlane, ...],
+) -> None:
+    """Detect unexpected prefix event-FX planes already observed during FX loading."""
+    certificate = resume.record.certificate
+    opens = set(certificate.consumed_fx_open_ats)
+    pairs = {currency_pair_key(first, second) for first, second in certificate.consumed_fx_pairs}
+    known_planes = set(verified_planes)
+    for plane, minutes in fx_evidence.coverage_by_plane.items():
+        if plane in known_planes or currency_pair_key(plane[0], plane[1]) not in pairs:
+            continue
+        if any(minute - timedelta(minutes=1) in opens for minute in minutes):
+            raise _CheckpointResumeFallbackError("checkpoint_event_fx_exchanges_changed")
+
+
+async def _validate_resume_event_fx_candles(
+    repo: Repository,
+    resume: PnlCheckpointResume | None,
+    fx_evidence: _SeriesFxEvidence,
+    as_of: datetime,
+) -> None:
+    """Fall back cold if prefix event-FX candles commit between verify and FX load."""
+    if resume is None:
+        return
+    planes = _require_resume_verified_horizon(resume, as_of)
+    certificate = resume.record.certificate
+    opens = certificate.consumed_fx_open_ats
+    if not opens:
+        return
+    _validate_loaded_event_fx_planes(resume, fx_evidence, planes)
+    total = await repo.get_pnl_event_fx_candle_fingerprint(planes, opens, as_of)
+    if total != certificate.event_fx_candles_fingerprint:
+        raise _CheckpointResumeFallbackError("checkpoint_event_fx_candles_changed")
+
+
+async def _load_and_validate_series_fx(
+    repo: Repository,
+    request: _FxRequest,
+    options: PnlSeriesReplayOptions,
+    policy: PnlSeriesReadPolicy,
+    trusted_refs: Sequence[InstrumentSymbolRefRow],
+) -> _SeriesFxEvidence:
+    """Load series FX evidence and enforce election and candle stability on resume."""
+    fx_evidence = await _load_wallet_series_fx(repo, request, options, policy)
+    _validate_resume_fx_election(
+        options.checkpoint_resume,
+        _ResumeFxElectionInputs(
+            event_requirements=request.event_requirements,
+            mark_requirements=request.mark_requirements,
+            fx_evidence=fx_evidence,
+            trusted_refs=trusted_refs,
+            identity_planes=request.identity_planes,
+            valuation_ccy=request.valuation_ccy,
+            pointwise_exact_fx=options.pointwise_exact_fx,
+        ),
+    )
+    await _validate_resume_event_fx_candles(
+        repo,
+        options.checkpoint_resume,
+        fx_evidence,
+        request.as_of,
+    )
+    return fx_evidence
+
+
+def _opening_pool_provenance_lost(
+    resume: PnlCheckpointResume,
+    market_refs: _SeriesMarketRefs,
+    refs: Sequence[InstrumentSymbolRefRow],
+    opening_t0: datetime,
+) -> bool:
+    """Return whether an opening-pool instrument trusted at C lost its ref by the horizon."""
+    cutoff = max(opening_t0, resume.record.certificate.checkpoint_minute)
+    prefix_spans = {
+        pool.instrument_public_id: (opening_t0, cutoff) for pool in resume.bundle.engine_state.pools
+    }
+    if not prefix_spans:
+        return False
+    prefix_opening_refs, _ = _partition_series_price_refs(prefix_spans, refs)
+    return any(
+        ref["instrument_public_id"] not in market_refs.quote_by_instrument
+        for ref in prefix_opening_refs
+    )
+
+
+def _validate_resume_price_provenance(
+    resume: PnlCheckpointResume | None,
+    market_refs: _SeriesMarketRefs,
+    refs: Sequence[InstrumentSymbolRefRow],
+    opening_t0: datetime,
+) -> None:
+    """Fall back when suffix or deferred rows invalidate a carried price-reference proof.
+
+    Args:
+        resume: Verified checkpoint resume state, or null on an anchor replay.
+        market_refs: Current-read trusted quotes and provenance failure reasons.
+        refs: Symbol references loaded for the resumed horizon.
+        opening_t0: Activation opening boundary.
+
+    Raises:
+        _CheckpointResumeFallbackError: With ``"checkpoint_price_provenance_changed"``
+            when an instrument carried from the prefix becomes provenance-unproven.
+    """
+    if resume is None:
+        return
+    if _opening_pool_provenance_lost(resume, market_refs, refs, opening_t0):
+        raise _CheckpointResumeFallbackError("checkpoint_price_provenance_changed")
+    captured_untrusted = {
+        entry.instrument_public_id: {item.reason for item in entry.reasons}
+        for entry in resume.bundle.engine_state.untrusted_reasons_by_instrument
+    }
+    checked_instruments = {
+        pool.instrument_public_id for pool in resume.bundle.engine_state.pools
+    } | set(resume.bundle.price_ref_spans_by_instrument)
+    for instrument_public_id in checked_instruments:
+        reasons = market_refs.untrusted_price_reasons_by_instrument.get(instrument_public_id, ())
+        if (
+            "execution_price_provenance_unproven" in reasons
+            and "execution_price_provenance_unproven"
+            not in captured_untrusted.get(instrument_public_id, ())
+        ):
+            raise _CheckpointResumeFallbackError("checkpoint_price_provenance_changed")
+
+
+def _series_display_identities(
+    replay: _SeriesReplayInputs,
+    opening: TimelineOpening,
+    refs: Sequence[InstrumentSymbolRefRow],
+    *,
+    resuming: bool,
+) -> tuple[dict[str, tuple[datetime, datetime]], dict[str, tuple[str, str]]]:
+    """Compute merged display spans and resolved display identities for one series read.
+
+    Args:
+        replay: Loaded series execution and accrual inputs.
+        opening: Anchor opening state.
+        refs: Suffix and opening symbol reference rows.
+        resuming: Whether execution replays from a verified checkpoint resume state.
+
+    Returns:
+        Merged activity spans and display symbol identities by instrument ID.
+    """
+    display_activity_spans = merge_resume_spans(
+        replay.carried_display_spans,
+        _series_display_activity_spans(
+            TimelineOpening(pools=(), t0=opening.t0) if resuming else opening,
+            replay.reference_execution_rows,
+            replay.reference_accrual_rows,
+        ),
+    )
+    return display_activity_spans, _instrument_display_identities(display_activity_spans, refs)
+
+
 @pnl_read_stage("series")
 async def build_wallet_pnl_series(
     repo: Repository,
@@ -7728,145 +8176,137 @@ async def build_wallet_pnl_series(
                 granularity,
                 valuation_ccy,
             )
-    with pnl_read_phase("series_replay"):
-        try:
+    try:
+        _enforce_checkpoint_resume_read_profile(options, policy, from_time, as_of)
+        with pnl_read_phase("series_replay"):
             replay = await _load_series_replay_inputs(repo, anchor_load, to_time, options)
-        except _CheckpointLateExecutionError:
-            fallback = await build_wallet_pnl_series(
+            replay_metadata = await _series_replay_metadata(
+                repo, anchor_load, replay, options, (from_time, to_time)
+            )
+            if options.metadata_only:
+                return _metadata_only_pnl_series(
+                    granularity,
+                    valuation_ccy,
+                    replay_metadata,
+                    replay.applied_annulments,
+                )
+            opening_instrument_ids, instrument_ids = _series_instrument_ids(
+                anchor, replay, from_time, to_time
+            )
+        with pnl_read_phase("series_market_data"):
+            await _capture_symbol_refs_before_replay(
                 repo,
-                wallet_public_id,
-                mode,
+                options,
+                instrument_ids,
+                as_of,
+            )
+            refs = (
+                await repo.get_instrument_symbol_refs(instrument_ids, as_of)
+                if instrument_ids
+                else []
+            )
+            market_refs = _partition_series_market_refs(
+                refs,
+                opening_instrument_ids,
+                instrument_ids,
+                replay,
+                anchor.opening.t0,
+            )
+            _validate_resume_price_provenance(
+                options.checkpoint_resume,
+                market_refs,
+                refs,
+                anchor.opening.t0,
+            )
+            mark_candles = await _load_mark_candles(
+                repo,
+                market_refs.trusted_refs,
                 from_time,
                 to_time,
-                granularity,
                 as_of,
-                valuation_ccy,
-                policy=policy,
-                options=replace(
-                    options,
-                    checkpoint_capture=None,
-                    checkpoint_resume=None,
+            )
+        with pnl_read_phase("series_requirements"):
+            trusted_replayed_rows = [
+                row
+                for row in replay.replayed_execution_rows
+                if row["instrument_public_id"] in market_refs.quote_by_instrument
+            ]
+            display_activity_spans, display_identities = _series_display_identities(
+                replay,
+                anchor.opening,
+                refs,
+                resuming=replay.checkpoint_minute is not None,
+            )
+            (
+                mark_requirements,
+                event_requirements,
+                mark_carry,
+                identity_planes,
+            ) = await _series_requirement_plan(
+                repo,
+                _SeriesRequirementInput(
+                    replay=replay,
+                    trusted_replayed_rows=trusted_replayed_rows,
+                    mark_request=_MarkCarryRequest(
+                        candles=mark_candles,
+                        execution_rows=replay.loaded_execution_rows,
+                        fx_context=_EventFxContext(
+                            base_by_instrument=market_refs.base_by_instrument,
+                            quote_by_instrument=market_refs.quote_by_instrument,
+                            valuation_ccy=valuation_ccy,
+                            request_all_conversion_minutes=(
+                                engine_options.request_all_conversion_minutes
+                            ),
+                        ),
+                        base_by_instrument=market_refs.base_by_instrument,
+                        quote_by_instrument=market_refs.quote_by_instrument,
+                        refs=market_refs.trusted_refs,
+                        valuation_ccy=valuation_ccy,
+                        from_time=from_time,
+                        to_time=to_time,
+                        opening=anchor.opening,
+                        as_of=as_of,
+                    ),
+                    options=options,
+                    policy=policy,
+                    opening=anchor.opening,
                 ),
             )
-            return replace(
-                fallback,
-                checkpoint_resume_fallback="checkpoint_late_execution",
-            )
-        replay_metadata = await _series_replay_metadata(
-            repo, anchor_load, replay, options, (from_time, to_time)
-        )
-        if options.metadata_only:
-            return _metadata_only_pnl_series(
-                granularity,
-                valuation_ccy,
-                replay_metadata,
-                replay.applied_annulments,
-            )
-        opening_instrument_ids, instrument_ids = _series_instrument_ids(
-            anchor, replay, from_time, to_time
-        )
-    with pnl_read_phase("series_market_data"):
-        await _capture_symbol_refs_before_replay(
+        fx_evidence = await _load_and_validate_series_fx(
             repo,
+            _FxRequest(
+                mark_requirements=mark_requirements,
+                event_requirements=event_requirements,
+                identity_planes=identity_planes,
+                as_of=as_of,
+                valuation_ccy=valuation_ccy,
+                carried_mark_requirements=mark_carry.fx_requirements,
+            ),
             options,
-            instrument_ids,
-            as_of,
-        )
-        refs = (
-            await repo.get_instrument_symbol_refs(instrument_ids, as_of) if instrument_ids else []
-        )
-        market_refs = _partition_series_market_refs(
-            refs,
-            opening_instrument_ids,
-            instrument_ids,
-            replay,
-            anchor.opening.t0,
-        )
-        (
-            trusted_refs,
-            quote_by_instrument,
-            base_by_instrument,
-            untrusted_price_reasons_by_instrument,
-        ) = (
+            policy,
             market_refs.trusted_refs,
-            market_refs.quote_by_instrument,
-            market_refs.base_by_instrument,
-            market_refs.untrusted_price_reasons_by_instrument,
         )
-        mark_candles = await _load_mark_candles(
+    except _CheckpointResumeFallbackError as error:
+        fallback = await build_wallet_pnl_series(
             repo,
-            trusted_refs,
+            wallet_public_id,
+            mode,
             from_time,
             to_time,
+            granularity,
             as_of,
-        )
-    with pnl_read_phase("series_requirements"):
-        trusted_replayed_rows = [
-            row
-            for row in replay.replayed_execution_rows
-            if row["instrument_public_id"] in quote_by_instrument
-        ]
-        display_activity_spans = merge_resume_spans(
-            replay.carried_display_spans,
-            _series_display_activity_spans(
-                (
-                    TimelineOpening(pools=(), t0=anchor.opening.t0)
-                    if replay.checkpoint_minute is not None
-                    else anchor.opening
-                ),
-                replay.reference_execution_rows,
-                replay.reference_accrual_rows,
+            valuation_ccy,
+            policy=policy,
+            options=replace(
+                options,
+                checkpoint_capture=None,
+                checkpoint_resume=None,
             ),
         )
-        display_identities = _instrument_display_identities(display_activity_spans, refs)
-        (
-            mark_requirements,
-            event_requirements,
-            mark_carry,
-            identity_planes,
-        ) = await _series_requirement_plan(
-            repo,
-            _SeriesRequirementInput(
-                replay=replay,
-                trusted_replayed_rows=trusted_replayed_rows,
-                mark_request=_MarkCarryRequest(
-                    candles=mark_candles,
-                    execution_rows=replay.loaded_execution_rows,
-                    fx_context=_EventFxContext(
-                        base_by_instrument=base_by_instrument,
-                        quote_by_instrument=quote_by_instrument,
-                        valuation_ccy=valuation_ccy,
-                        request_all_conversion_minutes=(
-                            engine_options.request_all_conversion_minutes
-                        ),
-                    ),
-                    base_by_instrument=base_by_instrument,
-                    quote_by_instrument=quote_by_instrument,
-                    refs=trusted_refs,
-                    valuation_ccy=valuation_ccy,
-                    from_time=from_time,
-                    to_time=to_time,
-                    opening=anchor.opening,
-                    as_of=as_of,
-                ),
-                options=options,
-                policy=policy,
-                opening=anchor.opening,
-            ),
+        return replace(
+            fallback,
+            checkpoint_resume_fallback=error.reason,
         )
-    fx_evidence = await _load_wallet_series_fx(
-        repo,
-        _FxRequest(
-            mark_requirements=mark_requirements,
-            event_requirements=event_requirements,
-            identity_planes=identity_planes,
-            as_of=as_of,
-            valuation_ccy=valuation_ccy,
-            carried_mark_requirements=mark_carry.fx_requirements,
-        ),
-        options,
-        policy,
-    )
 
     global_reasons, engine_opening = _series_valuation_context(
         options.checkpoint_resume,
@@ -7887,7 +8327,7 @@ async def build_wallet_pnl_series(
             marks, mark_evidence = _series_mark_evidence(
                 mark_candles,
                 _MarkValuation(
-                    quote_by_instrument,
+                    market_refs.quote_by_instrument,
                     valuation_ccy,
                     fx_evidence.book,
                     fx_evidence.planes_by_instrument,
@@ -7904,14 +8344,16 @@ async def build_wallet_pnl_series(
                         row,
                         valuation_ccy,
                         fx_evidence.book,
-                        base_asset=base_by_instrument.get(row["instrument_public_id"]),
-                        price_currency=quote_by_instrument.get(row["instrument_public_id"]),
+                        base_asset=market_refs.base_by_instrument.get(row["instrument_public_id"]),
+                        price_currency=market_refs.quote_by_instrument.get(
+                            row["instrument_public_id"]
+                        ),
                         venues=fx_evidence.venues_at(
                             row["instrument_public_id"], _rate_minute(row["timestamp"])
                         ),
                     ),
                     row,
-                    quote_by_instrument.get(row["instrument_public_id"]),
+                    market_refs.quote_by_instrument.get(row["instrument_public_id"]),
                     event_requirements,
                     valuation_ccy,
                 )
@@ -7950,7 +8392,9 @@ async def build_wallet_pnl_series(
                 window,
                 opening=engine_opening,
                 lineage=replay.lineage,
-                untrusted_price_reasons_by_instrument=untrusted_price_reasons_by_instrument,
+                untrusted_price_reasons_by_instrument=(
+                    market_refs.untrusted_price_reasons_by_instrument
+                ),
                 mark_evidence=mark_evidence,
             )
             _record_carry_timing(result.points, carry_valuation=policy.carry_valuation)
@@ -7998,6 +8442,8 @@ async def build_wallet_pnl_series(
             checkpoint_minute=to_time,
             as_of=as_of,
             timeline_calc_version=PNL_TIMELINE_CALC_VERSION,
+            trusted_refs=market_refs.trusted_refs,
+            coverage_by_plane=fx_evidence.coverage_by_plane,
         )
     )
     with pnl_read_phase("series_overlay"):

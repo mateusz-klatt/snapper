@@ -16,6 +16,7 @@ from pydantic import field_validator
 from pydantic import model_validator
 
 from snapper.application.portfolio.pnl_fx_replay_state import _EventFxReplayState
+from snapper.application.portfolio.pnl_fx_replay_state import _FxInstrumentRequirements
 from snapper.application.portfolio.pnl_fx_replay_state import _MarkReplayState
 from snapper.application.portfolio.pnl_opening_checkpoint import _STRICT_CHECKPOINT_CONFIG
 from snapper.application.portfolio.pnl_opening_checkpoint import CarriedNumberPayload
@@ -33,8 +34,8 @@ from snapper.application.portfolio.pnl_opening_checkpoint import _require_strict
 from snapper.application.portfolio.pnl_opening_checkpoint import _unique_json_pairs
 from snapper.data.pnl_correction_state import IdAggregate
 
-BUNDLE_VERSION: Final[Literal[2]] = 2
-"""Current strict envelope version embedding scope and generation identity."""
+BUNDLE_VERSION: Final[Literal[4]] = 4
+"""Current strict envelope version embedding scope, generation identity, and FX elections."""
 
 
 def _require_checkpoint_mode(value: str) -> str:
@@ -135,6 +136,13 @@ class PnlCheckpointBundleIdentityPayload(BaseModel):
     source_generation: PositiveGenerationInt
 
 
+def _require_ordered_currency_pair(value: tuple[str, str], field_name: str) -> tuple[str, str]:
+    """Require lexically ordered distinct currency legs for a canonical pair."""
+    if value[0] >= value[1]:
+        raise ValueError(f"checkpoint {field_name} pair must satisfy pair[0] < pair[1]")
+    return value
+
+
 class PnlEventFxRequirementPayload(BaseModel):
     """Exact event-FX minutes required for one normalized currency pair."""
 
@@ -147,9 +155,7 @@ class PnlEventFxRequirementPayload(BaseModel):
     @classmethod
     def _validate_pair(cls, value: tuple[str, str]) -> tuple[str, str]:
         """Require lexically ordered distinct currency legs."""
-        if value[0] >= value[1]:
-            raise ValueError("checkpoint event_walk_state pair must satisfy pair[0] < pair[1]")
-        return value
+        return _require_ordered_currency_pair(value, "event_walk_state")
 
     @field_validator("minutes")
     @classmethod
@@ -202,6 +208,7 @@ class PnlEventFxReplayStatePayload(BaseModel):
     model_config = _STRICT_CHECKPOINT_CONFIG
 
     requirements: tuple[PnlEventFxInstrumentRequirementsPayload, ...]
+    conversion_requirements: tuple[PnlEventFxInstrumentRequirementsPayload, ...]
     last_effective: tuple[PoolLastEffectivePayload, ...]
     position_qty: tuple[PnlEventFxPoolQuantityPayload, ...]
     basis_unknown: tuple[PoolKeyPayload, ...]
@@ -214,6 +221,11 @@ class PnlEventFxReplayStatePayload(BaseModel):
             self.requirements,
             lambda item: item.instrument_public_id,
             "event_walk_state.requirements",
+        )
+        _require_strictly_sorted(
+            self.conversion_requirements,
+            lambda item: item.instrument_public_id,
+            "event_walk_state.conversion_requirements",
         )
         _require_strictly_sorted(
             self.last_effective,
@@ -358,12 +370,77 @@ class PnlEventFxCandlePlanePayload(BaseModel):
     aggregate: PnlIdAggregatePayload
 
 
+class PnlRefBindingPayload(BaseModel):
+    """Canonical symbol-reference projection bound to an instrument at capture."""
+
+    model_config = _STRICT_CHECKPOINT_CONFIG
+
+    native_symbol: NonEmptyStr
+    exchange: NonEmptyStr
+    instrument_exchange: NonEmptyStr
+    base_currency: NonEmptyStr
+    quote_currency: NonEmptyStr
+
+
+class PnlPrefixRefBindingPayload(BaseModel):
+    """Trusted market-reference binding (or absence thereof) carried for one instrument."""
+
+    model_config = _STRICT_CHECKPOINT_CONFIG
+
+    instrument_public_id: NonEmptyStr
+    binding: PnlRefBindingPayload | None
+
+
+class PnlPrefixFxElectionPayload(BaseModel):
+    """Exact FX plane elected at capture for one prefix consumer and minute."""
+
+    model_config = _STRICT_CHECKPOINT_CONFIG
+
+    instrument_public_id: NonEmptyStr
+    pair: tuple[NonEmptyStr, NonEmptyStr]
+    minute: UtcDateTime
+    elected_plane: tuple[NonEmptyStr, NonEmptyStr, NonEmptyStr] | None
+
+    @field_validator("pair")
+    @classmethod
+    def _validate_pair(cls, value: tuple[str, str]) -> tuple[str, str]:
+        """Require lexically ordered distinct currency legs."""
+        return _require_ordered_currency_pair(value, "prefix_fx_elections")
+
+    @model_validator(mode="after")
+    def _validate_elected_plane_pair(self) -> Self:
+        """Require any elected plane to belong to the declared unordered pair."""
+        if self.elected_plane is not None:
+            plane_pair = tuple(sorted((self.elected_plane[0], self.elected_plane[1])))
+            if plane_pair != self.pair:
+                raise ValueError("checkpoint prefix_fx_elections plane does not match pair")
+        return self
+
+
+class PnlPrefixFxCoveragePayload(BaseModel):
+    """Usable FX candle minutes observed per plane at capture without reloading prefix."""
+
+    model_config = _STRICT_CHECKPOINT_CONFIG
+
+    base: NonEmptyStr
+    quote: NonEmptyStr
+    exchange: NonEmptyStr
+    minutes: tuple[UtcDateTime, ...]
+
+    @field_validator("minutes")
+    @classmethod
+    def _validate_minutes(cls, value: tuple[datetime, ...]) -> tuple[datetime, ...]:
+        """Require covered minutes in strictly sorted unique order."""
+        _require_strictly_sorted(value, lambda minute: minute, "prefix_fx_coverage.minutes")
+        return value
+
+
 class PnlCheckpointStateBundle(BaseModel):
     """Versioned engine and service replay state captured at one boundary."""
 
     model_config = _STRICT_CHECKPOINT_CONFIG
 
-    bundle_version: Literal[2]
+    bundle_version: Literal[4]
     identity: PnlCheckpointBundleIdentityPayload
     engine_state: PnlOpeningCheckpointState
     price_ref_spans_by_instrument: dict[NonEmptyStr, tuple[UtcDateTime, UtcDateTime]]
@@ -373,6 +450,9 @@ class PnlCheckpointStateBundle(BaseModel):
     event_walk_state: PnlEventFxReplayStatePayload
     mark_walk_state: PnlMarkFxReplayStatePayload
     event_fx_candles_by_plane: tuple[PnlEventFxCandlePlanePayload, ...]
+    prefix_fx_elections: tuple[PnlPrefixFxElectionPayload, ...]
+    prefix_ref_bindings: tuple[PnlPrefixRefBindingPayload, ...]
+    prefix_fx_coverage: tuple[PnlPrefixFxCoveragePayload, ...]
 
     @field_validator("price_ref_spans_by_instrument", "display_activity_spans_by_instrument")
     @classmethod
@@ -425,6 +505,88 @@ class PnlCheckpointStateBundle(BaseModel):
         )
         return value
 
+    @field_validator("prefix_fx_elections")
+    @classmethod
+    def _validate_prefix_fx_elections(
+        cls, value: tuple[PnlPrefixFxElectionPayload, ...]
+    ) -> tuple[PnlPrefixFxElectionPayload, ...]:
+        """Require prefix FX elections in canonical ascending consumer-pair-minute order."""
+        _require_strictly_sorted(
+            value,
+            lambda item: (item.instrument_public_id, item.pair, item.minute),
+            "prefix_fx_elections",
+        )
+        return value
+
+    @field_validator("prefix_ref_bindings")
+    @classmethod
+    def _validate_prefix_ref_bindings(
+        cls, value: tuple[PnlPrefixRefBindingPayload, ...]
+    ) -> tuple[PnlPrefixRefBindingPayload, ...]:
+        """Require prefix ref bindings in canonical sorted unique instrument order."""
+        _require_strictly_sorted(
+            value,
+            lambda item: item.instrument_public_id,
+            "prefix_ref_bindings",
+        )
+        return value
+
+    @field_validator("prefix_fx_coverage")
+    @classmethod
+    def _validate_prefix_fx_coverage(
+        cls, value: tuple[PnlPrefixFxCoveragePayload, ...]
+    ) -> tuple[PnlPrefixFxCoveragePayload, ...]:
+        """Require prefix FX coverage summaries in canonical sorted plane order."""
+        _require_strictly_sorted(
+            value,
+            lambda item: (item.base, item.quote, item.exchange),
+            "prefix_fx_coverage",
+        )
+        return value
+
+
+def _encode_instrument_fx_requirements(
+    requirements: _FxInstrumentRequirements,
+) -> tuple[PnlEventFxInstrumentRequirementsPayload, ...]:
+    """Encode per-instrument FX minute requirements into canonical payload entries.
+
+    Args:
+        requirements: Exact FX minutes grouped by instrument and currency pair.
+
+    Returns:
+        Sorted strict instrument requirement payloads.
+    """
+    return tuple(
+        PnlEventFxInstrumentRequirementsPayload(
+            instrument_public_id=instrument_public_id,
+            requirements=tuple(
+                PnlEventFxRequirementPayload(pair=pair, minutes=tuple(sorted(minutes)))
+                for pair, minutes in sorted(pair_requirements.items())
+            ),
+        )
+        for instrument_public_id, pair_requirements in sorted(requirements.items())
+    )
+
+
+def _decode_instrument_fx_requirements(
+    entries: Sequence[PnlEventFxInstrumentRequirementsPayload],
+) -> _FxInstrumentRequirements:
+    """Decode canonical instrument requirement payloads into mutable minute sets.
+
+    Args:
+        entries: Validated per-instrument requirement payloads.
+
+    Returns:
+        Mutable instrument-to-pair FX requirement mapping.
+    """
+    return {
+        instrument_entry.instrument_public_id: {
+            requirement.pair: set(requirement.minutes)
+            for requirement in instrument_entry.requirements
+        }
+        for instrument_entry in entries
+    }
+
 
 def event_walk_state_from_replay(state: _EventFxReplayState) -> PnlEventFxReplayStatePayload:
     """Convert a real event-FX replay state into its complete strict payload.
@@ -436,16 +598,8 @@ def event_walk_state_from_replay(state: _EventFxReplayState) -> PnlEventFxReplay
         Canonically ordered lossless event-walk payload.
     """
     return PnlEventFxReplayStatePayload(
-        requirements=tuple(
-            PnlEventFxInstrumentRequirementsPayload(
-                instrument_public_id=instrument_public_id,
-                requirements=tuple(
-                    PnlEventFxRequirementPayload(pair=pair, minutes=tuple(sorted(minutes)))
-                    for pair, minutes in sorted(pair_requirements.items())
-                ),
-            )
-            for instrument_public_id, pair_requirements in sorted(state.requirements.items())
-        ),
+        requirements=_encode_instrument_fx_requirements(state.requirements),
+        conversion_requirements=_encode_instrument_fx_requirements(state.conversion_requirements),
         last_effective=tuple(
             PoolLastEffectivePayload(
                 pool=_pool_key_to_payload(pool_key),
@@ -483,13 +637,8 @@ def event_walk_state_to_replay(payload: PnlEventFxReplayStatePayload) -> _EventF
         A mutable replay state equal to the state originally captured.
     """
     return _EventFxReplayState(
-        requirements={
-            instrument_entry.instrument_public_id: {
-                requirement.pair: set(requirement.minutes)
-                for requirement in instrument_entry.requirements
-            }
-            for instrument_entry in payload.requirements
-        },
+        requirements=_decode_instrument_fx_requirements(payload.requirements),
+        conversion_requirements=_decode_instrument_fx_requirements(payload.conversion_requirements),
         last_effective={
             _pool_key_from_payload(entry.pool): entry.last_effective_time
             for entry in payload.last_effective
@@ -584,6 +733,30 @@ def bundle_to_json(bundle: PnlCheckpointStateBundle) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def is_unsupported_bundle_version(text: str) -> bool:
+    """Return whether valid JSON declares an integer ``bundle_version`` other than current.
+
+    Args:
+        text: Serialized checkpoint state envelope.
+
+    Returns:
+        ``True`` only when strict JSON parsing yields an object whose integer
+        non-boolean ``bundle_version`` differs from :data:`BUNDLE_VERSION`.
+    """
+    try:
+        raw = json.loads(
+            text,
+            object_pairs_hook=_unique_json_pairs,
+            parse_constant=_reject_json_constant,
+        )
+    except ValueError:
+        return False
+    if not isinstance(raw, dict) or "bundle_version" not in raw:
+        return False
+    version = raw["bundle_version"]
+    return isinstance(version, int) and not isinstance(version, bool) and version != BUNDLE_VERSION
 
 
 def bundle_from_json(text: str) -> PnlCheckpointStateBundle:

@@ -13,7 +13,6 @@ from snapper.application.portfolio.pnl_snapshotter_config import ENV_VARS
 from snapper.application.portfolio.pnl_snapshotter_config import FX_SHADOW_PINNING_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import INTERVAL_ENV_VAR
 from snapper.application.portfolio.pnl_snapshotter_config import ResolvedCheckpointMode
-from snapper.application.portfolio.pnl_snapshotter_config import resolve_checkpoint_mode
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_checkpoint_modes
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_enabled
 from snapper.application.portfolio.pnl_snapshotter_config import resolve_interval
@@ -83,11 +82,10 @@ class TestResolveCheckpointMode:
         """Unset, empty, whitespace, or ``off`` tokens resolve to ``off`` quietly.
 
         Given: An unset, blank, whitespace, or case-varied ``off`` string.
-        When: ``resolve_checkpoint_mode`` and ``resolve_checkpoint_modes`` parse it.
+        When: ``resolve_checkpoint_modes`` parses it.
         Then: Both configured and effective modes are ``"off"`` and no warning logs.
         """
         with caplog.at_level(logging.WARNING, logger=pnl_snapshotter_config.__name__):
-            assert resolve_checkpoint_mode(raw) == "off"
             assert resolve_checkpoint_modes(raw) == ResolvedCheckpointMode("off", "off")
         assert caplog.records == []
 
@@ -103,9 +101,9 @@ class TestResolveCheckpointMode:
         """
         with caplog.at_level(logging.WARNING, logger=pnl_snapshotter_config.__name__):
             first = resolve_checkpoint_modes(" Shadow\t")
-            second = resolve_checkpoint_mode("shadow")
+            second = resolve_checkpoint_modes("shadow")
         assert first == ResolvedCheckpointMode(configured="shadow", effective="off")
-        assert second == "off"
+        assert second == ResolvedCheckpointMode(configured="shadow", effective="off")
         warnings = [record for record in caplog.records if record.levelname == "WARNING"]
         assert len(warnings) == 1
         message = warnings[0].getMessage()
@@ -128,7 +126,6 @@ class TestResolveCheckpointMode:
         with caplog.at_level(logging.WARNING, logger=pnl_snapshotter_config.__name__):
             resolved = resolve_checkpoint_modes(raw)
         assert resolved == ResolvedCheckpointMode(configured="active", effective="off")
-        assert resolve_checkpoint_mode(raw) == "off"
         assert len(caplog.records) == 1
 
     @pytest.mark.parametrize(
@@ -152,7 +149,7 @@ class TestResolveCheckpointMode:
         """Enabled ``shadow`` and ``active`` values strip whitespace and match case-insensitively.
 
         Given: ``CHECKPOINT_MODES_ENABLED`` widened via monkeypatch and mixed-case tokens.
-        When: ``resolve_checkpoint_mode`` parses the setting value.
+        When: ``resolve_checkpoint_modes`` parses the setting value.
         Then: It returns the canonical lowercase literal with no kill-switch warning.
         """
         monkeypatch.setattr(
@@ -161,7 +158,6 @@ class TestResolveCheckpointMode:
             frozenset({"off", "shadow", "active"}),
         )
         with caplog.at_level(logging.WARNING, logger=pnl_snapshotter_config.__name__):
-            assert resolve_checkpoint_mode(raw) == expected
             assert resolve_checkpoint_modes(raw) == ResolvedCheckpointMode(
                 configured=expected,
                 effective=expected,
@@ -173,11 +169,9 @@ class TestResolveCheckpointMode:
         """Any unrecognised token fails loud at startup and names the env var.
 
         Given: An unrecognised checkpoint mode token.
-        When: ``resolve_checkpoint_mode`` and ``resolve_checkpoint_modes`` validate it.
-        Then: Both raise ``ValueError`` naming ``PNL_SNAPSHOTTER_CHECKPOINT_MODE``.
+        When: ``resolve_checkpoint_modes`` validates it.
+        Then: It raises ``ValueError`` naming ``PNL_SNAPSHOTTER_CHECKPOINT_MODE``.
         """
-        with pytest.raises(ValueError, match=CHECKPOINT_MODE_ENV_VAR):
-            resolve_checkpoint_mode(raw)
         with pytest.raises(ValueError, match=CHECKPOINT_MODE_ENV_VAR):
             resolve_checkpoint_modes(raw)
 

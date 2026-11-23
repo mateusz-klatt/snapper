@@ -37,6 +37,7 @@ from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from snapper.data.repository_types import PortfolioPnlSampleRow
 from tests.application.portfolio import test_pnl_snapshotter_continuation as continuation
 from tests.application.portfolio import test_pnl_snapshotter_lower_id_rewind as idless
+from tests.data import test_pnl_crypto_usd_plane_repository as prices
 from tests.data import test_pnl_opening_checkpoint_repository as checkpoint_repository
 from tests.data import test_pnl_timeline_execution_prefix_repository as prefix
 from tests.data import test_pnl_timeline_sample_repository as samples
@@ -410,3 +411,103 @@ async def test_real_recapture_triggers_use_one_anchor_replay_and_match_off(
     assert metrics.recaptures == {"absent": 1, reason: 1}
     assert metrics.captures_committed == 2
     assert metrics.resumes_attempted == 0
+
+
+async def _add_age_frontier_evidence(repo: SQLAlchemyRepository, age_tip: datetime) -> None:
+    """Advance real market and observation evidence to the recapture age horizon."""
+    async with repo.session() as session:
+        observation = samples._observation(
+            timestamp=age_tip,
+            balances_json='[{"currency":"USD","total":1000},{"currency":"BTC","total":2}]',
+        )
+        observation.sequence_id = 10
+        observation.public_id = "00000000-0000-7000-8000-000000000999"
+        session.add(observation)
+        session.add(
+            prices._candle(
+                prefix._INSTRUMENT,
+                age_tip - _MINUTE,
+                115.0,
+                spec=prices._CandleSpec(
+                    timestamp=age_tip,
+                    public_id="00000000-0000-7000-8000-000000000998",
+                ),
+            )
+        )
+        await session.commit()
+
+
+async def _run_three_tick_lifecycle(
+    mode: Literal["off", "active"],
+    path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, object], ...]:
+    """Execute tick 1 capture, tick 2 suffix resume, and tick 3 age recapture on SQLite."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    url = f"sqlite+aiosqlite:///{path.as_posix()}"
+    scope = await idless._seed(url, complete=False)
+    if mode != "off":
+        monkeypatch.setattr(
+            pnl_snapshotter_config,
+            "CHECKPOINT_MODES_ENABLED",
+            frozenset({"off", "active"}),
+        )
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", mode)
+    monkeypatch.delenv("PNL_FX_SHADOW_PINNING_ENABLED", raising=False)
+    capture_tip = samples._T0 + _MINUTE
+    age_tip = capture_tip + timedelta(minutes=dispatch.RECAPTURE_AGE_MINUTES)
+    age_as_of = age_tip + 2 * _MINUTE
+    async with idless._repository(url) as repo:
+        calls1, reads1 = await _tick_with_spies(repo, _TICK1_AS_OF, monkeypatch)
+        assert calls1 == 1
+        assert reads1 == (1 if mode == "off" else 2)
+        await _add_suffix(repo, "buy_sell")
+        calls2, reads2 = await _tick_with_spies(repo, _TICK2_AS_OF, monkeypatch)
+        assert calls2 == 1
+        assert reads2 == (1 if mode == "off" else 0)
+        if mode == "active":
+            c1 = await repo.get_portfolio_pnl_opening_checkpoint(scope)
+            assert c1 is not None and c1.certificate.checkpoint_minute == capture_tip
+        await _add_age_frontier_evidence(repo, age_tip)
+        calls3, reads3 = await _tick_with_spies(repo, age_as_of, monkeypatch)
+        assert calls3 == 1
+        assert reads3 == (1 if mode == "off" else 2)
+        final_record = await repo.get_portfolio_pnl_opening_checkpoint(scope)
+        if mode == "off":
+            assert final_record is None
+        else:
+            assert final_record is not None
+            assert final_record.certificate.checkpoint_minute == age_tip
+        rows = await repo.get_portfolio_pnl_samples(_query(scope), capture_tip, age_tip)
+    return _canonical_rows(rows)
+
+
+async def test_real_sqlite_three_tick_capture_resume_and_age_recapture_equal_cold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prove 3-tick real SQLite capture, resume, and age recapture match pure cold runs.
+
+    Given: A real SQLite scope where tick 1 anchors and captures, tick 2 adds suffix
+        fills and resumes, and tick 3 crosses the unpatched age bound for recapture.
+    When: Both ``off`` and ``active`` modes run all three ticks with only permit and
+        mode constants patched in test scope.
+    Then: Active resumes cleanly on tick 2, recaptures on tick 3 via age, and every
+        persisted sample row across all 1,441 minutes equals the pure-cold run.
+
+    Args:
+        tmp_path: Private temporary directory for isolated SQLite files.
+        monkeypatch: Pytest fixture patching only engine permit and mode constants.
+    """
+    _permit_capture(monkeypatch)
+    reset_checkpoint_metrics()
+    off_rows = await _run_three_tick_lifecycle("off", tmp_path / "cold.db", monkeypatch)
+    reset_checkpoint_metrics()
+    active_rows = await _run_three_tick_lifecycle("active", tmp_path / "active.db", monkeypatch)
+    assert len(off_rows) == dispatch.RECAPTURE_AGE_MINUTES + 1
+    assert active_rows == off_rows
+    metrics = checkpoint_metrics()
+    assert metrics.captures_committed == 2
+    assert metrics.resumes_attempted == 1
+    assert metrics.resumes_succeeded == 1
+    assert metrics.recaptures == {"absent": 1, "age": 1}

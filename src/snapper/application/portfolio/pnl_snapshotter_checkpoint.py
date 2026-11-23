@@ -1,5 +1,6 @@
 """Capture, resume, refusal, and invalidation helpers for the P&L snapshotter."""
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -18,6 +19,7 @@ from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     PnlCheckpointRecaptureTrigger,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_wallet_alias
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     record_checkpoint_capture_refusal,
 )
@@ -31,6 +33,7 @@ from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlChe
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
     PnlCheckpointResumeEligibility,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_verifier import service_resume_fallback
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import (
     verify_checkpoint_for_resume,
 )
@@ -49,6 +52,8 @@ logger = logging.getLogger(__name__)
 
 RECAPTURE_AGE_MINUTES: Final[int] = 1440
 RECAPTURE_SUFFIX_FILLS: Final[int] = 2000
+MAX_RECAPTURES_PER_TICK: Final[int] = 4
+"""Maximum full anchor recaptures over ``(cutoff, frontier]`` permitted in a single tick."""
 _RECAPTURE_AGE: Final[timedelta] = timedelta(minutes=RECAPTURE_AGE_MINUTES)
 
 
@@ -89,7 +94,7 @@ def _log_refusal(scope: PortfolioPnlSampleScope, reason: str) -> None:
     logger.warning(
         "PortfolioPnlSnapshotter: checkpoint capture refused; wallet=%s mode=%s ccy=%s "
         "epoch=%s reason=%s",
-        scope.wallet_public_id,
+        checkpoint_wallet_alias(scope.wallet_public_id),
         scope.mode,
         scope.valuation_ccy,
         scope.epoch_public_id,
@@ -97,6 +102,16 @@ def _log_refusal(scope: PortfolioPnlSampleScope, reason: str) -> None:
         extra={"checkpoint_capture_refusal": reason},
     )
     record_checkpoint_capture_refusal(reason, scope)
+
+
+def record_checkpoint_write_refusal(scope: PortfolioPnlSampleScope, reason: str) -> None:
+    """Log and count one repository or savepoint checkpoint write refusal.
+
+    Args:
+        scope: Active anchor-bound sample scope.
+        reason: Closed refusal code describing why checkpoint persistence rolled back.
+    """
+    _log_refusal(scope, reason)
 
 
 def capture_request_for(
@@ -141,8 +156,8 @@ def capture_request_for(
     ):
         _log_refusal(scope, "capture_value_error")
         return None
-    anchor_public_id, anchor_digest = checkpoint_anchor_identity(anchor)
     try:
+        anchor_public_id, anchor_digest = checkpoint_anchor_identity(anchor)
         return PnlCheckpointCaptureRequest(
             key=frontier.key,
             source_generation=frontier.generation,
@@ -155,7 +170,7 @@ def capture_request_for(
             anchor_digest=anchor_digest,
             calc_version=frontier.key.calc_version,
         )
-    except ValueError:
+    except (ValueError, TypeError):
         _log_refusal(scope, "capture_value_error")
         return None
 
@@ -172,10 +187,21 @@ async def delete_checkpoint(
         scope: Scope owning the checkpoint row.
         record: Stored checkpoint record being retired.
     """
-    deleted = await repo.delete_portfolio_pnl_opening_checkpoint(
-        scope,
-        record.certificate.source_generation,
-    )
+    try:
+        deleted = await repo.delete_portfolio_pnl_opening_checkpoint(
+            scope,
+            record.certificate.source_generation,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "PortfolioPnlSnapshotter: checkpoint delete failed; wallet=%s generation=%s (%s)",
+            checkpoint_wallet_alias(scope.wallet_public_id),
+            record.certificate.source_generation,
+            type(exc).__name__,
+        )
+        return
     if deleted:
         record_checkpoint_invalidation_deleted(scope)
 
@@ -190,7 +216,7 @@ def _log_fallback(
     logger.warning(
         "PortfolioPnlSnapshotter: checkpoint resume fallback; wallet=%s generation=%s "
         "reason=%s delete_required=%s",
-        scope.wallet_public_id,
+        checkpoint_wallet_alias(scope.wallet_public_id),
         frontier.generation,
         fallback.reason,
         fallback.delete_required,
@@ -208,6 +234,7 @@ class PnlCheckpointResumeRequest:
     frontier: PnlCorrectionFrontier
     start: datetime
     mode: CheckpointMode
+    recapture_budget_exhausted: bool = False
 
 
 @dataclass(frozen=True)
@@ -281,6 +308,83 @@ async def _suffix_fills(
     )
 
 
+def _exhausted_recapture_decision(scope: PortfolioPnlSampleScope) -> PnlCheckpointDecision:
+    """Record per-tick recapture budget exhaustion and continue without capture."""
+    _log_refusal(scope, "capture_recapture_budget_exceeded")
+    return PnlCheckpointDecision()
+
+
+async def _verify_stored_checkpoint(
+    request: PnlCheckpointResumeRequest,
+    record: PnlOpeningCheckpointRecord,
+) -> PnlCheckpointDecision:
+    """Verify a stored row against live generation evidence or trigger a fallback."""
+    scope = request.scope
+    frontier = request.frontier
+    anchor_public_id, anchor_digest = checkpoint_anchor_identity(request.anchor)
+    outcome = await verify_checkpoint_for_resume(
+        request.repo,
+        record,
+        scope,
+        frontier.as_of,
+        PnlCheckpointResumeEligibility(
+            mode=request.mode,
+            calc_version=frontier.key.calc_version,
+            timeline_calc_version=PNL_TIMELINE_CALC_VERSION,
+            fx_policy_version=POINTWISE_FX_ELECTION_POLICY_VERSION,
+            expected_anchor_public_id=anchor_public_id,
+            expected_anchor_digest=anchor_digest,
+            expected_execution_manifest_digest=frontier.execution_manifest_digest,
+            pointwise_exact_fx=True,
+            replay_generation_tip=frontier.tip,
+            metadata_only=False,
+            from_time=request.start,
+            frontier_tip=frontier.tip,
+            has_fill_gap=False,
+        ),
+    )
+    if isinstance(outcome, PnlCheckpointResume):
+        return PnlCheckpointDecision(resume=outcome)
+    _log_fallback(scope, frontier, outcome)
+    if outcome.delete_required:
+        await delete_checkpoint(request.repo, scope, record)
+    if request.recapture_budget_exhausted:
+        return _exhausted_recapture_decision(scope)
+    return _recapture(scope, "fallback")
+
+
+async def _prepare_with_record(
+    request: PnlCheckpointResumeRequest,
+) -> PnlCheckpointDecision:
+    """Evaluate absence, invalidation, bounded recapture, and live verification."""
+    repo = request.repo
+    scope = request.scope
+    frontier = request.frontier
+    record = await repo.get_portfolio_pnl_opening_checkpoint(scope)
+    initial = recapture_trigger(frontier, record, 0)
+    if initial == "absent":
+        _log_fallback(scope, frontier, PnlCheckpointFallback("checkpoint_absent", False))
+        return (
+            _exhausted_recapture_decision(scope)
+            if request.recapture_budget_exhausted
+            else _recapture(scope, "absent")
+        )
+    if initial is not None:
+        assert record is not None
+        await delete_checkpoint(repo, scope, record)
+        return (
+            _exhausted_recapture_decision(scope)
+            if request.recapture_budget_exhausted
+            else _recapture(scope, initial)
+        )
+    assert record is not None
+    suffix = await _suffix_fills(repo, scope, frontier, record)
+    bounded = recapture_trigger(frontier, record, suffix)
+    if bounded is not None and not request.recapture_budget_exhausted:
+        return _recapture(scope, bounded)
+    return await _verify_stored_checkpoint(request, record)
+
+
 async def prepare_checkpoint_resume(
     request: PnlCheckpointResumeRequest,
 ) -> PnlCheckpointDecision:
@@ -292,55 +396,34 @@ async def prepare_checkpoint_resume(
     Returns:
         Decision selecting either verified suffix resume or anchor recapture.
     """
-    repo = request.repo
     scope = request.scope
-    anchor = request.anchor
     frontier = request.frontier
-    start = request.start
-    mode = request.mode
-    if mode == "off" or not checkpoint_capture_permitted(frontier.key.calc_version):
+    if request.mode == "off" or not checkpoint_capture_permitted(frontier.key.calc_version):
         return PnlCheckpointDecision(recapture="absent")
     if frontier.has_fill_gap:
         _log_fallback(scope, frontier, PnlCheckpointFallback("checkpoint_fill_gap", False))
-        return _recapture(scope, "fallback")
-    record = await repo.get_portfolio_pnl_opening_checkpoint(scope)
-    initial = recapture_trigger(frontier, record, 0)
-    if initial is not None:
-        if initial == "absent":
-            _log_fallback(scope, frontier, PnlCheckpointFallback("checkpoint_absent", False))
-        return _recapture(scope, initial)
-    assert record is not None
-    suffix = await _suffix_fills(repo, scope, frontier, record)
-    bounded = recapture_trigger(frontier, record, suffix)
-    if bounded is not None:
-        return _recapture(scope, bounded)
-    anchor_public_id, anchor_digest = checkpoint_anchor_identity(anchor)
-    outcome = await verify_checkpoint_for_resume(
-        repo,
-        record,
-        scope,
-        frontier.as_of,
-        PnlCheckpointResumeEligibility(
-            mode=mode,
-            calc_version=frontier.key.calc_version,
-            timeline_calc_version=PNL_TIMELINE_CALC_VERSION,
-            fx_policy_version=POINTWISE_FX_ELECTION_POLICY_VERSION,
-            expected_anchor_public_id=anchor_public_id,
-            expected_anchor_digest=anchor_digest,
-            pointwise_exact_fx=True,
-            replay_generation_tip=frontier.tip,
-            metadata_only=False,
-            from_time=start,
-            frontier_tip=frontier.tip,
-            has_fill_gap=False,
-        ),
-    )
-    if isinstance(outcome, PnlCheckpointResume):
-        return PnlCheckpointDecision(resume=outcome)
-    _log_fallback(scope, frontier, outcome)
-    if outcome.delete_required:
-        await delete_checkpoint(repo, scope, record)
-    return _recapture(scope, "fallback")
+        return (
+            _exhausted_recapture_decision(scope)
+            if request.recapture_budget_exhausted
+            else _recapture(scope, "fallback")
+        )
+    try:
+        return await _prepare_with_record(request)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "PortfolioPnlSnapshotter: checkpoint verify failed; wallet=%s generation=%s (%s)",
+            checkpoint_wallet_alias(scope.wallet_public_id),
+            frontier.generation,
+            type(exc).__name__,
+        )
+        _log_fallback(scope, frontier, PnlCheckpointFallback("checkpoint_verify_error", False))
+        return (
+            _exhausted_recapture_decision(scope)
+            if request.recapture_budget_exhausted
+            else _recapture(scope, "fallback")
+        )
 
 
 async def handle_resume_fallback(
@@ -350,7 +433,7 @@ async def handle_resume_fallback(
     resume: PnlCheckpointResume,
     reason: str,
 ) -> None:
-    """Count a service-detected late execution and retire the divergent row.
+    """Count a service-detected fallback through the closed verifier verdict and retire stale state.
 
     Args:
         repo: Repository used to retire the stored checkpoint row.
@@ -359,12 +442,11 @@ async def handle_resume_fallback(
         resume: Verified resume state that hit a service fallback.
         reason: Fallback reason reported by the timeline service.
     """
-    fallback = PnlCheckpointFallback("checkpoint_late_execution", True)
-    if reason != "checkpoint_late_execution":
-        fallback = PnlCheckpointFallback("checkpoint_payload_corrupt", True)
+    fallback = service_resume_fallback(reason)
     _log_fallback(scope, frontier, fallback)
     record_checkpoint_recapture("fallback", scope)
-    await delete_checkpoint(repo, scope, resume.record)
+    if fallback.delete_required:
+        await delete_checkpoint(repo, scope, resume.record)
 
 
 def certified_checkpoint_write(

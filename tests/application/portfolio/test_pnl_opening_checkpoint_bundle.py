@@ -17,10 +17,17 @@ from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlCheck
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlEventFxCandlePlanePayload
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlFxRateSourcePayload
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlIdAggregatePayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlPrefixFxCoveragePayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlPrefixFxElectionPayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlPrefixRefBindingPayload
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import PnlRefBindingPayload
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_from_json
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_to_json
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import event_walk_state_from_replay
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import event_walk_state_to_replay
+from snapper.application.portfolio.pnl_opening_checkpoint_bundle import (
+    is_unsupported_bundle_version,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import mark_walk_state_from_replay
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import mark_walk_state_to_replay
 from snapper.application.portfolio.pnl_timeline import TimelineWindow
@@ -285,7 +292,7 @@ def _populated_bundle() -> PnlCheckpointStateBundle:
     """
     event_state, mark_states, shadows = _real_walk_states()
     return PnlCheckpointStateBundle(
-        bundle_version=2,
+        bundle_version=4,
         identity=_identity_payload(),
         engine_state=_engine_state(),
         price_ref_spans_by_instrument={
@@ -298,6 +305,34 @@ def _populated_bundle() -> PnlCheckpointStateBundle:
         event_walk_state=event_walk_state_from_replay(event_state),
         mark_walk_state=mark_walk_state_from_replay(mark_states, shadows),
         event_fx_candles_by_plane=(_candle_plane_payload(),),
+        prefix_fx_elections=(
+            PnlPrefixFxElectionPayload(
+                instrument_public_id=_INSTRUMENT,
+                pair=("EUR", "USD"),
+                minute=_m(3),
+                elected_plane=("EUR", "USD", "kraken"),
+            ),
+        ),
+        prefix_ref_bindings=(
+            PnlPrefixRefBindingPayload(
+                instrument_public_id=_INSTRUMENT,
+                binding=PnlRefBindingPayload(
+                    native_symbol="BTC-USD",
+                    exchange="kraken",
+                    instrument_exchange="kraken",
+                    base_currency="BTC",
+                    quote_currency="USD",
+                ),
+            ),
+        ),
+        prefix_fx_coverage=(
+            PnlPrefixFxCoveragePayload(
+                base="EUR",
+                quote="USD",
+                exchange="kraken",
+                minutes=(_m(3),),
+            ),
+        ),
     )
 
 
@@ -401,7 +436,7 @@ def test_empty_collections_round_trip() -> None:
         untrusted_at={},
     )
     bundle = PnlCheckpointStateBundle(
-        bundle_version=2,
+        bundle_version=4,
         identity=_identity_payload(),
         engine_state=_engine_state(),
         price_ref_spans_by_instrument={},
@@ -411,6 +446,9 @@ def test_empty_collections_round_trip() -> None:
         event_walk_state=event_walk_state_from_replay(event_state),
         mark_walk_state=mark_walk_state_from_replay({}, ()),
         event_fx_candles_by_plane=(),
+        prefix_fx_elections=(),
+        prefix_ref_bindings=(),
+        prefix_fx_coverage=(),
     )
     encoded = bundle_to_json(bundle)
     decoded = bundle_from_json(encoded)
@@ -433,11 +471,11 @@ def test_rejects_extra_field() -> None:
         bundle_from_json(json.dumps(payload))
 
 
-@pytest.mark.parametrize("version", [1, 3])
+@pytest.mark.parametrize("version", [1, 3, 5])
 def test_rejects_wrong_bundle_version(version: int) -> None:
     """Reject legacy and unknown envelope versions.
 
-    Given: Otherwise valid bundle JSON with ``bundle_version`` set to 1 or 3.
+    Given: Otherwise valid bundle JSON with ``bundle_version`` set to 1, 3, or 5.
     When: Strict decoding runs.
     Then: ``ValueError`` is raised.
 
@@ -446,6 +484,7 @@ def test_rejects_wrong_bundle_version(version: int) -> None:
     """
     payload = _json_object(bundle_to_json(_populated_bundle()))
     payload["bundle_version"] = version
+    assert is_unsupported_bundle_version(json.dumps(payload)) is True
     with pytest.raises(ValueError, match="bundle_version"):
         bundle_from_json(json.dumps(payload))
 
@@ -517,18 +556,20 @@ def test_rejects_naive_datetime() -> None:
 def test_rejects_duplicate_json_keys() -> None:
     """Reject duplicate keys instead of silently keeping the last value.
 
-    Given: Canonical bundle JSON with a second top-level ``bundle_version`` key.
-    When: The duplicate-aware JSON parser runs.
-    Then: ``ValueError`` names the duplicate key.
+    Given: Duplicate-key, malformed, and version-free JSON documents.
+    When: Strict decoding and the non-raising version probe run.
+    Then: ``ValueError`` names the duplicate key and both probe inputs return ``False``.
     """
     encoded = bundle_to_json(_populated_bundle())
     duplicated = encoded.replace(
-        '"bundle_version":2',
-        '"bundle_version":2,"bundle_version":2',
+        '"bundle_version":4',
+        '"bundle_version":4,"bundle_version":4',
         1,
     )
     with pytest.raises(ValueError, match="duplicate JSON key"):
         bundle_from_json(duplicated)
+    assert is_unsupported_bundle_version("{") is False
+    assert is_unsupported_bundle_version("{}") is False
 
 
 @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
@@ -777,3 +818,101 @@ def test_rejects_unordered_or_equal_event_fx_pair(pair: list[str]) -> None:
     pair_entry["pair"] = pair
     with pytest.raises(ValueError, match="pair"):
         bundle_from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("legacy_version", [2, 3])
+def test_rejects_legacy_bundle_versions_2_and_3(legacy_version: int) -> None:
+    """Reject legacy bundle_version 2 and 3 envelopes after bumping BUNDLE_VERSION.
+
+    Given: A serialized envelope whose ``bundle_version`` is downgraded to ``2`` or ``3``.
+    When: Strict decoding runs via ``bundle_from_json``.
+    Then: ``ValueError`` rejects the legacy bundle version.
+
+    Args:
+        legacy_version: Downgraded bundle schema version.
+    """
+    payload = _json_object(bundle_to_json(_populated_bundle()))
+    payload["bundle_version"] = legacy_version
+    with pytest.raises(ValueError, match="bundle_version"):
+        bundle_from_json(json.dumps(payload))
+
+
+def test_prefix_fx_election_and_coverage_validators() -> None:
+    """Reject mismatched planes, unordered pairs, and duplicate election/coverage keys.
+
+    Given: Populated election stability payloads with mismatched plane currencies,
+        duplicate election keys, duplicate ref-binding keys, or unsorted coverage minutes.
+    When: ``PnlPrefixFxElectionPayload`` or ``bundle_from_json`` validates them.
+    Then: ``ValueError`` rejects every malformed or non-canonical entry.
+    """
+    with pytest.raises(ValueError, match="does not match pair"):
+        PnlPrefixFxElectionPayload(
+            instrument_public_id=_INSTRUMENT,
+            pair=("EUR", "USD"),
+            minute=_m(3),
+            elected_plane=("GBP", "USD", "kraken"),
+        )
+    missing_plane = PnlPrefixFxElectionPayload(
+        instrument_public_id=_INSTRUMENT,
+        pair=("EUR", "USD"),
+        minute=_m(3),
+        elected_plane=None,
+    )
+    assert missing_plane.elected_plane is None
+    base_json = bundle_to_json(_populated_bundle())
+    dup_elections = _json_object(base_json)
+    election_entries = cast(list[object], dup_elections["prefix_fx_elections"])
+    dup_elections["prefix_fx_elections"] = [election_entries[0], election_entries[0]]
+    with pytest.raises(ValueError, match="sorted and unique"):
+        bundle_from_json(json.dumps(dup_elections))
+
+
+def test_conversion_requirements_round_trip_and_reject_unsorted() -> None:
+    """Round-trip prefix conversion-only minutes and enforce canonical ordering.
+
+    Given: An ``_EventFxReplayState`` carrying non-empty ``conversion_requirements``.
+    When: The bundle makes a canonical JSON round-trip and its conversion keys
+        are permuted or duplicated.
+    Then: Restored ``conversion_requirements`` match exactly, input permutation
+        produces identical JSON, and duplicate conversion keys are rejected.
+    """
+    event_state, mark_states, shadows = _real_walk_states()
+    conversion_reqs = {
+        "I2": {("EUR", "USD"): {_m(1), _m(3)}},
+        _INSTRUMENT: {("EUR", "USD"): {_m(2)}},
+    }
+    state_with_conversions = _EventFxReplayState(
+        requirements=event_state.requirements,
+        last_effective=event_state.last_effective,
+        position_qty=event_state.position_qty,
+        basis_unknown=event_state.basis_unknown,
+        untrusted_at=event_state.untrusted_at,
+        conversion_requirements=conversion_reqs,
+    )
+    bundle = _populated_bundle().model_copy(
+        update={
+            "event_walk_state": event_walk_state_from_replay(state_with_conversions),
+            "mark_walk_state": mark_walk_state_from_replay(mark_states, shadows),
+        }
+    )
+    encoded = bundle_to_json(bundle)
+    decoded = bundle_from_json(encoded)
+    assert event_walk_state_to_replay(decoded.event_walk_state) == state_with_conversions
+    reversed_state = _EventFxReplayState(
+        requirements=event_state.requirements,
+        last_effective=event_state.last_effective,
+        position_qty=event_state.position_qty,
+        basis_unknown=event_state.basis_unknown,
+        untrusted_at=event_state.untrusted_at,
+        conversion_requirements=dict(reversed(tuple(conversion_reqs.items()))),
+    )
+    permuted = bundle.model_copy(
+        update={"event_walk_state": event_walk_state_from_replay(reversed_state)}
+    )
+    assert bundle_to_json(permuted) == encoded
+    raw = _json_object(encoded)
+    event_walk = _nested_object(raw, "event_walk_state")
+    entries = cast(list[object], event_walk["conversion_requirements"])
+    event_walk["conversion_requirements"] = [entries[0], entries[0]]
+    with pytest.raises(ValueError, match="sorted and unique"):
+        bundle_from_json(json.dumps(raw))

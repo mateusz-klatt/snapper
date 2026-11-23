@@ -23,6 +23,7 @@ from snapper.data.repository_types import InstrumentSymbolRefRow
 from snapper.data.repository_types import PnlFxRatePlane
 from snapper.data.repository_types import PnlTimelineAppliedAnnulment
 from snapper.data.repository_types import PnlTimelineExecutionLineageRow
+from snapper.data.repository_types import PnlTimelineOpeningExecutionRow
 
 MAX_DEFERRED_EXECUTIONS: Final[int] = 256
 """Maximum deferred-execution count permitted across all exchanges in a checkpoint."""
@@ -38,6 +39,69 @@ type PnlCheckpointWriteRefusal = Literal[
     "deferred_tail_too_long",
 ]
 """Closed vocabulary of deterministic checkpoint write-refusal reasons in precedence order."""
+
+
+class PnlCheckpointWriteRefusalError(ValueError):
+    """Typed write-refusal error carrying a closed refusal code for repository writes."""
+
+    def __init__(self, reason: PnlCheckpointWriteRefusal) -> None:
+        """Bind a closed repository write refusal onto a ``ValueError`` subtype.
+
+        Args:
+            reason: Closed write-refusal reason code.
+        """
+        super().__init__(f"Refusing opening checkpoint write: {reason}")
+        self.reason: PnlCheckpointWriteRefusal = reason
+
+
+def execution_manifest_digest(annulments: Sequence[PnlTimelineAppliedAnnulment]) -> str:
+    """Hash all certified correction identities in canonical order, including empty sets.
+
+    Args:
+        annulments: Applied annulment manifest entries for a generation.
+
+    Returns:
+        Lowercase 64-character SHA-256 hexadecimal digest.
+    """
+    identities = sorted(
+        (
+            annulment["public_id"],
+            annulment["target_execution_public_id"],
+            annulment["target_execution_digest"],
+            annulment["exchange"],
+            annulment["scope_sequence"],
+        )
+        for annulment in annulments
+    )
+    canonical = json.dumps(identities, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def partition_execution_watermarks(
+    executions: Sequence[PnlTimelineOpeningExecutionRow],
+    deferred_execution_keys: Sequence[tuple[str, int]],
+) -> tuple[dict[str, int], dict[str, tuple[int, ...]]]:
+    """Partition prefix execution sequences into applied watermarks and deferred tuples.
+
+    Args:
+        executions: Captured effective execution prefix rows through ``W_C``.
+        deferred_execution_keys: Deferred ``(exchange, scope_sequence)`` pairs.
+
+    Returns:
+        Applied maximum watermarks and sorted deferred sequences by exchange.
+    """
+    deferred_set = set(deferred_execution_keys)
+    applied: dict[str, int] = {}
+    deferred: dict[str, list[int]] = {}
+    for row in sorted(executions, key=lambda item: (item["exchange"], item["scope_sequence"])):
+        exchange = row["exchange"]
+        sequence = row["scope_sequence"]
+        if (exchange, sequence) in deferred_set:
+            deferred.setdefault(exchange, []).append(sequence)
+        else:
+            applied[exchange] = max(applied.get(exchange, 0), sequence)
+    return applied, {exchange: tuple(sequences) for exchange, sequences in sorted(deferred.items())}
+
 
 type PnlFillWitnessIdentity = tuple[int, str]
 """Canonical ``(event_id, public_id)`` identity of one fill witness row."""

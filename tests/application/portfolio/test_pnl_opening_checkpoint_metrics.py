@@ -15,12 +15,15 @@ from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_metrics
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_metrics_by_scope
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_scope_key
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_wallet_alias
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     emit_checkpoint_metrics_summary,
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     format_checkpoint_metrics_summary,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import prune_checkpoint_metrics
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     record_checkpoint_capture_committed,
 )
@@ -43,6 +46,9 @@ from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     record_checkpoint_shadow_mismatch,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
+    record_checkpoint_shadow_skipped,
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import reset_checkpoint_metrics
 from snapper.data.repository import PortfolioPnlSampleScope
@@ -115,22 +121,28 @@ def test_per_scope_metrics_track_scopes_independently_and_sum_globally() -> None
     record_checkpoint_invalidation_deleted(scope_b)
     record_checkpoint_shadow_comparison(scope_b)
     record_checkpoint_shadow_mismatch(scope_b)
+    record_checkpoint_shadow_skipped("window_mismatch", scope_b)
     record_checkpoint_recapture("age", scope_b)
 
     by_scope = checkpoint_metrics_by_scope()
-    assert list(by_scope) == [("wallet-a", "live", "USD"), ("wallet-b", "live", "EUR")]
-    assert by_scope[("wallet-a", "live", "USD")] == PnlCheckpointMetrics(
+    alias_a = checkpoint_scope_key(scope_a)
+    alias_b = checkpoint_scope_key(scope_b)
+    assert set(by_scope) == {alias_a, alias_b}
+    assert "wallet-a" not in str(list(by_scope))
+    assert "wallet-b" not in str(list(by_scope))
+    assert by_scope[alias_a] == PnlCheckpointMetrics(
         captures_committed=1,
         capture_refusals={"not_settled": 1},
         resumes_attempted=1,
         resumes_succeeded=1,
         recaptures={"absent": 1},
     )
-    assert by_scope[("wallet-b", "live", "EUR")] == PnlCheckpointMetrics(
+    assert by_scope[alias_b] == PnlCheckpointMetrics(
         fallbacks={"checkpoint_late_execution": 1},
         invalidations_deleted=1,
         shadow_comparisons=1,
         shadow_mismatches=1,
+        shadow_skipped={"window_mismatch": 1},
         recaptures={"age": 1},
     )
 
@@ -143,7 +155,12 @@ def test_per_scope_metrics_track_scopes_independently_and_sum_globally() -> None
     assert totals.invalidations_deleted == 1
     assert totals.shadow_comparisons == 1
     assert totals.shadow_mismatches == 1
+    assert totals.shadow_skipped == {"window_mismatch": 1}
     assert totals.recaptures == {"absent": 1, "age": 1}
+
+    pruned = prune_checkpoint_metrics({"wallet-a"})
+    assert pruned == 1
+    assert list(checkpoint_metrics_by_scope()) == [alias_a]
 
     reset_checkpoint_metrics()
     assert checkpoint_metrics_by_scope() == {}
@@ -154,7 +171,8 @@ def test_format_checkpoint_metrics_summary_is_deterministic_and_sorted() -> None
 
     Given: A scope with unsorted insertion order across all reason maps.
     When: ``format_checkpoint_metrics_summary`` renders the summary line repeatedly.
-    Then: The output starts with ``checkpoint_metrics_summary`` and sorts every map by key.
+    Then: The output starts with ``checkpoint_metrics_summary``, uses a keyed wallet alias,
+        and sorts every map by key.
     """
     metrics = PnlCheckpointMetrics(
         captures_committed=3,
@@ -165,18 +183,21 @@ def test_format_checkpoint_metrics_summary_is_deterministic_and_sorted() -> None
         invalidations_deleted=1,
         shadow_comparisons=4,
         shadow_mismatches=1,
+        shadow_skipped={"window_mismatch": 2},
         recaptures={"suffix_size": 3, "absent": 1, "age": 2},
     )
-    scope = ("wallet-1", "live", "USD")
+    alias = checkpoint_wallet_alias("wallet-1")
+    scope = (alias, "live", "USD")
     expected = (
         "checkpoint_metrics_summary "
-        "wallet=wallet-1 mode=live ccy=USD "
+        f"wallet={alias} mode=live ccy=USD "
         "captures_committed=3 "
         "capture_refusals={capture_value_error:1,not_settled:2} "
         "resumes_attempted=5 resumes_succeeded=4 "
         "fallbacks={checkpoint_absent:1,checkpoint_late_execution:2} "
         "invalidations_deleted=1 "
         "shadow_comparisons=4 shadow_mismatches=1 "
+        "shadow_skipped={window_mismatch:2} "
         "recaptures={absent:1,age:2,suffix_size:3}"
     )
 
@@ -184,6 +205,7 @@ def test_format_checkpoint_metrics_summary_is_deterministic_and_sorted() -> None
     second = format_checkpoint_metrics_summary(scope, metrics)
     assert first == expected
     assert second == expected
+    assert "wallet-1" not in first
 
 
 def test_summary_tick_gate_emits_at_constant_period_and_skips_off(
@@ -215,9 +237,17 @@ def test_summary_tick_gate_emits_at_constant_period_and_skips_off(
         assert tick == CHECKPOINT_SUMMARY_EVERY_TICKS
         assert len(caplog.records) == 2
         assert all(record.levelname == "INFO" for record in caplog.records)
+        aliases = sorted([checkpoint_wallet_alias("wallet-a"), checkpoint_wallet_alias("wallet-b")])
         assert (
-            caplog.records[0].getMessage().startswith("checkpoint_metrics_summary wallet=wallet-a ")
+            caplog.records[0]
+            .getMessage()
+            .startswith(f"checkpoint_metrics_summary wallet={aliases[0]} ")
         )
         assert (
-            caplog.records[1].getMessage().startswith("checkpoint_metrics_summary wallet=wallet-b ")
+            caplog.records[1]
+            .getMessage()
+            .startswith(f"checkpoint_metrics_summary wallet={aliases[1]} ")
         )
+        for record in caplog.records:
+            assert "wallet-a" not in record.getMessage()
+            assert "wallet-b" not in record.getMessage()
