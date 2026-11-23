@@ -58,8 +58,12 @@ def _contain_address_space_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     process on Linux; without this fixture the cap would persist for the rest
     of an xdist worker's lifetime and crash unrelated tests with MemoryError.
     Tests that assert the limit patch ``setrlimit`` themselves, which wins.
+    The RSS guard reads the whole process's peak RSS, which in a long-lived
+    worker under coverage already exceeds the probe's cap, so ``getrusage``
+    reports a fresh-process figure here as well.
     """
     monkeypatch.setattr(probe.resource, "setrlimit", lambda _kind, _bounds: None)
+    monkeypatch.setattr(probe.resource, "getrusage", lambda _who: SimpleNamespace(ru_maxrss=65536))
 
 
 class _RecordingCursor:
