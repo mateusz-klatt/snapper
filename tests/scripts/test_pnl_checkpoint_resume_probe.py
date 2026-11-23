@@ -2149,6 +2149,26 @@ async def test_replay_budget_repins_reused_session_and_resets_counts(
         assert payload.startswith("SELECT executions.id")
 
 
+@pytest.mark.parametrize("explicit_begin", (False, True), ids=("select", "explicit-begin"))
+async def test_replay_budget_refuses_transaction_started_before_guard(explicit_begin: bool) -> None:
+    """Refuse an unpinned transaction before counting rows or coalescing its BEGIN."""
+    config = probe.CheckpointResumeProbeConfig(wallet_public_id=prefix._WALLET)
+    statement = text("BEGIN") if explicit_begin else select(Execution.id)
+    async with idless._repository("sqlite+aiosqlite:///:memory:") as repo:
+        with probe._read_only_guards(repo):
+            async with repo.session() as session:
+                await session.execute(text("BEGIN"))
+                with (
+                    probe._guard_replay_rows(repo, config),
+                    pytest.raises(
+                        probe.CheckpointResumeProbeError, match="^snapshot_not_pinned$"
+                    ) as failure,
+                ):
+                    await session.execute(statement)
+
+    assert probe._classify_failure(failure.value) == (2, "RESULT: FAIL snapshot_not_pinned")
+
+
 async def test_replay_budget_keeps_open_sqlite_snapshot_across_savepoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1082,20 +1082,26 @@ class _ReplayRowBudget:
             return None
         statement = state.statement
         if isinstance(statement, TextClause) and statement.text == self.snapshot_sql:
-            state.session.connection()
+            self._pinned_connection(state.session)
             return null_result()
         if isinstance(statement, Select):
             self._check_select(state, statement)
         return None
 
+    def _pinned_connection(self, session: Session) -> tuple[Connection, dict[str, int]]:
+        """Acquire the connection and require a snapshot recorded by this budget."""
+        connection = session.connection()
+        transaction = session.get_transaction()
+        _require(transaction is not None, "snapshot_not_pinned")
+        counts = self.read_counts.get(cast(SessionTransaction, transaction))
+        _require(counts is not None, "snapshot_not_pinned")
+        return connection, cast(dict[str, int], counts)
+
     def _check_select[*RowT](self, state: ORMExecuteState, statement: Select[*RowT]) -> None:
         """Refuse an over-cap query before it executes in the pinned read transaction."""
-        connection = state.session.connection()
-        transaction = state.session.get_transaction()
-        assert transaction is not None
+        connection, counts = self._pinned_connection(state.session)
         for kind, column in _REPLAY_ROW_COLUMNS:
             if statement.selected_columns.corresponding_column(column) is not None:
-                counts = self.read_counts[transaction]
                 used = self.candles if kind == "candles" else counts.get(kind, 0)
                 remaining = self.limits[kind] - used
                 rows = statement.order_by(None).subquery()
