@@ -1490,8 +1490,11 @@ requested cancel logs one G3-C WARN per episode, including when the executor
 has no tracked order for that cancel. For both requested and stream cancels,
 if an order has a database row and the exchange client lacks a repository or
 tracker, the executor logs one ERROR naming the order and stops automatic
-row-update retries for that order. The row stays active for recovery after
-the configuration is repaired and the executor restarts.
+terminal-row update retries for that order. Reconciliation still checks orders
+missing from the open-order snapshot and publishes any trailing fills it finds.
+If the stream path already sent a terminal notification, re-entry skips that
+publish. The row stays active for recovery after the configuration is repaired
+and the executor restarts.
 
 Before the venue order-placement call, each submit passes the pre-placement
 safety checks. The duplicate-submit guard drops outbox replays of an

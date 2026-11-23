@@ -6068,7 +6068,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """Compare tracked orders against the exchange open-order snapshot."""
         for _eid, pending in tuple(self.pending_orders.items()):
             exchange_oid = pending.exchange_order_id
-            if not exchange_oid or pending.terminal_row_projection == "blocked":
+            if not exchange_oid:
                 continue
 
             if exchange_oid not in exchange_by_id:
@@ -6873,7 +6873,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         routes a synthetic terminal ExecutionUpdate through the normal
         execution pipeline (status projection, lifecycle pop). Extracted
         from :meth:`_reconcile_disappeared_order` so recovery-time
-        terminal handling can reuse the exact same emission path.
+        terminal handling can reuse the exact same emission path. A blocked
+        row projection already logged its fault and can re-enter every cycle.
 
         Args:
             exchange_name: Exchange identifier for logging.
@@ -6893,11 +6894,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             terminal_type = "canceled"
             terminal_status = ExchangeOrderStatusEnum.CANCELED
 
-        logger.warning(
-            f"[{exchange_name}] Recon: order {exchange_oid} "
-            f"disappeared (status={snapshot.status}), "
-            f"emitting terminal={terminal_type}"
-        )
+        if pending.terminal_row_projection != "blocked":
+            logger.warning(
+                f"[{exchange_name}] Recon: order {exchange_oid} "
+                f"disappeared (status={snapshot.status}), "
+                f"emitting terminal={terminal_type}"
+            )
         corrective = ExecutionUpdate(
             order_id=exchange_oid,
             exec_type=terminal_type,

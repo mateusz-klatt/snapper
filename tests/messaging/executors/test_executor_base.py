@@ -14246,20 +14246,23 @@ class TestRequestedCancelEvidenceFirst:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("missing_dependency", ["repository", "_tracker"])
-    async def test_requested_cancel_with_unwired_projection_logs_once_and_stays_open(
+    async def test_blocked_cancel_reconciles_three_times_without_repeating_logs_or_publish(
         self,
         requested_cancel_book: tuple[SQLAlchemyRepository, MergedDummyExecutor, str],
         missing_dependency: Literal["repository", "_tracker"],
     ) -> None:
-        """Keep evidence and tracking while parking a permanently unwired row writer."""
+        """Re-enter the stream handler while skipping the blocked write and duplicate effects."""
         repository, ex, _ = requested_cancel_book
         holder = ex.pending_orders[_CANCEL_CID]
         client = ex.exchange_client
-        assert client is not None
+        assert client is not None and ex.msg_publisher is not None
         setattr(client, missing_dependency, None)
+        publish = cast(AsyncMock, ex.msg_publisher.send)
 
         with (
+            patch.object(base_module.logger, "warning") as warning,
             patch.object(base_module.logger, "error") as error,
+            patch.object(base_module.logger, "critical") as critical,
             patch.object(
                 client, "_log_order_update_to_db", wraps=client._log_order_update_to_db
             ) as project,
@@ -14268,17 +14271,26 @@ class TestRequestedCancelEvidenceFirst:
                 "insert_order_terminal_once",
                 wraps=repository.insert_order_terminal_once,
             ) as record,
+            patch.object(
+                ex, "_publish_stream_terminal_event", wraps=ex._publish_stream_terminal_event
+            ) as stream_terminal,
         ):
             await ex._process_cancel(_cancel_request(exchange="paper"))
-            await ex._reconcile_with_exchange()
-            await ex._reconcile_with_exchange()
+            publish.assert_awaited_once()
+            for _ in range(3):
+                await ex._reconcile_with_exchange()
 
         error.assert_called_once()
         assert _CANCEL_CID in error.call_args.args[0]
         assert "ex-cancel" in error.call_args.args[0]
+        warning.assert_not_called()
+        critical.assert_not_called()
         project.assert_not_awaited()
-        record.assert_awaited_once()
-        client.get_order.assert_not_awaited()
+        assert record.await_count == 4
+        assert client.get_order.await_args_list == [call("ex-cancel", "BTC-USD")] * 3
+        stream_terminal.assert_awaited_once()
+        assert publish.await_count == 2
+        assert holder.stream_terminal_published
         assert ex.pending_orders[_CANCEL_CID] is holder
         assert ex.client_by_exchange["ex-cancel"] == _CANCEL_CID
         assert await repository.has_venue_event(_CANCEL_CID, "order_terminal")
@@ -14292,6 +14304,48 @@ class TestRequestedCancelEvidenceFirst:
 
 class TestStreamCancellationEvidenceFirst:
     """Durable-evidence-first ordering and retry holding for ``_handle_cancellation``."""
+
+    @pytest.mark.asyncio
+    async def test_blocked_cancel_reconciles_trailing_fill_once_without_terminal_row_write(
+        self, requested_cancel_book: tuple[SQLAlchemyRepository, MergedDummyExecutor, str]
+    ) -> None:
+        """Publish a venue-reported trailing fill with an unwired client repository."""
+        _, ex, _ = requested_cancel_book
+        holder = ex.pending_orders[_CANCEL_CID]
+        client = ex.exchange_client
+        assert client is not None and ex.msg_publisher is not None
+        client.repository = None
+        publish = cast(AsyncMock, ex.msg_publisher.send)
+        snapshot = cast(ExchangeOrderSnapshot, cast(AsyncMock, client.get_order).return_value)
+        snapshot.filled = 0.4
+        snapshot.remaining = 0.6
+        snapshot.fee = 1.25
+        snapshot.fee_currency = "USD"
+
+        with patch.object(
+            client, "_log_order_update_to_db", wraps=client._log_order_update_to_db
+        ) as project:
+            await ex._process_execution(_stream_execution_update())
+            assert holder.terminal_row_projection == "blocked"
+            publish.assert_awaited_once()
+            await ex._reconcile_with_exchange()
+            await ex._reconcile_with_exchange()
+
+        project.assert_awaited_once_with(
+            db_order_id=holder.db_order_id,
+            status=ExchangeOrderStatusEnum.OPEN,
+            filled_size=0.4,
+            average_price=None,
+        )
+        assert publish.await_count == 2
+        topic, fill = publish.await_args_list[1].args
+        assert topic == "orders.events.paper.BTC-USD.executed"
+        assert isinstance(fill, ExecutionData)
+        assert (fill.trade_id, fill.client_order_id) == ("recon-ex-cancel-c0.4", _CANCEL_CID)
+        assert (fill.last_size, fill.fee, fill.fee_asset) == (0.4, 1.25, "USD")
+        assert holder.last_seen_cum_qty == 0.4
+        assert ex.pending_orders[_CANCEL_CID] is holder
+        assert ex.client_by_exchange["ex-cancel"] == _CANCEL_CID
 
     @pytest.mark.asyncio
     async def test_records_order_terminal_before_order_update_and_publish(self) -> None:
