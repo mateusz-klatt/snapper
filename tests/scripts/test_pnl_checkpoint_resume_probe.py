@@ -418,6 +418,8 @@ def test_postgres_shaped_statement_allowlist_and_duration_parsing() -> None:
         "SELECT pg_sleep(5)",
         "SELECT pg_advisory_lock(1)",
         "SELECT pg_advisory_unlock(1)",
+        "SELECT pg_try_advisory_lock(1)",
+        "SELECT pg_try_advisory_xact_lock_shared(1)",
         "SELECT setval('candles_id_seq', 1)",
         "SELECT 1 INTO TEMP probe_mutation",
         "WITH s AS (SELECT pg_sleep(1)) SELECT * FROM s",
@@ -2561,3 +2563,36 @@ async def test_probe_with_repository_timeout_raises_timeout_error(
             )
     finally:
         await repo.engine.dispose()
+
+
+def test_mark_series_sort_tolerates_null_historical_quote() -> None:
+    """Sort historical mark series whose quote metadata is partly null.
+
+    Given: Two references to one native symbol, exchange and base whose
+        historical quote is ``None`` in one version and ``"USD"`` in the other.
+    When: The series set is sorted with the probe's null-safe key.
+    Then: Sorting does not raise and the concrete quote orders before the null one.
+    """
+    series = {
+        ("XBTUSD", "kraken", "BTC", None),
+        ("XBTUSD", "kraken", "BTC", "USD"),
+    }
+    with pytest.raises(TypeError):
+        sorted(series)
+    assert sorted(series, key=probe._null_safe_series_key) == [
+        ("XBTUSD", "kraken", "BTC", "USD"),
+        ("XBTUSD", "kraken", "BTC", None),
+    ]
+
+
+def test_dsn_redaction_covers_slash_in_password() -> None:
+    """Redact a DSN password that contains a raw slash.
+
+    Given: A DSN whose password contains ``/``, which SQLAlchemy accepts unescaped.
+    When: ``_redact_secrets`` scrubs it, as argparse errors and diagnostics do.
+    Then: No fragment of the password survives in the output.
+    """
+    slashed = probe._redact_secrets("postgresql+asyncpg://alice:pa/ss@10.0.1.5:5432/prod")
+    assert "pa/ss" not in slashed
+    assert "ss@" not in slashed
+    assert slashed == "postgresql+asyncpg://***:***@10.0.1.5:5432/prod"

@@ -140,7 +140,7 @@ _FOR_LOCK_RE = re.compile(r"\bFOR\s+(?:(?:NO\s+KEY\s+)?UPDATE|(?:KEY\s+)?SHARE)\
 _SELECT_INTO_RE = re.compile(r"\bSELECT\b[\s\S]*\bINTO\b")
 _EXPLAIN_ANALYZE_RE = re.compile(r"\bANALYZE\b")
 _FORBIDDEN_SQL_CALL_RE = re.compile(
-    r"\b(?:SET_CONFIG\s*\(|SETVAL\s*\(|PG_ADVISORY(?:_[A-Z]+)*\s*\(|PG_SLEEP(?:_FOR|_UNTIL)?\b)"
+    r"\b(?:SET_CONFIG\s*\(|SETVAL\s*\(|PG_(?:TRY_)?ADVISORY(?:_[A-Z]+)*\s*\(|PG_SLEEP(?:_FOR|_UNTIL)?\b)"
 )
 _BOUND_TX_CONFIG_RE = re.compile(
     r"^SELECT\s+set_config\('statement_timeout',\s*CASE\s+WHEN\s+"
@@ -177,7 +177,7 @@ _PG_UNIT_MS: Final[dict[str, int]] = {
     "min": 60_000,
     "h": 3_600_000,
 }
-_DSN_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^\s'\"/@]+)(@)")
+_DSN_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^\s'\"@]+)(@)")
 _SECRET_KV_RE = re.compile(
     r"(?i)(\b(?:password|passwd|pwd|secret|token|api_key)\s*=\s*)(?:'[^']*'|\"[^\"]*\"|[^\s&'\",;)]+)"
 )
@@ -1081,6 +1081,18 @@ def _fx_candidate_pairs(
     )
 
 
+def _null_safe_series_key(
+    series: tuple[str, str, str, str | None],
+) -> tuple[tuple[bool, str], ...]:
+    """Order series tuples deterministically when historical quote metadata is null.
+
+    Historical symbol references may carry both ``None`` and a concrete quote for
+    the same native symbol, exchange and base; comparing ``None`` with ``str``
+    would raise ``TypeError``, so each field sorts as ``(is_null, value)``.
+    """
+    return tuple((value is None, value or "") for value in series)
+
+
 async def _count_mark_candles(
     repo: SQLAlchemyRepository,
     refs: Sequence[InstrumentSymbolRefRow],
@@ -1100,7 +1112,8 @@ async def _count_mark_candles(
                 ref["quote_currency"],
             )
             for ref in refs
-        }
+        },
+        key=_null_safe_series_key,
     )
     stmt = (
         select(func.count(Candle.id))
