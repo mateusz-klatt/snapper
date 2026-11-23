@@ -15,6 +15,9 @@ from snapper.application.portfolio.pnl_correction_planner import PlannedPnlCorre
 from snapper.application.portfolio.pnl_engine_options import pnl_engine_options_for
 from snapper.application.portfolio.pnl_opening_checkpoint_capture import PnlCheckpointCaptureRequest
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    checkpoint_minute_fenced,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     checkpoint_write_refusal,
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
@@ -120,6 +123,8 @@ def capture_request_for(
     scope: PortfolioPnlSampleScope,
     anchor: PortfolioPnlAnchorRow,
     end: datetime,
+    *,
+    self_heal_open: datetime | None = None,
 ) -> PnlCheckpointCaptureRequest | None:
     """Build a capture request only at a clean settling tip and isolate refusals.
 
@@ -128,12 +133,16 @@ def capture_request_for(
         scope: Active anchor-bound sample scope.
         anchor: Active anchor row for the scope.
         end: Inclusive end minute of the chunk being replayed.
+        self_heal_open: This tick's earliest retryable incomplete minute, if any.
 
     Returns:
         Validated capture request, or ``None`` when ineligible or refused.
     """
     if not checkpoint_capture_permitted(frontier.key.calc_version):
         _log_refusal(scope, "capture_not_permitted")
+        return None
+    if checkpoint_minute_fenced(end, self_heal_open):
+        _log_refusal(scope, "self_heal_open")
         return None
     start = frontier.next_minute
     if (
@@ -204,7 +213,7 @@ async def delete_checkpoint(
         )
         return
     if deleted:
-        record_checkpoint_invalidation_deleted(scope)
+        record_checkpoint_invalidation_deleted("generation", scope)
 
 
 def _log_fallback(
@@ -262,6 +271,10 @@ def recapture_trigger(
 ) -> PnlCheckpointRecaptureTrigger | None:
     """Classify recapture triggers without database work or replay side effects.
 
+    Generation recapture deliberately combines a generation mismatch with only the
+    ``window_start`` comparator: a forward generation resumes an earlier checkpoint,
+    while pending-minute and repair fences remain repository deletion concerns.
+
     Args:
         frontier: Current durable correction frontier.
         record: Stored opening checkpoint record, if any.
@@ -275,9 +288,8 @@ def recapture_trigger(
     certificate = record.certificate
     if certificate.key.calc_version != frontier.key.calc_version:
         return "calc_version"
-    if (
-        certificate.source_generation != frontier.generation
-        and frontier.window_start <= certificate.checkpoint_minute
+    if certificate.source_generation != frontier.generation and checkpoint_minute_fenced(
+        certificate.checkpoint_minute, frontier.window_start
     ):
         return "generation"
     if frontier.tip - certificate.checkpoint_minute >= _RECAPTURE_AGE:

@@ -462,7 +462,7 @@ async def test_replay_start_does_not_skip_when_frontier_next_minute_is_pending()
     start = await snap._replay_start(
         cast(Repository, repo), ctx, pending_frontier, _M3, _gap_metadata()
     )
-    assert start == _M1
+    assert start == (_M1, None)
 
 
 def _assert_skip_record_fields(

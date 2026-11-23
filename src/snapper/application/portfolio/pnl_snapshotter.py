@@ -77,6 +77,9 @@ from snapper.application.portfolio.pnl_opening_checkpoint_metrics import prune_c
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     record_checkpoint_capture_committed,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
+    record_checkpoint_invalidation_deleted,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import record_checkpoint_recapture
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     record_checkpoint_resume_attempted,
@@ -311,6 +314,7 @@ class _ScopeContext:
     expected_venues: frozenset[str]
     as_of: datetime
     anchor: PortfolioPnlAnchorRow
+    self_heal_open: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -829,6 +833,7 @@ class PortfolioPnlSnapshotter:
             self._log_repair_from_lag(ctx, frontier)
             if frontier is not None and ctx.as_of < frontier.as_of:
                 return False
+            self_heal_open = None
             if (
                 frontier is None
                 or frontier.next_minute is None
@@ -838,9 +843,10 @@ class PortfolioPnlSnapshotter:
                 or frontier.expected_venues is None
                 or frontier.venue_event_watermarks is None
             ):
-                frontier = await self._start_replay(repo, ctx, frontier)
+                frontier, self_heal_open = await self._start_replay(repo, ctx, frontier)
             if frontier is not None:
-                await self._advance_replay(repo, ctx, frontier)
+                replay_ctx = replace(ctx, self_heal_open=self_heal_open)
+                await self._advance_replay(repo, replay_ctx, frontier)
         except PortfolioPnlCorrectionConflictError, PnlFrozenReplayEvidenceChangedError:
             self._log_class(ctx.wallet_public_id, "catchup_conflict", "durable frontier")
             return True
@@ -853,11 +859,11 @@ class PortfolioPnlSnapshotter:
         frontier: PnlCorrectionFrontier | None,
         *,
         rewind: bool = False,
-    ) -> PnlCorrectionFrontier | None:
-        """Select an inclusive finalized target and freeze its execution evidence prefix."""
+    ) -> tuple[PnlCorrectionFrontier | None, datetime | None]:
+        """Select a finalized target and return its frontier and self-heal fence."""
         tip = ctx.as_of.replace(second=0, microsecond=0) - FINALIZATION_LAG
         if tip <= ctx.t0:
-            return None
+            return None, None
         if frontier is not None:
             tip = max(tip, frontier.tip)
         pending = await self._probe_replay(repo, ctx, frontier, tip)
@@ -866,13 +872,13 @@ class PortfolioPnlSnapshotter:
             raise PortfolioPnlCorrectionConflictError(
                 "P&L replay could not certify its fill witnesses"
             )
-        start = (
-            ctx.t0 + _MINUTE
+        start, self_heal_open = (
+            (ctx.t0 + _MINUTE, None)
             if rewind
             else await self._replay_start(repo, ctx, frontier, tip, pending)
         )
         if start is None:
-            return None
+            return None, None
         first_minute = await repo.get_portfolio_pnl_correction_evidence(ctx.scope, start, start)
         started = await repo.invalidate_portfolio_pnl_correction(
             ctx.scope,
@@ -892,8 +898,9 @@ class PortfolioPnlSnapshotter:
             ),
             frontier,
         )
+        self._record_repo_fence_deletions(repo, ctx.scope)
         self._clear_fill_gap_skip_streak(ctx.scope)
-        return started
+        return started, self_heal_open
 
     async def _probe_replay(
         self,
@@ -928,8 +935,8 @@ class PortfolioPnlSnapshotter:
         frontier: PnlCorrectionFrontier | None,
         tip: datetime,
         pending: PnlSeriesReplayMetadata,
-    ) -> datetime | None:
-        """Recompute the oldest unresolved minute through the selected finalized tip."""
+    ) -> tuple[datetime | None, datetime | None]:
+        """Return the oldest unresolved minute and this tick's self-heal fence."""
         first = ctx.t0 + _MINUTE
         if (
             frontier is None
@@ -939,12 +946,12 @@ class PortfolioPnlSnapshotter:
             or frontier.has_fill_gap != pending.has_fill_gap
             or frontier.expected_venues != ctx.expected_venues
         ):
-            return first
+            return first, None
         if pending.has_fill_gap:
             if await self._can_skip_persistent_fill_gap(repo, ctx, frontier, tip, pending):
                 self._log_persistent_fill_gap_skip(ctx, frontier)
-                return None
-            return first
+                return None, None
+            return first, None
         late = plan_late_fill_recompute(pending.earliest_affected_minute, frontier.tip)
         healed = await self._self_heal_start(repo, ctx, frontier.tip)
         forward = frontier.tip + _MINUTE if frontier.tip < tip else None
@@ -952,7 +959,9 @@ class PortfolioPnlSnapshotter:
             minute for minute in (late, healed, frontier.repair_from, forward) if minute is not None
         )
         start = min(candidates, default=None)
-        return max(start, first) if start is not None else None
+        if start is None:
+            return None, None
+        return max(start, first), healed
 
     @staticmethod
     def _scope_streak_key(scope: PortfolioPnlSampleScope) -> tuple[str, str, str, str]:
@@ -1198,9 +1207,16 @@ class PortfolioPnlSnapshotter:
         committed = await repo.commit_portfolio_pnl_correction_chunk(
             ctx.scope, frontier, plan.chunk
         )
+        self._record_repo_fence_deletions(repo, ctx.scope)
         self._record_chunk_outcome(ctx.wallet_public_id, self._monotonic() - started, chunk)
         self._log_repair_from_lag(ctx, committed)
         self._report_withheld(ctx.wallet_public_id, plan.withheld, bool(plan.chunk.edits))
+
+    @staticmethod
+    def _record_repo_fence_deletions(repo: Repository, scope: PortfolioPnlSampleScope) -> None:
+        """Count one committed repository-fence deletion when its rowcount is nonzero."""
+        if repo.consume_last_pnl_checkpoint_invalidation_deleted() > 0:
+            record_checkpoint_invalidation_deleted("repo_fence", scope)
 
     def _record_recapture_consumed(self, wallet: str) -> None:
         """Advance the tick recapture budget and mark the consuming wallet for rotation."""
@@ -1239,7 +1255,13 @@ class PortfolioPnlSnapshotter:
                     "capture_recapture_budget_exceeded",
                 )
             return None
-        recapture = capture_request_for(frontier, ctx.scope, ctx.anchor, end)
+        recapture = capture_request_for(
+            frontier,
+            ctx.scope,
+            ctx.anchor,
+            end,
+            self_heal_open=ctx.self_heal_open,
+        )
         if recapture is not None:
             self._record_recapture_consumed(ctx.wallet_public_id)
         return recapture
@@ -1335,7 +1357,13 @@ class PortfolioPnlSnapshotter:
         resume = decision.resume
         capture: PnlCheckpointCaptureRequest | None = None
         if decision.recapture is not None:
-            capture = capture_request_for(frontier, ctx.scope, ctx.anchor, chunk.end)
+            capture = capture_request_for(
+                frontier,
+                ctx.scope,
+                ctx.anchor,
+                chunk.end,
+                self_heal_open=ctx.self_heal_open,
+            )
             if capture is not None:
                 self._record_recapture_consumed(ctx.wallet_public_id)
         request = _CheckpointDispatchRequest(repo, ctx, frontier, chunk, started, capture, resume)
@@ -1528,6 +1556,7 @@ class PortfolioPnlSnapshotter:
                 checkpoint=None,
             )
             write = None
+        self._record_repo_fence_deletions(repo, ctx.scope)
         write_refusal = repo.consume_last_pnl_checkpoint_write_refusal()
         if write is not None:
             if write_refusal is None:

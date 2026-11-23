@@ -27,6 +27,9 @@ type PnlCheckpointRecaptureTrigger = Literal[
     "suffix_size",
 ]
 
+type PnlCheckpointInvalidationReason = Literal["generation", "repo_fence"]
+"""Closed vocabulary for opening-checkpoint deletion paths."""
+
 type PnlCheckpointShadowSkipReason = Literal["window_mismatch", "tick_budget"]
 """Closed vocabulary for skipped checkpoint shadow comparisons."""
 
@@ -107,7 +110,7 @@ class PnlCheckpointMetrics:
     resumes_attempted: int = 0
     resumes_succeeded: int = 0
     fallbacks: dict[str, int] = field(default_factory=dict)
-    invalidations_deleted: int = 0
+    invalidations_deleted: dict[PnlCheckpointInvalidationReason, int] = field(default_factory=dict)
     shadow_comparisons: int = 0
     shadow_mismatches: int = 0
     shadow_skipped: dict[str, int] = field(default_factory=dict)
@@ -126,7 +129,7 @@ def _snapshot(metrics: PnlCheckpointMetrics) -> PnlCheckpointMetrics:
         resumes_attempted=metrics.resumes_attempted,
         resumes_succeeded=metrics.resumes_succeeded,
         fallbacks=dict(metrics.fallbacks),
-        invalidations_deleted=metrics.invalidations_deleted,
+        invalidations_deleted=dict(metrics.invalidations_deleted),
         shadow_comparisons=metrics.shadow_comparisons,
         shadow_mismatches=metrics.shadow_mismatches,
         shadow_skipped=dict(metrics.shadow_skipped),
@@ -190,7 +193,7 @@ def reset_checkpoint_metrics() -> None:
     _METRICS.resumes_attempted = 0
     _METRICS.resumes_succeeded = 0
     _METRICS.fallbacks.clear()
-    _METRICS.invalidations_deleted = 0
+    _METRICS.invalidations_deleted.clear()
     _METRICS.shadow_comparisons = 0
     _METRICS.shadow_mismatches = 0
     _METRICS.shadow_skipped.clear()
@@ -263,15 +266,17 @@ def record_checkpoint_fallback(
 
 
 def record_checkpoint_invalidation_deleted(
+    reason: PnlCheckpointInvalidationReason,
     scope: PnlCheckpointScope | PnlCheckpointScopeKey | None = None,
 ) -> None:
-    """Count one generation-fenced stored-row deletion.
+    """Count one stored-row deletion by its closed invalidation path.
 
     Args:
+        reason: Generation fence or repository frontier fence performing the deletion.
         scope: Optional scope owning the deleted checkpoint row.
     """
     for target in _targets(scope):
-        target.invalidations_deleted += 1
+        target.invalidations_deleted[reason] = target.invalidations_deleted.get(reason, 0) + 1
 
 
 def record_checkpoint_shadow_comparison(
@@ -370,7 +375,7 @@ def format_checkpoint_metrics_summary(
         f"resumes_attempted={metrics.resumes_attempted} "
         f"resumes_succeeded={metrics.resumes_succeeded} "
         f"fallbacks={_format_reason_counts(metrics.fallbacks)} "
-        f"invalidations_deleted={metrics.invalidations_deleted} "
+        f"invalidations_deleted={_format_reason_counts(metrics.invalidations_deleted)} "
         f"shadow_comparisons={metrics.shadow_comparisons} "
         f"shadow_mismatches={metrics.shadow_mismatches} "
         f"shadow_skipped={_format_reason_counts(metrics.shadow_skipped)} "

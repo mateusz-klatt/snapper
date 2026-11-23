@@ -131,7 +131,7 @@ async def test_prepare_resume_handles_fill_gap_and_generation_fenced_delete(
     fallback = await dispatch.prepare_checkpoint_resume(clean)
     assert fallback.recapture == "fallback"
     assert await repo.get_portfolio_pnl_opening_checkpoint(fixtures._sample_scope()) is None
-    assert checkpoint_metrics().invalidations_deleted == 1
+    assert checkpoint_metrics().invalidations_deleted == {"generation": 1}
 
 
 async def test_prepare_resume_returns_verified_state_and_handles_start_at_tip(
@@ -211,7 +211,7 @@ async def test_resume_fallback_reason_and_delete_fence_miss(
         "unexpected",
     )
     assert checkpoint_metrics().fallbacks == {"checkpoint_payload_corrupt": 1}
-    assert checkpoint_metrics().invalidations_deleted == 0
+    assert checkpoint_metrics().invalidations_deleted == {}
     delete = AsyncMock(return_value=True)
     monkeypatch.setattr(repo, "delete_portfolio_pnl_opening_checkpoint", delete)
     await dispatch.handle_resume_fallback(
@@ -264,7 +264,7 @@ async def test_delete_checkpoint_handles_failure_and_preserves_cancellation(
             cast(Repository, repo), fixtures._sample_scope(), resume.record
         )
     delete.assert_awaited_once()
-    assert checkpoint_metrics().invalidations_deleted == 0
+    assert checkpoint_metrics().invalidations_deleted == {}
 
 
 async def test_prepare_resume_propagates_cancellation(
@@ -377,9 +377,9 @@ async def test_stationary_persistent_fill_gap_skip_and_liveness_log(
         pending,
     )
 
-    assert first is None
-    assert second is None
-    assert changed == fixtures._minute(1)
+    assert first == (None, None)
+    assert second == (None, None)
+    assert changed == (fixtures._minute(1), None)
     assert len(snap._persistent_fill_gap_skip_logged) == 1
 
 

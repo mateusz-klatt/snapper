@@ -205,6 +205,7 @@ def prefix_fx_coverage_payloads(
 
 
 type PnlCheckpointCaptureRefusal = Literal[
+    "self_heal_open",
     "capture_value_error",
     "capture_evidence_error",
     "capture_not_permitted",

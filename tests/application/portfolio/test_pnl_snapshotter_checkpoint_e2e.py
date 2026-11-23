@@ -380,7 +380,7 @@ async def test_real_prefix_accrual_change_falls_back_deletes_and_matches_off(
         "checkpoint_absent": 1,
         "checkpoint_accrual_prefix_changed": 1,
     }
-    assert metrics.invalidations_deleted == 1
+    assert metrics.invalidations_deleted == {"generation": 1}
     assert metrics.recaptures == {"absent": 1, "fallback": 1}
 
 
