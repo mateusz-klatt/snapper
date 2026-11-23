@@ -50,6 +50,18 @@ from tests.data import test_pnl_timeline_sample_repository as samples
 _MINUTE = timedelta(minutes=1)
 
 
+@pytest.fixture(autouse=True)
+def _contain_address_space_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the probe's RLIMIT_AS from leaking into the pytest worker process.
+
+    ``main()`` applies ``resource.setrlimit(RLIMIT_AS, ...)`` to the current
+    process on Linux; without this fixture the cap would persist for the rest
+    of an xdist worker's lifetime and crash unrelated tests with MemoryError.
+    Tests that assert the limit patch ``setrlimit`` themselves, which wins.
+    """
+    monkeypatch.setattr(probe.resource, "setrlimit", lambda _kind, _bounds: None)
+
+
 class _RecordingCursor:
     """Minimal DBAPI cursor recording executed SQL and returning mapped rows."""
 
