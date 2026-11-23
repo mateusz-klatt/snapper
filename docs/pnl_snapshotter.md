@@ -399,6 +399,9 @@ Rollout and rollback:
 
 ## Running the probe in production
 
+Run the probe as a standalone process. It installs class-global SQLAlchemy
+session listeners for the duration of the probe.
+
 Create a dedicated least-privilege PostgreSQL role (`snapper_ro`) with read-only
 transaction defaults (replace every `<...>` placeholder before running):
 
@@ -465,8 +468,11 @@ limit for the entire process, including startup memory.
 `--window-minutes` bounds the output of each replay. Capture ends at the
 checkpoint minute, and the cold and resumed comparisons start one minute
 later. Capture and cold replay still process the history needed to reconstruct
-opening state. Row caps check the actual execution, fill, accrual, and candle
-queries at their read horizons, including FX candles for fees.
+opening state. Row caps count the actual execution, fill, accrual, and candle
+queries at their read horizons, including FX candles for fees. The count and
+load share a read snapshot pinned at transaction start. Each budgeted read
+adds up to one bounded scan for the count. Allow for about twice the candle
+scan work when setting `--max-runtime-seconds` and the outer timeout.
 
 Exit codes:
 

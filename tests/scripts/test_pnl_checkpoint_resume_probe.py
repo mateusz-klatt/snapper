@@ -26,6 +26,7 @@ from sqlalchemy import update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from scripts import pnl_checkpoint_resume_probe as probe
@@ -39,6 +40,7 @@ from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPoli
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.data.models import Candle
+from snapper.data.models import Execution
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlCorrectionKey
 from snapper.data.repository import PortfolioPnlSampleScope
@@ -969,6 +971,8 @@ class _FakeAsyncpgPrepared:
         lowered = self._sql.lower()
         if "count(" in lowered and "sum(" in lowered and "group by" not in lowered:
             return [(0, None, None, None)]
+        if lowered.startswith("select count(*)"):
+            return [(0,)]
         for pattern, rows in _FAKE_PG_STATIC_RESPONSES:
             if pattern in self._sql:
                 return rows
@@ -2011,6 +2015,43 @@ async def test_bound_pg_timeout_set_config_and_production_read_audit(
         probe._assert_read_only_sql(sql, statement_timeout_ms=30_000)
 
 
+async def test_pg_replay_budget_pins_transaction_before_text_select(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A text SELECT can take a snapshot before any ORM read reaches the budget."""
+    state = _FakeAsyncpgState(statement_timeout="30s")
+    statements: list[str] = []
+
+    async def fake_connect(*_args: object, **kwargs: object) -> _FakeAsyncpgConn:
+        """Keep the PostgreSQL dialect and substitute the recording driver."""
+        return _FakeAsyncpgConn(state, **kwargs)
+
+    def record_statement(
+        _connection: object, _cursor: object, statement: str, *_args: object
+    ) -> None:
+        """Capture ORM transaction SQL after dialect initialization and checkout."""
+        statements.append(statement)
+
+    monkeypatch.setattr(asyncpg, "connect", fake_connect)
+    repo = SQLAlchemyRepository("postgresql+asyncpg://probe_ro@localhost/snapper")
+    config = probe.CheckpointResumeProbeConfig(wallet_public_id=prefix._WALLET)
+    pin_sql = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+    event.listen(repo.engine.sync_engine, "before_cursor_execute", record_statement)
+    try:
+        with probe._read_only_guards(repo), probe._guard_replay_rows(repo, config):
+            async with repo.session() as session:
+                await session.execute(text("SELECT 1"))
+                await session.execute(text(pin_sql))
+                await session.execute(select(Candle.close))
+    finally:
+        await repo.engine.dispose()
+
+    assert statements[:2] == [pin_sql, "SELECT 1"]
+    assert len(statements) == 4
+    assert statements[2].startswith("SELECT count(*)")
+    assert statements[3].startswith("SELECT candles.close")
+
+
 async def test_candle_cap_ignores_prices_outside_replay_queries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2073,6 +2114,71 @@ async def test_replay_row_budget_is_scoped_to_task_and_engine(
             assert await read_candles(other_repo) > 1
             with pytest.raises(probe.CheckpointResumeProbeError, match="^caps_exceeded:candles$"):
                 await read_candles(repo)
+
+
+@pytest.mark.parametrize("commit", (True, False), ids=("commit", "rollback"))
+async def test_replay_budget_repins_reused_session_and_resets_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commit: bool
+) -> None:
+    """Both transactions in one session can read a cap-sized execution prefix."""
+    url, scope = await _seed_and_catchup(tmp_path / "reused_session.db", monkeypatch)
+    config = probe.CheckpointResumeProbeConfig(
+        wallet_public_id=scope.wallet_public_id, max_executions=3
+    )
+    statements: list[str] = []
+    async with idless._repository(url) as repo:
+        event.listen(
+            repo.engine.sync_engine,
+            "before_cursor_execute",
+            lambda _c, _cur, statement, *_args: statements.append(statement),
+        )
+        with probe._read_only_guards(repo), probe._guard_replay_rows(repo, config):
+            async with repo.session() as session:
+                for _ in range(2):
+                    rows = (await session.execute(select(Execution.id))).all()
+                    assert len(rows) == 3
+                    if commit:
+                        await session.commit()
+                    else:
+                        await session.rollback()
+
+    assert len(statements) == 6
+    for begin, count, payload in (statements[:3], statements[3:]):
+        assert begin == "BEGIN"
+        assert count.startswith("SELECT count(*)")
+        assert payload.startswith("SELECT executions.id")
+
+
+async def test_replay_budget_keeps_open_sqlite_snapshot_across_savepoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open SQLite transaction keeps its snapshot and counts across a savepoint."""
+    url, scope = await _seed_and_catchup(tmp_path / "joined_session.db", monkeypatch)
+    config = probe.CheckpointResumeProbeConfig(
+        wallet_public_id=scope.wallet_public_id, max_executions=3
+    )
+    async with idless._repository(url) as repo:
+        with probe._read_only_guards(repo), probe._guard_replay_rows(repo, config):
+            async with repo.engine.connect() as connection:
+                await connection.exec_driver_sql("BEGIN")
+                async with AsyncSession(bind=connection) as session:
+                    assert len((await session.execute(select(Execution.id))).all()) == 3
+                    async with session.begin_nested():
+                        with pytest.raises(
+                            probe.CheckpointResumeProbeError, match="^caps_exceeded:executions$"
+                        ):
+                            await session.execute(select(Execution.id))
+
+
+async def test_execution_cap_allows_checkpoint_verification_rereads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verification can reread all three executions across its separate transactions."""
+    url, scope = await _seed_and_catchup(tmp_path / "verification_cap.db", monkeypatch)
+    config = probe.CheckpointResumeProbeConfig(
+        wallet_public_id=scope.wallet_public_id, window_minutes=4, max_executions=3, db_url=url
+    )
+    assert (await probe.probe_wallet_checkpoint_resume(config)).matched
 
 
 def test_accrual_and_candle_caps_refuse_with_exit_three(

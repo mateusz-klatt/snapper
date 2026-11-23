@@ -22,7 +22,27 @@ Safety architecture:
     * RSS checks sample memory growth and Linux ``RLIMIT_AS`` limits virtual
       memory. Use a container memory limit (``docker run --memory``) and an
       outer timeout to enforce hard memory and runtime bounds.
+    * The ``do_orm_execute`` listener is class-global. Use it only in the
+      standalone probe process, never inside the application process.
     * Redacts credentials/DSNs from all error and CLI output.
+
+Row budgets:
+    * Each budgeted SELECT adds up to one bounded scan before the load. Size
+      ``--max-runtime-seconds`` and the outer timeout for about twice the candle
+      scan work.
+    * Execution rows include the spot execution chain tip fold and the
+      timeline execution prefix, frozen prefix, and frozen suffix reads.
+      Checkpoint verification's prefix count is an aggregate. Its chain-tip
+      folds and frozen prefix read run in separate transactions.
+    * Fill rows include timeline fill lineage, execution annulment
+      contradiction witnesses, and the scope fill prefix read for the gap
+      check. Annulment rows come from the execution annulment manifest.
+    * Accrual rows come from ``get_accruals_for_pnl``. Candle rows come from
+      ``get_pnl_timeline_candles``, ``get_pnl_fx_rate_candles``, and
+      ``get_pnl_fx_rate_candles_at``.
+    * The probe counts candle rows across the replay's batches and counts
+      other rows per transaction. If a frozen suffix read loads candidates and
+      falls back to a full prefix in the same transaction, both buffers count.
 
 Exit codes:
     * ``0``: ``RESULT: PASS`` (cold and resumed outputs match bit-for-bit)
@@ -55,13 +75,17 @@ from typing import Protocol
 from typing import cast
 from weakref import WeakKeyDictionary
 
+from aiosqlite import Connection as SQLiteConnection
 from sqlalchemy import Select
 from sqlalchemy import event
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Result
 from sqlalchemy.engine import make_url
+from sqlalchemy.engine.result import null_result
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -69,6 +93,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import ORMExecuteState
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import SessionTransaction
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.sql.elements import TextClause
 
@@ -1026,31 +1051,51 @@ class _ReplayRowBudget:
         }
         self.execution_reason = "cut_moved" if fresh_cut else "caps_exceeded:executions"
         self.snapshot_sql = _PG_READ_SNAPSHOT if engine.dialect.name == "postgresql" else "BEGIN"
-        self.read_counts: WeakKeyDictionary[Session, dict[str, int]] = WeakKeyDictionary()
+        self.read_counts: WeakKeyDictionary[SessionTransaction, dict[str, int]] = (
+            WeakKeyDictionary()
+        )
         self.candles = 0
 
-    def before_execute(self, state: ORMExecuteState) -> None:
-        """Use the exact query projection, joins, filters and bound parameters for the count."""
+    def after_begin(
+        self, _session: Session, transaction: SessionTransaction, connection: Connection
+    ) -> None:
+        """Pin the outer transaction before its first statement and retain it across savepoints."""
+        if (
+            _ACTIVE_ROW_BUDGET.get() is not self
+            or connection.engine is not self.engine
+            or transaction.parent is not None
+        ):
+            return
+        if (
+            self.snapshot_sql != "BEGIN"
+            or not cast(SQLiteConnection, connection.connection.driver_connection).in_transaction
+        ):
+            connection.exec_driver_sql(self.snapshot_sql)
+        self.read_counts[transaction] = {}
+
+    def before_execute(self, state: ORMExecuteState) -> Result[tuple[()]] | None:
+        """Coalesce the repository's own snapshot pin and meter the actual replay SELECTs."""
         if (
             _ACTIVE_ROW_BUDGET.get() is not self
             or state.session.get_bind().engine is not self.engine
         ):
-            return
+            return None
         statement = state.statement
         if isinstance(statement, TextClause) and statement.text == self.snapshot_sql:
-            self.read_counts[state.session] = {}
+            state.session.connection()
+            return null_result()
         if isinstance(statement, Select):
             self._check_select(state, statement)
+        return None
 
     def _check_select[*RowT](self, state: ORMExecuteState, statement: Select[*RowT]) -> None:
-        """Pin implicit SELECT transactions and refuse an over-cap query before it executes."""
+        """Refuse an over-cap query before it executes in the pinned read transaction."""
         connection = state.session.connection()
-        if state.session not in self.read_counts:
-            connection.exec_driver_sql(self.snapshot_sql)
-            self.read_counts[state.session] = {}
+        transaction = state.session.get_transaction()
+        assert transaction is not None
         for kind, column in _REPLAY_ROW_COLUMNS:
             if statement.selected_columns.corresponding_column(column) is not None:
-                counts = self.read_counts[state.session]
+                counts = self.read_counts[transaction]
                 used = self.candles if kind == "candles" else counts.get(kind, 0)
                 remaining = self.limits[kind] - used
                 rows = statement.order_by(None).subquery()
@@ -1080,14 +1125,17 @@ def _guard_replay_rows(
 ) -> Iterator[None]:
     """Install one budget around a replay, checkpoint verification, or fresh cut read."""
     budget = _ReplayRowBudget(repo.engine.sync_engine, config, fresh_cut)
-    handler = budget.before_execute
-    event.listen(Session, "do_orm_execute", handler)
+    after_begin = budget.after_begin
+    before_execute = budget.before_execute
+    event.listen(Session, "after_begin", after_begin)
+    event.listen(Session, "do_orm_execute", before_execute)
     token = _ACTIVE_ROW_BUDGET.set(budget)
     try:
         yield
     finally:
         _ACTIVE_ROW_BUDGET.reset(token)
-        event.remove(Session, "do_orm_execute", handler)
+        event.remove(Session, "do_orm_execute", before_execute)
+        event.remove(Session, "after_begin", after_begin)
 
 
 async def _load_prepared_scope(
