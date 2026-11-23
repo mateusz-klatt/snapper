@@ -192,11 +192,13 @@ async def test_final_recheck_failure_uses_specific_nonterminal_path_after_succes
     monkeypatch.setattr(
         "snapper.messaging.executors.base.is_tradeable", lambda _instrument, _exchange: True
     )
+    executor._unrecorded_order_terminal_dropped_cids.add(request.client_order_id)
     await executor._process_order(request)
     assert [entry.args[1] for entry in publish.await_args_list] == [OrderEventEnum.SUBMITTED]
     cast(AsyncMock, client.create_order).assert_not_awaited()
     record.assert_not_awaited()
     assert executor.pending_orders == {}
+    assert request.client_order_id not in executor._unrecorded_order_terminal_dropped_cids
 
 
 async def test_marker_append_failure_never_falls_through_to_create_or_terminal_status(
