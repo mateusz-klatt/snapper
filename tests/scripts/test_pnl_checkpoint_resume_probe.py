@@ -2323,18 +2323,22 @@ def test_rss_readers_statm_darwin_fallback_and_baseline_growth(
 
 
 def test_apply_address_space_limit_real_getrlimit_and_non_linux_skip(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exercise ``_apply_address_space_limit`` with real ``getrlimit`` and non-Linux skips.
+    """Exercise relative ``RLIMIT_AS`` calculation, hard-limit clamp/skip, and ``/proc`` skips.
 
-    Given: Real ``resource.getrlimit(RLIMIT_AS)``, a local ``setrlimit`` recorder overriding the
-        autouse worker fixture, erroring ``setrlimit``, and non-Linux platform configurations.
-    When: Calling ``_apply_address_space_limit`` across Linux and non-Linux branches.
-    Then: Linux computes bounds from real ``getrlimit`` without mutating process limits, finite
-        vs infinite hard limits and ``ValueError`` errors are handled, and non-Linux skips cleanly.
+    Given: Real ``resource.getrlimit(RLIMIT_AS)``, a fake ``/proc/self/status`` file holding
+        ``VmSize``, a local ``setrlimit`` recorder overriding the autouse stub, erroring
+        ``setrlimit``, and non-Linux or unreadable-``/proc`` inputs.
+    When: Calling ``_apply_address_space_limit`` across all Linux, clamp/skip, and fallback paths.
+    Then: Computed soft limit equals ``current_vmsize + max(max_rss_mb, 4 * max_rss_mb)`` MiB,
+        never exceeds existing hard limits, skips when hard limit is below target or ``/proc``
+        fails, handles ``setrlimit`` errors, and skips on non-Linux platforms.
 
     Args:
-        monkeypatch: Pytest fixture patching platform and recording ``resource.setrlimit`` calls.
+        tmp_path: Pytest isolated directory hosting a fake ``/proc/self/status`` file.
+        monkeypatch: Pytest fixture patching platform, status path, and ``setrlimit``.
     """
     recorded: list[tuple[int, tuple[int, int]]] = []
     monkeypatch.setattr(
@@ -2342,6 +2346,12 @@ def test_apply_address_space_limit_real_getrlimit_and_non_linux_skip(
         "setrlimit",
         lambda kind, bounds: recorded.append((kind, bounds)),
     )
+
+    vmsize_kb = 131_072
+    vmsize_bytes = vmsize_kb * 1024
+    status_file = tmp_path / "status"
+    status_file.write_text(f"Name:\tpython\nVmSize:\t{vmsize_kb} kB\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "_PROC_STATUS_PATH", status_file)
 
     monkeypatch.setattr(probe.sys, "platform", "darwin")
     probe._apply_address_space_limit(256)
@@ -2351,23 +2361,41 @@ def test_apply_address_space_limit_real_getrlimit_and_non_linux_skip(
 
     monkeypatch.setattr(probe.sys, "platform", "linux")
     _soft, real_hard = resource.getrlimit(resource.RLIMIT_AS)
-    limit_bytes = 256 * 1024 * 1024
-    expected_capped = (
-        limit_bytes if real_hard == resource.RLIM_INFINITY else min(limit_bytes, real_hard)
-    )
+    headroom_bytes = (probe.ADDRESS_SPACE_HEADROOM_FACTOR * 256) * 1024 * 1024
+    desired_soft = vmsize_bytes + headroom_bytes
     probe._apply_address_space_limit(256)
-    assert recorded[-1] == (resource.RLIMIT_AS, (expected_capped, real_hard))
+    if real_hard == resource.RLIM_INFINITY or real_hard >= desired_soft:
+        expected_real = (
+            desired_soft if real_hard == resource.RLIM_INFINITY else min(desired_soft, real_hard)
+        )
+        assert recorded[-1] == (resource.RLIMIT_AS, (expected_real, real_hard))
+    else:
+        assert recorded == []
 
     recorded.clear()
     monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, resource.RLIM_INFINITY))
     probe._apply_address_space_limit(256)
-    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, 64 * 1024 * 1024))
+    high_finite_hard = desired_soft + 32 * 1024 * 1024
+    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, high_finite_hard))
+    probe._apply_address_space_limit(256)
+    low_finite_hard = vmsize_bytes + 64 * 1024 * 1024
+    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, low_finite_hard))
     probe._apply_address_space_limit(256)
     assert recorded == [
-        (resource.RLIMIT_AS, (256 * 1024 * 1024, resource.RLIM_INFINITY)),
-        (resource.RLIMIT_AS, (64 * 1024 * 1024, 64 * 1024 * 1024)),
+        (resource.RLIMIT_AS, (desired_soft, resource.RLIM_INFINITY)),
+        (resource.RLIMIT_AS, (desired_soft, high_finite_hard)),
     ]
 
+    recorded.clear()
+    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, resource.RLIM_INFINITY))
+    status_file.write_text("Name:\tpython\nVmRSS:\t4096 kB\n", encoding="utf-8")
+    probe._apply_address_space_limit(256)
+    monkeypatch.setattr(probe, "_PROC_STATUS_PATH", tmp_path / "missing_status")
+    probe._apply_address_space_limit(256)
+    assert recorded == []
+
+    monkeypatch.setattr(probe, "_PROC_STATUS_PATH", status_file)
+    status_file.write_text(f"VmSize:\t{vmsize_kb} kB\n", encoding="utf-8")
     monkeypatch.setattr(
         probe.resource,
         "setrlimit",
@@ -2379,6 +2407,48 @@ def test_apply_address_space_limit_real_getrlimit_and_non_linux_skip(
     monkeypatch.delattr(probe.resource, "RLIMIT_AS", raising=False)
     probe._apply_address_space_limit(256)
     assert recorded == []
+
+
+def test_linux_real_rlimit_as_subprocess_smoke() -> None:
+    """Apply unstubbed relative ``RLIMIT_AS`` in a Linux subprocess and allocate ``max_rss_mb/2``.
+
+    Given: A Linux host running a clean child Python subprocess with no ``setrlimit`` stubs.
+    When: Importing ``pnl_checkpoint_resume_probe``, applying ``_apply_address_space_limit(64)``,
+        and allocating and touching a 32 MiB buffer (``max_rss_mb / 2``).
+    Then: The child applies the relative virtual limit without dying on library mappings and exits 0.
+    """
+    if not sys.platform.startswith("linux"):
+        pytest.skip("Linux-only real RLIMIT_AS subprocess smoke test")
+    repo_root = Path(probe.__file__).resolve().parents[1]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root / "src")
+    child_code = (
+        "import resource; "
+        "from scripts import pnl_checkpoint_resume_probe as probe; "
+        "max_rss_mb = 64; "
+        "vmsize = probe._read_linux_vmsize_bytes(); "
+        "assert vmsize is not None and vmsize > 0; "
+        "_, hard_before = resource.getrlimit(resource.RLIMIT_AS); "
+        "expected = vmsize + max(max_rss_mb, probe.ADDRESS_SPACE_HEADROOM_FACTOR * max_rss_mb) * 1024 * 1024; "
+        "probe._apply_address_space_limit(max_rss_mb); "
+        "soft_after, hard_after = resource.getrlimit(resource.RLIMIT_AS); "
+        "assert hard_after == hard_before; "
+        "assert (soft_after == expected) if (hard_before == resource.RLIM_INFINITY or hard_before >= expected) else True; "
+        "buf = bytearray((max_rss_mb // 2) * 1024 * 1024); "
+        "mv = memoryview(buf); "
+        "mv[::4096] = b'\\x01' * len(mv[::4096]); "
+        "assert len(buf) == (max_rss_mb // 2) * 1024 * 1024"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", child_code],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 async def test_probe_with_repository_timeout_raises_timeout_error(

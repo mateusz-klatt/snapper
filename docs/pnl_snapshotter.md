@@ -416,7 +416,13 @@ PYTHONPATH=src python scripts/pnl_checkpoint_resume_probe.py \
 The `--max-rss-mb` guard (default `2048` MiB) bounds current-RSS growth over a
 baseline captured at probe start (`/proc/self/statm` resident pages on Linux,
 with `ru_maxrss` fallback on macOS), so a parent process's inherited peak does
-not trip the memory cap.
+not trip the memory cap. On Linux, the CLI also sets soft `RLIMIT_AS` relative
+to current virtual size read from `/proc/self/status` (`VmSize`), capped at
+`current_vmsize + max(max_rss_mb, 4 * max_rss_mb)` bytes so shared library
+mappings and allocator arenas do not trigger spurious `MemoryError`; it never
+raises `RLIMIT_AS` above the existing hard limit and skips `RLIMIT_AS` when the
+hard limit is lower than the computed target or `/proc/self/status` is
+unreadable.
 
 Exit codes:
 

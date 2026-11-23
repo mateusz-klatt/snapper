@@ -117,6 +117,7 @@ DEFAULT_MAX_EXECUTIONS: Final[int] = 200_000
 DEFAULT_MAX_ACCRUALS: Final[int] = 200_000
 DEFAULT_MAX_CANDLES: Final[int] = 2_000_000
 DEFAULT_MAX_RSS_MB: Final[int] = 2048
+ADDRESS_SPACE_HEADROOM_FACTOR: Final[int] = 4
 PROBE_APPLICATION_NAME: Final[str] = "pnl_checkpoint_resume_probe"
 PROBE_DB_URL_ENV_VAR: Final[str] = "PNL_PROBE_DB_URL"
 READONLY_ROLE_WARNING: Final[str] = (
@@ -126,6 +127,7 @@ READONLY_ROLE_WARNING: Final[str] = (
 
 _SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*[\s\S]*?\*/")
 _SQL_STRING_RE = re.compile(r"'(?:''|[^'])*'")
+_VMSIZE_LINE_RE = re.compile(r"^VmSize:\s*(\d+)\s*kB\s*$", re.MULTILINE)
 _LIT_TOKEN_RE = re.compile(r"'__LIT_(\d+)__'")
 _FOR_LOCK_RE = re.compile(r"\bFOR\s+(?:(?:NO\s+KEY\s+)?UPDATE|(?:KEY\s+)?SHARE)\b")
 _FORBIDDEN_SQL_CALL_RE = re.compile(r"\b(?:SET_CONFIG\s*\(|PG_SLEEP(?:_FOR|_UNTIL)?\b)")
@@ -869,6 +871,7 @@ async def _preflight_read_only(
 
 
 _PROC_STATM_PATH: Final[Path] = Path("/proc/self/statm")
+_PROC_STATUS_PATH: Final[Path] = Path("/proc/self/status")
 
 
 def _current_rss_mb() -> float:
@@ -883,6 +886,18 @@ def _current_rss_mb() -> float:
     return 0.0
 
 
+def _read_linux_vmsize_bytes() -> int | None:
+    """Read current Linux virtual address space size in bytes from ``/proc/self/status``."""
+    try:
+        status_text = _PROC_STATUS_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = _VMSIZE_LINE_RE.search(status_text)
+    if match is None:
+        return None
+    return int(match.group(1)) * 1024
+
+
 def _check_rss_mb(max_rss_mb: int, baseline_rss_mb: float = 0.0) -> None:
     """Abort the probe if RSS growth over ``baseline_rss_mb`` exceeds ``max_rss_mb``.
 
@@ -895,14 +910,20 @@ def _check_rss_mb(max_rss_mb: int, baseline_rss_mb: float = 0.0) -> None:
 
 
 def _apply_address_space_limit(max_rss_mb: int) -> None:
-    """Apply ``RLIMIT_AS`` on Linux hosts where POSIX virtual-memory caps are enforceable."""
-    limit_bytes = max_rss_mb * 1024 * 1024
+    """Set soft ``RLIMIT_AS`` on Linux relative to current ``VmSize`` with allocator headroom."""
     rlimit_as = getattr(resource, "RLIMIT_AS", None)
     if rlimit_as is None or not sys.platform.startswith("linux"):
         return
+    current_vmsize = _read_linux_vmsize_bytes()
+    if current_vmsize is None:
+        return
+    headroom_mb = max(max_rss_mb, ADDRESS_SPACE_HEADROOM_FACTOR * max_rss_mb)
+    desired_soft = current_vmsize + headroom_mb * 1024 * 1024
     try:
         _soft, hard = resource.getrlimit(rlimit_as)
-        capped = limit_bytes if hard == resource.RLIM_INFINITY else min(limit_bytes, hard)
+        if hard != resource.RLIM_INFINITY and hard < desired_soft:
+            return
+        capped = desired_soft if hard == resource.RLIM_INFINITY else min(desired_soft, hard)
         resource.setrlimit(rlimit_as, (capped, hard))
     except (ValueError, OSError):
         return
@@ -1715,7 +1736,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-rss-mb",
         type=int,
         default=DEFAULT_MAX_RSS_MB,
-        help="Maximum RSS growth in MiB allowed over probe startup baseline (default: 2048).",
+        help=(
+            "Maximum RSS growth in MiB allowed over probe startup baseline (default: 2048). "
+            "On Linux, also sets soft RLIMIT_AS to current VmSize + "
+            f"{ADDRESS_SPACE_HEADROOM_FACTOR} * max_rss_mb headroom unless the hard limit or "
+            "/proc/self/status read prevents it."
+        ),
     )
     role_group = parser.add_mutually_exclusive_group()
     role_group.add_argument(
