@@ -63,6 +63,7 @@ from snapper.infrastructure.exchanges.implementations.paper import PaperExchange
 from snapper.infrastructure.network.egress_context import current_egress_identity
 from snapper.messaging.executors.base import ExchangeExecutorService
 from snapper.messaging.executors.kraken import KrakenOrderExecutor
+from snapper.messaging.executors.kraken_futures import KrakenFuturesOrderExecutor
 from snapper.messaging.executors.paper import PaperOrderExecutor
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -13364,7 +13365,7 @@ class TestConfirmedCancelTerminal:
     async def test_kraken_futures_retries_confirmed_cancel_before_native_inventory(
         self, terminal_held: bool
     ) -> None:
-        """Retry confirmed Futures cancels without another venue call or publication."""
+        """Retry confirmed Futures cancels with one diagnostic per hold episode."""
         ex, repo = _cancel_executor(tracked=True, exchange="kraken_futures")
         client = MagicMock(spec=base_module.KrakenFuturesExchangeClient)
         client.repository = repo
@@ -13378,24 +13379,37 @@ class TestConfirmedCancelTerminal:
         if terminal_held:
             retry_error = RuntimeError("terminal write unavailable")
             repo.insert_order_terminal_once = AsyncMock(
-                side_effect=[retry_error, retry_error, retry_error, True, False]
+                side_effect=[retry_error] * 7 + [True, False]
             )
         else:
-            client._log_order_update_to_db.side_effect = [None, None, 6]
+            client._log_order_update_to_db.side_effect = [None] * 4 + [6]
 
         holder = ex.pending_orders[_CANCEL_CID]
         ex.pending_orders["unrelated"] = base_module.PendingOrderState(
             request=make_order(client_order_id="unrelated")
         )
-        with patch.object(base_module.logger, "warning") as warning:
+        with (
+            patch.object(base_module.logger, "critical") as critical,
+            patch.object(base_module.logger, "warning") as warning,
+        ):
             await ex._process_cancel(_cancel_request(exchange="kraken_futures"))
-            await ex._reconcile_with_exchange()
+            if terminal_held:
+                critical.assert_called_once()
+                warning.assert_called_once()
+                assert f"confirmed terminal of {_CANCEL_CID}" in critical.call_args_list[0].args[0]
+                assert "snapper repair-cancel-targets" in warning.call_args_list[0].args[0]
+
+            for _ in range(3):
+                await ex._reconcile_with_exchange()
 
             assert ex.pending_orders[_CANCEL_CID] is holder
             assert ex.client_by_exchange["ex-cancel"] == _CANCEL_CID
             assert (_CANCEL_CID in ex._unrecorded_order_terminals) is terminal_held
             if terminal_held:
                 client._log_order_update_to_db.assert_not_awaited()
+                assert repo.insert_order_terminal_once.await_count == 7
+                critical.assert_called_once()
+                warning.assert_called_once()
 
             await ex._reconcile_with_exchange()
 
@@ -13407,12 +13421,60 @@ class TestConfirmedCancelTerminal:
         assert list(ex.pending_orders) == ["unrelated"]
         assert ex.client_by_exchange == {}
         assert ex._unrecorded_order_terminals == {}
-        assert ex._recover_native_inventory_orders.await_count == 2
+        assert ex._recover_native_inventory_orders.await_count == 4
         client.cancel_order.assert_awaited_once_with("ex-cancel", "BTC-USD")
         client._log_order_update_to_db.assert_awaited_with(
             db_order_id=5, status=ExchangeOrderStatusEnum.CANCELED
         )
         assert _published_events(ex) == [OrderEventEnum.CANCELLED]
+
+    @pytest.mark.asyncio
+    async def test_kraken_futures_unresolvable_requested_cancel_drop_logs_once(self) -> None:
+        """Report the first incomplete-identifiers drop within a held cancel episode."""
+        ex, repo = _cancel_executor(tracked=True, exchange="kraken_futures")
+        ex.exchange_client = MagicMock(
+            spec=base_module.KrakenFuturesExchangeClient,
+            cancel_order=ex.exchange_client.cancel_order,
+        )
+        ex._recover_native_inventory_orders = AsyncMock()
+        ex.pending_orders[_CANCEL_CID].request.instrument = ""
+
+        with (
+            patch.object(base_module.logger, "critical") as critical,
+            patch.object(base_module.logger, "warning") as warning,
+        ):
+            await ex._process_cancel(_cancel_request(instrument="", exchange="kraken_futures"))
+            critical.assert_called_once()
+            warning.assert_called_once()
+            assert "Requested cancel order_terminal held" in warning.call_args_list[0].args[0]
+            assert _CANCEL_CID in ex._requested_cancel_terminal_held_cids
+            critical.reset_mock()
+            warning.reset_mock()
+
+            for _ in range(3):
+                await ex._reconcile_with_exchange()
+
+        critical.assert_called_once()
+        drop_critical = critical.call_args_list[0].args[0]
+        assert f"Dropped requested cancel order_terminal for {_CANCEL_CID}" in drop_critical
+        assert "incomplete terminal identifiers" in drop_critical
+        cancel_warnings = [
+            entry.args[0] for entry in warning.call_args_list if "G3-C" in entry.args[0]
+        ]
+        assert len(cancel_warnings) == 1
+        assert (
+            f"Order terminal without order_terminal evidence for {_CANCEL_CID}"
+            in cancel_warnings[0]
+        )
+        assert "reason=incomplete terminal identifiers" in cancel_warnings[0]
+        assert (
+            ex.requested_cancel_terminal_held_count == ex.unrecorded_order_terminal_drop_count == 1
+        )
+        assert _CANCEL_CID in ex._requested_cancel_terminal_held_cids
+        assert _CANCEL_CID in ex._unrecorded_order_terminals
+        assert _CANCEL_CID in ex.pending_orders
+        assert repo.has_venue_event.await_count == 3
+        repo.insert_order_terminal_once.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_native_recon_skips_unwired_requested_cancel_projection(self) -> None:
@@ -14507,6 +14569,94 @@ class TestStreamCancellationEvidenceFirst:
         client.get_order.assert_not_awaited()
         ex.msg_publisher.send.assert_awaited_once()
         ex._recover_native_inventory_orders.assert_awaited_once()
+        assert ex.pending_orders == {}
+        assert ex.client_by_exchange == {}
+
+    @pytest.mark.asyncio
+    async def test_native_cancel_replay_preserves_partial_fill_and_fee(self) -> None:
+        """A native cancel replay retries the row without booking the prior partial again."""
+        ex = KrakenFuturesOrderExecutor()
+        ex.running = True
+        order = make_order(client_order_id=_CANCEL_CID, exchange="kraken_futures", mode="live")
+        ex.pending_orders[_CANCEL_CID] = base_module.PendingOrderState(
+            request=order, db_order_id=5, order_public_id="ord-pub-1", exchange_order_id="ex-cancel"
+        )
+        ex.client_by_exchange["ex-cancel"] = _CANCEL_CID
+        repo = AsyncMock(spec=SQLAlchemyRepository)
+        repo.get_fill_venue_events_for_order_identity.return_value = []
+        repo.insert_order_terminal_once.side_effect = [True, False, False, False]
+        ex.repository = repo
+        client = MagicMock(spec=base_module.KrakenFuturesExchangeClient)
+        client.repository = repo
+        client._tracker = ex._tracker
+        client._log_order_update_to_db.side_effect = [6, None, None, None, 7]
+        ex.exchange_client = client
+        publisher = MagicMock(spec=MessagePublisher)
+        publish = cast(AsyncMock, publisher.send)
+        ex.msg_publisher = publisher
+
+        partial = ExecutionUpdate(
+            order_id="ex-cancel",
+            exec_type="trade",
+            symbol="BTC-USD",
+            side=OrderSideEnum.BUY,
+            order_type=ExchangeOrderTypeEnum.LIMIT,
+            order_status=ExchangeOrderStatusEnum.PARTIALLY_FILLED,
+            timestamp=datetime(2026, 11, 11, tzinfo=UTC),
+            exec_id="native-partial-fill",
+            last_qty=0.4,
+            last_price=50_000.0,
+            fee_usd_equiv=1.25,
+        )
+        terminal = _stream_execution_update()
+        terminal.cum_qty = 0.4
+        terminal.fees = [ExecutionFeeBreakdown(asset="USD", quantity=1.25)]
+        await ex._process_execution(partial)
+        await ex._process_execution(terminal)
+
+        assert ex.pending_orders[_CANCEL_CID].stream_terminal_pending is terminal
+        with patch.object(
+            ex, "_recover_native_inventory_orders", new_callable=AsyncMock
+        ) as inventory:
+            for _ in range(2):
+                await ex._reconcile_with_exchange()
+                assert ex.pending_orders[_CANCEL_CID].stream_terminal_pending is terminal
+                assert ex.client_by_exchange["ex-cancel"] == _CANCEL_CID
+            await ex._reconcile_with_exchange()
+
+        fill_projection, *terminal_projections = client._log_order_update_to_db.await_args_list
+        assert fill_projection == call(
+            db_order_id=5, status=ExchangeOrderStatusEnum.OPEN, filled_size=0.4, average_price=None
+        )
+        assert (
+            terminal_projections
+            == [call(db_order_id=6, status=ExchangeOrderStatusEnum.CANCELED)] * 4
+        )
+        repo.insert_venue_event.assert_awaited_once()
+        fill_insert = repo.insert_venue_event.await_args
+        assert fill_insert is not None
+        fill_row = cast(VenueEventInsertRow, fill_insert.args[0])
+        assert (fill_row["event_type"], fill_row["fill_size"]) == ("fill_observed", 0.4)
+        assert (fill_row["fee"], fill_row["fee_asset"]) == (1.25, "USD")
+        client._log_execution_to_db.assert_awaited_once_with(
+            order_public_id="ord-pub-1",
+            execution=partial,
+            wallet_public_id="",
+            operator_public_id=None,
+            delta_size=0.4,
+            delta_price=50_000.0,
+            fee=1.25,
+            fee_asset="USD",
+            status=FillStatusEnum.PARTIAL,
+        )
+        assert publish.await_count == 2
+        fill_publish, terminal_publish = publish.await_args_list
+        fill, event = fill_publish.args[1], terminal_publish.args[1]
+        assert isinstance(fill, ExecutionData)
+        assert (fill.last_size, fill.fee, fill.fee_asset) == (0.4, 1.25, "USD")
+        assert isinstance(event, OrderEventData) and event.event == OrderEventEnum.CANCELLED
+        assert terminal_publish.args[0] == "orders.events.kraken_futures.BTC-USD.cancelled"
+        assert inventory.await_count == 3
         assert ex.pending_orders == {}
         assert ex.client_by_exchange == {}
 

@@ -215,7 +215,9 @@ The executor also increments `meta.requested_cancel_terminal_held_count` and
 logs one G3-C WARN per held requested-cancel episode for each client order ID.
 The episode ends when the evidence is recorded, the order is forgotten, or
 the executor stops. For an untracked order, dropping its retry entry also
-ends the episode.
+ends the episode. If a retry drops a requested cancel because its identifiers
+are still incomplete, it logs the first drop at CRITICAL alongside the G3-C
+drop WARN.
 
 When a stream cancellation or expiry is held for retry, the executor leaves
 the `Order` row non-terminal, skips the stream terminal publish, and keeps the

@@ -3686,7 +3686,8 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         whenever the order is no longer tracked in ``pending_orders`` so
         eviction of untracked orders can never leave orphans. Emits a WARN
         log pointing operators to the G3-C repair tool
-        (``snapper repair-cancel-targets``).
+        (``snapper repair-cancel-targets``). An unresolvable requested cancel
+        also logs the first drop at CRITICAL even if its hold was reported.
 
         Args:
             client_order_id: Dropped order's client order id.
@@ -3696,6 +3697,15 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         if client_order_id not in self._unrecorded_order_terminal_dropped_cids:
             self.unrecorded_order_terminal_drop_count += 1
+            if (
+                reason == "incomplete terminal identifiers"
+                and client_order_id in self._requested_cancel_terminal_held_cids
+            ):
+                logger.critical(
+                    f"[{exchange_name}] Dropped requested cancel order_terminal for "
+                    f"{client_order_id} (exchange {params.get('exchange_order_id')}) "
+                    f"because of {reason}"
+                )
             logger.warning(
                 f"[{exchange_name}] Order terminal without order_terminal evidence for "
                 f"{client_order_id} (exchange {params.get('exchange_order_id')}, "
