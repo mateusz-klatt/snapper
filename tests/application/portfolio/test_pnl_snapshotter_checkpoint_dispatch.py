@@ -2296,11 +2296,11 @@ def test_post_commit_cancellation_keeps_the_replay_chunk_limit(
 
     Given: One wallet marked as committed this iteration and another that was not.
     When: A tick cancellation reaches each wallet's handler.
-    Then: The committed wallet keeps its replay chunk limit and logs the shadow
-        overrun, while the uncommitted wallet's limit is halved as before.
+    Then: The committed wallet keeps its replay chunk limit and logs the
+        post-commit cancellation, while the uncommitted wallet's limit is halved as before.
 
     Args:
-        caplog: Log capture for the shadow overrun warning.
+        caplog: Log capture for the post-commit cancellation warning.
     """
     repo = fixtures._FakeRepo()
     snap = fixtures._snapshotter(repo, fixtures._minute(5))

@@ -598,12 +598,13 @@ class PortfolioPnlSnapshotter:
         """Back off authoritative replay work unless the wallet already committed.
 
         A cancellation that lands in shadow work after the wallet's
-        authoritative chunk committed says nothing about the replay chunk size,
-        so the limit is kept and the overrun is logged instead.
+        authoritative chunk committed, whether from the tick deadline or from
+        outside, says nothing about the replay chunk size, so the limit is kept
+        and the cancellation is logged instead.
         """
         if self._post_commit_wallet == wallet:
             logger.warning(
-                "PortfolioPnlSnapshotter: shadow work outlived the tick after the "
+                "PortfolioPnlSnapshotter: cancelled during shadow work after the "
                 "authoritative commit; wallet=%s replay chunk limit kept",
                 checkpoint_wallet_alias(wallet),
             )
@@ -1362,8 +1363,8 @@ class PortfolioPnlSnapshotter:
         )
         fallback = result.checkpoint_resume_fallback
         if resume is not None and fallback is not None:
-            await handle_resume_fallback(repo, ctx.scope, frontier, resume, fallback)
             record_checkpoint_recapture("fallback", ctx.scope)
+            await handle_resume_fallback(repo, ctx.scope, frontier, resume, fallback)
             recapture = capture or self._consume_recapture(request, chunk.end)
             if recapture is not None:
                 chunk, result = await self._replay_series(

@@ -365,8 +365,9 @@ leaves time for the tick's later wallets. A resumed side that overruns it is
 counted as `shadow_error:TimeoutError`; when no shadow budget remains, the
 comparison is skipped as `tick_budget`. External task cancellation is never
 converted into a shadow failure. If an uncancellable worker outlives the whole
-tick, the tick still ends after that wallet's commit: its replay chunk limit is
-kept, a warning is logged, and the remaining wallets run on the next tick.
+tick, the tick deadline wins: no `shadow_error:TimeoutError` is recorded, the
+tick ends after that wallet's commit, its replay chunk limit is kept with a
+warning, and the remaining wallets run on the next tick.
 A resume fallback found by the shadow branch deletes the stored checkpoint but
 neither recaptures inline nor counts a recapture, because the chunk has already
 committed. A fresh checkpoint is captured by the next eligible clean-tip replay
