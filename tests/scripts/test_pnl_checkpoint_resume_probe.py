@@ -322,8 +322,13 @@ async def test_probe_bounds_capture_output_on_long_history(
 ) -> None:
     """Fit six minutes of capture history into a four-point output budget.
 
-    The first fill predates the bounded capture window. The resume comparison
-    verifies that capture still carries its effect into the suffix.
+    Given: A ten-minute SQLite replay whose first fill predates the capture window.
+    When: The probe runs with a four-minute window and a four-unit timeline work limit.
+    Then: Capture ends at minute six and the four resumed suffix points match cold replay.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the seed and lowering the timeline work limit.
     """
     url, scope = await _seed_and_catchup(tmp_path / "bounded_capture.db", monkeypatch)
     monkeypatch.setattr(pnl_timeline_service, "PNL_TIMELINE_MAX_WORK_UNITS", 4)
@@ -345,7 +350,16 @@ async def test_candle_cap_refuses_btc_fee_fx_before_loading_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Count BTC fee conversion candles even when the wallet's quote is USD."""
+    """Count BTC fee conversion candles for a USD-quoted wallet.
+
+    Given: A caught-up USD wallet with BTC-denominated suffix fees and BTC/USD FX candles.
+    When: The probe runs with its default candle cap and again with a ten-row cap.
+    Then: The default run matches and the tighter run refuses before loading the FX payload.
+
+    Args:
+        tmp_path: Directory for the SQLite wallet and FX candles.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
     url, scope = await _seed_and_catchup(
         tmp_path / "fee_fx_cap.db", monkeypatch, suffix_fee_asset="BTC"
     )
@@ -387,7 +401,16 @@ async def test_candle_cap_counts_marks_visible_only_at_capture_horizon(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reject five capture marks when only four candle rows survive at the frontier."""
+    """Count candle rows at the capture horizon.
+
+    Given: Historical mark rows that are visible at capture and expire before the frontier.
+    When: The probe runs with its default cap and again with a four-row cap.
+    Then: The default run matches and the tighter cap refuses the five capture marks.
+
+    Args:
+        tmp_path: Directory for the SQLite replay and historical candle versions.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
     url, scope = await _seed_and_catchup(tmp_path / "capture_candle_cap.db", monkeypatch)
     config = probe.CheckpointResumeProbeConfig(
         wallet_public_id=scope.wallet_public_id, window_minutes=4
@@ -2018,7 +2041,15 @@ async def test_bound_pg_timeout_set_config_and_production_read_audit(
 async def test_pg_replay_budget_pins_transaction_before_text_select(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A text SELECT can take a snapshot before any ORM read reaches the budget."""
+    """Pin the PostgreSQL transaction before its first text SELECT.
+
+    Given: A PostgreSQL repository backed by a recording asyncpg connection.
+    When: A guarded session runs a text SELECT, requests the same pin, and loads candles.
+    Then: The driver sees one pin, the text SELECT, the bounded count, and the candle read in order.
+
+    Args:
+        monkeypatch: Fixture for replacing asyncpg connections with the recording double.
+    """
     state = _FakeAsyncpgState(statement_timeout="30s")
     statements: list[str] = []
 
@@ -2056,7 +2087,16 @@ async def test_candle_cap_ignores_prices_outside_replay_queries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unrelated USD marks and FX planes leave room for the wallet's five selected marks."""
+    """Exclude unrelated prices from the replay candle cap.
+
+    Given: A caught-up wallet with additional mark and FX candles outside its replay queries.
+    When: The probe runs with a five-row candle cap.
+    Then: The candle reads fit within the cap and the resumed suffix matches cold replay.
+
+    Args:
+        tmp_path: Directory for the SQLite database containing wallet and unrelated prices.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
     url, scope = await _seed_and_catchup(tmp_path / "scoped_candles.db", monkeypatch)
     unrelated_symbol = "00000000-0000-7000-8000-00000000f101"
     unrelated_instrument = "00000000-0000-7000-8000-00000000f102"
@@ -2093,7 +2133,16 @@ async def test_replay_row_budget_is_scoped_to_task_and_engine(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Other readers can use the same database while one replay has a one-row cap."""
+    """Apply the replay row budget only to its task and engine.
+
+    Given: Two repository engines for one SQLite database and a reader task started before the guard.
+    When: The guarded task sets a one-row candle cap and attempts reads through both engines.
+    Then: The other task and the other engine can read multiple rows, and the guarded read is refused.
+
+    Args:
+        tmp_path: Directory for the SQLite database shared by both engines.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
     url, scope = await _seed_and_catchup(tmp_path / "budget_scope.db", monkeypatch)
     config = probe.CheckpointResumeProbeConfig(
         wallet_public_id=scope.wallet_public_id, max_candles=1
@@ -2120,7 +2169,17 @@ async def test_replay_row_budget_is_scoped_to_task_and_engine(
 async def test_replay_budget_repins_reused_session_and_resets_counts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commit: bool
 ) -> None:
-    """Both transactions in one session can read a cap-sized execution prefix."""
+    """Reset the execution budget for each transaction in a reused session.
+
+    Given: A SQLite session with three executions and a three-row execution cap.
+    When: The session reads the executions in two transactions separated by commit or rollback.
+    Then: Each transaction pins its snapshot, counts the rows, and loads all three executions.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+        commit: Selects commit when true and rollback when false.
+    """
     url, scope = await _seed_and_catchup(tmp_path / "reused_session.db", monkeypatch)
     config = probe.CheckpointResumeProbeConfig(
         wallet_public_id=scope.wallet_public_id, max_executions=3
@@ -2151,7 +2210,15 @@ async def test_replay_budget_repins_reused_session_and_resets_counts(
 
 @pytest.mark.parametrize("explicit_begin", (False, True), ids=("select", "explicit-begin"))
 async def test_replay_budget_refuses_transaction_started_before_guard(explicit_begin: bool) -> None:
-    """Refuse an unpinned transaction before counting rows or coalescing its BEGIN."""
+    """Refuse a transaction that predates the replay guard.
+
+    Given: A SQLite session with a transaction already open when the guard is installed.
+    When: The session issues a budgeted SELECT or an explicit BEGIN under the guard.
+    Then: The probe reports snapshot_not_pinned and classifies the safety failure as exit code 2.
+
+    Args:
+        explicit_begin: Selects an explicit BEGIN when true and a budgeted SELECT when false.
+    """
     config = probe.CheckpointResumeProbeConfig(wallet_public_id=prefix._WALLET)
     statement = text("BEGIN") if explicit_begin else select(Execution.id)
     async with idless._repository("sqlite+aiosqlite:///:memory:") as repo:
@@ -2172,7 +2239,16 @@ async def test_replay_budget_refuses_transaction_started_before_guard(explicit_b
 async def test_replay_budget_keeps_open_sqlite_snapshot_across_savepoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An open SQLite transaction keeps its snapshot and counts across a savepoint."""
+    """Keep the SQLite snapshot and row counts across a savepoint.
+
+    Given: A session bound to a connection with an open SQLite transaction and three executions.
+    When: The session reads all three rows at the cap and attempts the same read in a savepoint.
+    Then: The first read succeeds and the second is refused because the transaction has spent its cap.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
     url, scope = await _seed_and_catchup(tmp_path / "joined_session.db", monkeypatch)
     config = probe.CheckpointResumeProbeConfig(
         wallet_public_id=scope.wallet_public_id, max_executions=3
@@ -2193,7 +2269,16 @@ async def test_replay_budget_keeps_open_sqlite_snapshot_across_savepoint(
 async def test_execution_cap_allows_checkpoint_verification_rereads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verification can reread all three executions across its separate transactions."""
+    """Allow checkpoint verification to reread executions in separate transactions.
+
+    Given: A caught-up SQLite wallet with three executions and a three-row execution cap.
+    When: The probe captures and verifies a checkpoint, then compares resumed and cold replay.
+    Then: Verification fits the cap and the resumed suffix matches the cold replay.
+
+    Args:
+        tmp_path: Directory for the SQLite checkpoint replay database.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
     url, scope = await _seed_and_catchup(tmp_path / "verification_cap.db", monkeypatch)
     config = probe.CheckpointResumeProbeConfig(
         wallet_public_id=scope.wallet_public_id, window_minutes=4, max_executions=3, db_url=url
@@ -2205,7 +2290,16 @@ def test_accrual_and_candle_caps_refuse_with_exit_three(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reject zero caps and return exit code 3 on accrual and candle overflows."""
+    """Differentiate invalid caps from accrual and candle budget refusals.
+
+    Given: A caught-up SQLite wallet with candles and two seeded accruals.
+    When: The probe validates zero caps and the CLI runs with one-row accrual or candle caps.
+    Then: The zero caps raise validation errors and each one-row cap produces exit code 3.
+
+    Args:
+        tmp_path: Directory for the SQLite replay and seeded accruals.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
     url, scope = asyncio.run(_seed_and_catchup(tmp_path / "caps.db", monkeypatch))
 
     async def _seed_accruals_and_check_invalid() -> None:
@@ -2277,7 +2371,19 @@ def test_accrual_and_candle_caps_refuse_with_exit_three(
 async def test_moved_cut_refuses_before_buffering_fresh_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grow_execution: bool
 ) -> None:
-    """Reject a grown execution prefix or gap read before SQL can return its payload."""
+    """Reject a grown capture cut before buffering the excess rows.
+
+    Given: A replay at its execution cap and a concurrent insertion before a fresh capture read.
+    When: Either the execution prefix grows before certification or an unmatched fill arrives
+        between prefix certification and the fill-gap read.
+    Then: The count detects the larger cut and the probe reports cut_moved with exit code 3
+        before the affected query returns its payload.
+
+    Args:
+        tmp_path: Directory for the SQLite database used by the probe and concurrent writer.
+        monkeypatch: Fixture for injecting growth immediately before the selected repository read.
+        grow_execution: Selects a new execution with its fill when true and an unmatched fill when false.
+    """
     db_path = tmp_path / "moved_cut.db"
     url, scope = await _seed_and_catchup(db_path, monkeypatch)
     async with idless._repository(url) as repo:
@@ -2730,7 +2836,15 @@ def test_apply_address_space_limit_real_getrlimit_and_non_linux_skip(
 def test_address_space_limit_preserves_tighter_inherited_soft_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Retain a 1 GiB soft limit even when the hard limit allows the larger probe budget."""
+    """Preserve a tighter inherited address-space limit.
+
+    Given: A simulated Linux process with a 1 GiB soft limit and an unlimited hard limit.
+    When: The probe applies its larger default address-space budget.
+    Then: The inherited soft and hard limits stay in effect.
+
+    Args:
+        monkeypatch: Fixture for simulating Linux, the process size, and resource limit calls.
+    """
     inherited = (1024**3, resource.RLIM_INFINITY)
 
     def assert_limit_preserved(_kind: int, bounds: tuple[int, int]) -> None:
@@ -2821,7 +2935,16 @@ async def test_probe_refuses_pass_after_synchronous_comparison_crosses_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reject a matching comparison that exhausts the deadline without suspending the task."""
+    """Refuse a matching comparison that crosses the deadline without yielding.
+
+    Given: A caught-up SQLite wallet and a controlled monotonic clock.
+    When: A synchronous comparison confirms equality and advances the clock past the deadline.
+    Then: The repository probe raises a timeout instead of returning the matching report.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the seed and substituting the comparison and clock.
+    """
     url, scope = await _seed_and_catchup(tmp_path / "comparison_deadline.db", monkeypatch)
     now = 0.0
     compare_series = probe._compare_series
@@ -2856,7 +2979,16 @@ async def test_probe_refuses_pass_after_engine_disposal_crosses_deadline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Apply the wallet probe's deadline through engine disposal."""
+    """Include engine disposal in the wallet probe deadline.
+
+    Given: A caught-up SQLite wallet and a controlled monotonic clock.
+    When: Engine disposal after the probe advances the clock beyond the deadline.
+    Then: The wallet probe raises a timeout before returning its report.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the seed and wrapping engine disposal and the clock.
+    """
     url, scope = await _seed_and_catchup(tmp_path / "disposal_deadline.db", monkeypatch)
     now = 0.0
     dispose_engine = AsyncEngine.dispose
@@ -2887,7 +3019,17 @@ def test_cli_refuses_pass_after_report_formatting_crosses_deadline(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Emit the existing deadline failure when formatting a matching report runs too long."""
+    """Refuse a matching CLI verdict when formatting crosses the deadline.
+
+    Given: A caught-up SQLite wallet and a controlled monotonic clock.
+    When: Formatting a matching report advances the clock past the deadline.
+    Then: The CLI returns exit code 2 and prints only the timeout result.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the seed and substituting the formatter and clock.
+        capsys: Fixture for capturing the CLI result printed to standard output.
+    """
     url, scope = asyncio.run(_seed_and_catchup(tmp_path / "cli_deadline.db", monkeypatch))
     now = 0.0
     format_report = probe._format_report
