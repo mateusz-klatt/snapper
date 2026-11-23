@@ -1,8 +1,8 @@
-"""Pure opening-checkpoint canonical digests and write-refusal predicate.
+"""Pure opening-checkpoint canonical digests, fence, and write-refusal predicates.
 
 Provides order-independent, kind-tagged SHA-256 digests over the five replay
 evidence sets that can vary across ``as_of`` reads, together with the pure
-write-refusal predicate evaluated before committing a certified checkpoint.
+invalidation fence and write-refusal predicate evaluated around certified checkpoints.
 This module performs no I/O and imports no infrastructure.
 """
 
@@ -39,6 +39,39 @@ type PnlCheckpointWriteRefusal = Literal[
     "deferred_tail_too_long",
 ]
 """Closed vocabulary of deterministic checkpoint write-refusal reasons in precedence order."""
+
+
+def opening_checkpoint_fence(frontier: PnlCorrectionFrontier) -> datetime:
+    """Return the earliest boundary that invalidates an opening checkpoint.
+
+    ``window_start`` is always set on a frontier, so the fence always exists;
+    the optional pending minute and repair boundary can only move it earlier.
+
+    Args:
+        frontier: Correction state whose open window and repair boundaries form the fence.
+
+    Returns:
+        The minimum of the window start and any set next minute or repair boundary.
+    """
+    return min(
+        (
+            frontier.window_start,
+            *(value for value in (frontier.next_minute, frontier.repair_from) if value is not None),
+        )
+    )
+
+
+def checkpoint_minute_fenced(minute: datetime, fence: datetime | None) -> bool:
+    """Return whether a checkpoint minute lies at or beyond an invalidation fence.
+
+    Args:
+        minute: Certified opening-checkpoint minute to test.
+        fence: Earliest invalidated minute, or ``None`` for no fence.
+
+    Returns:
+        ``False`` for an absent fence or an earlier minute, otherwise ``True``.
+    """
+    return fence is not None and minute >= fence
 
 
 class PnlCheckpointWriteRefusalError(ValueError):

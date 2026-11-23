@@ -68,7 +68,7 @@ def test_checkpoint_metrics_are_detached_and_grouped_by_reason() -> None:
     record_checkpoint_resume_attempted()
     record_checkpoint_resume_succeeded()
     record_checkpoint_fallback("checkpoint_absent")
-    record_checkpoint_invalidation_deleted()
+    record_checkpoint_invalidation_deleted("generation")
     record_checkpoint_shadow_comparison()
     record_checkpoint_shadow_mismatch()
     record_checkpoint_recapture("age")
@@ -80,7 +80,7 @@ def test_checkpoint_metrics_are_detached_and_grouped_by_reason() -> None:
     assert snapshot.resumes_attempted == 1
     assert snapshot.resumes_succeeded == 1
     assert snapshot.fallbacks == {"checkpoint_absent": 1}
-    assert snapshot.invalidations_deleted == 1
+    assert snapshot.invalidations_deleted == {"generation": 1}
     assert snapshot.shadow_comparisons == 1
     assert snapshot.shadow_mismatches == 1
     assert snapshot.recaptures == {"age": 2}
@@ -118,7 +118,7 @@ def test_per_scope_metrics_track_scopes_independently_and_sum_globally() -> None
     record_checkpoint_recapture("absent", scope_a)
 
     record_checkpoint_fallback("checkpoint_late_execution", scope_b)
-    record_checkpoint_invalidation_deleted(scope_b)
+    record_checkpoint_invalidation_deleted("generation", scope_b)
     record_checkpoint_shadow_comparison(scope_b)
     record_checkpoint_shadow_mismatch(scope_b)
     record_checkpoint_shadow_skipped("window_mismatch", scope_b)
@@ -139,7 +139,7 @@ def test_per_scope_metrics_track_scopes_independently_and_sum_globally() -> None
     )
     assert by_scope[alias_b] == PnlCheckpointMetrics(
         fallbacks={"checkpoint_late_execution": 1},
-        invalidations_deleted=1,
+        invalidations_deleted={"generation": 1},
         shadow_comparisons=1,
         shadow_mismatches=1,
         shadow_skipped={"window_mismatch": 1},
@@ -152,7 +152,7 @@ def test_per_scope_metrics_track_scopes_independently_and_sum_globally() -> None
     assert totals.resumes_attempted == 1
     assert totals.resumes_succeeded == 1
     assert totals.fallbacks == {"checkpoint_late_execution": 1}
-    assert totals.invalidations_deleted == 1
+    assert totals.invalidations_deleted == {"generation": 1}
     assert totals.shadow_comparisons == 1
     assert totals.shadow_mismatches == 1
     assert totals.shadow_skipped == {"window_mismatch": 1}
@@ -180,7 +180,7 @@ def test_format_checkpoint_metrics_summary_is_deterministic_and_sorted() -> None
         resumes_attempted=5,
         resumes_succeeded=4,
         fallbacks={"checkpoint_late_execution": 2, "checkpoint_absent": 1},
-        invalidations_deleted=1,
+        invalidations_deleted={"generation": 1},
         shadow_comparisons=4,
         shadow_mismatches=1,
         shadow_skipped={"window_mismatch": 2},
@@ -195,7 +195,7 @@ def test_format_checkpoint_metrics_summary_is_deterministic_and_sorted() -> None
         "capture_refusals={capture_value_error:1,not_settled:2} "
         "resumes_attempted=5 resumes_succeeded=4 "
         "fallbacks={checkpoint_absent:1,checkpoint_late_execution:2} "
-        "invalidations_deleted=1 "
+        "invalidations_deleted={generation:1} "
         "shadow_comparisons=4 shadow_mismatches=1 "
         "shadow_skipped={window_mismatch:2} "
         "recaptures={absent:1,age:2,suffix_size:3}"

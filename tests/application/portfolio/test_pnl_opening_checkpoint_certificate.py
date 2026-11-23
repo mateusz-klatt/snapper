@@ -20,10 +20,16 @@ from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     PnlCheckpointWriteRefusal,
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    checkpoint_minute_fenced,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     checkpoint_write_refusal,
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     event_fx_exchanges_digest,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    opening_checkpoint_fence,
 )
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import prefix_annulment_digest
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
@@ -176,6 +182,49 @@ def _assert_sha256_hex(digest: str) -> None:
     """Assert 64 lowercase hexadecimal digest format."""
     assert len(digest) == 64
     assert all(character in "0123456789abcdef" for character in digest)
+
+
+def test_opening_checkpoint_fence_selects_earliest_non_null_boundary() -> None:
+    """Share one minimum fence across window, pending, and repair boundaries.
+
+    Given: A frontier whose repair boundary precedes its window and next minute.
+    When: The opening-checkpoint fence is resolved with and without optional boundaries.
+    Then: The earliest boundary wins and absent optional boundaries are ignored.
+    """
+    frontier = replace(
+        _settled_frontier(),
+        window_start=_M3,
+        next_minute=_M4,
+        repair_from=_M2,
+    )
+    assert opening_checkpoint_fence(frontier) == _M2
+    assert opening_checkpoint_fence(replace(frontier, next_minute=None, repair_from=None)) == _M3
+
+
+@pytest.mark.parametrize(
+    ("fence", "expected"),
+    [
+        (_M2, True),
+        (_M3, True),
+        (_M4, False),
+        (None, False),
+    ],
+)
+def test_checkpoint_minute_fenced_covers_equality_and_absence(
+    fence: datetime | None,
+    expected: bool,
+) -> None:
+    """Apply the same inclusive minute comparator at every fence boundary.
+
+    Given: A checkpoint minute and a fence below, equal to, above, or absent from it.
+    When: ``checkpoint_minute_fenced`` evaluates the pair.
+    Then: Only a non-null fence at or below the checkpoint minute matches.
+
+    Args:
+        fence: Earlier, equal, later, or absent invalidation boundary.
+        expected: Expected inclusive fence decision.
+    """
+    assert checkpoint_minute_fenced(_M3, fence) is expected
 
 
 def test_empty_digests_are_well_formed_and_pairwise_distinct() -> None:

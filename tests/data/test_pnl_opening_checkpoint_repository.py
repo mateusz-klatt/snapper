@@ -28,7 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import MAX_DEFERRED_EXECUTIONS
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    checkpoint_minute_fenced,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     checkpoint_write_refusal,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    opening_checkpoint_fence,
 )
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
@@ -106,6 +112,7 @@ def test_default_checkpoint_write_refusal_is_empty() -> None:
     """Keep the base repository compatible with callers that never stage checkpoints."""
     repository = cast(Repository, object())
     assert Repository.consume_last_pnl_checkpoint_write_refusal(repository) is None
+    assert Repository.consume_last_pnl_checkpoint_invalidation_deleted(repository) == 0
 
 
 def _key() -> PnlCorrectionKey:
@@ -801,6 +808,9 @@ async def test_choke_point_invalidates_or_retains_checkpoint_for_both_writers(
         _request(start=samples._M3, tip=samples._M4, as_of=as_of_later),
         settled_g1,
     )
+    assert checkpoint_minute_fenced(samples._M3, opening_checkpoint_fence(rewound))
+    assert repository.consume_last_pnl_checkpoint_invalidation_deleted() == 1
+    assert repository.consume_last_pnl_checkpoint_invalidation_deleted() == 0
     assert await repository.get_portfolio_pnl_opening_checkpoint(samples._scope()) is None
 
     chunk_m4 = _empty_chunk(rewound, samples._M4)
@@ -814,6 +824,7 @@ async def test_choke_point_invalidates_or_retains_checkpoint_for_both_writers(
         chunk_m4,
         checkpoint=write_m4,
     )
+    assert repository.consume_last_pnl_checkpoint_invalidation_deleted() == 0
 
     forward_g3 = await repository.invalidate_portfolio_pnl_correction(
         samples._scope(),
@@ -822,6 +833,11 @@ async def test_choke_point_invalidates_or_retains_checkpoint_for_both_writers(
     )
     kept = await repository.get_portfolio_pnl_opening_checkpoint(samples._scope())
     assert kept is not None and kept.certificate == write_m4.certificate
+    assert not checkpoint_minute_fenced(
+        kept.certificate.checkpoint_minute,
+        opening_checkpoint_fence(forward_g3),
+    )
+    assert repository.consume_last_pnl_checkpoint_invalidation_deleted() == 0
 
     mid_chunk = _empty_chunk(forward_g3, samples._M5)
     mid_frontier = await repository.commit_portfolio_pnl_correction_chunk(
@@ -862,6 +878,7 @@ async def test_choke_point_invalidates_or_retains_checkpoint_for_both_writers(
         repair_chunk,
     )
     assert committed.repair_from is not None and committed.repair_from <= samples._M4
+    assert repository.consume_last_pnl_checkpoint_invalidation_deleted() == 1
     assert await repository.get_portfolio_pnl_opening_checkpoint(samples._scope()) is None
 
 

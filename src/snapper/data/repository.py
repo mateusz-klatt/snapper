@@ -183,6 +183,9 @@ from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     checkpoint_write_refusal,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    opening_checkpoint_fence,
+)
 from snapper.application.portfolio.reconciliation_invariants import (
     unclassified_state_has_no_retained_evidence,
 )
@@ -6824,6 +6827,14 @@ class Repository(ABC):
             Closed refusal reason if a checkpoint upsert rolled back, otherwise ``None``.
         """
         return None
+
+    def consume_last_pnl_checkpoint_invalidation_deleted(self) -> int:
+        """Return and clear the latest committed repository-fence deletion rowcount.
+
+        Returns:
+            Zero for repository implementations without opening-checkpoint persistence.
+        """
+        return 0
 
     @abstractmethod
     async def get_pnl_accrual_prefix_fingerprint(
@@ -20320,7 +20331,9 @@ class SQLAlchemyRepository(Repository):
                     **self._pnl_correction_values(frontier),
                 )
             )
-            await self._delete_invalidated_opening_checkpoint(s, frontier)
+            self._last_pnl_checkpoint_invalidation_deleted = (
+                await self._delete_invalidated_opening_checkpoint(s, frontier)
+            )
             return
         result = await s.execute(
             update(PortfolioPnlCorrectionFrontier)
@@ -20333,9 +20346,12 @@ class SQLAlchemyRepository(Repository):
         )
         if cast(CursorResult[tuple[object, ...]], result).rowcount != 1:
             raise PortfolioPnlCorrectionConflictError("P&L correction final checkpoint CAS lost")
-        await self._delete_invalidated_opening_checkpoint(s, frontier)
+        self._last_pnl_checkpoint_invalidation_deleted = (
+            await self._delete_invalidated_opening_checkpoint(s, frontier)
+        )
 
     _last_pnl_checkpoint_write_refusal: str | None = None
+    _last_pnl_checkpoint_invalidation_deleted: int = 0
 
     _PNL_OPENING_CHECKPOINT_PK: Final[tuple[str, ...]] = (
         "wallet_public_id",
@@ -20763,24 +20779,40 @@ class SQLAlchemyRepository(Repository):
 
     async def _delete_invalidated_opening_checkpoint(
         self, s: AsyncSession, frontier: PnlCorrectionFrontier
-    ) -> None:
-        """Delete any persisted checkpoint covered by an open window or repair boundary.
+    ) -> int:
+        """Delete a stored checkpoint whose minute lies at or beyond the shared frontier fence.
+
+        The SQL predicate ``checkpoint_minute >= fence`` is the database form of
+        ``checkpoint_minute_fenced``, so the capture gate and this delete agree.
 
         Args:
             s: Active fenced write session owning both frontier and checkpoint tables.
             frontier: Newly committed frontier state for the key.
+
+        Returns:
+            Number of opening-checkpoint rows deleted by the repository fence.
         """
-        earliest_open = min(
-            value
-            for value in (frontier.window_start, frontier.next_minute, frontier.repair_from)
-            if value is not None
-        )
-        await s.execute(
+        result = await s.execute(
             delete(PortfolioPnlOpeningCheckpoint).where(
                 *self._pnl_opening_checkpoint_filters(frontier.key),
-                PortfolioPnlOpeningCheckpoint.checkpoint_minute >= earliest_open,
+                PortfolioPnlOpeningCheckpoint.checkpoint_minute
+                >= opening_checkpoint_fence(frontier),
             )
         )
+        return cast(CursorResult[tuple[object, ...]], result).rowcount
+
+    def consume_last_pnl_checkpoint_invalidation_deleted(self) -> int:
+        """Return and clear the latest committed repository-fence deletion rowcount.
+
+        The count is instance state on a shared repository, so the caller must
+        consume it in the same task, directly after the frontier write that set it.
+
+        Returns:
+            Deleted rowcount from the latest frontier write, or zero when none matched.
+        """
+        deleted = self._last_pnl_checkpoint_invalidation_deleted
+        self._last_pnl_checkpoint_invalidation_deleted = 0
+        return deleted
 
     def consume_last_pnl_checkpoint_write_refusal(self) -> str | None:
         """Return and clear the latest savepoint checkpoint refusal recorded on commit.
@@ -20963,6 +20995,7 @@ class SQLAlchemyRepository(Repository):
             PortfolioPnlSampleScopeError: If the invalidation targets the anchor.
         """
         canonical = self._normalize_portfolio_pnl_sample_scope(scope)
+        self._last_pnl_checkpoint_invalidation_deleted = 0
         validate_correction_minute(request.start)
         validate_correction_manifest_digest(request.execution_manifest_digest)
         expected_venues = correction_expected_venues(request.expected_venues)
@@ -21088,6 +21121,7 @@ class SQLAlchemyRepository(Repository):
         canonical = self._normalize_portfolio_pnl_sample_scope(scope)
         key = self._pnl_correction_key(canonical)
         self._last_pnl_checkpoint_write_refusal = None
+        self._last_pnl_checkpoint_invalidation_deleted = 0
         chunk = self._normalize_pnl_correction_chunk(chunk)
         for edit in chunk.edits:
             if edit.replacement is not None:
