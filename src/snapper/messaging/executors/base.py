@@ -557,11 +557,9 @@ enqueue-time critical log is the trace."""
 
 
 def _has_required_venue_event_identifiers(params: RecordVenueEventParams) -> bool:
-    """Return True when all identifiers required to build a venue event row exist."""
-    return None not in (
-        params.get("event_type"),
-        params.get("exchange_name"),
-        params.get("instrument"),
+    """Return True when all required non-empty identifiers exist for a venue event row."""
+    return bool(
+        params.get("event_type") and params.get("exchange_name") and params.get("instrument")
     )
 
 
@@ -3497,9 +3495,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
         The cancel carries the target order's client order id. The
         instrument and strategy tag follow :meth:`_order_terminal_metadata`;
-        when that lookup or the record-once insert raises, the terminal is
-        queued in the retry map with whatever metadata is known, and the
-        reconciliation retry completes it.
+        when that lookup or the record-once insert raises, or when required
+        venue-event identifiers are missing or empty on a SQL repository,
+        the terminal is queued in the retry map with whatever metadata is
+        known, and the reconciliation retry completes it (or emits the WARN
+        drop metric if it remains unresolvable).
 
         Args:
             cancel: The cancel request the venue confirmed.
@@ -3524,12 +3524,22 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         holder: PendingOrderState | None,
         exchange_name: OrderExchange,
     ) -> str | None:
-        """Resolve terminal metadata and record once, holding for retry on ``Exception``.
+        """Resolve terminal metadata and record once, holding for retry on failure.
 
         Resolves the canonical instrument and strategy tag inside the ``try``
         block so a metadata lookup failure leaves ``strategy_tag`` absent in
-        ``params`` and the reconciliation retry re-resolves it. Normal
-        exceptions enqueue into ``_unrecorded_order_terminals`` via
+        ``params`` and the reconciliation retry re-resolves it. Distinguishes
+        all three ``False`` outcomes of :meth:`_record_order_terminal_once`:
+        a non-SQL repository keeps no venue events and proceeds normally; a SQL
+        repository whose ``insert_order_terminal_once`` returned ``False``
+        because the row already existed proceeds since durable evidence is
+        already present; and a SQL repository whose required identifiers are
+        missing or empty (for example an empty or ``None`` instrument so
+        :meth:`_venue_event_row` returns ``None``) strips ``strategy_tag``,
+        holds the terminal in ``_unrecorded_order_terminals`` so the retry can
+        re-resolve metadata (or emit the G3-C WARN drop metric if unresolvable),
+        and returns ``None`` so callers never terminalize an ``Order`` row
+        without durable evidence. Normal exceptions also enqueue via
         :meth:`_hold_unrecorded_order_terminal`; ``asyncio.CancelledError``
         inherits from ``BaseException`` and propagates without being held.
 
@@ -3542,8 +3552,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange_name: Executor exchange identifier.
 
         Returns:
-            Resolved instrument when the durable write succeeded (or found an
-            existing terminal), or ``None`` when the terminal was held for retry.
+            Resolved instrument when the durable write succeeded (or a SQL
+            terminal already existed, or the repository is non-SQL), or
+            ``None`` when the terminal was held for retry.
         """
         fallback_instrument = params.get("instrument", "")
         try:
@@ -3552,8 +3563,16 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             )
             params["instrument"] = instrument
             params["strategy_tag"] = strategy_tag
-            await self._record_order_terminal_once(params)
+            recorded = await self._record_order_terminal_once(params)
         except Exception:
+            self._hold_unrecorded_order_terminal(client_order_id, params, exchange_name)
+            return None
+        if (
+            not recorded
+            and isinstance(self.repository, SQLAlchemyRepository)
+            and not _has_required_venue_event_identifiers(params)
+        ):
+            params.pop("strategy_tag", None)
             self._hold_unrecorded_order_terminal(client_order_id, params, exchange_name)
             return None
         self._unrecorded_order_terminals.pop(client_order_id, None)
@@ -4061,12 +4080,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
         Returns:
             The insert row, or ``None`` (logged) when a required identifier
-            is missing.
+            is missing or empty.
         """
         event_type = params.get("event_type")
         exchange_name = params.get("exchange_name")
         instrument = params.get("instrument")
-        if event_type is None or exchange_name is None or instrument is None:
+        if not event_type or not exchange_name or not instrument:
             logger.error("Venue event params missing required identifiers: {}", params)
             return None
         mode = (
@@ -7575,10 +7594,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         tracking correlation. Both the live venue stream and the
         reconciliation disappeared-order path converge here.
 
-        On an ``Exception`` during metadata lookup or the record-once write,
-        the terminal is held in ``_unrecorded_order_terminals`` via
-        :meth:`_hold_unrecorded_order_terminal` (without ``strategy_tag`` if
-        metadata failed so the retry re-resolves it), and this method returns
+        On an ``Exception`` during metadata lookup or the record-once write, or
+        when a SQL repository cannot build ``order_terminal`` because required
+        identifiers are missing or empty (for example an empty or ``None``
+        instrument), the terminal is held in ``_unrecorded_order_terminals``
+        via :meth:`_hold_unrecorded_order_terminal` (without ``strategy_tag``
+        so the retry re-resolves it from the durable command, or emits the
+        G3-C WARN drop metric if it stays unresolvable), and this method returns
         ``True`` WITHOUT updating the ``Order`` row, publishing the stream
         terminal, or popping ``pending_orders`` / ``client_by_exchange``.
         Skipping those downstream steps while held guarantees an ``Order``
@@ -7587,7 +7609,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         eviction: the next reconciliation cycle drains the retry map and
         re-detects the still-tracked disappeared order, or startup recovery
         picks up the still-active ``Order`` row and re-runs this handler
-        idempotently via ``insert_order_terminal_once``. ``asyncio.CancelledError``
+        idempotently via ``insert_order_terminal_once``. When the terminal row
+        already existed on a SQL repository (``insert_order_terminal_once``
+        returning ``False`` with complete identifiers) or on a non-SQL
+        repository, downstream steps proceed normally. ``asyncio.CancelledError``
         propagates and is not held.
 
         If execution crashes or fails AFTER ``order_terminal`` is recorded

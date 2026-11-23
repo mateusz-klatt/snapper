@@ -204,6 +204,11 @@ a broken computation can cause neither heartbeat absence nor a false
 healthy report. Executor heartbeats also carry venue REST reconciliation
 health in `meta.venue_recon_failure_count`, `meta.venue_rest_reachable`,
 `meta.venue_health_halt_recommended`, and `meta.last_venue_recon_error`.
+When a held `order_terminal` entry is dropped — on retry-map eviction at the
+bounded limit, after an unresolvable retry with missing/empty identifiers on a
+SQL repository, or at executor shutdown — the executor increments
+`meta.unrecorded_order_terminal_drop_count` and logs at WARN level pointing
+operators to the G3-C repair tool (`snapper repair-cancel-targets`).
 After three consecutive venue reconciliation failures, the coordinator
 uses the heartbeat to halt known real shard keys for the matching
 exchange/wallet scope and to drop new cold-path signals for that scope.

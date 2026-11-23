@@ -14161,3 +14161,116 @@ class TestStreamCancellationEvidenceFirst:
             pub2.send.assert_awaited_once()
         finally:
             await repository.engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_empty_instrument_on_sql_repo_holds_skips_order_update_and_warns_when_unresolvable(
+        self,
+    ) -> None:
+        """Hold when empty instrument yields None row; warn once retry cannot resolve.
+
+        Given: a tracked order with an empty instrument on a ``SQLAlchemyRepository``
+            where no durable create command is initially resolvable,
+        When: ``_handle_cancellation`` runs and then ``_retry_unrecorded_order_terminals``
+            runs once while unresolvable, and a second case later resolves from
+            a durable create command,
+        Then: ``_handle_cancellation`` does not record or update the ``Order`` row,
+            holds the entry without ``strategy_tag``, increments the WARN drop metric
+            on an unresolvable retry, and heals cleanly when the retry finds a
+            create command.
+        """
+        ex_drop, repo_drop, client_drop = _stream_evidence_executor(exchange="paper", tracked=True)
+        ex_drop.pending_orders[_CANCEL_CID].request.instrument = ""
+
+        with (
+            patch.object(base_module.logger, "error"),
+            patch.object(base_module.logger, "critical"),
+            patch.object(base_module.logger, "warning") as warning_mock,
+        ):
+            result = await ex_drop._handle_cancellation(
+                _stream_execution_update("canceled", symbol=""),
+                "ex-cancel",
+                _CANCEL_CID,
+                "paper",
+            )
+
+            assert result is True
+            repo_drop.insert_order_terminal_once.assert_not_awaited()
+            client_drop._log_order_update_to_db.assert_not_awaited()
+            assert ex_drop.msg_publisher is not None
+            ex_drop.msg_publisher.send.assert_not_awaited()
+            assert _CANCEL_CID in ex_drop.pending_orders
+            assert "ex-cancel" in ex_drop.client_by_exchange
+            held = ex_drop._unrecorded_order_terminals[_CANCEL_CID]
+            assert "strategy_tag" not in held
+            assert ex_drop.unrecorded_order_terminal_drop_count == 0
+
+            await ex_drop._retry_unrecorded_order_terminals()
+
+        assert ex_drop._unrecorded_order_terminals == {}
+        assert ex_drop.unrecorded_order_terminal_drop_count == 1
+        assert any(
+            "Order terminal without order_terminal evidence" in call.args[0]
+            and _CANCEL_CID in call.args[0]
+            and "G3-C" in call.args[0]
+            and "snapper repair-cancel-targets" in call.args[0]
+            for call in warning_mock.call_args_list
+        )
+
+        ex_heal, repo_heal, client_heal = _stream_evidence_executor(exchange="paper", tracked=True)
+        ex_heal.pending_orders[_CANCEL_CID].request.instrument = ""
+        with (
+            patch.object(base_module.logger, "error"),
+            patch.object(base_module.logger, "critical"),
+        ):
+            await ex_heal._handle_cancellation(
+                _stream_execution_update("canceled", symbol=""),
+                "ex-cancel",
+                _CANCEL_CID,
+                "paper",
+            )
+        assert _CANCEL_CID in ex_heal._unrecorded_order_terminals
+        client_heal._log_order_update_to_db.assert_not_awaited()
+
+        repo_heal.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value={"shard_key": "paper.BTC-USD.paper.scalp", "status": "accepted"}
+        )
+        await ex_heal._retry_unrecorded_order_terminals()
+
+        assert ex_heal._unrecorded_order_terminals == {}
+        assert ex_heal.unrecorded_order_terminal_drop_count == 0
+        repo_heal.insert_order_terminal_once.assert_awaited_once()
+        healed_row = repo_heal.insert_order_terminal_once.await_args.args[0]
+        assert healed_row["instrument"] == "BTC-USD"
+        assert healed_row["shard_key"] == "paper.BTC-USD.paper.scalp"
+
+    @pytest.mark.asyncio
+    async def test_existing_terminal_false_return_still_updates_order_and_clears_maps(
+        self,
+    ) -> None:
+        """Proceed when SQL ``insert_order_terminal_once`` returns ``False`` for existing row.
+
+        Given: a tracked order with complete identifiers on a ``SQLAlchemyRepository``
+            whose ``insert_order_terminal_once`` returns ``False`` because durable
+            ``order_terminal`` evidence already exists,
+        When: ``_handle_cancellation`` handles a ``canceled`` frame,
+        Then: nothing is held or flagged as dropped, the ``Order`` row updates to
+            ``CANCELED``, the stream terminal publishes, and tracking maps clear.
+        """
+        ex, repo, client = _stream_evidence_executor(exchange="paper", tracked=True)
+        repo.insert_order_terminal_once = AsyncMock(return_value=False)
+
+        result = await ex._handle_cancellation(
+            _stream_execution_update("canceled"), "ex-cancel", _CANCEL_CID, "paper"
+        )
+
+        assert result is True
+        repo.insert_order_terminal_once.assert_awaited_once()
+        assert ex._unrecorded_order_terminals == {}
+        assert ex.unrecorded_order_terminal_drop_count == 0
+        client._log_order_update_to_db.assert_awaited_once_with(
+            db_order_id=5, status=ExchangeOrderStatusEnum.CANCELED
+        )
+        assert ex.msg_publisher is not None
+        ex.msg_publisher.send.assert_awaited_once()
+        assert _CANCEL_CID not in ex.pending_orders
+        assert "ex-cancel" not in ex.client_by_exchange
