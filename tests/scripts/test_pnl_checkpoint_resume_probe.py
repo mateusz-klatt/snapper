@@ -20,14 +20,18 @@ from uuid import uuid4
 import asyncpg
 import pytest
 from sqlalchemy import event
+from sqlalchemy import select
 from sqlalchemy import text
+from sqlalchemy import update
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from scripts import pnl_checkpoint_resume_probe as probe
 from snapper.application.portfolio import pnl_snapshotter
+from snapper.application.portfolio import pnl_timeline_service
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointFallback
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
 from snapper.application.portfolio.pnl_timeline import PnlTimelinePoint
@@ -35,11 +39,14 @@ from snapper.application.portfolio.pnl_timeline_service import PnlFxRateSource
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReadPolicy
 from snapper.application.portfolio.pnl_timeline_service import PnlSeriesReplayOptions
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
+from snapper.data.models import Candle
+from snapper.data.models import Execution
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
 from snapper.data.pnl_correction_state import PnlCorrectionKey
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
+from snapper.data.repository_types import PnlTimelineExecutionPrefix
 from snapper.data.repository_types import PnlTimelineFillWitnessCut
 from tests.application.portfolio import test_pnl_snapshotter_checkpoint_e2e as e2e
 from tests.application.portfolio import test_pnl_snapshotter_lower_id_rewind as idless
@@ -224,6 +231,8 @@ def _sample_result(
 async def _seed_and_catchup(
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    suffix_fee_asset: str = "USD",
 ) -> tuple[str, PortfolioPnlSampleScope]:
     """Seed ten minutes of real SQLite history with deferred and suffix fills, then run off catch-up."""
     monkeypatch.setattr(pnl_snapshotter, "MAX_CORRECTION_CHUNK_MINUTES", 2)
@@ -235,7 +244,9 @@ async def _seed_and_catchup(
         await e2e._add_valuation_minutes(repo, 6, 10)
         async with repo.session() as session:
             for sequence, minute, side in ((2, 7, "buy"), (3, 9, "sell")):
-                session.add_all(e2e._matched_execution(sequence, minute, side))
+                execution, fill = e2e._matched_execution(sequence, minute, side)
+                execution.fee_asset = fill.fee_asset = suffix_fee_asset
+                session.add_all((execution, fill))
             await session.commit()
         as_of = samples._T0 + 12 * _MINUTE
         for _ in range(5):
@@ -303,6 +314,119 @@ async def test_real_sqlite_probe_matches_cold_bit_for_bit_with_zero_db_writes(
             samples._T0 + 10 * _MINUTE,
         )
         assert len(rows) == 10
+
+
+async def test_probe_bounds_capture_output_on_long_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fit six minutes of capture history into a four-point output budget.
+
+    Given: A ten-minute SQLite replay whose first fill predates the capture window.
+    When: The probe runs with a four-minute window and a four-unit timeline work limit.
+    Then: Capture ends at minute six and the four resumed suffix points match cold replay.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the seed and lowering the timeline work limit.
+    """
+    url, scope = await _seed_and_catchup(tmp_path / "bounded_capture.db", monkeypatch)
+    monkeypatch.setattr(pnl_timeline_service, "PNL_TIMELINE_MAX_WORK_UNITS", 4)
+
+    report = await probe.probe_wallet_checkpoint_resume(
+        probe.CheckpointResumeProbeConfig(
+            wallet_public_id=scope.wallet_public_id,
+            window_minutes=4,
+            db_url=url,
+        )
+    )
+
+    assert report.matched
+    assert report.checkpoint_minute == samples._T0 + 6 * _MINUTE
+    assert report.point_count == 4
+
+
+async def test_candle_cap_refuses_btc_fee_fx_before_loading_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Count BTC fee conversion candles for a USD-quoted wallet.
+
+    Given: A caught-up USD wallet with BTC-denominated suffix fees and BTC/USD FX candles.
+    When: The probe runs with its default candle cap and again with a ten-row cap.
+    Then: The default run matches and the tighter run refuses before loading the FX payload.
+
+    Args:
+        tmp_path: Directory for the SQLite wallet and FX candles.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
+    url, scope = await _seed_and_catchup(
+        tmp_path / "fee_fx_cap.db", monkeypatch, suffix_fee_asset="BTC"
+    )
+    config = probe.CheckpointResumeProbeConfig(
+        wallet_public_id=scope.wallet_public_id, window_minutes=4
+    )
+    async with idless._repository(url) as repo:
+        async with repo.session() as session:
+            for listing in range(6):
+                symbol_id = f"00000000-0000-7000-8000-{listing + 0xc10:012x}"
+                instrument_id = f"00000000-0000-7000-8000-{listing + 0xc20:012x}"
+                symbol = prices._symbol(symbol_id, f"BTCUSD-FX-{listing}", "BTC", "USD")
+                symbol.asset_type = "forex"
+                session.add_all((symbol, prices._instrument(instrument_id, symbol_id, "kraken")))
+                for offset in (6, 8):
+                    minute = samples._T0 + offset * _MINUTE
+                    session.add(prices._candle(instrument_id, minute, 100.0))
+            await session.commit()
+
+        statements: list[str] = []
+        event.listen(
+            repo.engine.sync_engine,
+            "before_cursor_execute",
+            lambda _c, _cur, statement, *_rest: statements.append(statement),
+        )
+        assert (await probe.probe_with_repository(repo, config)).matched
+        assert any("pnl_fx_load_candidate_instruments" in statement for statement in statements)
+        statements.clear()
+
+        with pytest.raises(probe.CheckpointResumeProbeError, match="^caps_exceeded:candles$"):
+            await probe.probe_with_repository(repo, replace(config, max_candles=10))
+        assert not any(
+            "pnl_fx_load_candidate_instruments" in statement and "count(" not in statement.lower()
+            for statement in statements
+        )
+
+
+async def test_candle_cap_counts_marks_visible_only_at_capture_horizon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Count candle rows at the capture horizon.
+
+    Given: Historical mark rows that are visible at capture and expire before the frontier.
+    When: The probe runs with its default cap and again with a four-row cap.
+    Then: The default run matches and the tighter cap refuses the five capture marks.
+
+    Args:
+        tmp_path: Directory for the SQLite replay and historical candle versions.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
+    url, scope = await _seed_and_catchup(tmp_path / "capture_candle_cap.db", monkeypatch)
+    config = probe.CheckpointResumeProbeConfig(
+        wallet_public_id=scope.wallet_public_id, window_minutes=4
+    )
+    async with idless._repository(url) as repo:
+        async with repo.session() as session:
+            await session.execute(
+                update(Candle)
+                .where(Candle.open_at < samples._T0 + 6 * _MINUTE)
+                .values(known_to=samples._T0 + 9 * _MINUTE)
+            )
+            await session.commit()
+
+        assert (await probe.probe_with_repository(repo, config)).matched
+        with pytest.raises(probe.CheckpointResumeProbeError, match="^caps_exceeded:candles$"):
+            await probe.probe_with_repository(repo, replace(config, max_candles=4))
 
 
 def test_cli_main_and_subprocess_succeed_on_real_sqlite(
@@ -870,6 +994,8 @@ class _FakeAsyncpgPrepared:
         lowered = self._sql.lower()
         if "count(" in lowered and "sum(" in lowered and "group by" not in lowered:
             return [(0, None, None, None)]
+        if lowered.startswith("select count(*)"):
+            return [(0,)]
         for pattern, rows in _FAKE_PG_STATIC_RESPONSES:
             if pattern in self._sql:
                 return rows
@@ -1912,32 +2038,73 @@ async def test_bound_pg_timeout_set_config_and_production_read_audit(
         probe._assert_read_only_sql(sql, statement_timeout_ms=30_000)
 
 
-async def test_candle_cap_counts_only_wallet_marks_and_candidate_fx(
+async def test_pg_replay_budget_pins_transaction_before_text_select(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the PostgreSQL transaction before its first text SELECT.
+
+    Given: A PostgreSQL repository backed by a recording asyncpg connection.
+    When: A guarded session runs a text SELECT, requests the same pin, and loads candles.
+    Then: The driver sees one pin, the text SELECT, the bounded count, and the candle read in order.
+
+    Args:
+        monkeypatch: Fixture for replacing asyncpg connections with the recording double.
+    """
+    state = _FakeAsyncpgState(statement_timeout="30s")
+    statements: list[str] = []
+
+    async def fake_connect(*_args: object, **kwargs: object) -> _FakeAsyncpgConn:
+        """Keep the PostgreSQL dialect and substitute the recording driver."""
+        return _FakeAsyncpgConn(state, **kwargs)
+
+    def record_statement(
+        _connection: object, _cursor: object, statement: str, *_args: object
+    ) -> None:
+        """Capture ORM transaction SQL after dialect initialization and checkout."""
+        statements.append(statement)
+
+    monkeypatch.setattr(asyncpg, "connect", fake_connect)
+    repo = SQLAlchemyRepository("postgresql+asyncpg://probe_ro@localhost/snapper")
+    config = probe.CheckpointResumeProbeConfig(wallet_public_id=prefix._WALLET)
+    pin_sql = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+    event.listen(repo.engine.sync_engine, "before_cursor_execute", record_statement)
+    try:
+        with probe._read_only_guards(repo), probe._guard_replay_rows(repo, config):
+            async with repo.session() as session:
+                await session.execute(text("SELECT 1"))
+                await session.execute(text(pin_sql))
+                await session.execute(select(Candle.close))
+    finally:
+        await repo.engine.dispose()
+
+    assert statements[:2] == [pin_sql, "SELECT 1"]
+    assert len(statements) == 4
+    assert statements[2].startswith("SELECT count(*)")
+    assert statements[3].startswith("SELECT candles.close")
+
+
+async def test_candle_cap_ignores_prices_outside_replay_queries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exclude unrelated instruments without dropping relevant candidate-FX candles.
+    """Exclude unrelated prices from the replay candle cap.
 
-    Given: A caught-up wallet, an unrelated crypto series, and a candidate forex series.
-    When: Scope and direct candle counts run before and after adding those rows.
-    Then: The scope count is unchanged while the repository-proof FX count sees its rows.
+    Given: A caught-up wallet with additional mark and FX candles outside its replay queries.
+    When: The probe runs with a five-row candle cap.
+    Then: The candle reads fit within the cap and the resumed suffix matches cold replay.
 
     Args:
-        tmp_path: Pytest isolated directory for the SQLite fixture.
-        monkeypatch: Pytest fixture configuring the bounded off-mode seed.
+        tmp_path: Directory for the SQLite database containing wallet and unrelated prices.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
     """
     url, scope = await _seed_and_catchup(tmp_path / "scoped_candles.db", monkeypatch)
+    unrelated_symbol = "00000000-0000-7000-8000-00000000f101"
+    unrelated_instrument = "00000000-0000-7000-8000-00000000f102"
+    fx_symbol_id = "00000000-0000-7000-8000-00000000f103"
+    fx_instrument_id = "00000000-0000-7000-8000-00000000f104"
+    fx_symbol = prices._symbol(fx_symbol_id, "USD-EUR", "USD", "EUR")
+    fx_symbol.asset_type = "forex"
     async with idless._repository(url) as repo:
-        frontier = await repo.get_portfolio_pnl_correction_frontier(scope)
-        assert frontier is not None
-        before = await probe._count_scope_candles(repo, scope, frontier)
-        assert before > 0
-        unrelated_symbol = "00000000-0000-7000-8000-00000000f101"
-        unrelated_instrument = "00000000-0000-7000-8000-00000000f102"
-        fx_symbol_id = "00000000-0000-7000-8000-00000000f103"
-        fx_instrument_id = "00000000-0000-7000-8000-00000000f104"
-        fx_symbol = prices._symbol(fx_symbol_id, "USD-EUR", "USD", "EUR")
-        fx_symbol.asset_type = "forex"
         async with repo.session() as session:
             session.add_all(
                 (
@@ -1953,54 +2120,190 @@ async def test_candle_cap_counts_only_wallet_marks_and_candidate_fx(
                     session.add(prices._candle(instrument_id, minute, 1.1))
             await session.commit()
 
-        assert await probe._count_scope_candles(repo, scope, frontier) == before
-        fx_refs = await repo.get_instrument_symbol_refs([fx_instrument_id], frontier.as_of)
-        assert probe._fx_candidate_pairs(fx_refs, "USD") == [("EUR", "USD"), ("USD", "EUR")]
-        assert (
-            await probe._count_mark_candles(
-                repo, [], scope.anchor_point_time, frontier.tip, frontier.as_of
-            )
-            == 0
+        result = await probe.probe_with_repository(
+            repo,
+            probe.CheckpointResumeProbeConfig(
+                wallet_public_id=scope.wallet_public_id, window_minutes=4, max_candles=5
+            ),
         )
-        assert (
-            await probe._count_fx_candles(
-                repo, [], scope.anchor_point_time, frontier.tip, frontier.as_of
-            )
-            == 0
-        )
-        assert (
-            await probe._count_fx_candles(
-                repo,
-                [("USD", "EUR", "kraken")],
-                scope.anchor_point_time,
-                frontier.tip,
-                frontier.as_of,
-            )
-            == 11
-        )
+        assert result.matched
 
 
-def test_accrual_candle_and_cut_moved_caps_refuse_with_exit_three(
+async def test_replay_row_budget_is_scoped_to_task_and_engine(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Refuse oversized accruals, candles, or moved capture cuts with exit code 3.
+    """Apply the replay row budget only to its task and engine.
 
-    Given: Valid and zero cap configs, seeded accruals/candles, and a capture cut that grows
-        beyond ``max_executions`` between precheck and fresh capture.
-    When: Probe validation and execution evaluate caps and cut stability.
-    Then: Zero caps fail validation cleanly, accrual/candle caps return exit code 3
-        ``RESULT: REFUSED caps_exceeded:<kind>``, and moved cuts return exit code 3
-        ``RESULT: REFUSED cut_moved``.
+    Given: Two repository engines for one SQLite database and a reader task started before the guard.
+    When: The guarded task sets a one-row candle cap and attempts reads through both engines.
+    Then: The other task and the other engine can read multiple rows, and the guarded read is refused.
 
     Args:
-        tmp_path: Pytest isolated directory for temporary SQLite fixture.
-        monkeypatch: Pytest fixture patching CLI/cut growth scenarios.
+        tmp_path: Directory for the SQLite database shared by both engines.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
+    url, scope = await _seed_and_catchup(tmp_path / "budget_scope.db", monkeypatch)
+    config = probe.CheckpointResumeProbeConfig(
+        wallet_public_id=scope.wallet_public_id, max_candles=1
+    )
+    start = asyncio.Event()
+
+    async def read_candles(repo: SQLAlchemyRepository) -> int:
+        """Use a real ORM SELECT while the probe's listener is installed."""
+        await start.wait()
+        async with repo.session() as session:
+            return len((await session.execute(select(Candle.close))).all())
+
+    async with idless._repository(url) as repo, idless._repository(url) as other_repo:
+        other_task = asyncio.create_task(read_candles(repo))
+        with probe._guard_replay_rows(repo, config):
+            start.set()
+            assert await other_task > 1
+            assert await read_candles(other_repo) > 1
+            with pytest.raises(probe.CheckpointResumeProbeError, match="^caps_exceeded:candles$"):
+                await read_candles(repo)
+
+
+@pytest.mark.parametrize("commit", (True, False), ids=("commit", "rollback"))
+async def test_replay_budget_repins_reused_session_and_resets_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, commit: bool
+) -> None:
+    """Reset the execution budget for each transaction in a reused session.
+
+    Given: A SQLite session with three executions and a three-row execution cap.
+    When: The session reads the executions in two transactions separated by commit or rollback.
+    Then: Each transaction pins its snapshot, counts the rows, and loads all three executions.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+        commit: Selects commit when true and rollback when false.
+    """
+    url, scope = await _seed_and_catchup(tmp_path / "reused_session.db", monkeypatch)
+    config = probe.CheckpointResumeProbeConfig(
+        wallet_public_id=scope.wallet_public_id, max_executions=3
+    )
+    statements: list[str] = []
+    async with idless._repository(url) as repo:
+        event.listen(
+            repo.engine.sync_engine,
+            "before_cursor_execute",
+            lambda _c, _cur, statement, *_args: statements.append(statement),
+        )
+        with probe._read_only_guards(repo), probe._guard_replay_rows(repo, config):
+            async with repo.session() as session:
+                for _ in range(2):
+                    rows = (await session.execute(select(Execution.id))).all()
+                    assert len(rows) == 3
+                    if commit:
+                        await session.commit()
+                    else:
+                        await session.rollback()
+
+    assert len(statements) == 6
+    for begin, count, payload in (statements[:3], statements[3:]):
+        assert begin == "BEGIN"
+        assert count.startswith("SELECT count(*)")
+        assert payload.startswith("SELECT executions.id")
+
+
+@pytest.mark.parametrize("explicit_begin", (False, True), ids=("select", "explicit-begin"))
+async def test_replay_budget_refuses_transaction_started_before_guard(explicit_begin: bool) -> None:
+    """Refuse a transaction that predates the replay guard.
+
+    Given: A SQLite session with a transaction already open when the guard is installed.
+    When: The session issues a budgeted SELECT or an explicit BEGIN under the guard.
+    Then: The probe reports snapshot_not_pinned and classifies the safety failure as exit code 2.
+
+    Args:
+        explicit_begin: Selects an explicit BEGIN when true and a budgeted SELECT when false.
+    """
+    config = probe.CheckpointResumeProbeConfig(wallet_public_id=prefix._WALLET)
+    statement = text("BEGIN") if explicit_begin else select(Execution.id)
+    async with idless._repository("sqlite+aiosqlite:///:memory:") as repo:
+        with probe._read_only_guards(repo):
+            async with repo.session() as session:
+                await session.execute(text("BEGIN"))
+                with (
+                    probe._guard_replay_rows(repo, config),
+                    pytest.raises(
+                        probe.CheckpointResumeProbeError, match="^snapshot_not_pinned$"
+                    ) as failure,
+                ):
+                    await session.execute(statement)
+
+    assert probe._classify_failure(failure.value) == (2, "RESULT: FAIL snapshot_not_pinned")
+
+
+async def test_replay_budget_keeps_open_sqlite_snapshot_across_savepoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the SQLite snapshot and row counts across a savepoint.
+
+    Given: A session bound to a connection with an open SQLite transaction and three executions.
+    When: The session reads all three rows at the cap and attempts the same read in a savepoint.
+    Then: The first read succeeds and the second is refused because the transaction has spent its cap.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
+    url, scope = await _seed_and_catchup(tmp_path / "joined_session.db", monkeypatch)
+    config = probe.CheckpointResumeProbeConfig(
+        wallet_public_id=scope.wallet_public_id, max_executions=3
+    )
+    async with idless._repository(url) as repo:
+        with probe._read_only_guards(repo), probe._guard_replay_rows(repo, config):
+            async with repo.engine.connect() as connection:
+                await connection.exec_driver_sql("BEGIN")
+                async with AsyncSession(bind=connection) as session:
+                    assert len((await session.execute(select(Execution.id))).all()) == 3
+                    async with session.begin_nested():
+                        with pytest.raises(
+                            probe.CheckpointResumeProbeError, match="^caps_exceeded:executions$"
+                        ):
+                            await session.execute(select(Execution.id))
+
+
+async def test_execution_cap_allows_checkpoint_verification_rereads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Allow checkpoint verification to reread executions in separate transactions.
+
+    Given: A caught-up SQLite wallet with three executions and a three-row execution cap.
+    When: The probe captures and verifies a checkpoint, then compares resumed and cold replay.
+    Then: Verification fits the cap and the resumed suffix matches the cold replay.
+
+    Args:
+        tmp_path: Directory for the SQLite checkpoint replay database.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
+    """
+    url, scope = await _seed_and_catchup(tmp_path / "verification_cap.db", monkeypatch)
+    config = probe.CheckpointResumeProbeConfig(
+        wallet_public_id=scope.wallet_public_id, window_minutes=4, max_executions=3, db_url=url
+    )
+    assert (await probe.probe_wallet_checkpoint_resume(config)).matched
+
+
+def test_accrual_and_candle_caps_refuse_with_exit_three(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Differentiate invalid caps from accrual and candle budget refusals.
+
+    Given: A caught-up SQLite wallet with candles and two seeded accruals.
+    When: The probe validates zero caps and the CLI runs with one-row accrual or candle caps.
+    Then: The zero caps raise validation errors and each one-row cap produces exit code 3.
+
+    Args:
+        tmp_path: Directory for the SQLite replay and seeded accruals.
+        monkeypatch: Fixture for configuring the snapshotter used to seed the replay.
     """
     url, scope = asyncio.run(_seed_and_catchup(tmp_path / "caps.db", monkeypatch))
 
     async def _seed_accruals_and_check_invalid() -> None:
-        """Validate zero-cap failures, seed accruals, and verify empty witness count."""
+        """Validate zero caps and seed accruals that exceed a one-row budget."""
         async with idless._repository(url) as repo:
             for bad_cfg, expected in (
                 (
@@ -2029,8 +2332,6 @@ def test_accrual_candle_and_cut_moved_caps_refuse_with_exit_three(
                         )
                     )
                 await session.commit()
-
-            assert await probe._count_witness_fill_events(repo, scope, {}) == 0
 
     asyncio.run(_seed_accruals_and_check_invalid())
 
@@ -2065,90 +2366,125 @@ def test_accrual_candle_and_cut_moved_caps_refuse_with_exit_three(
         == 3
     )
 
-    async def _check_cut_moved() -> None:
-        """Verify typed cap errors and ``cut_moved`` refusal when captured prefix expands."""
-        async with idless._repository(url) as repo:
-            with pytest.raises(probe.CheckpointResumeProbeError, match="^caps_exceeded:accruals$"):
-                await probe.probe_with_repository(
-                    repo,
-                    probe.CheckpointResumeProbeConfig(
-                        wallet_public_id=scope.wallet_public_id, window_minutes=4, max_accruals=1
-                    ),
-                )
-            with pytest.raises(probe.CheckpointResumeProbeError, match="^caps_exceeded:candles$"):
-                await probe.probe_with_repository(
-                    repo,
-                    probe.CheckpointResumeProbeConfig(
-                        wallet_public_id=scope.wallet_public_id, window_minutes=4, max_candles=1
-                    ),
-                )
 
-            orig_get_prefix = repo.get_pnl_timeline_execution_prefix
+@pytest.mark.parametrize("grow_execution", (True, False), ids=("execution", "fill-gap"))
+async def test_moved_cut_refuses_before_buffering_fresh_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grow_execution: bool
+) -> None:
+    """Reject a grown capture cut before buffering the excess rows.
 
-            async def _grown_cut_prefix(
-                wallet_id: str,
-                mode: str,
-                as_of: datetime | None,
-                *,
-                capture_fill_witness_cut: bool = False,
-            ) -> object:
-                """Commit a new matched execution + fill via raw sqlite3 outside ORM guards."""
-                with closing(sqlite3.connect(tmp_path / "caps.db")) as raw_conn:
-                    raw_conn.row_factory = sqlite3.Row
-                    ex_row = dict(
+    Given: A replay at its execution cap and a concurrent insertion before a fresh capture read.
+    When: Either the execution prefix grows before certification or an unmatched fill arrives
+        between prefix certification and the fill-gap read.
+    Then: The count detects the larger cut and the probe reports cut_moved with exit code 3
+        before the affected query returns its payload.
+
+    Args:
+        tmp_path: Directory for the SQLite database used by the probe and concurrent writer.
+        monkeypatch: Fixture for injecting growth immediately before the selected repository read.
+        grow_execution: Selects a new execution with its fill when true and an unmatched fill when false.
+    """
+    db_path = tmp_path / "moved_cut.db"
+    url, scope = await _seed_and_catchup(db_path, monkeypatch)
+    async with idless._repository(url) as repo:
+        original_prefix = repo.get_pnl_timeline_execution_prefix
+        original_gap = repo.pnl_timeline_scope_has_fill_gap
+        capture_sql: list[str] = []
+
+        def record_capture_sql(
+            _conn: object, _cursor: object, statement: str, *_args: object
+        ) -> None:
+            """Record fresh capture SQL at the driver boundary."""
+            capture_sql.append(statement)
+
+        def inject_growth() -> None:
+            """Add rows outside the probe connection after the cold replay."""
+            with closing(sqlite3.connect(db_path)) as raw_conn:
+                raw_conn.row_factory = sqlite3.Row
+                fill = dict(
+                    raw_conn.execute(
+                        "SELECT * FROM venue_events WHERE exec_id = 'exec-kraken-2'"
+                    ).fetchone()
+                )
+                fill.pop("id")
+                fill.update(
+                    public_id="00000000-0000-7000-8000-000000000914",
+                    exec_id="exec-kraken-4",
+                    trade_id="trade-kraken-4",
+                    sequence_id=4,
+                    client_order_id=prefix._CLIENT_ORDER if grow_execution else "unmatched-client",
+                )
+                columns = ", ".join(fill)
+                placeholders = ", ".join("?" for _ in fill)
+                raw_conn.execute(
+                    f"INSERT INTO venue_events ({columns}) VALUES ({placeholders})",
+                    tuple(fill.values()),
+                )
+                if grow_execution:
+                    execution = dict(
                         raw_conn.execute(
                             "SELECT * FROM executions WHERE scope_sequence = 2"
                         ).fetchone()
                     )
-                    ex_row.pop("id")
-                    ex_row.update(
+                    execution.pop("id")
+                    execution.update(
                         scope_sequence=4,
                         public_id="00000000-0000-7000-8000-000000000904",
                         exec_id="exec-kraken-4",
                         trade_id="trade-kraken-4",
                         sequence_id=4,
-                        timestamp=ex_row["timestamp"],
                     )
-                    ex_cols = ", ".join(ex_row.keys())
-                    ex_q = ", ".join("?" for _ in ex_row)
+                    columns = ", ".join(execution)
+                    placeholders = ", ".join("?" for _ in execution)
                     raw_conn.execute(
-                        f"INSERT INTO executions ({ex_cols}) VALUES ({ex_q})",
-                        tuple(ex_row.values()),
+                        f"INSERT INTO executions ({columns}) VALUES ({placeholders})",
+                        tuple(execution.values()),
                     )
-                    ve_row = dict(
-                        raw_conn.execute(
-                            "SELECT * FROM venue_events WHERE exec_id = 'exec-kraken-2'"
-                        ).fetchone()
-                    )
-                    ve_row.pop("id")
-                    ve_row.update(
-                        public_id="00000000-0000-7000-8000-000000000914",
-                        exec_id="exec-kraken-4",
-                        trade_id="trade-kraken-4",
-                        sequence_id=4,
-                    )
-                    ve_cols = ", ".join(ve_row.keys())
-                    ve_q = ", ".join("?" for _ in ve_row)
-                    raw_conn.execute(
-                        f"INSERT INTO venue_events ({ve_cols}) VALUES ({ve_q})",
-                        tuple(ve_row.values()),
-                    )
-                    raw_conn.commit()
-                return await orig_get_prefix(
-                    wallet_id, mode, as_of, capture_fill_witness_cut=capture_fill_witness_cut
-                )
+                raw_conn.commit()
+            event.listen(repo.engine.sync_engine, "before_cursor_execute", record_capture_sql)
 
-            monkeypatch.setattr(repo, "get_pnl_timeline_execution_prefix", _grown_cut_prefix)
-            with pytest.raises(probe.CheckpointResumeProbeError, match="^cut_moved$") as cut_exc:
-                await probe.probe_with_repository(
-                    repo,
-                    probe.CheckpointResumeProbeConfig(
-                        wallet_public_id=scope.wallet_public_id, window_minutes=4, max_executions=3
-                    ),
-                )
-            assert probe._classify_failure(cut_exc.value) == (3, "RESULT: REFUSED cut_moved")
+        async def grown_cut(
+            wallet_id: str,
+            mode: str,
+            as_of: datetime | None,
+            *,
+            capture_fill_witness_cut: bool = False,
+        ) -> PnlTimelineExecutionPrefix:
+            """Grow the cut immediately before the fresh prefix transaction."""
+            inject_growth()
+            return await original_prefix(
+                wallet_id, mode, as_of, capture_fill_witness_cut=capture_fill_witness_cut
+            )
 
-    asyncio.run(_check_cut_moved())
+        async def grown_gap(
+            wallet_id: str,
+            mode: str,
+            as_of: datetime | None,
+            execution_prefix: PnlTimelineExecutionPrefix | None = None,
+        ) -> bool:
+            """Grow fills after prefix certification and before the fill-gap transaction."""
+            inject_growth()
+            return await original_gap(wallet_id, mode, as_of, execution_prefix)
+
+        if grow_execution:
+            monkeypatch.setattr(repo, "get_pnl_timeline_execution_prefix", grown_cut)
+        else:
+            monkeypatch.setattr(repo, "pnl_timeline_scope_has_fill_gap", grown_gap)
+        with pytest.raises(probe.CheckpointResumeProbeError, match="^cut_moved$") as cut_exc:
+            await probe.probe_with_repository(
+                repo,
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=scope.wallet_public_id, window_minutes=4, max_executions=3
+                ),
+            )
+        assert probe._classify_failure(cut_exc.value) == (3, "RESULT: REFUSED cut_moved")
+        if grow_execution:
+            assert any("count(*)" in sql and "FROM executions" in sql for sql in capture_sql)
+            assert not any(sql.startswith("SELECT executions.id") for sql in capture_sql)
+        else:
+            gap_sql = [sql for sql in capture_sql if "venue_events.wallet_public_id =" in sql]
+            assert len(gap_sql) == 1
+            assert gap_sql[0].startswith("SELECT count(*)")
 
 
 def test_argparse_error_and_exit_redact_dsn_and_multiline_collapse(
@@ -2412,15 +2748,15 @@ def test_apply_address_space_limit_real_getrlimit_and_non_linux_skip(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exercise relative ``RLIMIT_AS`` calculation, hard-limit clamp/skip, and ``/proc`` skips.
+    """Exercise relative ``RLIMIT_AS`` calculation and unchanged limits or unavailable ``/proc``.
 
     Given: Real ``resource.getrlimit(RLIMIT_AS)``, a fake ``/proc/self/status`` file holding
         ``VmSize``, a local ``setrlimit`` recorder overriding the autouse stub, erroring
         ``setrlimit``, and non-Linux or unreadable-``/proc`` inputs.
-    When: Calling ``_apply_address_space_limit`` across all Linux, clamp/skip, and fallback paths.
-    Then: Computed soft limit equals ``current_vmsize + max(max_rss_mb, 4 * max_rss_mb)`` MiB,
-        never exceeds existing hard limits, skips when hard limit is below target or ``/proc``
-        fails, handles ``setrlimit`` errors, and skips on non-Linux platforms.
+    When: Calling ``_apply_address_space_limit`` across Linux and fallback paths.
+    Then: The soft limit can fall to current virtual size plus four times the RSS cap,
+        retains tighter limits, handles ``setrlimit`` errors, and skips unavailable
+        ``/proc`` readings and non-Linux platforms.
 
     Args:
         tmp_path: Pytest isolated directory hosting a fake ``/proc/self/status`` file.
@@ -2446,26 +2782,28 @@ def test_apply_address_space_limit_real_getrlimit_and_non_linux_skip(
     assert recorded == []
 
     monkeypatch.setattr(probe.sys, "platform", "linux")
-    _soft, real_hard = resource.getrlimit(resource.RLIMIT_AS)
+    real_soft, real_hard = resource.getrlimit(resource.RLIMIT_AS)
     headroom_bytes = (probe.ADDRESS_SPACE_HEADROOM_FACTOR * 256) * 1024 * 1024
     desired_soft = vmsize_bytes + headroom_bytes
     probe._apply_address_space_limit(256)
-    if real_hard == resource.RLIM_INFINITY or real_hard >= desired_soft:
-        expected_real = (
-            desired_soft if real_hard == resource.RLIM_INFINITY else min(desired_soft, real_hard)
-        )
-        assert recorded[-1] == (resource.RLIMIT_AS, (expected_real, real_hard))
+    if real_soft == resource.RLIM_INFINITY or real_soft > desired_soft:
+        assert recorded[-1] == (resource.RLIMIT_AS, (desired_soft, real_hard))
     else:
         assert recorded == []
 
     recorded.clear()
-    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, resource.RLIM_INFINITY))
+    unlimited = (resource.RLIM_INFINITY, resource.RLIM_INFINITY)
+    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: unlimited)
     probe._apply_address_space_limit(256)
     high_finite_hard = desired_soft + 32 * 1024 * 1024
-    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, high_finite_hard))
+    monkeypatch.setattr(
+        probe.resource, "getrlimit", lambda _kind: (high_finite_hard, high_finite_hard)
+    )
     probe._apply_address_space_limit(256)
     low_finite_hard = vmsize_bytes + 64 * 1024 * 1024
-    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, low_finite_hard))
+    monkeypatch.setattr(
+        probe.resource, "getrlimit", lambda _kind: (low_finite_hard, low_finite_hard)
+    )
     probe._apply_address_space_limit(256)
     assert recorded == [
         (resource.RLIMIT_AS, (desired_soft, resource.RLIM_INFINITY)),
@@ -2473,7 +2811,7 @@ def test_apply_address_space_limit_real_getrlimit_and_non_linux_skip(
     ]
 
     recorded.clear()
-    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: (0, resource.RLIM_INFINITY))
+    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: unlimited)
     status_file.write_text("Name:\tpython\nVmRSS:\t4096 kB\n", encoding="utf-8")
     probe._apply_address_space_limit(256)
     monkeypatch.setattr(probe, "_PROC_STATUS_PATH", tmp_path / "missing_status")
@@ -2495,6 +2833,31 @@ def test_apply_address_space_limit_real_getrlimit_and_non_linux_skip(
     assert recorded == []
 
 
+def test_address_space_limit_preserves_tighter_inherited_soft_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preserve a tighter inherited address-space limit.
+
+    Given: A simulated Linux process with a 1 GiB soft limit and an unlimited hard limit.
+    When: The probe applies its larger default address-space budget.
+    Then: The inherited soft and hard limits stay in effect.
+
+    Args:
+        monkeypatch: Fixture for simulating Linux, the process size, and resource limit calls.
+    """
+    inherited = (1024**3, resource.RLIM_INFINITY)
+
+    def assert_limit_preserved(_kind: int, bounds: tuple[int, int]) -> None:
+        """Reject attempts to leave the process with larger limits."""
+        assert bounds == inherited
+
+    monkeypatch.setattr(probe.sys, "platform", "linux")
+    monkeypatch.setattr(probe, "_read_linux_vmsize_bytes", lambda: 128 * 1024**2)
+    monkeypatch.setattr(probe.resource, "getrlimit", lambda _kind: inherited)
+    monkeypatch.setattr(probe.resource, "setrlimit", assert_limit_preserved)
+    probe._apply_address_space_limit(probe.DEFAULT_MAX_RSS_MB)
+
+
 def test_linux_real_rlimit_as_subprocess_smoke() -> None:
     """Apply unstubbed relative ``RLIMIT_AS`` in a Linux subprocess and allocate ``max_rss_mb/2``.
 
@@ -2514,12 +2877,12 @@ def test_linux_real_rlimit_as_subprocess_smoke() -> None:
         "max_rss_mb = 64; "
         "vmsize = probe._read_linux_vmsize_bytes(); "
         "assert vmsize is not None and vmsize > 0; "
-        "_, hard_before = resource.getrlimit(resource.RLIMIT_AS); "
+        "soft_before, hard_before = resource.getrlimit(resource.RLIMIT_AS); "
         "expected = vmsize + max(max_rss_mb, probe.ADDRESS_SPACE_HEADROOM_FACTOR * max_rss_mb) * 1024 * 1024; "
         "probe._apply_address_space_limit(max_rss_mb); "
         "soft_after, hard_after = resource.getrlimit(resource.RLIMIT_AS); "
         "assert hard_after == hard_before; "
-        "assert (soft_after == expected) if (hard_before == resource.RLIM_INFINITY or hard_before >= expected) else True; "
+        "assert soft_after == (expected if soft_before == resource.RLIM_INFINITY else min(soft_before, expected)); "
         "buf = bytearray((max_rss_mb // 2) * 1024 * 1024); "
         "mv = memoryview(buf); "
         "mv[::4096] = b'\\x01' * len(mv[::4096]); "
@@ -2568,24 +2931,136 @@ async def test_probe_with_repository_timeout_raises_timeout_error(
         await repo.engine.dispose()
 
 
-def test_mark_series_sort_tolerates_null_historical_quote() -> None:
-    """Sort historical mark series whose quote metadata is partly null.
+async def test_probe_refuses_pass_after_synchronous_comparison_crosses_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse a matching comparison that crosses the deadline without yielding.
 
-    Given: Two references to one native symbol, exchange and base whose
-        historical quote is ``None`` in one version and ``"USD"`` in the other.
-    When: The series set is sorted with the probe's null-safe key.
-    Then: Sorting does not raise and the concrete quote orders before the null one.
+    Given: A caught-up SQLite wallet and a controlled monotonic clock.
+    When: A synchronous comparison confirms equality and advances the clock past the deadline.
+    Then: The repository probe raises a timeout instead of returning the matching report.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the seed and substituting the comparison and clock.
     """
-    series = {
-        ("XBTUSD", "kraken", "BTC", None),
-        ("XBTUSD", "kraken", "BTC", "USD"),
-    }
-    with pytest.raises(TypeError):
-        sorted(series)
-    assert sorted(series, key=probe._null_safe_series_key) == [
-        ("XBTUSD", "kraken", "BTC", "USD"),
-        ("XBTUSD", "kraken", "BTC", None),
-    ]
+    url, scope = await _seed_and_catchup(tmp_path / "comparison_deadline.db", monkeypatch)
+    now = 0.0
+    compare_series = probe._compare_series
+
+    def compare_after_deadline(
+        cold: PnlWalletSeriesResult, resumed: PnlWalletSeriesResult
+    ) -> str | None:
+        """Advance the probe clock during a matching comparison without yielding."""
+        nonlocal now
+        mismatch = compare_series(cold, resumed)
+        assert mismatch is None
+        now = 121.0
+        return mismatch
+
+    monkeypatch.setattr(
+        probe, "time", SimpleNamespace(monotonic=lambda: now, perf_counter=probe.time.perf_counter)
+    )
+    monkeypatch.setattr(probe, "_compare_series", compare_after_deadline)
+    async with idless._repository(url) as repo:
+        with pytest.raises(probe.CheckpointResumeProbeError, match="^timeout$"):
+            await probe.probe_with_repository(
+                repo,
+                probe.CheckpointResumeProbeConfig(
+                    wallet_public_id=scope.wallet_public_id,
+                    window_minutes=4,
+                    max_runtime_seconds=120,
+                ),
+            )
+
+
+async def test_probe_refuses_pass_after_engine_disposal_crosses_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Include engine disposal in the wallet probe deadline.
+
+    Given: A caught-up SQLite wallet and a controlled monotonic clock.
+    When: Engine disposal after the probe advances the clock beyond the deadline.
+    Then: The wallet probe raises a timeout before returning its report.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the seed and wrapping engine disposal and the clock.
+    """
+    url, scope = await _seed_and_catchup(tmp_path / "disposal_deadline.db", monkeypatch)
+    now = 0.0
+    dispose_engine = AsyncEngine.dispose
+
+    async def dispose_after_deadline(engine: AsyncEngine) -> None:
+        """Advance the probe clock during engine disposal."""
+        nonlocal now
+        await dispose_engine(engine)
+        now = 121.0
+
+    monkeypatch.setattr(
+        probe, "time", SimpleNamespace(monotonic=lambda: now, perf_counter=probe.time.perf_counter)
+    )
+    monkeypatch.setattr(AsyncEngine, "dispose", dispose_after_deadline)
+    with pytest.raises(probe.CheckpointResumeProbeError, match="^timeout$"):
+        await probe.probe_wallet_checkpoint_resume(
+            probe.CheckpointResumeProbeConfig(
+                wallet_public_id=scope.wallet_public_id,
+                window_minutes=4,
+                db_url=url,
+                max_runtime_seconds=120,
+            )
+        )
+
+
+def test_cli_refuses_pass_after_report_formatting_crosses_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Refuse a matching CLI verdict when formatting crosses the deadline.
+
+    Given: A caught-up SQLite wallet and a controlled monotonic clock.
+    When: Formatting a matching report advances the clock past the deadline.
+    Then: The CLI returns exit code 2 and prints only the timeout result.
+
+    Args:
+        tmp_path: Directory for the isolated SQLite replay database.
+        monkeypatch: Fixture for configuring the seed and substituting the formatter and clock.
+        capsys: Fixture for capturing the CLI result printed to standard output.
+    """
+    url, scope = asyncio.run(_seed_and_catchup(tmp_path / "cli_deadline.db", monkeypatch))
+    now = 0.0
+    format_report = probe._format_report
+
+    def format_after_deadline(report: probe.CheckpointResumeProbeReport) -> str:
+        """Advance the probe clock just before a matching report would be printed."""
+        nonlocal now
+        assert report.matched
+        now = 121.0
+        return format_report(report)
+
+    monkeypatch.setattr(
+        probe, "time", SimpleNamespace(monotonic=lambda: now, perf_counter=probe.time.perf_counter)
+    )
+    monkeypatch.setattr(probe, "_format_report", format_after_deadline)
+    assert (
+        probe.main(
+            [
+                "--wallet",
+                scope.wallet_public_id,
+                "--window-minutes",
+                "4",
+                "--db-url",
+                url,
+                "--max-runtime-seconds",
+                "120",
+            ]
+        )
+        == 2
+    )
+    assert capsys.readouterr().out.strip() == "RESULT: FAIL timeout"
 
 
 def test_dsn_redaction_covers_slash_in_password() -> None:

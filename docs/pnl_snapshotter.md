@@ -399,6 +399,9 @@ Rollout and rollback:
 
 ## Running the probe in production
 
+Run the probe as a standalone process. It installs class-global SQLAlchemy
+session listeners for the duration of the probe.
+
 Create a dedicated least-privilege PostgreSQL role (`snapper_ro`) with read-only
 transaction defaults (replace every `<...>` placeholder before running):
 
@@ -426,14 +429,16 @@ DSN carries none, and the `.pgpass` host field must match the DSN host.
 the LAN (`192.168.5.0/24`) but never from a container on the Docker bridge,
 which is reserved for the application role. Run the probe either from a LAN
 host's virtualenv or from a one-off container on the host network, where
-`<db-host>` defaults to `127.0.0.1`:
+`<db-host>` defaults to `127.0.0.1`. Run the container command from the
+repository root with an image built from the same revision as the probe.
 
 ```bash
-docker run --rm --network host --user "$(id -u)" \
+docker run --rm --memory=3g --network host --user "$(id -u)" --entrypoint timeout \
     -v ~/.pgpass:/run/secrets/pgpass:ro \
+    -v "$PWD/scripts/pnl_checkpoint_resume_probe.py:/app/scripts/pnl_checkpoint_resume_probe.py:ro" \
     -e PGPASSFILE=/run/secrets/pgpass \
     -e PNL_PROBE_DB_URL='postgresql+asyncpg://snapper_ro@<db-host>:5432/<database>' \
-    <image> python scripts/pnl_checkpoint_resume_probe.py \
+    <image> --kill-after=5s 150s python /app/scripts/pnl_checkpoint_resume_probe.py \
     --wallet <WALLET_PUBLIC_ID> --mode live --valuation-ccy USD --window-minutes 60
 ```
 
@@ -445,21 +450,29 @@ PYTHONPATH=src python scripts/pnl_checkpoint_resume_probe.py \
     --db-url 'postgresql+asyncpg://snapper_ro@<db-host>:5432/<database>'
 ```
 
-The `--max-rss-mb` guard (default `2048` MiB) bounds current-RSS growth over a
-baseline captured at probe start (`/proc/self/statm` resident pages on Linux,
-with `ru_maxrss` fallback on macOS), so a parent process's inherited peak does
-not trip the memory cap. On Linux, the CLI also sets soft `RLIMIT_AS` relative
-to current virtual size read from `/proc/self/status` (`VmSize`), capped at
-`current_vmsize + max(max_rss_mb, 4 * max_rss_mb)` bytes so shared library
-mappings and allocator arenas do not trigger spurious `MemoryError`; it never
-raises `RLIMIT_AS` above the existing hard limit and skips `RLIMIT_AS` when the
-hard limit is lower than the computed target or `/proc/self/status` is
-unreadable.
+The `--max-rss-mb` guard (default `2048` MiB) checks RSS growth over the probe's
+startup baseline. On Linux it samples `/proc/self/statm`, so temporary spikes
+between samples can escape detection. On macOS it uses `ru_maxrss`. On Linux
+the CLI can lower soft `RLIMIT_AS` to the startup virtual-memory size
+(`VmSize` from `/proc/self/status`) plus four times `--max-rss-mb` in MiB.
+This leaves room for shared libraries and the allocator and preserves any
+tighter inherited soft limit.
 
-`--max-runtime-seconds` is enforced at asynchronous cancellation points. A
-CPU-bound replay may therefore overrun the configured ceiling until its next
-`await`; PostgreSQL statement timeouts and the memory limits remain independent
-hard-safety controls.
+The probe checks `--max-runtime-seconds` at asynchronous cancellation points
+and before reporting the comparison verdict. CPU-bound work can continue past
+the deadline until the next check. For hard enforcement, run the probe with a
+container memory limit (`docker run --memory`) and an outer timeout that can
+terminate the probe process, as in the container example. Size the container
+limit for the entire process, including startup memory.
+
+`--window-minutes` bounds the output of each replay. Capture ends at the
+checkpoint minute, and the cold and resumed comparisons start one minute
+later. Capture and cold replay still process the history needed to reconstruct
+opening state. Row caps count the actual execution, fill, accrual, and candle
+queries at their read horizons, including FX candles for fees. The count and
+load share a read snapshot pinned at transaction start. Each budgeted read
+adds up to one bounded scan for the count. Allow for about twice the candle
+scan work when setting `--max-runtime-seconds` and the outer timeout.
 
 Exit codes:
 
@@ -467,12 +480,10 @@ Exit codes:
     bit-for-bit.
 - `1`: `RESULT: FAIL <mismatch_detail>` — cold vs. resumed points or rate
     sources diverged.
-- `2`: `RESULT: FAIL <reason>` — missing anchor or `no_frontier`, safety/cap or
+- `2`: `RESULT: FAIL <reason>` — missing anchor or `no_frontier`, safety or
     writable-role refusal, `timeout`, `interrupted`, or configuration/DB error.
 - `3`: `RESULT: REFUSED <reason>` — closed checkpoint or frontier refusal (for
     example `frontier_has_fill_gap`, `capture_fill_gap`, or
-    `checkpoint_verify_fallback:...`), `caps_exceeded:<kind>` from the
-    pre-run counts, or `cut_moved`. `cut_moved` is a post-load re-check: the
-    capture prefix is already read when it runs, so the overshoot beyond the
-    pre-run count is bounded only by the executions ingested during the probe,
-    within the statement timeout and the memory caps.
+    `checkpoint_verify_fallback:...`), `caps_exceeded:<kind>`, or `cut_moved`.
+    The probe refuses with `cut_moved` before buffering an over-cap execution
+    or fill query for the fresh capture cut.
