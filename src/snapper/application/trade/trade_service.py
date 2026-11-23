@@ -816,17 +816,30 @@ class TradeService:
         return False
 
     def record_stale_awaiting_target_count(self, exchange: str, count: int) -> None:
-        """Record latest stale awaiting_target cancel count for an exchange."""
+        """Record latest stale awaiting_target cancel count for an exchange.
+
+        Args:
+            exchange: Exchange whose reconciler reported the count.
+            count: Number of stale held cancels; negative values clamp to zero.
+        """
         self._stale_awaiting_target_counts[exchange] = max(0, count)
 
     @property
     def stale_awaiting_target_counts(self) -> dict[str, int]:
-        """Return latest stale awaiting_target cancel count keyed by exchange."""
+        """Return latest stale awaiting_target cancel count keyed by exchange.
+
+        Returns:
+            Copy of the per-exchange stale held-cancel counts.
+        """
         return dict(self._stale_awaiting_target_counts)
 
     @property
     def stale_awaiting_target_count(self) -> int:
-        """Return total stale awaiting_target cancels across all exchanges."""
+        """Return total stale awaiting_target cancels across all exchanges.
+
+        Returns:
+            Sum of the per-exchange stale held-cancel counts.
+        """
         return sum(self._stale_awaiting_target_counts.values())
 
     def snapshot_for_checkpoint(

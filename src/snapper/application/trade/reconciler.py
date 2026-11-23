@@ -433,7 +433,11 @@ class ReconciliationLoop:
 
     @property
     def stale_awaiting_target_count(self) -> int:
-        """Return latest count of stale awaiting_target cancels on this exchange."""
+        """Return latest count of stale awaiting_target cancels on this exchange.
+
+        Returns:
+            Number of held cancels older than the stale threshold at the last pass.
+        """
         return self._stale_awaiting_target_count
 
     async def run(self) -> None:
