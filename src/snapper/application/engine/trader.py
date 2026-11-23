@@ -55,12 +55,16 @@ from snapper.application.process_manager.registry import register_process
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.services.settings import SettingsService
+from snapper.application.trade.cancel_target import CancelTargetIdentityReader
+from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
+from snapper.application.trade.cancel_target import cancel_target_exchange_order_id
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.command_request import order_request_from_command
 from snapper.application.trade.command_request import parse_shard_key
 from snapper.application.trade.fill_aliases import aliases_cover_same_fills
 from snapper.application.trade.fill_aliases import resolve_live_fill_event
 from snapper.application.trade.outbox import OutboxDispatcher
+from snapper.application.trade.reconciler import DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import FillProjection
 from snapper.application.trade.trade_service import ShardState
@@ -6480,6 +6484,18 @@ class TraderCoordinator(RegisterableProcess):
         )
         return asyncio.create_task(self.guard_scanner.run())
 
+    def _awaiting_target_stale_threshold_s(self) -> float:
+        """Resolve stale awaiting_target threshold with MagicMock-safe default."""
+        raw = getattr(self.settings, "awaiting_target_stale_threshold_s", None)
+        if (
+            isinstance(raw, (int, float))
+            and not isinstance(raw, bool)
+            and math.isfinite(raw)
+            and raw > 0.0
+        ):
+            return float(raw)
+        return DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
+
     def _create_reconciliation_tasks(self) -> Iterator[asyncio.Task[None]]:
         """Yield each reconciliation task immediately to the lifecycle owner.
 
@@ -6493,6 +6509,8 @@ class TraderCoordinator(RegisterableProcess):
         if not isinstance(self.repository, SQLAlchemyRepository):
             return
         exchanges: list[str] = list(get_args(OrderExchange))
+        stale_threshold_s = self._awaiting_target_stale_threshold_s()
+        publisher = getattr(self, "msg_publisher", None)
         for exchange_name in exchanges:
             recon = ReconciliationLoop(
                 exchange_name=exchange_name,
@@ -6500,6 +6518,8 @@ class TraderCoordinator(RegisterableProcess):
                 trade_service=self.trade_service,
                 interval_seconds=60.0,
                 ownership=self._ownership,
+                stale_threshold_s=stale_threshold_s,
+                msg_publisher=publisher,
             )
             task = asyncio.create_task(recon.run())
             yield task
@@ -6645,11 +6665,12 @@ class TraderCoordinator(RegisterableProcess):
           the ``.submit`` topic for the exchange executor to place.
         - ``cancel``: publishes an ``OrderCancelData`` to the ``.cancel``
           topic, carrying the original order's ``client_order_id`` and
-          ``exchange_order_id``. The venue id is re-hydrated from the
-          active ``orders`` row at dispatch time so a late venue ACK
-          landing after the REST route snapshotted the command row
-          still results in a cancel that targets the correct exchange
-          order id. Cancels remain admissible after recovery
+          ``exchange_order_id``. The venue id is re-hydrated at dispatch
+          time from the active Order, create command, or accepted/fill
+          evidence so a late venue ACK landing after the REST route
+          snapshotted the command row still targets the correct venue order.
+          Unresolved targets raise before publication, leaving the durable
+          cancel CREATED for a later outbox retry. Cancels remain admissible after recovery
           certification fails because they use durable order identity,
           not uncertified position projections, and remove resting
           exposure. They are part of the repair surface; blocking them
@@ -6666,11 +6687,18 @@ class TraderCoordinator(RegisterableProcess):
             topic = order_command_topic(exchange, cmd["instrument"], OrderCommandEnum.CANCEL)
             resolved_venue_id = cmd.get("exchange_order_id") or ""
             if not resolved_venue_id:
-                fresh = await self.repository.get_exchange_order_id_for_client_order_id(
-                    cmd["client_order_id"], as_of=datetime.now(UTC)
+                fresh = await cancel_target_exchange_order_id(
+                    cast(CancelTargetIdentityReader, self.repository),
+                    cmd["client_order_id"],
+                    cmd["exchange"],
+                    datetime.now(UTC),
                 )
                 if fresh:
                     resolved_venue_id = fresh
+            if not resolved_venue_id:
+                raise CancelTargetUnresolvedError(
+                    f"cancel target venue id unresolved for {cmd['client_order_id']}"
+                )
             cancel = OrderCancelData(
                 public_id=cmd["client_order_id"],
                 timestamp=datetime.now(UTC),

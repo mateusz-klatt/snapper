@@ -16,6 +16,7 @@ from datetime import datetime
 
 from loguru import logger
 
+from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.core.command_material import TradeCommandMaterialChangedError
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import TradeCommandStatusEnum
@@ -305,62 +306,82 @@ class OutboxDispatcher:
             return False
         return True
 
-    async def _dispatch_batch(self) -> None:
-        """Fetch and dispatch one batch of undispatched commands.
+    async def _publish_or_hold(self, cmd: TradeCommandRow) -> bool:
+        """Publish when possible and hold only unresolved cancels without mutation.
 
-        Publishes each command sequentially (ZMQ broker ordering is
-        preserved), then commits the success-set's CREATED -> DISPATCHED
-        SCD2 transitions in a single bulk call. Per-row revert path
-        (publish failed) still uses ``update_trade_command_status`` —
-        bulk-write blow-up only risks the success path, not the
-        error-recovery path.
+        Args:
+            cmd: Durable command selected for dispatch.
+
+        Returns:
+            False for an unresolved cancel; True after publish or when publishing is disabled.
         """
+        try:
+            if self._publish_fn is not None:
+                await self._publish_fn(cmd)
+        except CancelTargetUnresolvedError:
+            return False
+        return True
+
+    async def _dispatch_command(self, cmd: TradeCommandRow) -> TradeCommandDispatchUpdate | None:
+        """Publish or hold one command and return its dispatch update on success.
+
+        Args:
+            cmd: Candidate command from the current undispatched batch.
+
+        Returns:
+            CREATED-to-DISPATCHED update, or None when held or failed.
+        """
+        if not await self._material_permits_dispatch(cmd):
+            return None
+        if await self._expire_if_stale(cmd):
+            return None
+        try:
+            if not await self._publish_or_hold(cmd):
+                return None
+        except Exception:
+            logger.exception(f"OutboxDispatcher: failed to dispatch command {cmd['public_id']}")
+            try:
+                await self._repo.update_trade_command_status(
+                    public_id=cmd["public_id"],
+                    new_status=TradeCommandStatusEnum.CREATED,
+                    bus_time=datetime.now(UTC),
+                    session_id=cmd["session_id"],
+                    sequence_id=cmd["sequence_id"],
+                    attempt_count=cmd["attempt_count"] + 1,
+                    last_error="dispatch failed",
+                )
+            except Exception:
+                logger.exception(
+                    f"OutboxDispatcher: failed to update command {cmd['public_id']} status"
+                )
+            return None
+        bus_time = datetime.now(UTC)
+        return TradeCommandDispatchUpdate(
+            public_id=cmd["public_id"],
+            bus_time=bus_time,
+            session_id=cmd["session_id"],
+            sequence_id=cmd["sequence_id"],
+            dispatched_at=bus_time,
+            attempt_count=cmd["attempt_count"] + 1,
+        )
+
+    async def _dispatch_batch(self) -> None:
+        """Fetch one batch of undispatched commands, publish, and bulk-dispatch."""
         now = datetime.now(UTC)
         commands = await self._fetch_owned_batch(now)
+        if not commands:
+            return
         success_updates: list[TradeCommandDispatchUpdate] = []
-        published_pids: list[str] = []
         for cmd in commands:
-            if not await self._material_permits_dispatch(cmd):
-                continue
-            if await self._expire_if_stale(cmd):
-                continue
-            try:
-                if self._publish_fn is not None:
-                    await self._publish_fn(cmd)
-                bus_time = datetime.now(UTC)
-                success_updates.append(
-                    TradeCommandDispatchUpdate(
-                        public_id=cmd["public_id"],
-                        bus_time=bus_time,
-                        session_id=cmd["session_id"],
-                        sequence_id=cmd["sequence_id"],
-                        dispatched_at=bus_time,
-                        attempt_count=cmd["attempt_count"] + 1,
-                    )
-                )
-                published_pids.append(cmd["public_id"])
-            except Exception:
-                logger.exception(f"OutboxDispatcher: failed to dispatch command {cmd['public_id']}")
-                try:
-                    await self._repo.update_trade_command_status(
-                        public_id=cmd["public_id"],
-                        new_status=TradeCommandStatusEnum.CREATED,
-                        bus_time=datetime.now(UTC),
-                        session_id=cmd["session_id"],
-                        sequence_id=cmd["sequence_id"],
-                        attempt_count=cmd["attempt_count"] + 1,
-                        last_error="dispatch failed",
-                    )
-                except Exception:
-                    logger.exception(
-                        f"OutboxDispatcher: failed to update command {cmd['public_id']} status"
-                    )
+            update = await self._dispatch_command(cmd)
+            if update is not None:
+                success_updates.append(update)
         if not success_updates:
             return
         try:
             await self._repo.bulk_dispatch_trade_commands(success_updates)
-            for pid in published_pids:
-                logger.debug(f"OutboxDispatcher: dispatched command {pid}")
+            for update in success_updates:
+                logger.debug(f"OutboxDispatcher: dispatched command {update['public_id']}")
         except Exception:
             logger.exception(
                 "OutboxDispatcher: bulk dispatch DB write failed for "

@@ -61,6 +61,7 @@ from collections.abc import Callable
 from snapper.core.ids import is_uuid7
 from snapper.core.types import MarketDataTypeEnum
 from snapper.core.types import OrderCommandEnum
+from snapper.core.types import OrderExchange
 from snapper.infrastructure.symbols.functions import get_available_exchanges
 from snapper.infrastructure.symbols.functions import get_available_symbols_set
 from snapper.infrastructure.symbols.functions import get_market_data_exchanges
@@ -695,6 +696,36 @@ def _validate_trade_integrity_heartbeat(segments: list[str]) -> tuple[bool, str]
     return True, ""
 
 
+_VALID_RECONCILER_EXCHANGES: frozenset[str] = frozenset(typing.get_args(OrderExchange))
+
+
+def _validate_reconciler_heartbeat(segments: list[str]) -> tuple[bool, str]:
+    """Validate reconciler held-cancel health heartbeat topic structure.
+
+    Args:
+        segments: Split topic segments starting with
+            ``system.heartbeats.reconciler``.
+
+    Returns:
+        Validation success and an explanatory error string.
+    """
+    if len(segments) != 4:
+        return (
+            False,
+            (
+                "system.heartbeats.reconciler requires exactly 4 segments: "
+                "system.heartbeats.reconciler.{exchange}"
+            ),
+        )
+    exchange = segments[3]
+    if exchange in _VALID_RECONCILER_EXCHANGES:
+        return True, ""
+    return (
+        False,
+        f"system.heartbeats.reconciler.{exchange}: unsupported exchange '{exchange}'",
+    )
+
+
 _HEARTBEAT_COMPONENT_VALIDATORS: dict[str, Callable[[list[str]], tuple[bool, str]]] = {
     "strategy": _validate_strategy_heartbeat,
     "executor": _validate_executor_heartbeat,
@@ -703,6 +734,7 @@ _HEARTBEAT_COMPONENT_VALIDATORS: dict[str, Callable[[list[str]], tuple[bool, str
     "marketdata": _validate_marketdata_heartbeat,
     "ai_delegate": _validate_ai_delegate_heartbeat,
     "trade_integrity": _validate_trade_integrity_heartbeat,
+    "reconciler": _validate_reconciler_heartbeat,
 }
 
 
@@ -729,6 +761,8 @@ def _validate_heartbeat_topic(segments: list[str]) -> tuple[bool, str]:
       liveness and response heartbeats from the API AI-delegate watchdog.
     - ``system.heartbeats.trade_integrity.{m1|m2}`` (4 seg) — bounded
       database-integrity monitor status.
+    - ``system.heartbeats.reconciler.{exchange}`` (4 seg) — periodic
+      reconciler health including stale held ``awaiting_target`` cancels.
 
     Args:
         segments: Split topic segments (first two are 'system.heartbeats').

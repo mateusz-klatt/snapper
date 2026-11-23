@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 from loguru import logger
 
+from snapper.application.engine import trader as trader_module
 from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import InstrumentSpecMissingError
@@ -29,6 +30,7 @@ from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
 from snapper.application.portfolio.models import PositionStateModel
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
+from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.application.trade.caps_enforcer import Guard
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.application.trade.trade_service import TradeService
@@ -2197,22 +2199,30 @@ async def test_outbox_publish_cancel_sends_order_cancel_data() -> None:
 
 
 @pytest.mark.asyncio
-async def test_outbox_publish_cancel_rehydrates_missing_exchange_order_id() -> None:
-    """Cancel dispatch refreshes exchange_order_id from the repo when empty.
+@pytest.mark.parametrize("id_source", ["order", "command", "event"])
+async def test_outbox_publish_cancel_rehydrates_missing_exchange_order_id(id_source: str) -> None:
+    """Cancel dispatch refreshes an empty venue id from durable target evidence.
 
-    Given: a TraderCoordinator whose outbox is publishing a cancel
-        TradeCommand whose ``exchange_order_id`` is ``None`` (the REST
-        cancel route snapshotted the row before the venue ACK assigned
-        the id),
+    Given: a cancel command and an id on the Order, create command, or ack event,
     When: ``_outbox_publish`` is invoked,
-    Then: the dispatcher re-queries the repository at publish time and
-        the resulting ``OrderCancelData`` carries the hydrated venue id
-        so the live adapter can cancel by exchange id.
+    Then: the resulting ``OrderCancelData`` carries the hydrated venue id.
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.msg_publisher = AsyncMock()
     mock_repo = MagicMock()
-    mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-late")
+    mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(
+        return_value="ex-late" if id_source == "order" else None
+    )
+    mock_repo.get_active_create_command_by_client_order_id = AsyncMock(
+        return_value={"exchange_order_id": "ex-late"} if id_source == "command" else None
+    )
+    mock_repo.get_order_lifecycle_events = AsyncMock(
+        return_value=(
+            [{"event_type": "order_accepted", "exchange_order_id": "ex-late"}]
+            if id_source == "event"
+            else []
+        )
+    )
     coord.repository = mock_repo
     cmd: dict[str, Any] = {
         "public_id": "cmd-cancel",
@@ -2243,21 +2253,19 @@ async def test_outbox_publish_cancel_rehydrates_missing_exchange_order_id() -> N
 
 
 @pytest.mark.asyncio
-async def test_outbox_publish_cancel_repo_returns_none_keeps_empty() -> None:
-    """Cancel dispatch still publishes when the repo has no venue id yet.
+async def test_outbox_publish_cancel_repo_returns_none_holds_created() -> None:
+    """Cancel dispatch holds an unresolved target instead of publishing blank.
 
-    Given: a cancel TradeCommand whose ``exchange_order_id`` is empty
-        and whose matching ``orders`` row has not yet been ACKed by
-        the venue,
+    Given: a cancel with no venue id in any durable identity source,
     When: ``_outbox_publish`` is invoked,
-    Then: the resulting ``OrderCancelData`` is still published with an
-        empty ``exchange_order_id`` so paper executors can fall back
-        to cancelling by ``client_order_id``.
+    Then: it raises the dedicated hold exception and sends no frame.
     """
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.msg_publisher = AsyncMock()
     mock_repo = MagicMock()
     mock_repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+    mock_repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
+    mock_repo.get_order_lifecycle_events = AsyncMock(return_value=[])
     coord.repository = mock_repo
     cmd: dict[str, Any] = {
         "public_id": "cmd-cancel",
@@ -2281,10 +2289,9 @@ async def test_outbox_publish_cancel_repo_returns_none_keeps_empty() -> None:
         "operator_public_id": None,
         "user_public_id": None,
     }
-    await coord._outbox_publish(cmd)
-    sent = coord.msg_publisher.send.call_args[0][1]
-    assert sent.exchange_order_id == ""
-    assert sent.client_order_id == "cid-cancel"
+    with pytest.raises(CancelTargetUnresolvedError):
+        await coord._outbox_publish(cmd)
+    coord.msg_publisher.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2755,6 +2762,38 @@ async def test_create_reconciliation_tasks_with_sql_repo() -> None:
         t.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await t
+
+
+@pytest.mark.asyncio
+async def test_create_reconciliation_tasks_wires_stale_threshold_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coordinator passes configured awaiting_target threshold and msg_publisher to loops.
+
+    Given: A TraderCoordinator with numeric ``awaiting_target_stale_threshold_s`` and
+        a mock ``msg_publisher``,
+    When: ``_create_reconciliation_tasks`` constructs each exchange ``ReconciliationLoop``,
+    Then: Each loop receives the configured threshold and ``msg_publisher``.
+    """
+    real_cls = trader_module.ReconciliationLoop
+    reconciliation_factory = MagicMock(side_effect=real_cls)
+    monkeypatch.setattr(trader_module, "ReconciliationLoop", reconciliation_factory)
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord.repository = AsyncMock(spec=SQLAlchemyRepository)
+    coord.settings = MagicMock()
+    coord.settings.awaiting_target_stale_threshold_s = 300.0
+    coord._ownership = None
+    coord.msg_publisher = AsyncMock()
+    tasks = list(coord._create_reconciliation_tasks())
+    for t in tasks:
+        t.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await t
+    assert reconciliation_factory.call_count == len(tasks) > 0
+    first_kwargs = reconciliation_factory.call_args_list[0].kwargs
+    assert first_kwargs["stale_threshold_s"] == 300.0
+    assert first_kwargs["msg_publisher"] is coord.msg_publisher
 
 
 @pytest.mark.asyncio

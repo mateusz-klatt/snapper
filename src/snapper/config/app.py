@@ -481,6 +481,15 @@ class AppSettings:
         return self._bootstrap.plan_recovery_auto_settle_enabled
 
     @property
+    def awaiting_target_stale_threshold_s(self) -> float:
+        """Return max age before an awaiting_target cancel is flagged stale.
+
+        Returns:
+            Positive threshold in seconds (default 900.0 / 15 minutes).
+        """
+        return self._bootstrap.awaiting_target_stale_threshold_s
+
+    @property
     def telemetry_recording_enabled(self) -> bool:
         """Return whether data-plane telemetry recording is enabled.
 

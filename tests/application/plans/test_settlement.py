@@ -2,6 +2,7 @@
 
 import sys
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -26,6 +27,7 @@ from snapper.application.plans.settlement import serialize_candidate
 from snapper.application.plans.settlement import settle_single_recovered_plan
 from snapper.application.plans.settlement import settlement_code_revision
 from snapper.application.plans.settlement import settlement_database_endpoint
+from snapper.application.plans.settlement import verify_plan_child_settlement_candidate
 from snapper.core.json_types import JsonObject
 from snapper.data.models import ExecutionPlan
 from snapper.data.repository import SQLAlchemyRepository
@@ -107,6 +109,7 @@ def _command_row(
     status: str = "filled",
     plan_public_id: str | None = "01960000-0000-7000-8000-000000000010",
     last_error: str | None = None,
+    exchange_order_id: str | None = "EX-1",
 ) -> TradeCommandRow:
     """Build a synthetic `TradeCommandRow` for pure inspection tests.
 
@@ -115,6 +118,7 @@ def _command_row(
         status: Command status string.
         plan_public_id: Linked execution plan public id.
         last_error: Optional error message on the command.
+        exchange_order_id: Venue order id stored on the command.
 
     Returns:
         Typed `TradeCommandRow` dictionary.
@@ -132,7 +136,7 @@ def _command_row(
         "strategy_id": "manual_once",
         "client_order_id": client_order_id,
         "venue_client_id": client_order_id,
-        "exchange_order_id": "EX-1",
+        "exchange_order_id": exchange_order_id,
         "side": "buy",
         "order_type": "market",
         "quantity": 10.0,
@@ -166,6 +170,7 @@ def _venue_event_row(
     event_type: str,
     status: str | None = None,
     cum_fill_size: float | None = None,
+    exchange_order_id: str | None = "EX-1",
 ) -> VenueEventRow:
     """Build a synthetic `VenueEventRow` for pure inspection tests.
 
@@ -174,6 +179,7 @@ def _venue_event_row(
         event_type: Venue event type string.
         status: Optional order status string.
         cum_fill_size: Optional cumulative fill quantity.
+        exchange_order_id: Venue id carried by the event.
 
     Returns:
         Typed `VenueEventRow` dictionary.
@@ -192,7 +198,7 @@ def _venue_event_row(
         "command_public_id": None,
         "client_order_id": "cid-1",
         "venue_client_id": "cid-1",
-        "exchange_order_id": "EX-1",
+        "exchange_order_id": exchange_order_id,
         "exec_id": None,
         "trade_id": None,
         "side": "buy",
@@ -216,6 +222,7 @@ def _mock_reader(
     events: list[VenueEventRow] | None = None,
     fill_event: VenueEventRow | None = None,
     latest_event_at: datetime | None = None,
+    order_exchange_order_id: str | None = None,
 ) -> MagicMock:
     """Construct a typed mock `PlanSettlementReader`.
 
@@ -224,6 +231,7 @@ def _mock_reader(
         events: Lifecycle venue events returned for the child.
         fill_event: Cumulative fill venue event returned for the child.
         latest_event_at: Timestamp returned by `get_latest_venue_event_received_at`.
+        order_exchange_order_id: Venue id returned by the active Order lookup.
 
     Returns:
         Configured `MagicMock` reader.
@@ -231,6 +239,9 @@ def _mock_reader(
     reader = MagicMock()
     reader.get_active_execution_plans = AsyncMock(return_value=[])
     reader.get_active_create_command_by_client_order_id = AsyncMock(return_value=command)
+    reader.get_exchange_order_id_for_client_order_id = AsyncMock(
+        return_value=order_exchange_order_id
+    )
     reader.get_order_lifecycle_events = AsyncMock(return_value=events or [])
     reader.get_max_cumulative_fill_venue_event = AsyncMock(return_value=fill_event)
     reader.get_latest_venue_event_received_at = AsyncMock(return_value=latest_event_at)
@@ -508,12 +519,14 @@ async def test_inspect_maps_active_plan_terminal_children_and_evidence_ids() -> 
         ),
         plan,
     )
+    failed_default_plan = _plan_row()
+    failed_default_plan["last_error"] = "order_interlock_blocked"
     failed_default_err = await inspect_plan_settlement(
         _mock_reader(
             command=_command_row(status="failed", last_error=None),
             events=[_venue_event_row(event_id=8, event_type="order_interlock_blocked")],
         ),
-        plan,
+        failed_default_plan,
     )
     cancelled_cand = await inspect_plan_settlement(
         _mock_reader(
@@ -551,7 +564,7 @@ async def test_inspect_maps_active_plan_terminal_children_and_evidence_ids() -> 
     assert failed_long_err.last_error == "x" * 1024
     assert failed_long_err.children[0].terminal_venue_event_id == 7
     assert isinstance(failed_default_err, PlanSettlementCandidate)
-    assert failed_default_err.last_error == "child command failed"
+    assert failed_default_err.last_error == "order_interlock_blocked"
     assert isinstance(cancelled_cand, PlanSettlementCandidate)
     assert cancelled_cand.target_status == "cancelled"
     assert cancelled_cand.children[0].terminal_venue_event_id == 10
@@ -665,8 +678,18 @@ async def test_inspect_cancel_requested_preserves_g2b_target_confirmation() -> N
     )
     interlock_failed = await inspect_plan_settlement(
         _mock_reader(
-            command=_command_row(status="failed", last_error="order_interlock_blocked"),
-            events=[_venue_event_row(event_id=1, event_type="order_interlock_blocked")],
+            command=_command_row(
+                status="failed",
+                last_error="order_interlock_blocked",
+                exchange_order_id=None,
+            ),
+            events=[
+                _venue_event_row(
+                    event_id=1,
+                    event_type="order_interlock_blocked",
+                    exchange_order_id=None,
+                )
+            ],
         ),
         plan,
     )
@@ -697,6 +720,132 @@ async def test_inspect_cancel_requested_preserves_g2b_target_confirmation() -> N
     assert unconfirmed_failed.skip_code == "unconfirmed_failed_child"
     assert isinstance(rejected_cancel_req, PlanSettlementSkipped)
     assert rejected_cancel_req.skip_code == "cancel_requested_unconfirmed_target"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event_type", ["order_accepted", "fill_observed", "order_submit_unknown", "order_rejected"]
+)
+async def test_inspect_failed_requires_exclusive_pre_venue_refusals(event_type: str) -> None:
+    """Reject failed-child settlement when any non-refusal lifecycle event exists.
+
+    Given: A failed child with an interlock refusal and one parametrized other event.
+    When: `inspect_plan_settlement` classifies the child.
+    Then: It returns `unconfirmed_failed_child` instead of a settlement candidate.
+    """
+    decision = await inspect_plan_settlement(
+        _mock_reader(
+            command=_command_row(status="failed"),
+            events=[
+                _venue_event_row(event_id=1, event_type="order_interlock_blocked"),
+                _venue_event_row(event_id=2, event_type=event_type),
+            ],
+        ),
+        _plan_row(),
+    )
+
+    assert isinstance(decision, PlanSettlementSkipped)
+    assert decision.skip_code == "unconfirmed_failed_child"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command_exchange_order_id", "order_exchange_order_id"),
+    [("EX-COMMAND", None), (None, "EX-ORDER")],
+)
+async def test_inspect_cancel_requested_failed_rejects_either_venue_id(
+    command_exchange_order_id: str | None,
+    order_exchange_order_id: str | None,
+) -> None:
+    """Reject cancel recovery settlement when either durable venue id exists.
+
+    Given: An interlock-only failed child with an id on its command or Order.
+    When: `inspect_plan_settlement` classifies the cancel-requested plan.
+    Then: It returns `unconfirmed_failed_child`.
+    """
+    decision = await inspect_plan_settlement(
+        _mock_reader(
+            command=_command_row(
+                status="failed",
+                last_error="order_interlock_blocked",
+                exchange_order_id=command_exchange_order_id,
+            ),
+            events=[
+                _venue_event_row(
+                    event_id=1,
+                    event_type="order_interlock_blocked",
+                    exchange_order_id=None,
+                )
+            ],
+            order_exchange_order_id=order_exchange_order_id,
+        ),
+        _plan_row(status="cancel_requested"),
+    )
+
+    assert isinstance(decision, PlanSettlementSkipped)
+    assert decision.skip_code == "unconfirmed_failed_child"
+
+
+@pytest.mark.asyncio
+async def test_locked_child_recheck_accepts_only_unchanged_exact_candidate(
+    sqlite_repo: SQLAlchemyRepository,
+) -> None:
+    """Recheck child evidence under locks and reject every candidate drift.
+
+    Given: A real cancel-requested interlock plan and its valid candidate,
+    When: The locked recheck receives valid, multi-child, stale-plan, and changed-evidence candidates,
+    Then: Only the unchanged single-child candidate verifies.
+    """
+    plan_pid = await _seed_plan_with_child(
+        sqlite_repo,
+        created_at=_T0,
+        plan_status="cancel_requested",
+        child_order_id="cid-locked-recheck",
+        child_status="failed",
+    )
+    event: VenueEventInsertRow = {
+        "event_type": "order_interlock_blocked",
+        "shard_key": f"kraken.XRP-EUR.live.{_WALLET_ID}",
+        "exchange": "kraken",
+        "instrument": "XRP-EUR",
+        "mode": "live",
+        "client_order_id": "cid-locked-recheck",
+        "venue_client_id": "cid-locked-recheck",
+        "side": "buy",
+        "status": "failed",
+        "error": "order_interlock_blocked",
+        "exchange_order_id": None,
+        "liquidity_role": "unknown",
+        "received_at": _T0 + timedelta(seconds=1),
+        "session_id": "seed-sess",
+        "sequence_id": 4,
+        "timestamp": _T0 + timedelta(seconds=1),
+        "wallet_public_id": _WALLET_ID,
+    }
+    await sqlite_repo.insert_venue_event(event)
+    plan = await sqlite_repo.get_execution_plan(plan_pid, as_of=datetime.now(UTC))
+    assert plan is not None
+    decision = await inspect_plan_settlement(sqlite_repo, plan)
+    assert isinstance(decision, PlanSettlementCandidate)
+
+    assert await verify_plan_child_settlement_candidate(sqlite_repo, decision) is True
+    assert (
+        await verify_plan_child_settlement_candidate(sqlite_repo, replace(decision, children=()))
+        is False
+    )
+    assert (
+        await verify_plan_child_settlement_candidate(
+            sqlite_repo,
+            replace(decision, current_sequence_id=decision.current_sequence_id + 1),
+        )
+        is False
+    )
+    assert (
+        await verify_plan_child_settlement_candidate(
+            sqlite_repo, replace(decision, last_error="changed")
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -1180,3 +1329,68 @@ async def test_single_and_batch_locked_version_and_rowcount_guards(
             settled_at=_T0 + timedelta(seconds=10),
             session_id="s-batch-drift",
         )
+
+
+@pytest.mark.asyncio
+async def test_settle_single_recovered_plan_uses_read_committed_on_postgresql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Single-plan settle uses READ COMMITTED + locked re-read on PostgreSQL.
+
+    Given: A mocked PostgreSQL repository and a single recovery settle candidate,
+    When: `settle_single_recovered_plan` executes its transaction and re-evaluation,
+    Then: It sets `READ COMMITTED` (never `SERIALIZABLE`) before inspecting the plan.
+    """
+    plan_id = "plan-pg-read-committed"
+    observed: list[str] = []
+
+    async def _record_execute(statement: object, *_args: object, **_kwargs: object) -> MagicMock:
+        observed.append(f"sql:{statement}")
+        return MagicMock(rowcount=0)
+
+    fake_session = AsyncMock(add=MagicMock(), execute=AsyncMock(side_effect=_record_execute))
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = fake_session
+    session_cm.__aexit__.return_value = False
+
+    fake_pg_repo = MagicMock(spec=SQLAlchemyRepository)
+    fake_pg_repo.dialect_name = "postgresql"
+    fake_pg_repo.session.return_value = session_cm
+
+    candidate = MagicMock(spec=PlanSettlementCandidate)
+    candidate.plan_public_id = plan_id
+    candidate.children = ()
+    candidate.current_status = "active"
+    candidate.current_session_id = "s-orig"
+    candidate.current_sequence_id = 10
+    candidate.current_filled_quantity = 0.0
+
+    existing_orm = MagicMock(spec=ExecutionPlan)
+    existing_orm.status = "active"
+    existing_orm.session_id = "s-orig"
+    existing_orm.sequence_id = 10
+    existing_orm.filled_quantity = 0.0
+
+    async def _inspect_and_skip(*_args: object, **_kwargs: object) -> MagicMock:
+        observed.append("inspect")
+        return MagicMock(spec=PlanSettlementSkipped)
+
+    lock_children = AsyncMock(return_value={})
+    lock_plans = AsyncMock(return_value={plan_id: existing_orm})
+    monkeypatch.setattr(settlement_module, "lock_child_create_commands", lock_children)
+    monkeypatch.setattr(settlement_module, "lock_active_execution_plans", lock_plans)
+    monkeypatch.setattr(settlement_module, "inspect_plan_settlement", _inspect_and_skip)
+
+    settled = await settle_single_recovered_plan(
+        fake_pg_repo,
+        candidate,
+        settled_at=_T0 + timedelta(seconds=5),
+        session_id="s-pg-rc",
+        sequence_id=1,
+    )
+
+    assert settled is False
+    assert observed == ["sql:SET TRANSACTION ISOLATION LEVEL READ COMMITTED", "inspect"]
+    assert all("SERIALIZABLE" not in entry for entry in observed)
+    lock_children.assert_awaited_once()
+    lock_plans.assert_awaited_once()

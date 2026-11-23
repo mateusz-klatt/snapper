@@ -343,7 +343,7 @@ _CK_TRADE_COMMAND_TYPE = "command_type IN ('create', 'submit', 'cancel', 'replac
 """Intentional dual vocabulary: REST/MCP/plan write 'create', engine/guard
 write 'submit', cancel paths 'cancel', OrderCommandEnum 'replace'."""
 _CK_TRADE_COMMAND_STATUS = (
-    "status IN ('created', 'dispatched', 'direct_dispatched', 'accepted', "
+    "status IN ('created', 'awaiting_target', 'dispatched', 'direct_dispatched', 'accepted', "
     "'filled', 'partially_filled', 'rejected', 'cancelled', 'expired', 'failed')"
 )
 """trade_commands.status carries TradeCommandStatusEnum (DOMAIN spelling —

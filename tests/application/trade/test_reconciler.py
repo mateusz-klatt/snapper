@@ -13,14 +13,22 @@ from unittest.mock import MagicMock
 import pytest
 from loguru import logger
 
+from snapper.application.notify.rules.critical_system_error import CriticalSystemErrorRule
 from snapper.application.trade import reconciler as reconciler_module
+from snapper.application.trade.cancel_target import CancelHydrationStamp
+from snapper.application.trade.cancel_target import hydrate_awaiting_target_cancel
+from snapper.application.trade.cancel_target import resolve_and_hydrate_awaiting_target_cancel
+from snapper.application.trade.reconciler import DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.reconciler import fold_lifecycle_advance
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
+from snapper.core.types import HealthStatusEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
+from snapper.messaging.schemas.data import HeartbeatData
+from snapper.messaging.topics.validation import validate_topic
 
 
 def _make_cmd(**overrides: Any) -> TradeCommandRow:
@@ -113,6 +121,8 @@ def _make_repo(
     repo.get_order_lifecycle_events = AsyncMock(return_value=events or [])
     repo.advance_trade_command_lifecycle = AsyncMock(return_value=True)
     repo.get_rejected_commands_with_later_live_evidence = AsyncMock(return_value=[])
+    repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+    repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
     return repo
 
 
@@ -1223,16 +1233,30 @@ class TestCancelRetirement:
 
     @pytest.mark.asyncio
     async def test_created_cancel_is_untouched(self) -> None:
-        """A created cancel stays the outbox's territory.
+        """Pre-dispatch created cancel stays the outbox's territory.
 
         Given: an over-age cancel still in created status,
         When: one reconciliation cycle runs,
-        Then: the retirement pass reads nothing and advances nothing.
+        Then: neither retirement nor hydration reads or advances it.
         """
         repo = _retirement_repo([_cancel_cmd(status="created")], None, {})
         recon, _ = _make_loop(repo)
         await recon._reconcile_cycle()
         repo.get_active_create_command_by_client_order_id.assert_not_awaited()
+        repo.advance_trade_command_lifecycle.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unresolved_awaiting_target_cancel_stays_held(self) -> None:
+        """An awaiting_target cancel with no resolved venue id stays held.
+
+        Given: an awaiting_target cancel whose target has no venue id yet,
+        When: one reconciliation cycle runs,
+        Then: target retirement evidence is not queried and lifecycle CAS does not run.
+        """
+        repo = _retirement_repo([_cancel_cmd(status="awaiting_target")], None, {})
+        recon, _ = _make_loop(repo)
+        await recon._reconcile_cycle()
+        repo.get_latest_venue_event_received_at.assert_not_awaited()
         repo.advance_trade_command_lifecycle.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1278,3 +1302,340 @@ class TestCancelRetirement:
         assert advance is not None
         assert advance.status == TradeCommandStatusEnum.CANCELLED
         assert advance.terminal_at == received
+
+
+def _make_heartbeat_publisher() -> tuple[MagicMock, list[tuple[str, HeartbeatData]]]:
+    """Create a typed publisher stub recording emitted heartbeat topics and frames."""
+    sent: list[tuple[str, HeartbeatData]] = []
+    seq = 0
+
+    def _next_sequence(_stream: str) -> int:
+        nonlocal seq
+        seq += 1
+        return seq
+
+    tracker = MagicMock()
+    tracker.session_id = "sess-hb"
+    tracker.next_sequence = MagicMock(side_effect=_next_sequence)
+
+    async def _send(topic: str, frame: HeartbeatData) -> None:
+        sent.append((topic, frame))
+
+    publisher = MagicMock()
+    publisher.tracker = tracker
+    publisher.send = AsyncMock(side_effect=_send)
+    return publisher, sent
+
+
+def _awaiting_target_cmd(public_id: str, age_seconds: float) -> TradeCommandRow:
+    """Build an awaiting_target cancel row aged by ``age_seconds``."""
+    return _make_cmd(
+        public_id=public_id,
+        command_type="cancel",
+        status=TradeCommandStatusEnum.AWAITING_TARGET.value,
+        created_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+        plan_public_id="plan-1",
+    )
+
+
+class TestStaleAwaitingTargetMonitoring:
+    """Periodic visibility, episode dedup, metrics, and health heartbeats for stuck holds."""
+
+    def test_constructor_validates_held_cancel_monitor_configuration(self) -> None:
+        """Threshold must be finite and strictly positive and cap at least 1.
+
+        Given: ReconciliationLoop constructor arguments,
+        When: The monitor receives invalid threshold or cap values,
+        Then: ``ValueError`` is raised.
+        """
+        recon, _ = _make_loop(_make_repo())
+        assert recon._awaiting_target_stale_threshold_s == DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
+        for bad in (0.0, -5.0, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="finite and positive"):
+                ReconciliationLoop(
+                    "kraken", _make_repo(), MagicMock(spec=TradeService), stale_threshold_s=bad
+                )
+        with pytest.raises(ValueError, match="max_hydrate_per_cycle"):
+            ReconciliationLoop(
+                "kraken", _make_repo(), MagicMock(spec=TradeService), max_hydrate_per_cycle=0
+            )
+
+    @pytest.mark.asyncio
+    async def test_fresh_awaiting_target_is_silent_and_publishes_healthy_heartbeat(
+        self, loguru_warnings: list[str]
+    ) -> None:
+        """Held cancels younger than threshold do not trigger generic stale WARNs.
+
+        Given: An awaiting_target cancel aged 300s (older than 3x interval, below 900s),
+        When: Multiple reconciliation cycles run with a heartbeat publisher,
+        Then: Zero WARNING logs are emitted, stale count is 0, and heartbeat is HEALTHY.
+        """
+        cmd = _awaiting_target_cmd("cancel-fresh", age_seconds=300.0)
+        repo = _make_repo(cmds=[cmd])
+        trade_svc = TradeService()
+        publisher, sent = _make_heartbeat_publisher()
+        recon = ReconciliationLoop(
+            "kraken",
+            repo,
+            trade_svc,
+            stale_threshold_s=900.0,
+            msg_publisher=publisher,
+        )
+
+        await recon._reconcile_cycle()
+
+        assert [msg for msg in loguru_warnings if msg.startswith("WARNING|")] == []
+        assert recon.stale_awaiting_target_count == 0
+        assert trade_svc.stale_awaiting_target_count == 0
+        assert trade_svc.stale_awaiting_target_counts == {"kraken": 0}
+        assert len(sent) == 1
+        topic, frame = sent[0]
+        valid, err = validate_topic(topic)
+        assert valid, err
+        assert topic == "system.heartbeats.reconciler.kraken"
+        assert frame.component == "reconciler.kraken"
+        assert frame.status == HealthStatusEnum.HEALTHY
+        assert frame.meta["stale_awaiting_target_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_stale_awaiting_target_warns_once_per_row_per_episode_and_closes(
+        self, loguru_warnings: list[str]
+    ) -> None:
+        """Stale held cancels emit one WARNING per row per episode and reopen cleanly.
+
+        Given: Two awaiting_target cancels older than the 900s threshold,
+        When: Cycle 1 and 2 run while stuck, cycle 3 sees them resolved, and cycle 4 sees
+            the first row enter a fresh stale hold episode,
+        Then: Cycle 1 logs 2 WARNINGs (one per row), cycle 2 logs 0 more, cycle 3 drops
+            metric to 0 with HEALTHY heartbeat, and cycle 4 logs 1 WARNING for the new episode.
+        """
+        stale_one = _awaiting_target_cmd("cancel-stuck-1", age_seconds=950.0)
+        stale_two = _awaiting_target_cmd("cancel-stuck-2", age_seconds=1000.0)
+        repo = _make_repo(cmds=[stale_one, stale_two])
+        trade_svc = TradeService()
+        publisher, sent = _make_heartbeat_publisher()
+        recon = ReconciliationLoop(
+            "kraken",
+            repo,
+            trade_svc,
+            stale_threshold_s=900.0,
+            msg_publisher=publisher,
+        )
+
+        await recon._reconcile_cycle()
+        warns = [m for m in loguru_warnings if m.startswith("WARNING|")]
+        assert len(warns) == 2
+        assert any("cancel-stuck-1" in m for m in warns)
+        assert any("cancel-stuck-2" in m for m in warns)
+        assert recon.stale_awaiting_target_count == 2
+        assert trade_svc.stale_awaiting_target_count == 2
+        assert sent[-1][1].status == HealthStatusEnum.WARNING
+        assert sent[-1][1].meta["stale_awaiting_target_count"] == 2
+
+        await recon._reconcile_cycle()
+        assert len([m for m in loguru_warnings if m.startswith("WARNING|")]) == 2
+
+        repo.get_active_commands_for_exchange = AsyncMock(return_value=[])
+        await recon._reconcile_cycle()
+        assert recon.stale_awaiting_target_count == 0
+        assert trade_svc.stale_awaiting_target_count == 0
+        assert sent[-1][1].status == HealthStatusEnum.HEALTHY
+
+        repo.get_active_commands_for_exchange = AsyncMock(return_value=[stale_one])
+        await recon._reconcile_cycle()
+        warns_after_reopen = [m for m in loguru_warnings if m.startswith("WARNING|")]
+        assert len(warns_after_reopen) == 3
+
+    @pytest.mark.asyncio
+    async def test_reconciler_heartbeat_feeds_critical_system_error_rule_without_flood(
+        self,
+    ) -> None:
+        """Three WARNING ticks open one episode alert and three HEALTHY ticks close it.
+
+        Given: A stale awaiting_target cancel driving reconciler heartbeats into
+            ``CriticalSystemErrorRule``,
+        When: Four WARNING cycles execute followed by three HEALTHY cycles,
+        Then: Cycle 3 raises one deduplicated alert, cycle 4 stays silent, and cycles
+            5-7 close cleanly.
+        """
+        stale = _awaiting_target_cmd("cancel-alert-1", age_seconds=1200.0)
+        repo = _make_repo(cmds=[stale])
+        publisher, sent = _make_heartbeat_publisher()
+        recon = ReconciliationLoop(
+            "kraken",
+            repo,
+            TradeService(),
+            stale_threshold_s=900.0,
+            msg_publisher=publisher,
+        )
+        notify_repo = AsyncMock()
+        notify_repo.list_users_with_permission = AsyncMock(return_value=["admin-1"])
+        notify_repo.list_alert_events_with_dedup_key = AsyncMock(return_value=[])
+        rule = CriticalSystemErrorRule()
+        t0 = datetime.now(UTC)
+
+        alerts: list[object] = []
+        for idx in range(4):
+            await recon._reconcile_cycle()
+            topic, frame = sent[-1]
+            rows = await rule.evaluate(
+                topic,
+                frame.to_json().encode("utf-8"),
+                notify_repo,
+                t0 + timedelta(seconds=60 * idx),
+            )
+            alerts.extend(rows)
+
+        assert len(alerts) == 1
+
+        repo.get_active_commands_for_exchange = AsyncMock(return_value=[])
+        for idx in range(3):
+            await recon._reconcile_cycle()
+            topic, frame = sent[-1]
+            rows = await rule.evaluate(
+                topic,
+                frame.to_json().encode("utf-8"),
+                notify_repo,
+                t0 + timedelta(seconds=240 + 60 * idx),
+            )
+            assert rows == []
+        assert rule._episode_closed(("reconciler", "kraken")) is True
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_publish_failure_does_not_fail_reconcile_cycle(self) -> None:
+        """A failing heartbeat send logs without tripping shard reconciliation failures.
+
+        Given: A ReconciliationLoop whose heartbeat publisher raises on send,
+        When: One reconciliation cycle runs,
+        Then: ``record_recon_failure`` is not called.
+        """
+        cmd = _awaiting_target_cmd("cancel-err-hb", age_seconds=950.0)
+        repo = _make_repo(cmds=[cmd])
+        trade_svc = TradeService()
+        publisher = MagicMock()
+        publisher.tracker = MagicMock(session_id="s-err", next_sequence=MagicMock(return_value=1))
+        publisher.send = AsyncMock(side_effect=RuntimeError("zmq down"))
+        recon = ReconciliationLoop(
+            "kraken",
+            repo,
+            trade_svc,
+            stale_threshold_s=900.0,
+            msg_publisher=publisher,
+        )
+
+        await recon._reconcile_cycle()
+
+        assert recon.stale_awaiting_target_count == 1
+        assert trade_svc._shards["kraken.BTC-USD.live"].recon_failure_count == 0
+
+
+class TestRuntimeAwaitingTargetHydration:
+    """Runtime hydration of held awaiting_target cancels inside ReconciliationLoop."""
+
+    @pytest.mark.asyncio
+    async def test_resolution_error_leaves_held_and_logs_once_per_episode(
+        self, loguru_warnings: list[str]
+    ) -> None:
+        """A resolution failure leaves the row held, logs ERROR once, and heals on recovery.
+
+        Given: An awaiting_target cancel whose venue-id lookup raises across cycles 1-2
+            and resolves cleanly on cycle 3,
+        When: Three reconciliation cycles execute,
+        Then: Cycle 1 logs 1 ERROR, cycle 2 emits 0 additional ERRORs, the row stays held
+            and triggers no recon_failure, and cycle 3 hydrates it to created.
+        """
+        held = _awaiting_target_cmd("cancel-err-res", age_seconds=950.0)
+        repo = _make_repo(cmds=[held])
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(
+            side_effect=RuntimeError("lookup down")
+        )
+        trade_svc = TradeService()
+        recon = ReconciliationLoop("kraken", repo, trade_svc, stale_threshold_s=900.0)
+
+        await recon._reconcile_cycle()
+        errors_c1 = [m for m in loguru_warnings if m.startswith("ERROR|")]
+        assert len(errors_c1) == 1
+        assert "cancel-err-res" in errors_c1[0]
+        repo.advance_trade_command_lifecycle.assert_not_awaited()
+        assert recon.stale_awaiting_target_count == 1
+
+        await recon._reconcile_cycle()
+        errors_c2 = [m for m in loguru_warnings if m.startswith("ERROR|")]
+        assert len(errors_c2) == 1
+        assert trade_svc._shards["kraken.BTC-USD.live"].recon_failure_count == 0
+
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-recovered")
+        await recon._reconcile_cycle()
+        kwargs = repo.advance_trade_command_lifecycle.await_args.kwargs
+        assert kwargs["public_id"] == "cancel-err-res"
+        assert kwargs["expected_status"] == TradeCommandStatusEnum.AWAITING_TARGET
+        assert kwargs["new_status"] == TradeCommandStatusEnum.CREATED
+        assert kwargs["exchange_order_id"] == "ex-recovered"
+        assert recon.stale_awaiting_target_count == 0
+        assert recon._hydration_error_logged == set()
+
+    @pytest.mark.asyncio
+    async def test_hydration_is_bounded_per_cycle(self) -> None:
+        """Runtime hydration processes at most ``max_hydrate_per_cycle`` rows per pass.
+
+        Given: Three awaiting_target cancels ready to resolve and ``max_hydrate_per_cycle=2``,
+        When: One reconciliation cycle runs,
+        Then: Exactly the first two are CAS-hydrated in cycle 1 and the third waits for cycle 2.
+        """
+        c1 = _awaiting_target_cmd("cancel-cap-1", age_seconds=30.0)
+        c2 = _awaiting_target_cmd("cancel-cap-2", age_seconds=20.0)
+        c3 = _awaiting_target_cmd("cancel-cap-3", age_seconds=10.0)
+        repo = _make_repo(cmds=[c1, c2, c3])
+        repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-cap")
+        recon = ReconciliationLoop("kraken", repo, TradeService(), max_hydrate_per_cycle=2)
+
+        await recon._reconcile_cycle()
+        hydrated_pids = [
+            call.kwargs["public_id"]
+            for call in repo.advance_trade_command_lifecycle.await_args_list
+        ]
+        assert hydrated_pids == ["cancel-cap-1", "cancel-cap-2"]
+
+        repo.get_active_commands_for_exchange = AsyncMock(return_value=[c3])
+        await recon._reconcile_cycle()
+        assert repo.advance_trade_command_lifecycle.await_args.kwargs["public_id"] == "cancel-cap-3"
+
+    @pytest.mark.asyncio
+    async def test_shared_hydration_helper_handles_cas_error_race_and_quiet_log(
+        self, loguru_warnings: list[str]
+    ) -> None:
+        """Shared helper distinguishes race_lost, CAS error, and log_error=False.
+
+        Given: A held cancel row and mocked repository,
+        When: CAS raises with ``log_error=True`` vs ``False``, or returns ``False``,
+        Then: ``error`` respects ``log_error`` and lost CAS returns ``race_lost``.
+        """
+        cmd = _awaiting_target_cmd("cancel-helper-1", age_seconds=50.0)
+        stamp = CancelHydrationStamp(bus_time=datetime.now(UTC), session_id="s1", sequence_id=9)
+
+        store = _make_repo()
+        store.advance_trade_command_lifecycle = AsyncMock(side_effect=RuntimeError("cas boom"))
+        assert (
+            await hydrate_awaiting_target_cancel(store, cmd, "ex-1", stamp, log_error=True)
+            == "error"
+        )
+        assert len([m for m in loguru_warnings if m.startswith("ERROR|")]) == 1
+
+        assert (
+            await hydrate_awaiting_target_cancel(store, cmd, "ex-1", stamp, log_error=False)
+            == "error"
+        )
+        assert len([m for m in loguru_warnings if m.startswith("ERROR|")]) == 1
+
+        store.get_exchange_order_id_for_client_order_id = AsyncMock(
+            side_effect=RuntimeError("boom")
+        )
+        assert (
+            await resolve_and_hydrate_awaiting_target_cancel(store, cmd, stamp, log_error=False)
+            == "error"
+        )
+        assert len([m for m in loguru_warnings if m.startswith("ERROR|")]) == 1
+
+        store.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-2")
+        store.advance_trade_command_lifecycle = AsyncMock(return_value=False)
+        assert await resolve_and_hydrate_awaiting_target_cancel(store, cmd, stamp) == "race_lost"

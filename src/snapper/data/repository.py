@@ -8869,8 +8869,9 @@ class Repository(ABC):
 
         Returns:
             True if an active ``command_type='cancel'`` row with a
-            non-terminal status (``created``/``dispatched``/``acked``)
-            exists, False otherwise.
+            non-terminal status (``awaiting_target``/``created``/
+            ``dispatched``/``direct_dispatched``/``accepted``/
+            ``partially_filled``) exists, False otherwise.
         """
         ...
 
@@ -27476,39 +27477,54 @@ class SQLAlchemyRepository(Repository):
                 return None
             return row[0]
 
-    async def has_pending_cancel_command(
+    async def get_pending_cancel_command_for_client_order_id(
         self,
         client_order_id: str,
         as_of: datetime,
-    ) -> bool:
-        """Return True when a non-terminal cancel command exists for the cid.
-
-        Looks for an active SCD2 ``trade_commands`` row with
-        ``command_type='cancel'`` whose status is not in a terminal
-        set (``filled``/``cancelled``/``expired``/``rejected``/``failed``).
-        PlanExecutorService recovery uses this as a dedup guard when
-        re-emitting stranded cancels.
+    ) -> TradeCommandRow | None:
+        """Return the newest active non-terminal cancel for a client order id.
 
         Args:
             client_order_id: Child client id to search.
             as_of: Temporal point for active-version selection.
 
         Returns:
-            True iff a live cancel command already exists.
+            Newest pending cancel row, or None when no active cancel exists.
         """
-        terminal_statuses = _TRADE_COMMAND_TERMINAL_STATUSES
         async with self.session() as s:
             result = await s.execute(
-                select(TradeCommand.id)
+                select(TradeCommand)
                 .where(
                     TradeCommand.client_order_id == client_order_id,
                     TradeCommand.command_type == "cancel",
-                    TradeCommand.status.notin_(terminal_statuses),
+                    TradeCommand.status.notin_(_TRADE_COMMAND_TERMINAL_STATUSES),
                     *where_active(TradeCommand, as_of),
                 )
+                .order_by(TradeCommand.created_at.desc(), TradeCommand.id.desc())
                 .limit(1)
             )
-            return result.first() is not None
+            cancel = result.scalars().first()
+            return None if cancel is None else self._trade_command_to_row(cancel)
+
+    async def has_pending_cancel_command(
+        self,
+        client_order_id: str,
+        as_of: datetime,
+    ) -> bool:
+        """Return True when a non-terminal cancel command exists for the order.
+
+        Includes held ``awaiting_target`` cancels so duplicate cancel rows are
+        never inserted while a stranded cancel awaits venue identity hydration.
+
+        Args:
+            client_order_id: Child client id to search.
+            as_of: Temporal point for active-version selection.
+
+        Returns:
+            True if any active non-terminal cancel exists, False otherwise.
+        """
+        pending = await self.get_pending_cancel_command_for_client_order_id(client_order_id, as_of)
+        return pending is not None
 
     async def update_trade_command_status(
         self,
@@ -27796,11 +27812,10 @@ class SQLAlchemyRepository(Repository):
     ) -> list[TradeCommandRow]:
         """Return trade commands with status='created' for outbox dispatch.
 
-        When ``offset > 0``, the query skips the
-        first ``offset`` rows. Used by
-        class:`OutboxDispatcher._dispatch_batch` to page through the
-        ``created`` backlog while filtering for owned shards in Python
-        see for the starvation-bound contract.
+        When ``offset > 0``, the query skips the first ``offset`` rows. Used by
+        :meth:`OutboxDispatcher._fetch_owned_batch` when multi-instance
+        shard ownership filtering is active. Held id-less cancels persist as
+        ``awaiting_target`` and are never fetched by this query.
         Ordering is ``(created_at, id)`` for deterministic pagination
         plan-service dispatch inserts multiple commands within a single
         ``now`` tick (see ``application/plans/service.py``) so ties on

@@ -189,6 +189,9 @@ class BootstrapSettingsLoader(BaseSettings):
             ``PlanExecutorService`` startup recovery. Default ``False``
             keeps startup recovery from settling historical plans without
             an explicit operator preview and digest confirmation.
+        awaiting_target_stale_threshold_s: Age in seconds after which
+            a held ``awaiting_target`` cancel command is flagged stale
+            by the periodic reconciler check and health heartbeat.
         position_dust_notional_threshold: Quote-currency notional below
             which a position is dust, as a finite non-negative decimal.
             Default ``0.50``. A position is also dust when its lot-rounded
@@ -288,6 +291,12 @@ class BootstrapSettingsLoader(BaseSettings):
     plan_recovery_auto_settle_enabled: bool = Field(
         default=False,
         alias="PLAN_RECOVERY_AUTO_SETTLE_ENABLED",
+    )
+    awaiting_target_stale_threshold_s: float = Field(
+        default=900.0,
+        gt=0.0,
+        allow_inf_nan=False,
+        alias="AWAITING_TARGET_STALE_THRESHOLD_S",
     )
     position_dust_notional_threshold: Decimal = Field(
         default=DEFAULT_POSITION_DUST_NOTIONAL_THRESHOLD,
