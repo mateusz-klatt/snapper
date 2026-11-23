@@ -210,6 +210,15 @@ SQL repository, or at executor shutdown — the executor counts each distinct
 stuck terminal once per episode in `meta.unrecorded_order_terminal_drop_count`
 and logs one WARN per episode pointing operators to the G3-C repair tool
 (`snapper repair-cancel-targets`).
+While an `order_terminal` is held for retry, the executor deliberately leaves
+the `Order` row non-terminal, skips the stream terminal publish, and keeps the
+order tracked. This is fail-closed: no order becomes canceled or expired
+without durable evidence. The engine's in-flight guard for that order
+therefore stays engaged until the next reconciliation cycle (about 60 s)
+records the evidence and re-enters the cancellation handler. A brief delayed
+release after a database error is intended, not a bug. After a restart that
+loses the in-memory retry map, the still-open `Order` row is re-detected as a
+disappeared order and recorded afresh.
 After three consecutive venue reconciliation failures, the coordinator
 uses the heartbeat to halt known real shard keys for the matching
 exchange/wallet scope and to drop new cold-path signals for that scope.
