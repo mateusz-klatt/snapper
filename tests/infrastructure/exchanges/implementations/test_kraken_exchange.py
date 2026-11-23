@@ -3742,6 +3742,72 @@ class TestPrivateRestSerialization:
         assert await asyncio.to_thread(event.wait, 2.0)
 
     @pytest.mark.asyncio
+    async def test_slow_private_lock_wait_logs_holder_and_waiter(
+        self,
+        kraken_client: KrakenExchangeClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A slow waiter logs one warning naming both operations."""
+        monkeypatch.setattr(kr, "_PRIVATE_REST_LOCK_WAIT_WARN_S", 0.05)
+        holder_started = threading.Event()
+        release_holder = threading.Event()
+
+        def holder_call() -> str:
+            holder_started.set()
+            assert release_holder.wait(5.0)
+            return "holder"
+
+        with patch.object(kr.logger, "warning") as mock_warning:
+            holder_task = asyncio.create_task(
+                kraken_client._with_retry(
+                    holder_call,
+                    egress_kind="private_idempotent_read",
+                    egress_operation="holder_operation",
+                    egress_target=ccxt_proxy_target(kraken_client._ccxt_client),
+                )
+            )
+            await self._wait_for_thread_event(holder_started)
+            waiter_task = asyncio.create_task(
+                kraken_client._with_retry(
+                    lambda: "waiter",
+                    egress_kind="private_idempotent_read",
+                    egress_operation="waiting_operation",
+                    egress_target=ccxt_proxy_target(kraken_client._ccxt_client),
+                )
+            )
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(waiter_task), 0.1)
+            holder_during_wait = kraken_client._private_rest_holder
+            release_holder.set()
+            holder_result, waiter_result = await asyncio.gather(holder_task, waiter_task)
+
+        mock_warning.assert_called_once()
+        message = str(mock_warning.call_args.args[0])
+        assert "holder_operation" in message
+        assert "waiting_operation" in message
+        assert "nonce lock waited" in message
+        assert holder_during_wait == "holder_operation"
+        assert (holder_result, waiter_result) == ("holder", "waiter")
+        assert kraken_client._private_rest_holder is None
+
+    @pytest.mark.asyncio
+    async def test_uncontended_private_lock_wait_does_not_warn(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """An uncontended invocation neither warns nor retains a holder."""
+        with patch.object(kr.logger, "warning") as mock_warning:
+            result = await kraken_client._with_retry(
+                lambda: "ok",
+                egress_kind="private_idempotent_read",
+                egress_operation="uncontended_operation",
+                egress_target=ccxt_proxy_target(kraken_client._ccxt_client),
+            )
+
+        mock_warning.assert_not_called()
+        assert result == "ok"
+        assert kraken_client._private_rest_holder is None
+
+    @pytest.mark.asyncio
     async def test_sdk_mutation_and_ccxt_private_read_are_serialized(
         self, kraken_client: KrakenExchangeClient
     ) -> None:
@@ -3858,6 +3924,7 @@ class TestPrivateRestSerialization:
                 egress_target=ccxt_proxy_target(kraken_client._ccxt_client),
             )
         released_after_error = not kraken_client.private_rest_busy()
+        holder_after_error = kraken_client._private_rest_holder
         result = await kraken_client._with_retry(
             lambda: "ok",
             egress_kind="private_idempotent_read",
@@ -3866,8 +3933,10 @@ class TestPrivateRestSerialization:
         )
 
         assert released_after_error
+        assert holder_after_error is None
         assert result == "ok"
         assert not kraken_client.private_rest_busy()
+        assert kraken_client._private_rest_holder is None
 
     @pytest.mark.asyncio
     async def test_cancellation_holds_lock_until_worker_finishes(
@@ -3897,20 +3966,29 @@ class TestPrivateRestSerialization:
         with pytest.raises(asyncio.CancelledError):
             await task
         busy_after_cancellation = kraken_client.private_rest_busy()
+        holder_after_cancellation = kraken_client._private_rest_holder
 
         release_worker.set()
+        await self._wait_for_thread_event(worker_finished)
+        for _ in range(100):
+            if not kraken_client.private_rest_busy():
+                break
+            await asyncio.sleep(0)
+        holder_after_orphan = kraken_client._private_rest_holder
         result = await kraken_client._with_retry(
             lambda: "next",
             egress_kind="private_idempotent_read",
             egress_operation="test_private_read_after_cancellation",
             egress_target=ccxt_proxy_target(kraken_client._ccxt_client),
         )
-        await self._wait_for_thread_event(worker_finished)
 
         assert busy_after_cancellation
+        assert holder_after_cancellation == "test_cancelled_private_read"
+        assert holder_after_orphan is None
         assert worker_finished.is_set()
         assert result == "next"
         assert not kraken_client.private_rest_busy()
+        assert kraken_client._private_rest_holder is None
 
     @pytest.mark.asyncio
     async def test_private_lock_is_not_held_during_rate_limit_backoff(

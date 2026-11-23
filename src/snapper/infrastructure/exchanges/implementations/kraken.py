@@ -160,6 +160,7 @@ is estimated or prorated.
 _NATIVE_BALANCE_AGGREGATE_KEYS: Final = frozenset(
     {"free", "used", "total", "info", "timestamp", "datetime"}
 )
+_PRIVATE_REST_LOCK_WAIT_WARN_S: Final[float] = 5.0
 
 
 def _kraken_native_txid(payload: dict[str, Any]) -> Any:
@@ -753,6 +754,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._ws_client: SpotWSClient | None = None
         self._ws_connect_lock: asyncio.Lock = asyncio.Lock()
         self._private_rest_lock: asyncio.Lock = asyncio.Lock()
+        self._private_rest_holder: str | None = None
         self._ws_connected = False
         self._trade_client: Trade | None = None
         self._user_client: User | None = None
@@ -862,7 +864,9 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         if kind == "public_read":
             return await self._dispatch_blocking(routed_call)
-        return await self._run_private_rest(lambda: self._dispatch_blocking(routed_call))
+        return await self._run_private_rest(
+            lambda: self._dispatch_blocking(routed_call), operation=operation
+        )
 
     async def connect(self) -> None:
         """Establish REST connection to Kraken exchange.
@@ -3966,28 +3970,43 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.debug("Initialized native Kraken User REST API client")
         return self._user_client
 
-    async def _run_private_rest[ResultT](self, invoke: Callable[[], Awaitable[ResultT]]) -> ResultT:
+    async def _run_private_rest[ResultT](
+        self, invoke: Callable[[], Awaitable[ResultT]], *, operation: str
+    ) -> ResultT:
         """Run one private invocation under the per-instance nonce lock.
 
         Retry callers acquire their REST slot before entering this helper,
         so neither slot waits nor backoff sleeps occur while the lock is
         held. Shielding leaves the dispatched invocation running when its
         caller is cancelled; only its done callback releases the lock,
-        after the blocking worker has actually finished.
+        after the blocking worker has actually finished. Lock acquisition
+        has no hard timeout or failure: each holder is bounded transitively
+        by CCXT's 30-second HTTP timeout or python-kraken-sdk's 10-second
+        per-request ``TIMEOUT``.
 
         Args:
             invoke: Factory for the coroutine or future performing one call.
+            operation: Stable waiting operation name for contention logs.
 
         Returns:
             Result returned by the private invocation.
         """
+        wait_started = monotonic()
+        holder = self._private_rest_holder
         await self._private_rest_lock.acquire()
+        wait_seconds = monotonic() - wait_started
+        self._private_rest_holder = operation
+        if wait_seconds >= _PRIVATE_REST_LOCK_WAIT_WARN_S:
+            logger.warning(
+                f"Kraken private REST nonce lock waited {wait_seconds:.3f}s "
+                f"for {operation}; holder at wait start: {holder or 'unknown'}"
+            )
         invocation = asyncio.ensure_future(invoke())
         invocation.add_done_callback(self._release_private_rest_lock)
         return await asyncio.shield(invocation)
 
     def _release_private_rest_lock[ResultT](self, invocation: asyncio.Future[ResultT]) -> None:
-        """Release the nonce lock after dispatch and consume an orphan outcome.
+        """Clear the holder and release after dispatch, consuming orphan outcomes.
 
         Args:
             invocation: Completed private invocation holding the lock.
@@ -3997,6 +4016,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         with contextlib.suppress(asyncio.CancelledError):
             invocation.exception()
+        self._private_rest_holder = None
         self._private_rest_lock.release()
 
     async def _invoke_with_retry_slot(
@@ -4142,7 +4162,10 @@ class KrakenExchangeClient(ExchangeClientBase):
         if inspect.iscoroutinefunction(func):
             if egress_kind == "public_read":
                 return await func(*args, **kwargs)
-            return await self._run_private_rest(lambda: func(*args, **kwargs))
+            return await self._run_private_rest(
+                lambda: func(*args, **kwargs),
+                operation=egress_operation or cast(str, getattr(func, "__name__", "unknown")),
+            )
         if egress_kind is not None:
             if egress_operation is None or egress_target is None:
                 raise RuntimeError("Kraken REST egress routing requires operation and target")
@@ -4152,7 +4175,10 @@ class KrakenExchangeClient(ExchangeClientBase):
                 target=egress_target,
                 sync_call=lambda: func(*args, **kwargs),
             )
-        return await self._run_private_rest(lambda: self._dispatch_blocking(func, *args, **kwargs))
+        return await self._run_private_rest(
+            lambda: self._dispatch_blocking(func, *args, **kwargs),
+            operation=egress_operation or cast(str, getattr(func, "__name__", "unknown")),
+        )
 
     @staticmethod
     async def _handle_rate_limit(attempt: int, max_retries: int, base_delay: float) -> int:
