@@ -554,15 +554,6 @@ _UNRECORDED_ORDER_TERMINAL_LIMIT = 1_000
 When it is full, the oldest entry is dropped with a critical log and the WARN
 drop metric/log; the map lives in memory only, so a restart loses it and the
 enqueue-time critical log is the trace."""
-
-
-def _has_required_venue_event_identifiers(params: RecordVenueEventParams) -> bool:
-    """Return True when all required non-empty identifiers exist for a venue event row."""
-    return bool(
-        params.get("event_type") and params.get("exchange_name") and params.get("instrument")
-    )
-
-
 _SPOT_ANCHOR_HISTORY_LIMIT = 100
 """Page size for the anchor bootstrap's account-history tip reads (OQ-3). The
 local execution tip must be on the page or the bootstrap refuses, so the page
@@ -3517,6 +3508,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         }
         await self._record_or_hold_order_terminal(client_order_id, params, holder, exchange_name)
 
+    @staticmethod
+    def _order_terminal_identifiers_complete(params: RecordVenueEventParams) -> bool:
+        """Return True when ``order_terminal`` params carry non-empty required identifiers."""
+        return bool(
+            params.get("event_type") and params.get("exchange_name") and params.get("instrument")
+        )
+
     async def _record_or_hold_order_terminal(
         self,
         client_order_id: str,
@@ -3529,18 +3527,18 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Resolves the canonical instrument and strategy tag inside the ``try``
         block so a metadata lookup failure leaves ``strategy_tag`` absent in
         ``params`` and the reconciliation retry re-resolves it. Distinguishes
-        all three ``False`` outcomes of :meth:`_record_order_terminal_once`:
+        all three non-inserted outcomes on the ``order_terminal`` hold path:
         a non-SQL repository keeps no venue events and proceeds normally; a SQL
-        repository whose ``insert_order_terminal_once`` returned ``False``
+        repository whose ``insert_order_terminal_once`` returns ``False``
         because the row already existed proceeds since durable evidence is
-        already present; and a SQL repository whose required identifiers are
-        missing or empty (for example an empty or ``None`` instrument so
-        :meth:`_venue_event_row` returns ``None``) strips ``strategy_tag``,
-        holds the terminal in ``_unrecorded_order_terminals`` so the retry can
-        re-resolve metadata (or emit the G3-C WARN drop metric if unresolvable),
-        and returns ``None`` so callers never terminalize an ``Order`` row
-        without durable evidence. Normal exceptions also enqueue via
-        :meth:`_hold_unrecorded_order_terminal`; ``asyncio.CancelledError``
+        already present; and a SQL repository whose required identifiers
+        (``event_type``, ``exchange_name``, ``instrument``) are missing or
+        empty skips :meth:`_record_order_terminal_once`, strips
+        ``strategy_tag``, holds the terminal in ``_unrecorded_order_terminals``
+        so the retry can re-resolve metadata (or emit the G3-C WARN drop metric
+        if unresolvable), and returns ``None`` so callers never terminalize an
+        ``Order`` row without durable evidence. Normal exceptions also enqueue
+        via :meth:`_hold_unrecorded_order_terminal`; ``asyncio.CancelledError``
         inherits from ``BaseException`` and propagates without being held.
 
         Args:
@@ -3557,22 +3555,19 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             ``None`` when the terminal was held for retry.
         """
         fallback_instrument = params.get("instrument", "")
+        is_sql_repo = isinstance(self.repository, SQLAlchemyRepository)
         try:
             instrument, strategy_tag = await self._order_terminal_metadata(
                 client_order_id, holder, exchange_name, fallback_instrument
             )
             params["instrument"] = instrument
+            if is_sql_repo and not self._order_terminal_identifiers_complete(params):
+                params.pop("strategy_tag", None)
+                self._hold_unrecorded_order_terminal(client_order_id, params, exchange_name)
+                return None
             params["strategy_tag"] = strategy_tag
-            recorded = await self._record_order_terminal_once(params)
+            await self._record_order_terminal_once(params)
         except Exception:
-            self._hold_unrecorded_order_terminal(client_order_id, params, exchange_name)
-            return None
-        if (
-            not recorded
-            and isinstance(self.repository, SQLAlchemyRepository)
-            and not _has_required_venue_event_identifiers(params)
-        ):
-            params.pop("strategy_tag", None)
             self._hold_unrecorded_order_terminal(client_order_id, params, exchange_name)
             return None
         self._unrecorded_order_terminals.pop(client_order_id, None)
@@ -3714,14 +3709,13 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         Never takes ``fill_lock``. Each entry is first probed with
         ``has_venue_event``, and dropped when a terminal already exists,
         because another executor may have recorded it. Only otherwise is
-        missing metadata resolved from the durable command and the
-        record-once insert called, which rechecks atomically. An entry is
-        dropped once that call returns (emitting the WARN drop metric if
-        a SQL repository skipped recording because required identifiers
-        were missing), and kept for the next cycle when the probe, the
-        lookup or the insert raises. An entry that a concurrent enqueue
-        evicted from the full map while an earlier entry was awaited is
-        skipped; the eviction has already logged it.
+        missing metadata resolved from the durable command; on a SQL
+        repository, incomplete or empty required identifiers skip the insert,
+        drop the entry, and emit the WARN drop metric. Otherwise the
+        record-once insert runs and drops the entry once it returns, keeping
+        the entry for the next cycle when the probe, lookup, or insert raises.
+        An entry that a concurrent enqueue evicted from the full map while an
+        earlier entry was awaited is skipped; the eviction has already logged it.
         """
         exchange_name = self._get_exchange_name()
         for client_order_id in tuple(self._unrecorded_order_terminals):
@@ -3741,7 +3735,18 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     params = params.copy()
                     params["instrument"] = instrument
                     params["strategy_tag"] = strategy_tag
-                recorded = await self._record_order_terminal_once(params)
+                if isinstance(
+                    self.repository, SQLAlchemyRepository
+                ) and not self._order_terminal_identifiers_complete(params):
+                    self._unrecorded_order_terminals.pop(client_order_id, None)
+                    self._record_unrecorded_order_terminal_drop(
+                        client_order_id,
+                        params,
+                        exchange_name,
+                        "incomplete terminal identifiers",
+                    )
+                    continue
+                await self._record_order_terminal_once(params)
             except Exception:
                 logger.warning(
                     f"[{exchange_name}] Recon: order_terminal for {client_order_id} still "
@@ -3749,17 +3754,6 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 )
                 continue
             self._unrecorded_order_terminals.pop(client_order_id, None)
-            if (
-                not recorded
-                and isinstance(self.repository, SQLAlchemyRepository)
-                and not _has_required_venue_event_identifiers(params)
-            ):
-                self._record_unrecorded_order_terminal_drop(
-                    client_order_id,
-                    params,
-                    exchange_name,
-                    "incomplete terminal identifiers",
-                )
 
     async def _process_replace(self, replace: OrderReplaceData) -> None:
         """Reject an order-replace request (replace is not implemented).
@@ -4080,12 +4074,12 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
         Returns:
             The insert row, or ``None`` (logged) when a required identifier
-            is missing or empty.
+            is missing.
         """
         event_type = params.get("event_type")
         exchange_name = params.get("exchange_name")
         instrument = params.get("instrument")
-        if not event_type or not exchange_name or not instrument:
+        if event_type is None or exchange_name is None or instrument is None:
             logger.error("Venue event params missing required identifiers: {}", params)
             return None
         mode = (

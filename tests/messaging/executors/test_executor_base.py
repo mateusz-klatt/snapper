@@ -14274,3 +14274,31 @@ class TestStreamCancellationEvidenceFirst:
         ex.msg_publisher.send.assert_awaited_once()
         assert _CANCEL_CID not in ex.pending_orders
         assert "ex-cancel" not in ex.client_by_exchange
+
+    @pytest.mark.asyncio
+    async def test_record_venue_event_with_empty_instrument_still_records_row(self) -> None:
+        """Keep shared ``_record_venue_event`` accepting empty-string instruments as on master.
+
+        Given: an executor wired to a ``SQLAlchemyRepository`` and a non-terminal
+            ``fill_observed`` event whose ``instrument`` is ``""``,
+        When: ``_record_venue_event`` is called,
+        Then: ``_venue_event_row`` still builds the row (None-only validation) and
+            ``insert_venue_event`` is awaited once.
+        """
+        ex, repo, _ = _stream_evidence_executor(exchange="kraken", tracked=False)
+        repo.insert_venue_event = AsyncMock(return_value=1)
+
+        await ex._record_venue_event(
+            {
+                "event_type": "fill_observed",
+                "exchange_name": "kraken",
+                "instrument": "",
+                "client_order_id": _CANCEL_CID,
+            }
+        )
+
+        repo.insert_venue_event.assert_awaited_once()
+        written_row = repo.insert_venue_event.await_args.args[0]
+        assert written_row["event_type"] == "fill_observed"
+        assert written_row["instrument"] == ""
+        assert written_row["shard_key"] == "kraken..live"
