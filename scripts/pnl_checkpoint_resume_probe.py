@@ -15,6 +15,7 @@ Safety architecture:
     * Recommends running as a least-privilege read-only DB role; enforces
       ``has_table_privilege`` read-only checks on key P&L tables by default
       (override only via ``--allow-writable-role-with-readonly-session``).
+      The override relies on both the read-only session settings and the SQL guard.
     * Note: ``lock_timeout`` (1 s) bounds lock acquisition only; statement execution
       and idle lock retention are bounded by ``statement_timeout``,
       ``idle_in_transaction_session_timeout``, and ``--max-runtime-seconds``.
@@ -68,8 +69,10 @@ from dataclasses import fields
 from dataclasses import is_dataclass
 from datetime import datetime
 from datetime import timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import Final
+from typing import Literal
 from typing import NoReturn
 from typing import Protocol
 from typing import cast
@@ -156,15 +159,30 @@ READONLY_ROLE_WARNING: Final[str] = (
     "Running under a dedicated read-only role (e.g. snapper_ro) is recommended."
 )
 
-_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*[\s\S]*?\*/")
-_SQL_STRING_RE = re.compile(r"'(?:''|[^'])*'")
+_SQL_IDENTIFIER_START = r"[A-Za-z_\x80-\U0010ffff]"
+_SQL_IDENTIFIER_CONTINUE = r"[A-Za-z_0-9\x80-\U0010ffff]"
+_SQL_TOKEN_RE = re.compile(
+    r"(?P<space>[ \t\r\n\f\v]+)|(?P<line_comment>--)|(?P<block_comment>/\*)"
+    r"""|(?P<quote>[Ee]'|[Uu]&['"]|['"`\[])"""
+    rf"|(?P<dollar_quote>\$(?:{_SQL_IDENTIFIER_START}{_SQL_IDENTIFIER_CONTINUE}*)?\$)"
+    rf"|(?P<word>{_SQL_IDENTIFIER_START}(?:{_SQL_IDENTIFIER_CONTINUE}|\$)*)"
+    r"|(?P<symbol>\$[0-9]+|[0-9]+|[.,;()\]+*/<>=~!@#%^&|?:-])"
+)
+_SQL_BLOCK_MARKER_RE = re.compile(r"/\*|\*/")
+_SQL_PG_LINE_END_RE = re.compile(r"[\r\n]")
+_SQL_SQLITE_LINE_END_RE = re.compile(r"\n")
+_UNCLASSIFIED_SQL = "write_sql_refused:unclassified_sql"
 _VMSIZE_LINE_RE = re.compile(r"^VmSize:\s*(\d+)\s*kB\s*$", re.MULTILINE)
-_LIT_TOKEN_RE = re.compile(r"'__LIT_(\d+)__'")
 _FOR_LOCK_RE = re.compile(r"\bFOR\s+(?:(?:NO\s+KEY\s+)?UPDATE|(?:KEY\s+)?SHARE)\b")
+_READ_WRITE_RE = re.compile(r"\bREAD\s+WRITE\b")
 _SELECT_INTO_RE = re.compile(r"\bSELECT\b[\s\S]*\bINTO\b")
 _EXPLAIN_ANALYZE_RE = re.compile(r"\bANALYZE\b")
-_FORBIDDEN_SQL_CALL_RE = re.compile(
-    r"\b(?:SET_CONFIG\s*\(|SETVAL\s*\(|PG_(?:TRY_)?ADVISORY(?:_[A-Z]+)*\s*\(|PG_SLEEP(?:_FOR|_UNTIL)?\b)"
+_COPY_PROGRAM_RE = re.compile(r"\bCOPY\b.*\b(?:FROM|TO)\s+PROGRAM\b")
+_FORBIDDEN_SQL_NAME_RE = re.compile(
+    r"SET_CONFIG|SETVAL|NEXTVAL|DBLINK(?:_.*)?|LO_.*|LOREAD|LOWRITE"
+    r"|PG_(?:(?:TRY_)?ADVISORY(?:_[A-Z]+)*|SLEEP(?:_FOR|_UNTIL)?|NOTIFY"
+    r"|TERMINATE_BACKEND|CANCEL_BACKEND|RELOAD_CONF|ROTATE_LOGFILE"
+    r"|FILE_(?:WRITE|SYNC|RENAME|UNLINK)|LOGDIR_LS)"
 )
 _BOUND_TX_CONFIG_RE = re.compile(
     r"^SELECT\s+set_config\('statement_timeout',\s*CASE\s+WHEN\s+"
@@ -225,6 +243,8 @@ _ROLE_PRIVILEGE_QUERY = text(
 )
 _READ_ONLY_VERBS = frozenset(
     {
+        "SELECT",
+        "WITH",
         "SHOW",
         "VALUES",
         "EXPLAIN",
@@ -400,6 +420,127 @@ def _require(condition: bool, reason: str) -> None:
         raise CheckpointResumeProbeError(_redact_secrets(reason))
 
 
+@dataclass(frozen=True, slots=True)
+class _SqlToken:
+    """Retain the source spelling and the name of an unquoted or quoted identifier."""
+
+    kind: str
+    raw: str
+    name: str = ""
+
+
+def _sql_block_comment_end(statement: str, start: int, dialect_name: str) -> int:
+    """Find the end of a block comment, including PostgreSQL's nested comments."""
+    if dialect_name == "sqlite":
+        end = statement.find("*/", start)
+        if end >= 0:
+            return end + 2
+    else:
+        depth = 1
+        for marker in _SQL_BLOCK_MARKER_RE.finditer(statement, start):
+            depth += 1 if marker.group() == "/*" else -1
+            if depth == 0:
+                return marker.end()
+    raise CheckpointResumeProbeError(_UNCLASSIFIED_SQL)
+
+
+def _sql_quote_end(
+    statement: str, start: int, quote: str, backslashes: Literal["escape", "reject", "literal"]
+) -> int:
+    """Scan through a closing delimiter without interpreting doubled quotes as a close."""
+    pos = start
+    while pos < len(statement):
+        char = statement[pos]
+        pos += 1
+        if char == "\\" and backslashes != "literal":
+            _require(backslashes == "escape", _UNCLASSIFIED_SQL)
+            pos += 1
+        elif char == quote:
+            if quote == "]" or pos == len(statement) or statement[pos] != quote:
+                return pos
+            pos += 1
+    raise CheckpointResumeProbeError(_UNCLASSIFIED_SQL)
+
+
+def _sql_quoted_token(
+    statement: str, match: re.Match[str], dialect_name: str
+) -> tuple[_SqlToken, int]:
+    """Read quoted strings and identifiers using the active PostgreSQL or SQLite syntax.
+
+    The guard refuses ordinary PostgreSQL string backslashes because their meaning
+    depends on the session setting. It accepts Unicode identifier quoting when the
+    spelling needs no escape decoding, and refuses ``UESCAPE`` separately.
+    """
+    opener = match.group().upper()
+    if dialect_name == "sqlite":
+        _require(opener in {"'", '"', "[", "`"}, _UNCLASSIFIED_SQL)
+    elif opener == "[":
+        return _SqlToken("symbol", "["), match.end()
+    else:
+        _require(opener != "`", _UNCLASSIFIED_SQL)
+    quote = "]" if opener == "[" else opener[-1]
+    backslashes: Literal["escape", "reject", "literal"] = "escape" if opener == "E'" else "literal"
+    if opener == "'" and dialect_name == "postgresql":
+        backslashes = "reject"
+    end = _sql_quote_end(statement, match.end(), quote, backslashes)
+    raw = statement[match.start() : end]
+    if quote == "'":
+        return _SqlToken("string", raw), end
+    name = statement[match.end() : end - 1].replace(quote * 2, quote)
+    if opener == 'U&"':
+        _require("\\" not in name, _UNCLASSIFIED_SQL)
+    return _SqlToken("identifier", raw, name.upper()), end
+
+
+def _read_sql_token(
+    statement: str, match: re.Match[str], dialect_name: str
+) -> tuple[_SqlToken, int]:
+    """Read one lexeme, replacing comments and whitespace with separator tokens."""
+    kind = match.lastgroup
+    raw = match.group()
+    end = match.end()
+    if kind == "line_comment":
+        line_end_re = _SQL_SQLITE_LINE_END_RE if dialect_name == "sqlite" else _SQL_PG_LINE_END_RE
+        line_end = line_end_re.search(statement, end)
+        return _SqlToken("space", " "), line_end.start() if line_end else len(statement)
+    if kind == "block_comment":
+        return _SqlToken("space", " "), _sql_block_comment_end(statement, end, dialect_name)
+    if kind == "space":
+        return _SqlToken("space", " "), end
+    if kind == "quote":
+        return _sql_quoted_token(statement, match, dialect_name)
+    if kind == "dollar_quote":
+        _require(dialect_name == "postgresql", _UNCLASSIFIED_SQL)
+        close = statement.find(raw, end)
+        _require(close >= 0, _UNCLASSIFIED_SQL)
+        end = close + len(raw)
+        return _SqlToken("string", statement[match.start() : end]), end
+    if kind == "word":
+        name = raw.upper()
+        _require(name != "UESCAPE", _UNCLASSIFIED_SQL)
+        return _SqlToken("word", raw, name), end
+    if dialect_name == "sqlite":
+        _require(not raw.startswith(("$", ":", "@", "#")), _UNCLASSIFIED_SQL)
+    return _SqlToken("symbol", raw), end
+
+
+def _sql_fragments(statement: str, dialect_name: str) -> Iterator[list[_SqlToken]]:
+    """Yield statements separated by semicolons outside quoted tokens and comments."""
+    pos = 0
+    fragment: list[_SqlToken] = []
+    while pos < len(statement):
+        match = _SQL_TOKEN_RE.match(statement, pos)
+        if match is None:
+            raise CheckpointResumeProbeError(_UNCLASSIFIED_SQL)
+        token, pos = _read_sql_token(statement, match, dialect_name)
+        if token.raw == ";":
+            yield fragment
+            fragment = []
+        elif token.kind != "space" or (fragment and fragment[-1].kind != "space"):
+            fragment.append(token)
+    yield fragment
+
+
 def _is_read_only_pragma(normalized: str) -> bool:
     """Return whether a SQLite ``PRAGMA`` statement performs no mutation.
 
@@ -430,19 +571,15 @@ def _is_read_only_set(normalized: str) -> bool:
     Returns:
         ``True`` only for read-only characteristics, isolation, or local JIT settings.
     """
-    if "READ WRITE" in normalized:
-        return False
     if normalized == "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY":
         return True
     if re.fullmatch(
         r"SET TRANSACTION (?:READ ONLY|ISOLATION LEVEL "
-        r"(?:READ COMMITTED|REPEATABLE READ|SERIALIZABLE)(?:, READ ONLY)?)",
+        r"(?:READ COMMITTED|REPEATABLE READ|SERIALIZABLE)(?:\s*,\s*READ ONLY| READ ONLY)?)",
         normalized,
     ):
         return True
-    return (
-        re.fullmatch(r"SET LOCAL JIT\s*(?:=|TO)\s*(?:ON|OFF|TRUE|FALSE|'')", normalized) is not None
-    )
+    return re.fullmatch(r"SET LOCAL JIT\s*(?:=|TO)\s*(?:ON|OFF|TRUE|FALSE)", normalized) is not None
 
 
 def _parse_local_timeout_ms(raw_value: str) -> int | None:
@@ -463,38 +600,16 @@ def _parse_local_timeout_ms(raw_value: str) -> int | None:
     return int(match.group(2)) * multiplier
 
 
-def _unstash_literals(fragment: str, literals: Sequence[str]) -> str:
-    """Restore original single-quoted string literals inside one SQL fragment.
-
-    Args:
-        fragment: Literal-masked SQL fragment.
-        literals: Ordered table of captured raw single-quoted SQL literals.
-
-    Returns:
-        Comment-free SQL fragment with original string literal contents restored.
-    """
-    return _LIT_TOKEN_RE.sub(
-        lambda match: literals[int(match.group(1))],
-        fragment.strip(),
-    )
-
-
-def _assert_read_only_set(
-    masked_fragment: str,
-    literals: Sequence[str],
-    statement_timeout_ms: int,
-) -> None:
+def _assert_read_only_set(raw_fragment: str, statement_timeout_ms: int) -> None:
     """Validate ``SET`` fragments while strictly capping ``SET LOCAL`` timeouts.
 
     Args:
-        masked_fragment: Comment-free SQL fragment with string literals replaced by placeholders.
-        literals: Captured original single-quoted SQL literals indexed by placeholder.
+        raw_fragment: Comment-free SQL fragment with original literal contents.
         statement_timeout_ms: Probe configured statement-timeout ceiling in milliseconds.
 
     Raises:
         CheckpointResumeProbeError: When timeout bounds fail or ``SET`` mutates session state.
     """
-    raw_fragment = " ".join(_unstash_literals(masked_fragment, literals).split())
     local_timeout = _LOCAL_TIMEOUT_STMT_RE.fullmatch(raw_fragment)
     if local_timeout is not None:
         setting = local_timeout.group(1).lower()
@@ -503,8 +618,7 @@ def _assert_read_only_set(
         if parsed_ms is None or parsed_ms <= 0 or parsed_ms > cap_ms:
             raise CheckpointResumeProbeError(f"write_or_unbounded_sql:SET_LOCAL_{setting}")
         return
-    normalized = " ".join(masked_fragment.split()).upper()
-    if not _is_read_only_set(normalized):
+    if not _is_read_only_set(raw_fragment.upper()):
         raise CheckpointResumeProbeError("write_sql_refused:SET")
 
 
@@ -543,56 +657,65 @@ def _allow_bound_pg_timeout_select(raw_fragment: str) -> bool:
     return True
 
 
-def _assert_query_read_only(normalized: str, tokens: Sequence[str], verb: str) -> None:
-    """Reject writes hidden inside SELECT, WITH, or EXPLAIN statements."""
-    if _SELECT_INTO_RE.search(normalized):
-        raise CheckpointResumeProbeError("write_sql_refused:SELECT_INTO")
-    if verb == "EXPLAIN":
-        if _EXPLAIN_ANALYZE_RE.search(normalized):
-            raise CheckpointResumeProbeError("write_sql_refused:EXPLAIN_ANALYZE")
-        return
-    if verb not in {"SELECT", "WITH"}:
-        return
-    if _FOR_LOCK_RE.search(normalized):
+def _assert_query_read_only(keywords: str, verb: str) -> None:
+    """Reject locking clauses and write syntax outside quoted SQL tokens."""
+    if verb in {"BEGIN", "START", "SET"} and _READ_WRITE_RE.search(keywords):
+        raise CheckpointResumeProbeError("write_sql_refused:READ_WRITE")
+    if _FOR_LOCK_RE.search(keywords):
         raise CheckpointResumeProbeError("write_sql_refused:FOR_UPDATE")
-    if verb == "WITH" and (_WRITE_KEYWORDS & set(tokens)):
+    if _COPY_PROGRAM_RE.search(keywords):
+        raise CheckpointResumeProbeError("write_sql_refused:COPY_PROGRAM")
+    if _SELECT_INTO_RE.search(keywords):
+        raise CheckpointResumeProbeError("write_sql_refused:SELECT_INTO")
+    if verb == "EXPLAIN" and _EXPLAIN_ANALYZE_RE.search(keywords):
+        raise CheckpointResumeProbeError("write_sql_refused:EXPLAIN_ANALYZE")
+    if verb == "WITH" and _WRITE_KEYWORDS.intersection(keywords.split()):
         raise CheckpointResumeProbeError("write_sql_refused:WITH")
 
 
+def _sql_keyword(token: _SqlToken) -> str:
+    """Keep unquoted words in clause checks and mark other tokens as separators."""
+    if token.kind == "word" and token.raw.isascii() and "$" not in token.raw:
+        return token.name
+    return "?"
+
+
+def _assert_no_forbidden_calls(tokens: Sequence[_SqlToken]) -> None:
+    """Refuse side-effecting function names before a call's opening parenthesis."""
+    for name, opening in pairwise(tokens):
+        if opening.raw == "(" and _FORBIDDEN_SQL_NAME_RE.fullmatch(name.name):
+            raise CheckpointResumeProbeError("write_sql_refused:forbidden_function")
+
+
 def _assert_fragment_read_only(
-    fragment: str,
-    literals: Sequence[str],
+    fragment: Sequence[_SqlToken],
     statement_timeout_ms: int,
 ) -> None:
     """Reject any SQL fragment capable of mutating, locking, or unbounding database state.
 
     Args:
-        fragment: Comment- and literal-masked SQL fragment without semicolons.
-        literals: Captured original single-quoted SQL literals indexed by placeholder.
+        fragment: Lexed SQL fragment without statement-delimiting semicolons.
         statement_timeout_ms: Probe configured statement-timeout ceiling in milliseconds.
 
     Raises:
         CheckpointResumeProbeError: When the fragment violates read-only or timeout invariants.
     """
-    raw_fragment = " ".join(_unstash_literals(fragment, literals).split())
-    if _allow_bound_pg_timeout_select(raw_fragment):
-        return
-    normalized = " ".join(fragment.split()).upper()
-    if _FORBIDDEN_SQL_CALL_RE.search(normalized.replace('"', "")):
-        raise CheckpointResumeProbeError("write_sql_refused:forbidden_function")
-    tokens = re.findall(r"[A-Z_]+", normalized)
+    tokens = [token for token in fragment if token.kind != "space"]
     if not tokens:
         return
-    verb = tokens[0]
-    _assert_query_read_only(normalized, tokens, verb)
-    if verb in {"SELECT", "WITH", "EXPLAIN"}:
+    verb = _sql_keyword(tokens[0])
+    _require(verb != "?", _UNCLASSIFIED_SQL)
+    raw_fragment = "".join(token.raw for token in fragment).strip(" ")
+    if verb == "SELECT" and _allow_bound_pg_timeout_select(raw_fragment):
         return
+    _assert_no_forbidden_calls(tokens)
+    _assert_query_read_only(" ".join(map(_sql_keyword, tokens)), verb)
     if verb in _READ_ONLY_VERBS:
         return
-    if verb == "PRAGMA" and _is_read_only_pragma(normalized):
+    if verb == "PRAGMA" and _is_read_only_pragma(raw_fragment.upper()):
         return
     if verb == "SET":
-        _assert_read_only_set(fragment, literals, statement_timeout_ms)
+        _assert_read_only_set(raw_fragment, statement_timeout_ms)
         return
     raise CheckpointResumeProbeError(f"write_sql_refused:{verb}")
 
@@ -600,24 +723,21 @@ def _assert_fragment_read_only(
 def _assert_read_only_sql(
     statement: str,
     statement_timeout_ms: int = DEFAULT_STATEMENT_TIMEOUT_MS,
+    *,
+    dialect_name: str = "postgresql",
 ) -> None:
     """Validate every semicolon-delimited statement in ``statement`` is strictly bounded read-only.
 
     Args:
         statement: Raw SQL string submitted to SQLAlchemy cursor execution.
         statement_timeout_ms: Probe configured statement-timeout ceiling in milliseconds.
+        dialect_name: SQLAlchemy dialect controlling quoting and comment syntax.
     """
-    literals: list[str] = []
-
-    def _stash_literal(match: re.Match[str]) -> str:
-        """Stash one single-quoted SQL literal cleanly for safe statement splitting."""
-        literals.append(match.group(0))
-        return f"'__LIT_{len(literals) - 1}__'"
-
-    comment_free = _SQL_COMMENT_RE.sub(" ", statement)
-    masked = _SQL_STRING_RE.sub(_stash_literal, comment_free)
-    for fragment in masked.split(";"):
-        _assert_fragment_read_only(fragment, literals, statement_timeout_ms)
+    _require(
+        dialect_name in {"postgresql", "sqlite"} and "\x00" not in statement, _UNCLASSIFIED_SQL
+    )
+    for fragment in _sql_fragments(statement, dialect_name):
+        _assert_fragment_read_only(fragment, statement_timeout_ms)
 
 
 def _parse_pg_duration_ms(raw: str) -> int | None:
@@ -805,7 +925,7 @@ def _read_only_guards(
         *_rest: object,
     ) -> None:
         """Refuse non-read-only or unbounded SQL before execution reaches the driver."""
-        _assert_read_only_sql(statement, statement_timeout_ms)
+        _assert_read_only_sql(statement, statement_timeout_ms, dialect_name=dialect_name)
 
     event.listen(sync_engine, "connect", _on_connect)
     event.listen(sync_engine, "checkout", _on_checkout)
@@ -1799,7 +1919,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-writable-role-with-readonly-session",
         action="store_true",
         dest="allow_writable_role",
-        help="Permit a writable DB role while relying only on read-only session settings.",
+        help="Permit a writable DB role while relying on read-only session settings and the SQL guard.",
     )
     parser.set_defaults(allow_writable_role=False)
     return parser

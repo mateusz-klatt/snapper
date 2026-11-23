@@ -419,7 +419,12 @@ without modifying the application's `DB_URL`, passes the default writable-role
 check without `--allow-writable-role-with-readonly-session`, and redacts
 credentials across all outputs. If neither `--db-url` nor `PNL_PROBE_DB_URL` is
 set, the probe prints one `WARNING` line recommending the dedicated read-only
-role and continues with its existing checks:
+role and continues with its existing checks.
+
+The `--allow-writable-role-with-readonly-session` override skips the table
+privilege check. It relies on both the read-only session settings and the
+probe's SQL guard, which rejects read-write transaction modes, row locks,
+and known side-effecting calls before they reach the driver.
 
 Keep the password out of the URL, argv and the environment: asyncpg reads it
 from `~/.pgpass` (or the file named by `PGPASSFILE`, mode `0600`) when the

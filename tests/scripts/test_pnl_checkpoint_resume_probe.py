@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import resource
 import sqlite3
 import subprocess
@@ -15,6 +16,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from unittest.mock import Mock
 from uuid import uuid4
 
 import asyncpg
@@ -494,6 +496,294 @@ def test_cli_main_and_subprocess_succeed_on_real_sqlite(
     assert proc.returncode == 0, proc.stderr
     assert "bit_identical=True" in proc.stdout
     assert proc.stdout.strip().splitlines()[-1] == "RESULT: PASS"
+
+
+def test_sql_lexer_keeps_comment_markers_in_literals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep comment markers inside string literals.
+
+    Given: Three reads whose outer statements contain quoted comment markers.
+    When: The guard splits and checks the input SQL.
+    Then: All three reads reach the fragment classifier.
+
+    Args:
+        monkeypatch: Pytest fixture for observing the classifier.
+    """
+    classify = Mock(wraps=probe._assert_fragment_read_only)
+    monkeypatch.setattr(probe, "_assert_fragment_read_only", classify)
+
+    probe._assert_read_only_sql("SELECT '/*'; VALUES (1); SELECT '*/'")
+
+    assert classify.call_count == 3
+
+
+def test_sql_lexer_keeps_fragments_after_escape_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Preserve the read following a PostgreSQL escape string.
+
+    Given: Two reads with an escaped quote and comment markers in the first read's string.
+    When: The guard splits and checks the input SQL.
+    Then: Both reads reach the fragment classifier.
+
+    Args:
+        monkeypatch: Pytest fixture for observing the classifier.
+    """
+    classify = Mock(wraps=probe._assert_fragment_read_only)
+    monkeypatch.setattr(probe, "_assert_fragment_read_only", classify)
+
+    probe._assert_read_only_sql(r"SELECT E'it\'s ; inside /* --', 1; SELECT 2")
+
+    assert classify.call_count == 2
+
+
+def test_sql_guard_checks_unicode_quoted_call_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pass a Unicode-quoted name to the denylist matcher.
+
+    Given: A synthetic function name in the denylist.
+    When: The guard checks a call with that name in a Unicode-quoted identifier.
+    Then: The function is refused.
+
+    Args:
+        monkeypatch: Pytest fixture for replacing the denylist.
+    """
+    monkeypatch.setattr(probe, "_FORBIDDEN_SQL_NAME_RE", re.compile("READ_PROBE_MARKER"))
+    with pytest.raises(
+        probe.CheckpointResumeProbeError, match="write_sql_refused:forbidden_function"
+    ):
+        probe._assert_read_only_sql('SELECT U&"read_probe_marker"()')
+
+
+@pytest.mark.parametrize(
+    ("statement", "dialect_name"),
+    (
+        ("SELECT 1 /* outer /* inner */ ; still a comment */; SELECT 2", "postgresql"),
+        ("SELECT 1; -- a comment with ; and '", "postgresql"),
+        ("SELECT 1; -- a comment\rSELECT 2", "postgresql"),
+        ("SELECT 1 /* outer /* SQLite has flat comments */; SELECT 2", "sqlite"),
+        ("SELECT 1; -- a comment\rwith more text\nSELECT 2", "sqlite"),
+    ),
+)
+def test_sql_lexer_consumes_comments(statement: str, dialect_name: str) -> None:
+    """Consume comments according to the dialect's boundaries.
+
+    Given: Reads with line or block comments.
+    When: The guard lexes the SQL for its dialect.
+    Then: Comment contents do not interfere with read classification.
+
+    Args:
+        statement: Input read with dialect-specific comments.
+        dialect_name: SQL dialect governing the comments.
+    """
+    probe._assert_read_only_sql(statement, dialect_name=dialect_name)
+
+
+@pytest.mark.parametrize(
+    ("statement", "dialect_name"),
+    (
+        (r"SELECT e'\\', E'it''s'", "postgresql"),
+        ('SELECT 1 AS U&"read label; inside /*"; SELECT 2', "postgresql"),
+        ('SELECT 1 AS "read"" label; inside /*"; SELECT 2', "postgresql"),
+        ("SELECT $$ ; /* -- $$, $tag$ ' ; $tag$; SELECT 2", "postgresql"),
+        ("SELECT 'it''s ; /* --'; SELECT 2", "postgresql"),
+        ("SELECT U&'read label; /*', ARRAY[1, 2], $1", "postgresql"),
+        ("SELECT 1 AS [read label; /*], 2 AS `read label; --`", "sqlite"),
+        ("SELECT ?", "sqlite"),
+        (r"SELECT 'read\path'", "sqlite"),
+    ),
+)
+def test_sql_lexer_accepts_escaped_strings_and_identifiers(
+    statement: str, dialect_name: str
+) -> None:
+    """Keep escaped delimiters inside their quoted token.
+
+    Given: Reads with dialect-specific quoted strings or identifiers.
+    When: The guard lexes the SQL for its dialect.
+    Then: The guard accepts reads containing escaped delimiters.
+
+    Args:
+        statement: Input read with quoted SQL tokens.
+        dialect_name: SQL dialect governing the quoted tokens.
+    """
+    probe._assert_read_only_sql(statement, dialect_name=dialect_name)
+
+
+@pytest.mark.parametrize(
+    ("statement", "dialect_name"),
+    (
+        ("SELECT 'unfinished", "postgresql"),
+        ("SELECT E'unfinished", "postgresql"),
+        ("SELECT E'backslash\\", "postgresql"),
+        ('SELECT "unfinished', "postgresql"),
+        ('SELECT U&"unfinished', "postgresql"),
+        (r'SELECT 1 AS U&"read\0020label"', "postgresql"),
+        ("SELECT U&'read label' UESCAPE '!'", "postgresql"),
+        (r"SELECT 'read\path'", "postgresql"),
+        ("SELECT $tag$unfinished", "postgresql"),
+        ("SELECT 1 /* unfinished", "postgresql"),
+        ("SELECT 1 /* unfinished /* inner */", "postgresql"),
+        ("SELECT 1\x00", "postgresql"),
+        ("SELECT 1\x01", "postgresql"),
+        ("SELECT 1 AS `read label`", "postgresql"),
+        ("SELECT $$read label$$", "sqlite"),
+        ("SELECT $1", "sqlite"),
+        ("SELECT 1 /* unfinished", "sqlite"),
+        ("SELECT 1 AS [unfinished", "sqlite"),
+        ("SELECT 1 AS `unfinished", "sqlite"),
+        ("SELECT E'read label'", "sqlite"),
+    ),
+)
+def test_sql_lexer_refuses_unclassified_tokens(statement: str, dialect_name: str) -> None:
+    """Refuse SQL when token boundaries cannot be classified.
+
+    Given: SQL with an incomplete or unsupported token for the dialect.
+    When: The guard lexes the input SQL.
+    Then: The guard reports unclassified SQL.
+
+    Args:
+        statement: Input containing an unclassified token.
+        dialect_name: SQL dialect used to classify tokens.
+    """
+    with pytest.raises(probe.CheckpointResumeProbeError, match="unclassified_sql"):
+        probe._assert_read_only_sql(statement, dialect_name=dialect_name)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "BEGIN READ WRITE",
+        "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ WRITE",
+        "START TRANSACTION READ WRITE",
+        "SET TRANSACTION READ WRITE",
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+    ),
+)
+def test_sql_guard_refuses_read_write_transaction_modes(statement: str) -> None:
+    """Refuse read-write mode on every transaction configuration form.
+
+    Given: A transaction configuration statement that requests write access.
+    When: The guard classifies the statement.
+    Then: The guard rejects its read-write mode.
+
+    Args:
+        statement: Transaction configuration SQL.
+    """
+    with pytest.raises(probe.CheckpointResumeProbeError, match="write_sql_refused:READ_WRITE"):
+        probe._assert_read_only_sql(statement)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "VALUES ((SELECT 1 FOR UPDATE))",
+        "VALUES ((SELECT 1 FOR NO KEY UPDATE))",
+        "VALUES ((SELECT 1 FOR SHARE))",
+        "VALUES ((SELECT 1 FOR KEY SHARE))",
+        "EXPLAIN SELECT 1 FOR UPDATE",
+    ),
+)
+def test_sql_guard_refuses_nested_row_locks(statement: str) -> None:
+    """Detect row locks independently of the leading statement verb.
+
+    Given: A read with a locking SELECT nested under another verb.
+    When: The guard classifies the statement.
+    Then: The guard rejects the row-lock clause.
+
+    Args:
+        statement: Read SQL with a nested row-lock clause.
+    """
+    with pytest.raises(probe.CheckpointResumeProbeError, match="write_sql_refused:FOR_UPDATE"):
+        probe._assert_read_only_sql(statement)
+
+
+@pytest.mark.parametrize(
+    "function",
+    (
+        "pg_notify",
+        "pg_catalog.dblink",
+        '"dblink_exec"',
+        '"pg_catalog"."dblink_connect_u"',
+        "dblink_get_result",
+        "lo_create",
+        "lo_import",
+        "lo_export",
+        "lo_unlink",
+        "lo_put",
+        "lo_from_bytea",
+        'pg_catalog."nextval"',
+        "pg_terminate_backend",
+        "pg_cancel_backend",
+        "pg_reload_conf",
+        "pg_rotate_logfile",
+        "pg_file_write",
+        "pg_file_rename",
+        "pg_file_unlink",
+        "pg_file_sync",
+        "pg_logdir_ls",
+    ),
+)
+def test_sql_guard_refuses_side_effecting_calls(function: str) -> None:
+    """Refuse known side-effecting calls through every supported naming form.
+
+    Given: A function on the denylist, optionally qualified or quoted.
+    When: The guard classifies a read containing that function name as a call.
+    Then: The guard rejects the call.
+
+    Args:
+        function: The SQL spelling of the function name.
+    """
+    with pytest.raises(
+        probe.CheckpointResumeProbeError, match="write_sql_refused:forbidden_function"
+    ):
+        probe._assert_read_only_sql(f"SELECT {function}()")
+
+
+def test_sql_guard_refuses_copy_to_program() -> None:
+    """Refuse an external program target.
+
+    Given: COPY with an empty program command as the target.
+    When: The guard classifies the statement.
+    Then: The guard rejects COPY TO PROGRAM.
+    """
+    with pytest.raises(probe.CheckpointResumeProbeError, match="write_sql_refused:COPY_PROGRAM"):
+        probe._assert_read_only_sql("COPY (SELECT 1) TO PROGRAM ''")
+
+
+def test_sql_guard_refuses_nonlocal_set_config() -> None:
+    """Refuse session-level updates through the qualified set_config name.
+
+    Given: A schema-qualified set_config call with the local flag set to false.
+    When: The guard classifies the statement.
+    Then: The guard rejects the setting change.
+    """
+    with pytest.raises(
+        probe.CheckpointResumeProbeError, match="write_sql_refused:forbidden_function"
+    ):
+        probe._assert_read_only_sql("SELECT pg_catalog.set_config('application_name', '', false)")
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "SELECT 1",
+        "SELECT 'READ WRITE; FOR UPDATE' AS \"quoted read\"",
+        'SELECT 1 AS "read write", 2 AS "for update", 3 AS "into"',
+        "WITH sample AS (VALUES (1)) SELECT * FROM sample",
+        "EXPLAIN SELECT 1",
+        "EXPLAIN (COSTS OFF) SELECT 1",
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+    ),
+)
+def test_sql_guard_retains_read_only_allowlist(statement: str) -> None:
+    """Preserve reads, planning-only EXPLAIN and read-only transaction setup.
+
+    Given: An allowlisted SQL statement.
+    When: The guard classifies the statement.
+    Then: The guard accepts the statement.
+
+    Args:
+        statement: Allowlisted SQL statement.
+    """
+    probe._assert_read_only_sql(statement)
 
 
 def test_postgres_shaped_statement_allowlist_and_duration_parsing() -> None:
@@ -1957,21 +2247,12 @@ async def _record_pg_production_read_queries(
     return list(state.queries)
 
 
-async def test_bound_pg_timeout_set_config_and_production_read_audit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Allow exact ``_bound_pnl_correction_transaction`` SQL and verify all probe reads pass guard.
+def test_sql_guard_accepts_only_bound_pg_timeout_set_config() -> None:
+    """Allow the exact transaction-local timeout CASE and refuse other settings.
 
-    Given: Exact production ``set_config`` timeout SQL, tampered/over-cap variants, and live
-        SQLite + PostgreSQL-dialect production read paths exercised against an SQL recorder.
-    When: ``_assert_read_only_sql`` checks every direct case and every recorded statement.
-    Then: Exact ``_bound_pnl_correction_transaction`` SQL passes within caps, over-cap or
-        tampered ``set_config`` refuses cleanly, and every recorded read statement passes.
-
-    Args:
-        tmp_path: Pytest directory for the temporary SQLite probe database.
-        monkeypatch: Pytest fixture patching fake asyncpg for PG SQL recording.
+    Given: The transaction-local timeout CASE and modified calls.
+    When: The guard classifies each call without a database.
+    Then: The bounded CASE passes and invalid settings are refused.
     """
     pg_bound_sql = (
         "SELECT set_config('statement_timeout', CASE WHEN "
@@ -2004,6 +2285,21 @@ async def test_bound_pg_timeout_set_config_and_production_read_audit(
         ):
             probe._assert_read_only_sql(bad_set_config)
 
+
+async def test_sqlite_production_read_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify production read paths by recording SQLite SQL.
+
+    Given: A SQLite fixture with replay and accrual data.
+    When: The probe runs against the fixture and records its SQL.
+    Then: The guard accepts every recorded statement.
+
+    Args:
+        tmp_path: Pytest directory for the isolated SQLite fixture.
+        monkeypatch: Pytest fixture for configuring the fixture's replay.
+    """
     url, scope = await _seed_and_catchup(tmp_path / "audit.db", monkeypatch)
     async with idless._repository(url) as sqlite_repo:
         async with sqlite_repo.session() as session:
@@ -2027,8 +2323,21 @@ async def test_bound_pg_timeout_set_config_and_production_read_audit(
         )
         assert recorded_sqlite
         for sql in recorded_sqlite:
-            probe._assert_read_only_sql(sql)
+            probe._assert_read_only_sql(sql, dialect_name="sqlite")
 
+
+async def test_postgres_production_read_audit_with_recording_driver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify production read paths with a PostgreSQL SQL recorder.
+
+    Given: A recording asyncpg substitute.
+    When: The repository issues its production P&L reads through the driver.
+    Then: The guard accepts every recorded statement.
+
+    Args:
+        monkeypatch: Pytest fixture for substituting the asyncpg recorder.
+    """
     recorded_pg = await _record_pg_production_read_queries(monkeypatch)
     assert any("set_config('statement_timeout'" in sql for sql in recorded_pg)
     assert any("SET LOCAL jit = off" in sql for sql in recorded_pg)
