@@ -458,8 +458,9 @@ class AppSettings:
         Quote notionals are converted with the portfolio FX candles. A
         missing rate skips this rule. The position API also marks a
         position as dust when its lot-rounded absolute quantity is below
-        the instrument's venue minimum order size. A zero quantity is not
-        dust. The default is ``0.50`` USD.
+        the instrument's venue minimum order size. An exact zero quantity
+        is not dust. A non-zero quantity that lot-rounds to zero is dust.
+        The default is ``0.50`` USD.
 
         Returns:
             Finite, non-negative decimal threshold.

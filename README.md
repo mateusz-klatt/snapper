@@ -221,7 +221,8 @@ TRADE_COMMAND_DISPATCH_TTL_S=30.0
 
 # USD notional below which a position is dust. Quote notionals are
 # converted with the portfolio FX candles. A missing rate skips the
-# rule. Zero disables it. Flat positions are not dust.
+# rule. Zero disables it. An exact zero quantity is not dust. A
+# non-zero quantity that lot-rounds to zero is dust.
 POSITION_DUST_NOTIONAL_THRESHOLD=0.50
 ```
 

@@ -11,9 +11,11 @@ when that is the instrument's lot size.
 the venue contract multiplier and payoff: linear contracts multiply by
 ``contract_size`` and the quote price, and inverse contracts use
 ``contract_size`` quote units per contract. The quote amount is then
-scaled by the USD rate from the portfolio FX candles. A flat quantity,
-a missing rate, or a derivative whose contract value is unknown skips
-the notional rule and leaves only the venue minimum.
+scaled by the USD rate from the portfolio FX candles. An exact zero
+quantity is flat and is never dust. A non-zero quantity that lot-rounds
+to zero is dust. A missing rate, or a derivative whose contract value
+is unknown, skips the notional rule and leaves the lot-round rule and
+the venue minimum.
 """
 
 from collections.abc import Mapping
@@ -112,9 +114,10 @@ class PositionDisplay:
     """Additive display fields for a position or position-cycle payload.
 
     Attributes:
-        is_dust: True when the lot-rounded absolute quantity is below the
-            venue minimum, or the USD notional is below the threshold.
-            A lot-rounded quantity of zero is never dust.
+        is_dust: True when a non-zero quantity lot-rounds to zero, the
+            lot-rounded absolute quantity is below the venue minimum, or
+            the USD notional is below the threshold. An exact zero
+            quantity is flat and is never dust.
         quantity_decimals: Decimal places of the lot step, or None.
         price_decimals: Decimal places of the tick step, or None.
     """
@@ -338,18 +341,18 @@ def step_decimal_places(step: float | None) -> int | None:
 
 
 def _is_dust(inputs: PositionDisplayInput) -> bool:
-    """Return whether the lot-rounded quantity or its USD notional is dust.
+    """Return whether the quantity or its USD notional is dust.
 
-    A lot-rounded quantity of zero is not dust, even when it is below the
-    venue minimum, because the position holds nothing.
+    An exact zero quantity is flat and is never dust. A non-zero quantity
+    that lot-rounds to zero is dust. Otherwise the lot-rounded absolute
+    quantity is dust when it is below the venue minimum, or when its USD
+    notional is below the threshold.
     """
     quantity = _stored_decimal(inputs.quantity)
-    if quantity is None:
+    if quantity is None or quantity == 0:
         return False
     rounded = _round_to_step(quantity, _positive_step(inputs.lot_size))
-    if rounded == 0:
-        return False
-    if _below_minimum(rounded, inputs.min_order_size):
+    if rounded == 0 or _below_minimum(rounded, inputs.min_order_size):
         return True
     notional = _usd_notional(inputs, rounded)
     return notional is not None and notional < inputs.notional_threshold

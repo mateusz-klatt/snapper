@@ -52,10 +52,11 @@ class PositionCycleData(StrictDataSchema[Literal["position_cycle"]]):
 
     Attributes:
         is_dust: True when the cycle peak quantity, priced with the
-            matching position's mark or average, is below the venue
-            minimum or the USD notional threshold. A zero peak is not
-            dust. A cycle with no matching price, USD rate, or known
-            contract value uses the minimum-size rule only.
+            matching position's mark or average, lot-rounds to zero from
+            a non-zero raw peak, is below the venue minimum, or is below
+            the USD notional threshold. An exact zero peak is not dust.
+            A cycle with no matching price, USD rate, or known contract
+            value uses the lot-round and minimum-size rules only.
         quantity_decimals: Decimal places of the instrument lot step,
             or None when the spec has no positive lot size.
         price_decimals: Decimal places of the instrument tick size,
@@ -112,7 +113,7 @@ async def _open_cycle_payloads(
 
     The peak quantity is classified with the same steps, USD rate, and
     mark-or-average price as the matching open position. An orphan cycle
-    has no price, so only its venue minimum can mark it as dust.
+    has no price, so the notional rule does not apply.
     """
     threshold = position_dust_threshold()
     specs = await load_position_spec_steps(

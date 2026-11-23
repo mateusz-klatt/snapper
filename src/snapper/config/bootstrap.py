@@ -296,7 +296,8 @@ class BootstrapSettingsLoader(BaseSettings):
             "USD notional below which a position is dust. Quote notionals "
             "are converted with the portfolio FX candles; a missing rate "
             "skips this rule. The quantity rule still applies when this "
-            "threshold is zero. A zero quantity is not dust."
+            "threshold is zero. An exact zero quantity is not dust. A "
+            "non-zero quantity that lot-rounds to zero is dust."
         ),
     )
 

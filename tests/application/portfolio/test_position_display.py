@@ -504,9 +504,9 @@ def test_half_lot_rounds_away_from_zero() -> None:
 
 
 def test_zero_quantity_with_a_price_is_not_dust() -> None:
-    """A flat position holds nothing, so it is not dust.
+    """An exact zero quantity is flat and is not dust.
 
-    Given: quantity zero, a positive mark, and a venue minimum,
+    Given: quantity 0.0, a positive mark, and a venue minimum,
     When: the position is classified,
     Then: neither the minimum nor the notional rule marks it dust.
     """
@@ -525,26 +525,26 @@ def test_zero_quantity_with_a_price_is_not_dust() -> None:
     assert display.is_dust is False
 
 
-def test_quantity_that_lot_rounds_to_zero_is_not_dust() -> None:
-    """A residue that rounds to no lots is an empty position.
+def test_nonzero_quantity_that_lot_rounds_to_zero_is_dust() -> None:
+    """A non-zero residue that rounds to no lots is dust.
 
-    Given: a quantity smaller than half a lot and a venue minimum,
+    Given: quantity 4e-9, lot 1e-8, and no venue minimum or price,
     When: the position is classified,
-    Then: the rounded zero quantity is not dust.
+    Then: the lot-rounded zero quantity is dust.
     """
     display = _result(
         PositionDisplayInput(
-            quantity=1e-4,
-            lot_size=0.01,
+            quantity=4e-9,
+            lot_size=1e-8,
             tick_size=None,
-            min_order_size=1.0,
-            mark_price=10.0,
+            min_order_size=None,
+            mark_price=None,
             average_price=None,
             quote_currency="USD",
             notional_threshold=_THRESHOLD,
         )
     )
-    assert display.is_dust is False
+    assert display.is_dust is True
 
 
 def test_zero_threshold_disables_the_notional_rule() -> None:

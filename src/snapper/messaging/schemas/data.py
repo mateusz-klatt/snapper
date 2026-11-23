@@ -445,11 +445,12 @@ class PositionData(StrictDataSchema[Literal["position"]]):
             UI clients can wallet-scope the position list without an
             extra position-cycle join (the wallet-scoped position-cycle
             join shortcut).
-        is_dust: True when the lot-rounded absolute quantity is below
-            the venue minimum order size, or the USD notional is below
-            ``POSITION_DUST_NOTIONAL_THRESHOLD``. A zero lot-rounded
-            quantity is not dust. The notional rule is skipped when the
-            USD rate or derivative contract value is unknown.
+        is_dust: True when a non-zero quantity lot-rounds to zero, the
+            lot-rounded absolute quantity is below the venue minimum
+            order size, or the USD notional is below
+            ``POSITION_DUST_NOTIONAL_THRESHOLD``. An exact zero quantity
+            is not dust. The notional rule is skipped when the USD rate
+            or derivative contract value is unknown.
         quantity_decimals: Decimal places of the instrument lot step.
             None when the spec has no positive lot size.
         price_decimals: Decimal places of the instrument tick size.
@@ -474,11 +475,12 @@ class PositionData(StrictDataSchema[Literal["position"]]):
         default=False,
         json_schema_extra=_omit_json_schema_default,
         description=(
-            "True when the lot-rounded absolute quantity is below the venue "
-            "minimum order size, or the USD notional is below "
-            "POSITION_DUST_NOTIONAL_THRESHOLD. A zero quantity is not dust. "
-            "The notional rule is skipped when the USD rate or derivative "
-            "contract value is unknown."
+            "True when a non-zero quantity lot-rounds to zero, the "
+            "lot-rounded absolute quantity is below the venue minimum "
+            "order size, or the USD notional is below "
+            "POSITION_DUST_NOTIONAL_THRESHOLD. An exact zero quantity is "
+            "not dust. The notional rule is skipped when the USD rate or "
+            "derivative contract value is unknown."
         ),
     )
     quantity_decimals: int | None = Field(

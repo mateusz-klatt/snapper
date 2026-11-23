@@ -1467,8 +1467,9 @@ Kraken futures notionals use the contract multiplier and payoff
 (`contract_size` with linear or inverse settlement). The quote amount is
 converted with the same portfolio FX candles the P&L valuation uses. A
 missing rate skips the notional rule instead of guessing, and a derivative
-whose contract value is unknown does the same. A lot-rounded quantity of
-zero is not dust, because nothing is held. `quantity_decimals` and
+whose contract value is unknown does the same. An exact quantity of zero
+is flat and is not dust. A non-zero quantity that lot-rounds to zero is
+dust. `quantity_decimals` and
 `price_decimals` are the decimal places of the instrument lot step and
 tick size, quantized to 12 places so a binary residue cannot inflate the
 scale. Either precision is `null` when that spec field is missing. The
@@ -1939,8 +1940,9 @@ items carry `cycle_public_id`, `shard_key`, `instrument_public_id`,
 quantity and the mark or average price of the position with the same
 instrument, exchange, mode, and wallet, so a cycle and its position agree
 when the peak equals the held quantity. The notional is USD. A missing
-price, rate, or contract value leaves only the venue minimum, and a zero
-peak is not dust.
+price, rate, or contract value leaves the lot-round rule and the venue
+minimum. An exact zero peak is not dust. A non-zero peak that lot-rounds
+to zero is dust.
 
 ### POST /api/position-cycles/close-orphan
 
