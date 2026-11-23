@@ -828,6 +828,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         self._unhealed_accept_events: dict[str, RecordVenueEventParams] = {}
         self._unrecorded_order_terminals: dict[str, RecordVenueEventParams] = {}
         self.unrecorded_order_terminal_drop_count: int = 0
+        self._unrecorded_order_terminal_dropped_cids: set[str] = set()
         self._seen_exec_ids: OrderedDict[str, None] = OrderedDict()
         self._exec_stream_restarts: int = 0
         self._task_restarts: dict[str, int] = {}
@@ -1932,17 +1933,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
     def _drop_unrecorded_order_terminals_on_stop(self) -> None:
         """Drop and warn on any held order terminals still unrecorded at shutdown."""
-        if not self._unrecorded_order_terminals:
-            return
-        exchange_name = self._get_exchange_name()
-        for client_order_id, held_params in list(self._unrecorded_order_terminals.items()):
-            self._unrecorded_order_terminals.pop(client_order_id, None)
-            self._record_unrecorded_order_terminal_drop(
-                client_order_id,
-                held_params,
-                exchange_name,
-                "executor stopped before retry completed",
-            )
+        if self._unrecorded_order_terminals:
+            exchange_name = self._get_exchange_name()
+            for client_order_id, held_params in list(self._unrecorded_order_terminals.items()):
+                self._unrecorded_order_terminals.pop(client_order_id, None)
+                self._record_unrecorded_order_terminal_drop(
+                    client_order_id,
+                    held_params,
+                    exchange_name,
+                    "executor stopped before retry completed",
+                )
+        self._unrecorded_order_terminal_dropped_cids.clear()
 
     async def _dispatch_command(
         self, parsed_suffix: str, payload_str: str, exchange_name: OrderExchange, instrument: str
@@ -3571,6 +3572,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             self._hold_unrecorded_order_terminal(client_order_id, params, exchange_name)
             return None
         self._unrecorded_order_terminals.pop(client_order_id, None)
+        self._unrecorded_order_terminal_dropped_cids.discard(client_order_id)
         return instrument
 
     def _record_unrecorded_order_terminal_drop(
@@ -3580,12 +3582,18 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name: OrderExchange,
         reason: str,
     ) -> None:
-        """Record the WARN metric when a held terminal is evicted or dropped.
+        """Record the WARN metric once per episode when a held terminal is dropped.
 
-        Increments ``unrecorded_order_terminal_drop_count`` (exposed in
-        heartbeat forensics) and logs at WARN level so operators know an
-        order may be terminal without ``order_terminal`` evidence and need
-        the G3-C repair tool (``snapper repair-cancel-targets``).
+        ``unrecorded_order_terminal_drop_count`` counts distinct stuck terminals
+        per episode rather than repeated reconciliation cycles: WARN and
+        counter increment run only when ``client_order_id`` is not yet in
+        ``_unrecorded_order_terminal_dropped_cids``. To keep the set strictly
+        bounded, entries are cleared when recording succeeds, when the order
+        leaves ``pending_orders``, at shutdown, or immediately upon drop/eviction
+        whenever the order is no longer tracked in ``pending_orders`` so
+        eviction of untracked orders can never leave orphans. Emits a WARN
+        log pointing operators to the G3-C repair tool
+        (``snapper repair-cancel-targets``).
 
         Args:
             client_order_id: Dropped order's client order id.
@@ -3593,13 +3601,18 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             exchange_name: Executor exchange, for logs.
             reason: Why the held entry was dropped.
         """
-        self.unrecorded_order_terminal_drop_count += 1
-        logger.warning(
-            f"[{exchange_name}] Order terminal without order_terminal evidence for "
-            f"{client_order_id} (exchange {params.get('exchange_order_id')}, "
-            f"reason={reason}); run G3-C repair tool (snapper repair-cancel-targets) "
-            f"(total drops: {self.unrecorded_order_terminal_drop_count})"
-        )
+        if client_order_id not in self._unrecorded_order_terminal_dropped_cids:
+            self.unrecorded_order_terminal_drop_count += 1
+            logger.warning(
+                f"[{exchange_name}] Order terminal without order_terminal evidence for "
+                f"{client_order_id} (exchange {params.get('exchange_order_id')}, "
+                f"reason={reason}); run G3-C repair tool (snapper repair-cancel-targets) "
+                f"(total drops: {self.unrecorded_order_terminal_drop_count})"
+            )
+        if client_order_id in self.pending_orders:
+            self._unrecorded_order_terminal_dropped_cids.add(client_order_id)
+        else:
+            self._unrecorded_order_terminal_dropped_cids.discard(client_order_id)
 
     def _hold_unrecorded_order_terminal(
         self,
@@ -3611,9 +3624,11 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
         The map is bounded by ``_UNRECORDED_ORDER_TERMINAL_LIMIT``; when it
         is full the oldest entry is dropped with a critical log and the
-        WARN drop metric/log pointing operators to G3-C repair. The enqueue
-        itself logs at critical level with both order ids, because the map
-        does not survive a restart.
+        per-episode WARN drop metric/log pointing operators to G3-C repair
+        (evicted entries that are no longer tracked in ``pending_orders`` are
+        discarded from ``_unrecorded_order_terminal_dropped_cids`` so no
+        orphans remain). The enqueue itself logs at critical level with both
+        order ids, because the map does not survive a restart.
 
         Args:
             client_order_id: Target order's client order id, the map key.
@@ -3727,6 +3742,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     await self.repository.has_venue_event(client_order_id, "order_terminal")
                 ):
                     self._unrecorded_order_terminals.pop(client_order_id, None)
+                    self._unrecorded_order_terminal_dropped_cids.discard(client_order_id)
                     continue
                 if "strategy_tag" not in params:
                     instrument, strategy_tag = await self._order_terminal_metadata(
@@ -3754,6 +3770,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 )
                 continue
             self._unrecorded_order_terminals.pop(client_order_id, None)
+            self._unrecorded_order_terminal_dropped_cids.discard(client_order_id)
 
     async def _process_replace(self, replace: OrderReplaceData) -> None:
         """Reject an order-replace request (replace is not implemented).
@@ -7670,6 +7687,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             pending=pending,
         )
         self.pending_orders.pop(client_order_id, None)
+        self._unrecorded_order_terminal_dropped_cids.discard(client_order_id)
         self.client_by_exchange.pop(exchange_order_id, None)
         logger.info(
             f"[{exchange_name}] Order {client_order_id} {execution.exec_type}, "
@@ -8502,6 +8520,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         """
         if order_terminal:
             self.pending_orders.pop(client_order_id, None)
+            self._unrecorded_order_terminal_dropped_cids.discard(client_order_id)
             self.client_by_exchange.pop(exchange_order_id, None)
             logger.info(f"[{exchange_name}] Order {client_order_id} filled, removed from pending")
 

@@ -14302,3 +14302,177 @@ class TestStreamCancellationEvidenceFirst:
         assert written_row["event_type"] == "fill_observed"
         assert written_row["instrument"] == ""
         assert written_row["shard_key"] == "kraken..live"
+
+    @pytest.mark.asyncio
+    async def test_permanent_unresolvable_loop_warns_and_counts_once_per_episode(self) -> None:
+        """Deduplicate WARN and drop counter per cid per episode while keeping tracking intact.
+
+        Given: a tracked order with permanently empty instrument across 3
+            reconciliation cycles,
+        When: ``_handle_cancellation`` holds and ``_reconcile_with_exchange_unlocked``
+            runs 3 cycles, then retry resolves cleanly for that cid, and a new
+            unresolvable failure happens for the same cid,
+        Then: the 3 stuck recon cycles emit exactly one G3-C WARN and
+            ``drop_count == 1`` while keeping the order tracked; healing clears
+            the episode set so a new failure for the same cid WARNs and counts
+            again (``drop_count == 2``).
+        """
+        ex, repo, client = _stream_evidence_executor(exchange="paper", tracked=True)
+        ex.pending_orders[_CANCEL_CID].request.instrument = ""
+        client.get_order = AsyncMock(
+            return_value=ExchangeOrderSnapshot(
+                id="ex-cancel",
+                client_order_id=_CANCEL_CID,
+                symbol="",
+                side=OrderSideEnum.BUY,
+                type=ExchangeOrderTypeEnum.LIMIT,
+                status=ExchangeOrderStatusEnum.CANCELED,
+                amount=1.0,
+                filled=0.0,
+                remaining=1.0,
+                price=50000.0,
+                timestamp=1700000000.0,
+            )
+        )
+
+        with (
+            patch.object(base_module.logger, "critical"),
+            patch.object(base_module.logger, "warning") as warning_mock,
+        ):
+            await ex._handle_cancellation(
+                _stream_execution_update("canceled", symbol=""),
+                "ex-cancel",
+                _CANCEL_CID,
+                "paper",
+            )
+            for _ in range(3):
+                await ex._reconcile_with_exchange_unlocked()
+
+        episode_one_warns = [
+            call.args[0]
+            for call in warning_mock.call_args_list
+            if "Order terminal without order_terminal evidence" in call.args[0]
+        ]
+        assert len(episode_one_warns) == 1
+        assert ex.unrecorded_order_terminal_drop_count == 1
+        assert _CANCEL_CID in ex._unrecorded_order_terminal_dropped_cids
+        assert _CANCEL_CID in ex.pending_orders
+        assert "ex-cancel" in ex.client_by_exchange
+        assert _CANCEL_CID in ex._unrecorded_order_terminals
+        client._log_order_update_to_db.assert_not_awaited()
+
+        repo.get_active_create_command_by_client_order_id = AsyncMock(
+            return_value={"shard_key": "paper.BTC-USD.paper.scalp", "status": "accepted"}
+        )
+        await ex._retry_unrecorded_order_terminals()
+
+        assert _CANCEL_CID not in ex._unrecorded_order_terminal_dropped_cids
+        assert ex.unrecorded_order_terminal_drop_count == 1
+        repo.insert_order_terminal_once.assert_awaited_once()
+
+        repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
+        ex._unrecorded_order_terminals[_CANCEL_CID] = {
+            "event_type": "order_terminal",
+            "exchange_name": "paper",
+            "instrument": "",
+            "exchange_order_id": "ex-cancel",
+            "client_order_id": _CANCEL_CID,
+            "status": "canceled",
+        }
+        with (
+            patch.object(base_module.logger, "critical"),
+            patch.object(base_module.logger, "warning") as warning_mock_ep2,
+        ):
+            await ex._retry_unrecorded_order_terminals()
+
+        episode_two_warns = [
+            call.args[0]
+            for call in warning_mock_ep2.call_args_list
+            if "Order terminal without order_terminal evidence" in call.args[0]
+        ]
+        assert len(episode_two_warns) == 1
+        assert ex.unrecorded_order_terminal_drop_count == 2
+        assert _CANCEL_CID in ex._unrecorded_order_terminal_dropped_cids
+
+    @pytest.mark.asyncio
+    async def test_eviction_and_stop_bound_episode_set_and_count_correctly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Keep dropped-episode set bounded on eviction and cleared cleanly on stop.
+
+        Given: a tracked order already dropped once in its current episode, an
+            untracked order evicted from a bounded retry map, and another held
+            entry pending at shutdown,
+        When: tracked eviction occurs (without double-counting), untracked eviction
+            occurs, and ``stop()`` runs,
+        Then: ``drop_count`` counts each distinct episode once without leaving
+            untracked orphans on eviction, and ``stop()`` counts only newly
+            dropped entries and empties ``_unrecorded_order_terminal_dropped_cids``.
+        """
+        monkeypatch.setattr(base_module, "_UNRECORDED_ORDER_TERMINAL_LIMIT", 2)
+        ex, _, _ = _stream_evidence_executor(exchange="kraken", tracked=True)
+        ex.pending_orders[_CANCEL_CID].request.instrument = ""
+
+        with (
+            patch.object(base_module.logger, "critical"),
+            patch.object(base_module.logger, "warning"),
+        ):
+            await ex._handle_cancellation(
+                _stream_execution_update("canceled", symbol=""),
+                "ex-cancel",
+                _CANCEL_CID,
+                "kraken",
+            )
+            await ex._retry_unrecorded_order_terminals()
+            assert ex.unrecorded_order_terminal_drop_count == 1
+            assert ex._unrecorded_order_terminal_dropped_cids == {_CANCEL_CID}
+
+            await ex._handle_cancellation(
+                _stream_execution_update("canceled", symbol=""),
+                "ex-cancel",
+                _CANCEL_CID,
+                "kraken",
+            )
+            for cid in ("cid-untracked-1", "cid-untracked-2"):
+                ex._hold_unrecorded_order_terminal(
+                    cid,
+                    {
+                        "event_type": "order_terminal",
+                        "exchange_name": "kraken",
+                        "instrument": "BTC-USD",
+                        "client_order_id": cid,
+                        "status": "canceled",
+                    },
+                    "kraken",
+                )
+
+            assert ex.unrecorded_order_terminal_drop_count == 1
+            assert ex._unrecorded_order_terminal_dropped_cids == {_CANCEL_CID}
+
+            ex._hold_unrecorded_order_terminal(
+                "cid-untracked-3",
+                {
+                    "event_type": "order_terminal",
+                    "exchange_name": "kraken",
+                    "instrument": "BTC-USD",
+                    "client_order_id": "cid-untracked-3",
+                    "status": "canceled",
+                },
+                "kraken",
+            )
+            assert ex.unrecorded_order_terminal_drop_count == 2
+            assert ex._unrecorded_order_terminal_dropped_cids == {_CANCEL_CID}
+
+            await ex.stop()
+
+        assert ex.unrecorded_order_terminal_drop_count == 4
+        assert ex._unrecorded_order_terminals == {}
+        assert ex._unrecorded_order_terminal_dropped_cids == set()
+
+        await ex._handle_cancellation(
+            _stream_execution_update("canceled", symbol="BTC-USD"),
+            "ex-cancel",
+            _CANCEL_CID,
+            "kraken",
+        )
+        assert ex._unrecorded_order_terminal_dropped_cids == set()
