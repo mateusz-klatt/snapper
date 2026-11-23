@@ -40,6 +40,7 @@ def get_files_to_check(project_root: Path) -> list[Path]:
         project_root / "frontend" / "src" / "types" / "ws.generated.ts",
         project_root / "frontend" / "src" / "types" / "entities.generated.ts",
         project_root / "frontend" / "src" / "types" / "permissions.generated.ts",
+        project_root / "frontend" / "src" / "lib" / "schemas" / "shared.generated.zod.ts",
         project_root / "frontend" / "src" / "lib" / "schemas" / "ws.generated.zod.ts",
         project_root / "frontend" / "src" / "lib" / "schemas" / "api.generated.zod.ts",
         project_root / "ios" / "Snapper" / "Models" / "Generated" / "WSMessages.swift",

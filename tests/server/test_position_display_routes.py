@@ -133,17 +133,66 @@ def _client(repo: _SpecRepo, principal: AuthPrincipal | None = None) -> TestClie
     return TestClient(app)
 
 
+def _shared_display_schema(schema: dict[str, object]) -> dict[str, object]:
+    """Return the shared display component embedded in a payload schema."""
+    defs = schema.get("$defs")
+    if not isinstance(defs, dict):
+        raise AssertionError("display component is missing")
+    component = defs.get("PositionDisplayFields")
+    if not isinstance(component, dict):
+        raise AssertionError("PositionDisplayFields is missing")
+    return component
+
+
+def _required_names(schema: dict[str, object]) -> set[str]:
+    """Collect required names from a schema and its allOf members."""
+    names: set[str] = set()
+    required = schema.get("required")
+    if isinstance(required, list):
+        names.update(name for name in required if isinstance(name, str))
+    members = schema.get("allOf")
+    if isinstance(members, list):
+        for member in members:
+            if not isinstance(member, dict):
+                continue
+            nested = member.get("required")
+            if isinstance(nested, list):
+                names.update(name for name in nested if isinstance(name, str))
+    return names
+
+
 def test_dust_flag_stays_optional_in_the_json_schema() -> None:
     """Generated clients may omit is_dust because the server default fills it.
 
     Given: the position and open-cycle response models,
     When: their JSON schemas are built,
-    Then: is_dust has no schema default and is not required.
+    Then: both reference one display component, is_dust has no schema
+        default, and is_dust is not required.
     """
     for model in (PositionData, PositionCycleData):
         schema = model.model_json_schema()
-        assert "default" not in schema["properties"]["is_dust"]
-        assert "is_dust" not in schema["required"]
+        component = _shared_display_schema(schema)
+        properties = component["properties"]
+        if not isinstance(properties, dict):
+            raise AssertionError("display properties are missing")
+        is_dust = properties["is_dust"]
+        if not isinstance(is_dust, dict):
+            raise AssertionError("is_dust schema is missing")
+        assert "default" not in is_dust
+        assert "is_dust" not in _required_names(schema)
+        members = schema["allOf"]
+        if not isinstance(members, list) or not isinstance(members[0], dict):
+            raise AssertionError("display allOf is missing")
+        assert members[0]["$ref"] == "#/$defs/PositionDisplayFields"
+        remainder = members[1]
+        if not isinstance(remainder, dict):
+            raise AssertionError("payload fields are missing")
+        remainder_properties = remainder["properties"]
+        if not isinstance(remainder_properties, dict):
+            raise AssertionError("payload properties are missing")
+        assert "is_dust" not in remainder_properties
+        assert "quantity_decimals" not in remainder_properties
+        assert "price_decimals" not in remainder_properties
 
 
 def test_incomplete_position_row_fails_schema_validation() -> None:

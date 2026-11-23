@@ -13,6 +13,8 @@ from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.schemas.data import RelatedInstrumentsUnderlying
 from snapper.messaging.schemas.data import SignalData
+from snapper.messaging.schemas.data import _copy_schema_text
+from snapper.messaging.schemas.data import _schema_without_display_fields
 
 _FIXED_TIME = datetime(2026, 6, 8, 12, 0, 0, tzinfo=UTC)
 
@@ -307,3 +309,20 @@ def test_downstream_schemas_carry_paired_group_descriptor() -> None:
         assert payload.paired_group_size == 2
         assert payload.paired_group_index == 0
         assert payload.paired_group_policy == "simultaneous"
+
+
+def test_display_schema_helpers_ignore_absent_keywords() -> None:
+    """Schema composition tolerates payloads without object keywords.
+
+    Given: a schema fragment with no property map and non-text annotations,
+    When: the display-field helpers run,
+    Then: they emit an empty object and copy only string annotations.
+    """
+    remainder = _schema_without_display_fields({"properties": None, "required": "nope"})
+    assert remainder == {"type": "object", "properties": {}}
+    target: dict[str, object] = {}
+    _copy_schema_text({"title": 1, "description": None}, target)
+    assert target == {}
+    _copy_schema_text({"title": "PositionData", "description": "Payload."}, target)
+    assert target["title"] == "PositionData"
+    assert target["description"] == "Payload."

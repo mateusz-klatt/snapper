@@ -1046,6 +1046,81 @@ class TestGenerateSwiftStruct:
         assert "case id" in result
         assert 'case userName = "user_name"' in result
 
+    def test_flattens_allof_with_shared_fields_last(self) -> None:
+        """AllOf refs become flat stored properties after the payload fields.
+
+        Given: a payload allOf a shared component and its own properties,
+        When: the Swift struct is generated,
+        Then: both sets of fields are stored and the shared fields come last.
+        """
+        schema = {
+            "allOf": [
+                {"$ref": "#/definitions/PositionDisplayFields"},
+                {
+                    "type": "object",
+                    "properties": {"quantity": {"type": "number"}},
+                    "required": ["quantity"],
+                },
+                "skip-me",
+            ]
+        }
+        definitions = {
+            "PositionDisplayFields": {
+                "type": "object",
+                "properties": {"is_dust": {"type": "boolean"}},
+            },
+            "Missing": {"$ref": "#/definitions/Absent"},
+        }
+        result = "\n".join(generate_swift_struct("PositionData", schema, definitions))
+        assert result.index("let quantity: Double") < result.index("let isDust: Bool?")
+        unresolved = {"allOf": [{"$ref": "#/definitions/Absent"}]}
+        assert "\n".join(generate_swift_struct("EmptyRef", unresolved, {})) == (
+            "struct EmptyRef: Codable, Sendable {\n}"
+        )
+
+    def test_collects_structs_and_enums_from_allof(self, tmp_path: Path) -> None:
+        """AllOf payloads still emit their struct and inline enums.
+
+        Given: an API schema whose payload is an allOf composition,
+        When: Swift types are generated,
+        Then: the struct and its inline enum exist.
+        """
+        schema_path = tmp_path / "schema.json"
+        schema_path.write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "PositionDisplayFields": {
+                            "type": "object",
+                            "properties": {"is_dust": {"type": "boolean"}},
+                        },
+                        "PositionData": {
+                            "allOf": [
+                                {"$ref": "#/definitions/PositionDisplayFields"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "exchange": {
+                                            "type": "string",
+                                            "enum": ["kraken"],
+                                        }
+                                    },
+                                    "required": ["exchange"],
+                                },
+                            ]
+                        },
+                    }
+                }
+            )
+        )
+        output = tmp_path / "APITypes.swift"
+        generate_swift_types(tmp_path, schema_path, output, include_any_codable=False)
+        content = output.read_text()
+        assert "struct PositionData: Codable, Sendable" in content
+        assert "struct PositionDisplayFields: Codable, Sendable" in content
+        assert "enum PositionDataExchange" in content
+        assert generate_types._is_swift_struct_schema({"type": "string"}) is False
+
 
 class TestGenerateSwiftEnum:
     """Tests for generate_swift_enum function."""
@@ -1832,6 +1907,176 @@ class TestGenerateZodObjectSchema:
         assert ".optional()" not in result or "count: z.number().int()," in result
 
 
+class TestZodAllOfComposition:
+    """Tests for shared display-field Zod composition."""
+
+    def test_extends_a_shared_ref_object(self) -> None:
+        """A ref plus an object becomes one extend expression.
+
+        Given: an allOf schema of a component ref and the payload fields,
+        When: the Zod definition is generated,
+        Then: the payload object extends the shared schema and stays strict.
+        """
+        schema = {
+            "allOf": [
+                {"$ref": "#/components/schemas/PositionDisplayFields"},
+                {
+                    "type": "object",
+                    "properties": {"quantity": {"type": "number"}},
+                    "required": ["quantity"],
+                },
+            ]
+        }
+        result = generate_zod_schema_definition("PositionData", schema, {})
+        assert result == (
+            "export const PositionDataSchema = "
+            "z.object({\n    quantity: z.number(),\n  })"
+            ".extend(PositionDisplayFieldsSchema.shape).strict()"
+        )
+
+    def test_rejects_allof_shapes_that_are_not_one_ref_plus_one_object(self) -> None:
+        """Other allOf shapes keep the historical first-member fallback.
+
+        Given: allOf values that are not a two-member ref and object,
+        When: each shape is classified,
+        Then: none of them select the shared extend form.
+        """
+        rejected = [
+            {},
+            {"allOf": "nope"},
+            {"allOf": [{"$ref": "#/definitions/Only"}]},
+            {"allOf": ["ref", {"type": "object"}]},
+            {"allOf": [{"$ref": "#/definitions/A"}, "object"]},
+            {"allOf": [{"type": "object"}, {"type": "object"}]},
+            {
+                "allOf": [
+                    {"$ref": "#/definitions/A"},
+                    {"type": "string"},
+                ]
+            },
+        ]
+        for schema in rejected:
+            assert generate_types._zod_ref_object_allof(schema) is None
+
+    def test_writes_shared_fragment_once_for_websocket_schemas(self, tmp_path: Path) -> None:
+        """WebSocket generation imports the shared display schema.
+
+        Given: a display component and a payload that references it,
+        When: WebSocket Zod schemas are generated,
+        Then: the three fields are declared only in the shared module.
+        """
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        (build_dir / "ws-schemas.json").write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "PositionDisplayFields": {
+                            "type": "object",
+                            "properties": {
+                                "is_dust": {"type": "boolean"},
+                                "quantity_decimals": {"type": "integer"},
+                            },
+                        },
+                        "PositionData": {
+                            "allOf": [
+                                {"$ref": "#/definitions/PositionDisplayFields"},
+                                {
+                                    "type": "object",
+                                    "properties": {"quantity": {"type": "number"}},
+                                    "required": ["quantity"],
+                                },
+                            ]
+                        },
+                    }
+                }
+            )
+        )
+        (tmp_path / "frontend" / "src" / "lib" / "schemas").mkdir(parents=True)
+
+        generate_zod_ws(tmp_path)
+
+        shared = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "shared.generated.zod.ts"
+        ).read_text()
+        websocket = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "ws.generated.zod.ts"
+        ).read_text()
+        assert "is_dust: z.boolean().optional()," in shared
+        assert "export const PositionDisplayFieldsSchema" in shared
+        assert "is_dust:" not in websocket
+        assert "import { PositionDisplayFieldsSchema } from './shared.generated.zod'" in websocket
+        assert ".extend(PositionDisplayFieldsSchema.shape).strict()" in websocket
+
+    def test_writes_shared_fragment_once_for_api_schemas(self, tmp_path: Path) -> None:
+        """REST generation imports the shared display schema.
+
+        Given: an OpenAPI document with the display component and a payload,
+        When: API Zod schemas are generated,
+        Then: the component is imported and its fields are not repeated.
+        """
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        (build_dir / "openapi.json").write_text(
+            json.dumps(
+                {
+                    "components": {
+                        "schemas": {
+                            "PositionDisplayFields": {
+                                "properties": {
+                                    "is_dust": {"type": "boolean"},
+                                }
+                            },
+                            "PositionData": {
+                                "allOf": [
+                                    {"$ref": "#/components/schemas/PositionDisplayFields"},
+                                    {
+                                        "type": "object",
+                                        "properties": {"quantity": {"type": "number"}},
+                                        "required": ["quantity"],
+                                    },
+                                ]
+                            },
+                        }
+                    }
+                }
+            )
+        )
+        (tmp_path / "frontend" / "src" / "lib" / "schemas").mkdir(parents=True)
+
+        generate_zod_api(tmp_path)
+
+        shared = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "shared.generated.zod.ts"
+        ).read_text()
+        api = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "api.generated.zod.ts"
+        ).read_text()
+        assert "is_dust: z.boolean().optional()," in shared
+        assert "const _PositionDisplayFieldsRawSchema" not in api
+        assert "import { PositionDisplayFieldsSchema } from './shared.generated.zod'" in api
+        assert "export type PositionDisplayFields = " in api
+        assert ".extend(PositionDisplayFieldsSchema.shape).strict()" in api
+
+    def test_canonical_object_drops_non_object_keywords(self) -> None:
+        """Shared fragments ignore titles and empty required lists.
+
+        Given: a component without properties and one with no required names,
+        When: the object is canonicalized for Zod,
+        Then: only an object schema remains.
+        """
+        without_properties = generate_types._canonical_zod_object({"title": "Ignored"})
+        assert without_properties == {"type": "object", "properties": {}}
+        without_required = generate_types._canonical_zod_object(
+            {"properties": {"is_dust": {"type": "boolean"}}, "required": []}
+        )
+        assert "required" not in without_required
+        with_required = generate_types._canonical_zod_object(
+            {"properties": {"id": {"type": "integer"}}, "required": ["id"]}
+        )
+        assert with_required["required"] == ["id"]
+
+
 class TestGenerateZodSchemaDefinition:
     """Tests for generate_zod_schema_definition function."""
 
@@ -2177,6 +2422,33 @@ class TestGenerateEntityInterface:
         result = "\n".join(lines)
         assert "type:" not in result
         assert "data:" in result
+
+    def test_flattens_allof_shared_fields_after_payload(self) -> None:
+        """AllOf refs stay flat on the entity and follow the payload fields.
+
+        Given: an entity schema composed of a shared component and its own properties,
+        When: the interface is generated,
+        Then: both field sets are present and the shared fields come last.
+        """
+        schema = {
+            "allOf": [
+                {"$ref": "#/definitions/PositionDisplayFields"},
+                {
+                    "type": "object",
+                    "properties": {"quantity": {"type": "number"}},
+                    "required": ["quantity"],
+                },
+            ]
+        }
+        definitions = {
+            "PositionDisplayFields": {
+                "type": "object",
+                "properties": {"is_dust": {"type": "boolean"}},
+            }
+        }
+        lines = generate_entity_interface("Position", schema, all_schemas=definitions)
+        result = "\n".join(lines)
+        assert result.index("quantity: number") < result.index("isDust?: boolean")
 
 
 class TestDeriveEntityName:

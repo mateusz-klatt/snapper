@@ -72,6 +72,8 @@ top-level enum whose values (``read:market_data``) carry colons that are not
 valid Swift identifier characters, so ``Permissions.swift`` is the only correct
 source for it."""
 _DEFS_KEY = "$defs"
+_SHARED_ZOD_SCHEMA_NAMES = frozenset({"PositionDisplayFields"})
+_SHARED_ZOD_PATH = Path("frontend") / "src" / "lib" / "schemas" / "shared.generated.zod.ts"
 _STRIP_ESLINT_DISABLE_TARGET = Path("frontend") / "src" / "types" / "ws.generated.ts"
 _OPENAPI_TYPESCRIPT_TARGET = Path("frontend") / "src" / "types" / "api.generated.ts"
 _SWIFT_HEADER_LINES = [
@@ -766,6 +768,108 @@ def _swift_struct_coding_key_lines(properties: list[SwiftPropertySpec]) -> list[
     return lines
 
 
+def _deref_local_schema(schema: dict[str, Any], definitions: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a local JSON Schema ``$ref`` to its definition.
+
+    Args:
+        schema: Schema object that may contain ``$ref``.
+        definitions: Schema definitions keyed by name.
+
+    Returns:
+        The referenced definition, or ``schema`` when it is not a local ref.
+    """
+    ref = schema.get("$ref")
+    if not isinstance(ref, str):
+        return schema
+    target = definitions.get(ref.rsplit("/", 1)[-1])
+    if isinstance(target, dict):
+        return target
+    return schema
+
+
+def _ordered_allof_members(members: list[Any]) -> list[Any]:
+    """Place object members before ``$ref`` members.
+
+    Display-field components are referenced from ``allOf``. Emitting the
+    payload's own properties first keeps generated Swift fields in their
+    previous order, with the shared fields appended.
+
+    Args:
+        members: ``allOf`` members in schema order.
+
+    Returns:
+        Members with plain objects before references.
+    """
+    objects: list[Any] = []
+    refs: list[Any] = []
+    for member in members:
+        if isinstance(member, dict) and isinstance(member.get("$ref"), str):
+            refs.append(member)
+        else:
+            objects.append(member)
+    return [*objects, *refs]
+
+
+def _append_object_fields(
+    schema: dict[str, Any],
+    properties: dict[str, Any],
+    required: list[Any],
+) -> None:
+    """Merge one object's properties and required names into accumulators.
+
+    Args:
+        schema: Object schema or a schema that may carry those keywords.
+        properties: Accumulated properties in emission order.
+        required: Accumulated required names in emission order.
+    """
+    member_properties = schema.get("properties")
+    if isinstance(member_properties, dict):
+        properties.update(member_properties)
+    member_required = schema.get("required")
+    if isinstance(member_required, list):
+        required.extend(member_required)
+
+
+def _flatten_schema_allof(schema: dict[str, Any], definitions: dict[str, Any]) -> dict[str, Any]:
+    """Merge ``allOf`` members into one object schema.
+
+    Swift structs stay flat so decoding matches the JSON object. A shared
+    display component contributes its properties instead of becoming a
+    nested value.
+
+    Args:
+        schema: JSON Schema definition, possibly composed with ``allOf``.
+        definitions: Schema definitions for reference resolution.
+
+    Returns:
+        The original schema, or an object schema with merged properties.
+    """
+    members = schema.get("allOf")
+    if not isinstance(members, list):
+        return schema
+    properties: dict[str, Any] = {}
+    required: list[Any] = []
+    for member in _ordered_allof_members(members):
+        if not isinstance(member, dict):
+            continue
+        flat = _flatten_schema_allof(_deref_local_schema(member, definitions), definitions)
+        _append_object_fields(flat, properties, required)
+    _append_object_fields(schema, properties, required)
+    return {**schema, "type": "object", "properties": properties, "required": required}
+
+
+def _is_swift_struct_schema(schema: dict[str, Any]) -> bool:
+    """Return whether a definition should be emitted as a Swift struct.
+
+    Args:
+        schema: JSON Schema definition.
+
+    Returns:
+        True for object schemas and for ``allOf`` compositions of objects.
+    """
+    return schema.get("type") == "object" or isinstance(schema.get("allOf"), list)
+
+
 def generate_swift_struct(
     name: str, schema: dict[str, Any], definitions: dict[str, Any]
 ) -> list[str]:
@@ -779,6 +883,7 @@ def generate_swift_struct(
     Returns:
         List of Swift code lines for the struct.
     """
+    schema = _flatten_schema_allof(schema, definitions)
     properties = _swift_struct_property_specs(schema, definitions)
     lines = [f"struct {name}: Codable, Sendable {{"]
     lines.extend(_swift_struct_field_lines(properties))
@@ -921,9 +1026,10 @@ def _collect_inline_enums(
         generated_enums: Mutable set of already-generated enum names.
     """
     for name, type_schema in definitions.items():
-        if type_schema.get("type") != "object":
+        flat = _flatten_schema_allof(type_schema, definitions)
+        if flat.get("type") != "object":
             continue
-        for prop_name, prop_schema in type_schema.get("properties", {}).items():
+        for prop_name, prop_schema in flat.get("properties", {}).items():
             if "enum" not in prop_schema or prop_schema.get("type") != "string":
                 continue
             enum_name = f"{name}{prop_name.title().replace('_', '')}"
@@ -951,12 +1057,13 @@ def _collect_structs(
     skip = set(generated_structs or ())
     emitted: set[str] = set()
     for name, type_schema in definitions.items():
-        if type_schema.get("type") == "object":
-            if name in skip:
-                continue
-            lines.extend(generate_swift_struct(name, type_schema, definitions))
-            lines.append("")
-            emitted.add(name)
+        if not _is_swift_struct_schema(type_schema):
+            continue
+        if name in skip:
+            continue
+        lines.extend(generate_swift_struct(name, type_schema, definitions))
+        lines.append("")
+        emitted.add(name)
     return emitted
 
 
@@ -1191,15 +1298,15 @@ def json_type_to_zod(prop: dict[str, Any], required: bool, definitions: dict[str
     return "z.unknown()"
 
 
-def generate_zod_object_schema(schema: dict[str, Any], definitions: dict[str, Any]) -> str:
-    """Generate Zod object schema from JSON Schema.
+def _zod_object_expr(schema: dict[str, Any], definitions: dict[str, Any]) -> str:
+    """Return a Zod object expression without the strict modifier.
 
     Args:
         schema: JSON Schema object definition.
         definitions: Schema definitions for reference resolution.
 
     Returns:
-        Zod object schema string.
+        ``z.object({...})`` expression.
     """
     properties = schema.get("properties", {})
     required_fields = set(schema.get("required", []))
@@ -1213,7 +1320,77 @@ def generate_zod_object_schema(schema: dict[str, Any], definitions: dict[str, An
             zod_type = f"{zod_type}.optional()"
         fields.append(f"    {name}: {zod_type},")
     fields_str = "\n".join(fields)
-    return f"z.object({{\n{fields_str}\n  }}).strict()"
+    return f"z.object({{\n{fields_str}\n  }})"
+
+
+def generate_zod_object_schema(schema: dict[str, Any], definitions: dict[str, Any]) -> str:
+    """Generate Zod object schema from JSON Schema.
+
+    Args:
+        schema: JSON Schema object definition.
+        definitions: Schema definitions for reference resolution.
+
+    Returns:
+        Zod object schema string.
+    """
+    return f"{_zod_object_expr(schema, definitions)}.strict()"
+
+
+def _zod_ref_object_allof(schema: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """Return a shared ``$ref`` and object body from a two-member ``allOf``.
+
+    Args:
+        schema: JSON Schema definition that may be an ``allOf`` composition.
+
+    Returns:
+        Reference name and the object member, or ``None`` for other shapes.
+    """
+    members = schema.get("allOf")
+    if not isinstance(members, list) or len(members) != 2:
+        return None
+    ref_member, object_member = members
+    if not isinstance(ref_member, dict) or not isinstance(object_member, dict):
+        return None
+    ref = ref_member.get("$ref")
+    if not isinstance(ref, str) or object_member.get("type") != "object":
+        return None
+    return ref.rsplit("/", 1)[-1], object_member
+
+
+def _zod_definition_expr(
+    name: str,
+    schema: dict[str, Any],
+    definitions: dict[str, Any],
+) -> str:
+    """Return the Zod expression for one named schema.
+
+    Args:
+        name: Schema name.
+        schema: JSON Schema definition.
+        definitions: Schema definitions for reference resolution.
+
+    Returns:
+        Zod expression without a declaration keyword.
+    """
+    if name in _RECURSIVE_JSON_TYPES:
+        if name == "JsonObject":
+            return "z.record(z.string(), z.any())"
+        return "z.unknown()"
+    if schema.get("type") == "string" and "enum" in schema:
+        enum_values = ", ".join(f"'{v}'" for v in schema["enum"])
+        return f"z.enum([{enum_values}])"
+    composed = _zod_ref_object_allof(schema)
+    if composed is not None:
+        ref_name, body = composed
+        body_expr = _zod_object_expr(body, definitions)
+        return f"{body_expr}.extend({ref_name}Schema.shape).strict()"
+    if schema.get("type") == "object":
+        return generate_zod_object_schema(schema, definitions)
+    if schema.get("type") == "array":
+        items = schema.get("items", {})
+        item_type = json_type_to_zod(items, True, definitions)
+        return f"z.array({item_type})"
+    return json_type_to_zod(schema, True, definitions)
 
 
 def generate_zod_schema_definition(
@@ -1241,22 +1418,8 @@ def generate_zod_schema_definition(
     """
     decl_name = f"{name}Schema" if exported else f"_{name}RawSchema"
     decl_prefix = "export const " if exported else "const "
-    if name in _RECURSIVE_JSON_TYPES:
-        if name == "JsonObject":
-            return f"{decl_prefix}{decl_name} = z.record(z.string(), z.any())"
-        return f"{decl_prefix}{decl_name} = z.unknown()"
-    if schema.get("type") == "string" and "enum" in schema:
-        enum_values = ", ".join(f"'{v}'" for v in schema["enum"])
-        return f"{decl_prefix}{decl_name} = z.enum([{enum_values}])"
-    if schema.get("type") == "object":
-        zod_schema = generate_zod_object_schema(schema, definitions)
-        return f"{decl_prefix}{decl_name} = {zod_schema}"
-    if schema.get("type") == "array":
-        items = schema.get("items", {})
-        item_type = json_type_to_zod(items, True, definitions)
-        return f"{decl_prefix}{decl_name} = z.array({item_type})"
-    zod_type = json_type_to_zod(schema, True, definitions)
-    return f"{decl_prefix}{decl_name} = {zod_type}"
+    expression = _zod_definition_expr(name, schema, definitions)
+    return f"{decl_prefix}{decl_name} = {expression}"
 
 
 def _build_schema_deps(
@@ -1309,6 +1472,100 @@ def topological_sort_schemas(schemas: dict[str, Any], ref_prefix: str) -> list[s
     return result
 
 
+def _canonical_zod_object(schema: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a component to the keywords that affect Zod object emission.
+
+    Args:
+        schema: JSON Schema component.
+
+    Returns:
+        Object schema containing properties and, when present, required names.
+    """
+    properties = schema.get("properties")
+    required = schema.get("required")
+    canonical: dict[str, Any] = {
+        "type": "object",
+        "properties": properties if isinstance(properties, dict) else {},
+    }
+    if isinstance(required, list) and required:
+        canonical["required"] = required
+    return canonical
+
+
+def _shared_zod_names(schemas: dict[str, Any]) -> list[str]:
+    """Return shared Zod components present in a schema document.
+
+    Args:
+        schemas: Named JSON Schema definitions.
+
+    Returns:
+        Shared component names in document order.
+    """
+    return [name for name in schemas if name in _SHARED_ZOD_SCHEMA_NAMES]
+
+
+def _render_shared_zod_module(schemas: dict[str, Any], names: list[str]) -> str:
+    """Render the module that both Zod files import.
+
+    Args:
+        schemas: Named JSON Schema definitions.
+        names: Shared component names to emit.
+
+    Returns:
+        TypeScript source for the shared Zod module.
+    """
+    lines = [
+        "/**",
+        " * Generated Zod fragments shared by REST and WebSocket schemas.",
+        " * DO NOT EDIT - regenerate with: make ui-gen-types",
+        " */",
+        "",
+        "import { z } from 'zod/v4'",
+        "",
+    ]
+    for name in names:
+        lines.append(
+            generate_zod_schema_definition(name, _canonical_zod_object(schemas[name]), schemas)
+        )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _write_shared_zod_module(project_root: Path, schemas: dict[str, Any]) -> list[str]:
+    """Write shared Zod components once for REST and WebSocket imports.
+
+    Args:
+        project_root: Root directory of the project.
+        schemas: Named JSON Schema definitions from one generator input.
+
+    Returns:
+        Shared component names written to the module. Empty when this
+        document has none.
+    """
+    names = _shared_zod_names(schemas)
+    if not names:
+        return []
+    output = project_root / _SHARED_ZOD_PATH
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(_render_shared_zod_module(schemas, names))
+    return names
+
+
+def _shared_zod_import_lines(names: list[str]) -> list[str]:
+    """Return the import of shared Zod components.
+
+    Args:
+        names: Shared component names.
+
+    Returns:
+        Import lines, or an empty list when there is nothing to import.
+    """
+    if not names:
+        return []
+    imported = ", ".join(f"{name}Schema" for name in names)
+    return [f"import {{ {imported} }} from './shared.generated.zod'", ""]
+
+
 def generate_zod_ws(project_root: Path) -> None:
     """Generate Zod schemas for WebSocket messages.
 
@@ -1327,6 +1584,7 @@ def generate_zod_ws(project_root: Path) -> None:
         print("Error: No definitions found in build/ws-schemas.json")
         return
     sorted_names = topological_sort_schemas(definitions, _DEFS_REF_PREFIX)
+    shared_names = _write_shared_zod_module(project_root, definitions)
     lines = [
         "/**",
         " * Generated Zod schemas for WebSocket message validation.",
@@ -1335,8 +1593,11 @@ def generate_zod_ws(project_root: Path) -> None:
         "",
         "import { z } from 'zod/v4'",
         "",
+        *_shared_zod_import_lines(shared_names),
     ]
     for name in sorted_names:
+        if name in _SHARED_ZOD_SCHEMA_NAMES:
+            continue
         definition = definitions[name]
         schema_def = generate_zod_schema_definition(name, definition, definitions)
         lines.append(schema_def)
@@ -1365,6 +1626,7 @@ def generate_zod_api(project_root: Path) -> None:
         print("Error: No schemas found in build/openapi.json")
         return
     sorted_names = topological_sort_schemas(schemas, _COMPONENTS_REF_PREFIX)
+    shared_names = _write_shared_zod_module(project_root, schemas)
     lines = [
         "/**",
         " * Generated Zod schemas for REST API validation.",
@@ -1384,10 +1646,13 @@ def generate_zod_api(project_root: Path) -> None:
         "",
         "import { z } from 'zod'",
         "",
+        *_shared_zod_import_lines(shared_names),
         "import type { Components } from '../../types/api.generated'",
         "",
     ]
     for name in sorted_names:
+        if name in _SHARED_ZOD_SCHEMA_NAMES:
+            continue
         schema = schemas[name]
         raw_definition = generate_zod_schema_definition(name, schema, schemas, exported=False)
         lines.extend(
@@ -1757,6 +2022,9 @@ def generate_entity_interface(
 ) -> list[str]:
     """Generate TypeScript interface for an entity.
 
+    ``allOf`` compositions are flattened so a shared component contributes
+    fields on the same interface instead of replacing the payload.
+
     Args:
         entity_name: Name of the interface to generate.
         schema: JSON Schema definition for the entity.
@@ -1767,6 +2035,8 @@ def generate_entity_interface(
         List of TypeScript code lines for the interface.
     """
     lines: list[str] = []
+    definitions = all_schemas if all_schemas is not None else {}
+    schema = _flatten_schema_allof(schema, definitions)
 
     if doc_comment:
         lines.append("/**")

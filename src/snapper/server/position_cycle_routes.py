@@ -17,8 +17,6 @@ from fastapi import Depends
 from fastapi import HTTPException
 from fastapi import status
 from loguru import logger
-from pydantic import Field
-from pydantic.config import JsonDict
 
 from snapper.api.schemas.base import PayloadListResponse
 from snapper.api.schemas.base import PayloadResponse
@@ -34,6 +32,7 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.data.repository import Repository
 from snapper.data.repository_types import PositionCycleRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.schemas.data import PositionDisplayComposition
 from snapper.server.dependencies import get_repository_dependency
 from snapper.server.position_display import load_position_quote_prices
 from snapper.server.position_display import load_position_spec_steps
@@ -42,12 +41,7 @@ from snapper.server.position_display import position_dust_threshold
 router = APIRouter(prefix="/position-cycles", tags=["position-cycles"])
 
 
-def _omit_json_schema_default(schema: JsonDict) -> None:
-    """Drop a runtime default so generated clients can omit the field."""
-    schema.pop("default", None)
-
-
-class PositionCycleData(StrictDataSchema[Literal["position_cycle"]]):
+class PositionCycleData(PositionDisplayComposition, StrictDataSchema[Literal["position_cycle"]]):
     """Position cycle summary for admin display.
 
     Attributes:
@@ -75,9 +69,6 @@ class PositionCycleData(StrictDataSchema[Literal["position_cycle"]]):
     max_qty: float
     opened_at: str
     age_hours: float
-    is_dust: bool = Field(default=False, json_schema_extra=_omit_json_schema_default)
-    quantity_decimals: int | None = None
-    price_decimals: int | None = None
 
 
 class PositionCycleListResponse(

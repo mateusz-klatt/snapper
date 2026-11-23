@@ -31,6 +31,7 @@ class TestGetFilesToCheck:
             "api.generated.ts",
             "ws.generated.ts",
             "entities.generated.ts",
+            "shared.generated.zod.ts",
             "ws.generated.zod.ts",
             "api.generated.zod.ts",
             "WSMessages.swift",

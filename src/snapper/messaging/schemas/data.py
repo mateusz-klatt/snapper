@@ -35,11 +35,16 @@ System message classes:
 
 from datetime import datetime
 from typing import Literal
+from typing import Protocol
 from typing import Self
+from typing import cast
 
 from pydantic import Field
+from pydantic import GetJsonSchemaHandler
 from pydantic import model_validator
 from pydantic.config import JsonDict
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
 
 from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
@@ -406,7 +411,149 @@ class OrderData(StrictDataSchema[Literal["order"]]):
     paired_group_policy: PairedExecutionPolicy | None = None
 
 
-class PositionData(StrictDataSchema[Literal["position"]]):
+_POSITION_DISPLAY_FIELD_NAMES = frozenset({"is_dust", "quantity_decimals", "price_decimals"})
+
+
+class PositionDisplayFields(StrictBody):
+    """Dust flag and display precision shared by position payloads.
+
+    Position and open-cycle payloads stay flat JSON objects. Their JSON
+    schemas reference this component with ``allOf`` so generated clients
+    declare the three fields once.
+    """
+
+    is_dust: bool = Field(
+        default=False,
+        json_schema_extra=_omit_json_schema_default,
+        description=(
+            "True when a non-zero quantity lot-rounds to zero, the "
+            "lot-rounded absolute quantity is below the venue minimum "
+            "order size, or the USD notional is below "
+            "POSITION_DUST_NOTIONAL_THRESHOLD. An exact zero quantity is "
+            "not dust. The notional rule is skipped when the USD rate or "
+            "derivative contract value is unknown."
+        ),
+    )
+    quantity_decimals: int | None = Field(
+        default=None,
+        description="Decimal places of the instrument lot step. Null when lot size is absent.",
+    )
+    price_decimals: int | None = Field(
+        default=None,
+        description="Decimal places of the instrument tick size. Null when tick size is absent.",
+    )
+
+
+class _DisplaySchemaGenerator(Protocol):
+    """JSON schema generator that can register one model."""
+
+    def generate_inner(self, schema: CoreSchema) -> JsonSchemaValue:
+        """Return the JSON schema for a core schema."""
+        ...
+
+
+class _HandlerWithSchemaGenerator(Protocol):
+    """JSON schema handler that exposes its generator."""
+
+    generate_json_schema: _DisplaySchemaGenerator
+
+
+def _display_component_ref(handler: GetJsonSchemaHandler) -> JsonSchemaValue:
+    """Register the shared display fields and return their component reference.
+
+    Args:
+        handler: Pydantic JSON schema handler for the payload model.
+
+    Returns:
+        A ``$ref`` to ``PositionDisplayFields``.
+    """
+    generator = cast(_HandlerWithSchemaGenerator, handler).generate_json_schema
+    return generator.generate_inner(PositionDisplayFields.__pydantic_core_schema__)
+
+
+def _schema_without_display_fields(schema: JsonSchemaValue) -> JsonSchemaValue:
+    """Copy a payload schema with the shared display fields removed.
+
+    Args:
+        schema: Inline payload schema that still lists every field.
+
+    Returns:
+        Object schema of the payload fields other than the display fields.
+    """
+    raw_properties = schema.get("properties")
+    kept: dict[str, object] = {}
+    if isinstance(raw_properties, dict):
+        kept = {
+            str(name): value
+            for name, value in raw_properties.items()
+            if str(name) not in _POSITION_DISPLAY_FIELD_NAMES
+        }
+    remainder: JsonSchemaValue = {"type": "object", "properties": kept}
+    raw_required = schema.get("required")
+    if isinstance(raw_required, list):
+        remainder["required"] = [str(name) for name in raw_required]
+    return remainder
+
+
+def _copy_schema_text(source: JsonSchemaValue, target: JsonSchemaValue) -> None:
+    """Copy title and description onto a composed schema.
+
+    Args:
+        source: Inline schema that already carries the model text.
+        target: Composed schema that should keep that text.
+    """
+    for key in ("title", "description"):
+        value = source.get(key)
+        if isinstance(value, str):
+            target[key] = value
+
+
+def _compose_position_display_schema(
+    core_schema: CoreSchema,
+    handler: GetJsonSchemaHandler,
+) -> JsonSchemaValue:
+    """Build an allOf schema that references the shared display fields.
+
+    Args:
+        core_schema: Core schema of the payload model.
+        handler: Pydantic JSON schema handler.
+
+    Returns:
+        JSON schema whose instance shape is the flat payload object.
+    """
+    own = handler(core_schema)
+    composed: JsonSchemaValue = {
+        "allOf": [
+            _display_component_ref(handler),
+            _schema_without_display_fields(own),
+        ],
+    }
+    _copy_schema_text(own, composed)
+    return composed
+
+
+class PositionDisplayComposition(PositionDisplayFields):
+    """Payload base that publishes display fields as one schema component."""
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls,
+        core_schema: CoreSchema,
+        handler: GetJsonSchemaHandler,
+    ) -> JsonSchemaValue:
+        """Emit display fields through the shared component reference.
+
+        Args:
+            core_schema: Core schema of the payload model.
+            handler: Pydantic JSON schema handler.
+
+        Returns:
+            JSON schema for the flat payload object.
+        """
+        return _compose_position_display_schema(core_schema, handler)
+
+
+class PositionData(PositionDisplayComposition, StrictDataSchema[Literal["position"]]):
     """Portfolio position snapshot.
 
     Represents a single position in the portfolio.
@@ -445,16 +592,16 @@ class PositionData(StrictDataSchema[Literal["position"]]):
             UI clients can wallet-scope the position list without an
             extra position-cycle join (the wallet-scoped position-cycle
             join shortcut).
-        is_dust: True when a non-zero quantity lot-rounds to zero, the
-            lot-rounded absolute quantity is below the venue minimum
-            order size, or the USD notional is below
-            ``POSITION_DUST_NOTIONAL_THRESHOLD``. An exact zero quantity
-            is not dust. The notional rule is skipped when the USD rate
-            or derivative contract value is unknown.
-        quantity_decimals: Decimal places of the instrument lot step.
-            None when the spec has no positive lot size.
-        price_decimals: Decimal places of the instrument tick size.
-            None when the spec has no positive tick size.
+        is_dust: Inherited display flag. True when a non-zero quantity
+            lot-rounds to zero, the lot-rounded absolute quantity is
+            below the venue minimum order size, or the USD notional is
+            below ``POSITION_DUST_NOTIONAL_THRESHOLD``. An exact zero
+            quantity is not dust. The notional rule is skipped when the
+            USD rate or derivative contract value is unknown.
+        quantity_decimals: Inherited decimal places of the instrument
+            lot step. None when the spec has no positive lot size.
+        price_decimals: Inherited decimal places of the instrument tick
+            size. None when the spec has no positive tick size.
     """
 
     type: Literal["position"] = "position"
@@ -471,26 +618,6 @@ class PositionData(StrictDataSchema[Literal["position"]]):
     source_venue_event_id: int | None = None
     position_cycle_public_id: str | None = None
     wallet_public_id: str = ""
-    is_dust: bool = Field(
-        default=False,
-        json_schema_extra=_omit_json_schema_default,
-        description=(
-            "True when a non-zero quantity lot-rounds to zero, the "
-            "lot-rounded absolute quantity is below the venue minimum "
-            "order size, or the USD notional is below "
-            "POSITION_DUST_NOTIONAL_THRESHOLD. An exact zero quantity is "
-            "not dust. The notional rule is skipped when the USD rate or "
-            "derivative contract value is unknown."
-        ),
-    )
-    quantity_decimals: int | None = Field(
-        default=None,
-        description="Decimal places of the instrument lot step. Null when lot size is absent.",
-    )
-    price_decimals: int | None = Field(
-        default=None,
-        description="Decimal places of the instrument tick size. Null when tick size is absent.",
-    )
 
 
 class AccountBalanceEntry(StrictBody):
