@@ -14,6 +14,7 @@ from snapper.core.types import ExecutionModeEnum
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Execution
 from snapper.data.models import Order
+from snapper.data.models import PairedExecutionLeg
 from snapper.data.models import TradeCommand
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import VenueEvent
@@ -286,9 +287,54 @@ def checkpoint(
     )
 
 
+def paired_execution_leg(
+    *, client_order_id: str | None, exchange_order_id: str | None
+) -> PairedExecutionLeg:
+    """Build one paired-execution leg identified by either order identifier.
+
+    Args:
+        client_order_id: Client order id on the leg, or ``None``.
+        exchange_order_id: Exchange order id on the leg, or ``None``.
+
+    Returns:
+        The ORM row, not yet added.
+    """
+    return PairedExecutionLeg(
+        public_id="00000000-0000-7000-8000-0000000000d1",
+        group_public_id="00000000-0000-7000-8000-0000000000d2",
+        leg_index=0,
+        exchange="kraken",
+        mode="live",
+        instrument="XRP-EUR",
+        shard_key=KRAKEN_SHARD,
+        side="buy",
+        target_qty=5.0,
+        signal_public_id="00000000-0000-7000-8000-0000000000d3",
+        client_order_id=client_order_id,
+        exchange_order_id=exchange_order_id,
+        status="pending",
+        filled_signed_qty=0.0,
+        compensated_signed_qty=0.0,
+        compensation_seq=0,
+        wallet_public_id=WALLET,
+        created_at=CREATED_AT,
+        session_id=SESSION,
+        sequence_id=1,
+        timestamp=CREATED_AT,
+        known_to=KNOWN_TO_MAX,
+    )
+
+
 async def add_rows(
     repository: SQLAlchemyRepository,
-    rows: list[TradeCommand | Order | Execution | VenueEvent | TradeProjectionCheckpoint],
+    rows: list[
+        TradeCommand
+        | Order
+        | Execution
+        | VenueEvent
+        | TradeProjectionCheckpoint
+        | PairedExecutionLeg
+    ],
 ) -> None:
     """Insert rows in one transaction.
 
@@ -322,7 +368,14 @@ async def seed_kraken_pair(repository: SQLAlchemyRepository, index: int = 1) -> 
         order_id=f"00000000-0000-7000-8000-00000000{index:02d}0d",
         client_order_id=f"cid-{index}",
     )
-    rows: list[TradeCommand | Order | Execution | VenueEvent | TradeProjectionCheckpoint] = [
+    rows: list[
+        TradeCommand
+        | Order
+        | Execution
+        | VenueEvent
+        | TradeProjectionCheckpoint
+        | PairedExecutionLeg
+    ] = [
         command(
             pair.create_id,
             command_type="create",

@@ -12,8 +12,9 @@ no order, no fill quantity, no venue call.
 Each cancel is evaluated in stages, first match wins: the cancel (A), its
 target (B), existing terminal evidence (C), an earlier failure (D), the
 cancel's status (E), then a branch on the target's exchange (F) into the
-Walutomat checks (G) or the Kraken spot checks (H). Stage H's shard checks
-count an open command as covered when it is the target of a cancel named in
+Walutomat checks (G), the Kraken spot checks (H), or the Kraken margin
+checks (H-margin). The Kraken shard checks count an open command as covered
+when it is the target of a cancel named in
 the same run, so several stale pairs on one shard are repaired together. The
 dry run writes a deterministic preview and summary whose digest the voters
 approve; a write recomputes both and refuses unless they match the vote byte
@@ -131,10 +132,13 @@ class CancelEvidence:
         target_versions: Every version of the target command.
         order_versions: Every version of every order with the client order id.
         executions: Every execution of those orders.
-        events: Every venue event of the client order id.
+        events: Every venue event of the client order id, plus exchange-id
+            matches when H-margin is routed.
         open_commands: The target shard's open commands.
         checkpoint: The target shard's active checkpoint.
         shard_wallets: Every wallet seen on the target shard.
+        has_paired_leg: For H-margin, whether a paired-execution leg names the
+            order's client id or any of its exchange ids.
     """
 
     cancel_public_id: str
@@ -148,6 +152,7 @@ class CancelEvidence:
     open_commands: list[TradeCommandRow]
     checkpoint: TradeProjectionCheckpointRow | None
     shard_wallets: list[str]
+    has_paired_leg: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,9 +413,7 @@ def _resolve_kraken_order(
 
 
 def _check_order_history(case: KrakenCase) -> str | None:
-    """Check the order is spot, its history is consistent and it ended ``canceled``."""
-    if any(version["leverage"] is not None for version in case.versions):
-        return "not_kraken_spot"
+    """Check the order history is consistent and it ended ``canceled``."""
     active = [version for version in case.versions if is_open_ended_version(version["known_to"])]
     if len(active) != 1 or active[0] is not case.versions[-1]:
         return "order_versions_inconsistent"
@@ -529,14 +532,112 @@ _KRAKEN_CHECKS: Final[tuple[Callable[[KrakenCase], str | None], ...]] = (
 """Stage H's checks after the order is resolved and before the shard checks, in plan order."""
 
 
+def _is_kraken_margin(target: TradeCommandRow, versions: Sequence[OrderVersionRow]) -> bool:
+    """Return whether leverage on the target or any order version selects H-margin."""
+    return target["leverage"] is not None or any(
+        version["leverage"] is not None for version in versions
+    )
+
+
+def _exchange_order_ids(versions: Sequence[OrderVersionRow]) -> list[str]:
+    """Return the distinct, non-null exchange order ids in deterministic order."""
+    return sorted(
+        {
+            version["exchange_order_id"]
+            for version in versions
+            if version["exchange_order_id"] is not None
+        }
+    )
+
+
+def _check_margin_limit(case: KrakenCase) -> str | None:
+    """Require a live positive-leverage, unamended limit order on every version."""
+    leverage = case.target["leverage"]
+    if case.target["mode"] != ExecutionModeEnum.LIVE or type(leverage) is not int or leverage <= 0:
+        return "not_kraken_margin_limit"
+    first = case.versions[0]
+    if any(version["order_type"] != "limit" for version in case.versions):
+        return "not_kraken_margin_limit"
+    if any(
+        version["side"] != first["side"] or version["size"] != first["size"]
+        for version in case.versions[1:]
+    ):
+        return "not_kraken_margin_limit"
+    return None
+
+
+def _check_margin_leverage(case: KrakenCase) -> str | None:
+    """Require every order version to carry the target command's leverage."""
+    if any(version["leverage"] != case.target["leverage"] for version in case.versions):
+        return "margin_leverage_mismatch"
+    return None
+
+
+def _check_margin_status_path(case: KrakenCase) -> str | None:
+    """Refuse every status that could represent an executed margin order."""
+    if any(
+        version["status"] in {"closed", "filled", "partially_filled"} for version in case.versions
+    ):
+        return "margin_status_path"
+    return None
+
+
+def _check_margin_version_filled(case: KrakenCase) -> str | None:
+    """Require zero filled size on every order version."""
+    if any(version["filled_size"] != 0 for version in case.versions):
+        return "margin_version_filled"
+    return None
+
+
+def _check_margin_execution_row(case: KrakenCase) -> str | None:
+    """Refuse every executions row, including an EMPTY one, for the resolved order."""
+    order_public_id = case.versions[0]["public_id"]
+    if any(row["order_public_id"] == order_public_id for row in case.evidence.executions):
+        return "margin_has_execution_row"
+    return None
+
+
+def _check_margin_paired_leg(case: KrakenCase) -> str | None:
+    """Refuse a paired-execution leg matching either order identity."""
+    if case.evidence.has_paired_leg:
+        return "margin_has_paired_leg"
+    return None
+
+
+def _check_margin_position_evidence(case: KrakenCase) -> str | None:
+    """Refuse every venue event carrying a fill field for either order identity."""
+    if any(
+        event["fill_size"] is not None
+        or event["fill_price"] is not None
+        or event["trade_id"] is not None
+        or event["exec_id"] is not None
+        for event in case.evidence.events
+    ):
+        return "margin_has_position_evidence"
+    return None
+
+
+_KRAKEN_MARGIN_CHECKS: Final[tuple[Callable[[KrakenCase], str | None], ...]] = (
+    _check_margin_limit,
+    _check_margin_leverage,
+    _check_margin_status_path,
+    _check_margin_version_filled,
+    _check_margin_execution_row,
+    _check_margin_paired_leg,
+    _check_margin_position_evidence,
+)
+"""H-margin's additional checks in amendment order, after every shared H check."""
+
+
 def _kraken_decision(
     evidence: CancelEvidence,
     cancel: TradeCommandRow,
     target: TradeCommandRow,
     run_targets: RunTargets,
 ) -> Decision:
-    """Stage H: the record-terminal checks of a Kraken spot target, the shard checks last."""
-    if target["mode"] != ExecutionModeEnum.LIVE or target["leverage"] is not None:
+    """Stage H or H-margin: shared record-terminal checks, then margin checks."""
+    margin = _is_kraken_margin(target, evidence.order_versions)
+    if not margin and target["mode"] != ExecutionModeEnum.LIVE:
         return _refuse("not_kraken_spot")
     if target["status"] not in _FOLD_SOURCE_STATUSES:
         return _refuse("target_not_foldable")
@@ -550,6 +651,11 @@ def _kraken_decision(
     shard_reason = _check_shard(resolved, run_targets)
     if shard_reason is not None:
         return _refuse(shard_reason)
+    if margin:
+        for check in _KRAKEN_MARGIN_CHECKS:
+            reason = check(resolved)
+            if reason is not None:
+                return _refuse(reason)
     return Decision(RepairAction.RECORD_TERMINAL, kraken=resolved)
 
 
@@ -580,7 +686,7 @@ def _cancel_state_decision(cancel: TradeCommandRow) -> Decision | None:
 
 
 def evaluate(evidence: CancelEvidence, run_targets: RunTargets) -> Decision:
-    """Decide one cancel's action, stages A to H, first match wins.
+    """Decide one cancel's action, stages A to H or H-margin, first match wins.
 
     Args:
         evidence: Everything read for the cancel.
@@ -669,7 +775,9 @@ async def gather_evidence(
             f"cancel {cancel_public_id} has several active versions"
         ) from error
     if cancel is None or cancel["command_type"] != _CANCEL_COMMAND_TYPE:
-        return CancelEvidence(cancel_public_id, cancel, None, False, [], [], [], [], [], None, [])
+        return CancelEvidence(
+            cancel_public_id, cancel, None, False, [], [], [], [], [], None, [], False
+        )
     client_order_id = cancel["client_order_id"]
     target: TradeCommandRow | None = None
     ambiguous = False
@@ -679,8 +787,21 @@ async def gather_evidence(
         )
     except RuntimeError:
         ambiguous = True
-    events = await reads.get_venue_events_for_client_order_id(repository, client_order_id)
     versions = await reads.get_order_versions_by_client_order_id(repository, client_order_id)
+    margin = (
+        target is not None
+        and target["exchange"] == ExchangeEnum.KRAKEN
+        and _is_kraken_margin(target, versions)
+    )
+    exchange_order_ids = _exchange_order_ids(versions) if margin else []
+    events = await reads.get_venue_events_for_client_order_id(
+        repository, client_order_id, exchange_order_ids
+    )
+    has_paired_leg = (
+        await reads.has_paired_execution_leg(repository, client_order_id, exchange_order_ids)
+        if margin
+        else False
+    )
     public_ids = sorted({version["public_id"] for version in versions})
     executions = await reads.get_executions_by_order_public_ids(repository, public_ids)
     if target is None:
@@ -696,6 +817,7 @@ async def gather_evidence(
             [],
             None,
             [],
+            False,
         )
     shard_key = target["shard_key"]
     if shard_key not in shards:
@@ -713,6 +835,7 @@ async def gather_evidence(
         open_commands=facts.open_commands,
         checkpoint=facts.checkpoint,
         shard_wallets=facts.wallets,
+        has_paired_leg=has_paired_leg,
     )
 
 
@@ -735,7 +858,7 @@ def terminal_fields(case: KrakenCase) -> VenueEventInsertRow:
     writes; they are left out here so the preview stays deterministic.
 
     Args:
-        case: A Kraken case that passed every stage H check.
+        case: A Kraken case that passed every applicable stage H or H-margin check.
 
     Returns:
         The row without its write-time fields.
@@ -813,7 +936,7 @@ def predict(case: KrakenCase) -> JsonObject:
     """Predict the fold's and G2's advances with the reconciler's own functions.
 
     Args:
-        case: A Kraken case that passed every stage H check.
+        case: A Kraken case that passed every applicable stage H or H-margin check.
 
     Returns:
         The target's and the cancel's predicted transitions.
@@ -912,6 +1035,26 @@ def _kraken_document(case: KrakenCase) -> JsonObject:
     }
 
 
+def _margin_document(evidence: CancelEvidence) -> JsonObject:
+    """Render the leverage and per-version tuples that H-margin checked."""
+    target = cast(TradeCommandRow, evidence.target)
+    return {
+        "leverage": target["leverage"],
+        "order_versions": [
+            [
+                version["id"],
+                version["status"],
+                version["order_type"],
+                version["side"],
+                version["size"],
+                version["filled_size"],
+                version["leverage"],
+            ]
+            for version in evidence.order_versions
+        ],
+    }
+
+
 def line_document(
     evidence: CancelEvidence, decision: Decision, run_targets: RunTargets
 ) -> JsonObject:
@@ -948,6 +1091,12 @@ def line_document(
         ],
         "shard": _shard_document(evidence, run_targets),
     }
+    if (
+        evidence.target is not None
+        and evidence.target["exchange"] == ExchangeEnum.KRAKEN
+        and _is_kraken_margin(evidence.target, evidence.order_versions)
+    ):
+        document["margin"] = _margin_document(evidence)
     if decision.kraken is not None:
         document["record_terminal"] = _kraken_document(decision.kraken)
     return document

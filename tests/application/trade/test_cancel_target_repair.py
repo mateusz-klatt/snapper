@@ -50,6 +50,7 @@ from tests.helpers.cancel_target_repair import checkpoint
 from tests.helpers.cancel_target_repair import command
 from tests.helpers.cancel_target_repair import execution
 from tests.helpers.cancel_target_repair import order_version
+from tests.helpers.cancel_target_repair import paired_execution_leg
 from tests.helpers.cancel_target_repair import seed_kraken_pair
 from tests.helpers.cancel_target_repair import seed_walutomat_pair
 from tests.helpers.cancel_target_repair import sqlite_repository
@@ -200,6 +201,9 @@ def _version(status: str, version_id: int, known_to: datetime = KNOWN_TO_MAX) ->
         "client_order_id": "cid",
         "exchange_order_id": "OX-1",
         "status": status,
+        "order_type": "limit",
+        "side": "buy",
+        "size": 5.0,
         "filled_size": 0.0,
         "leverage": None,
         "timestamp": CREATED_AT + timedelta(seconds=version_id),
@@ -597,16 +601,19 @@ async def test_cancel_states_that_g2_would_not_retire_refuse(
 
 
 @pytest.mark.asyncio
-async def test_an_unsupported_exchange_refuses(repository: SQLAlchemyRepository) -> None:
-    """Stage F refuses a target on another exchange.
+@pytest.mark.parametrize("exchange", ["kraken_futures", "kraken_equities"])
+async def test_an_unsupported_exchange_refuses(
+    repository: SQLAlchemyRepository, exchange: str
+) -> None:
+    """Stage F refuses Kraken futures and equities targets.
 
-    Given: A pair whose commands are on kraken_futures,
+    Given: A pair whose commands are on the named unsupported Kraken venue,
     When: The cancel is evaluated,
     Then: It refuses as unsupported_exchange.
     """
     pair = await seed_kraken_pair(repository)
-    await _set_command(repository, pair.create_id, exchange="kraken_futures")
-    await _set_command(repository, pair.cancel_id, exchange="kraken_futures")
+    await _set_command(repository, pair.create_id, exchange=exchange)
+    await _set_command(repository, pair.cancel_id, exchange=exchange)
     decision = await _decision(repository, pair.cancel_id)
     assert decision.reason == "unsupported_exchange"
 
@@ -616,7 +623,7 @@ async def test_an_unsupported_exchange_refuses(repository: SQLAlchemyRepository)
     ("values", "reason"),
     [
         ({"mode": "paper"}, "not_kraken_spot"),
-        ({"leverage": 2}, "not_kraken_spot"),
+        ({"leverage": 2}, "margin_leverage_mismatch"),
         ({"status": "created"}, "target_not_foldable"),
         ({"wallet_public_id": OTHER_WALLET}, "order_missing"),
     ],
@@ -624,7 +631,7 @@ async def test_an_unsupported_exchange_refuses(repository: SQLAlchemyRepository)
 async def test_kraken_target_checks_refuse(
     repository: SQLAlchemyRepository, values: dict[str, str | int | None], reason: str
 ) -> None:
-    """Stage H refuses a target that is not live spot, not foldable, or without its order.
+    """Stage H and H-margin refuse invalid target state and missing orders.
 
     Given: A Kraken target changed as stated,
     When: The cancel is evaluated,
@@ -643,6 +650,29 @@ async def _set_orders(repository: SQLAlchemyRepository, public_id: str, **values
         await session.commit()
 
 
+async def _set_historical_order(
+    repository: SQLAlchemyRepository, public_id: str, **values: object
+) -> None:
+    """Update only the seeded order's closed, earlier version in place."""
+    async with repository.session() as session:
+        await session.execute(
+            sa.update(Order)
+            .where(Order.public_id == public_id, Order.known_to != KNOWN_TO_MAX)
+            .values(**values)
+        )
+        await session.commit()
+
+
+async def _seed_margin_pair(
+    repository: SQLAlchemyRepository, index: int = 1, leverage: int = 3
+) -> SeededPair:
+    """Seed a valid canceled, unfilled Kraken margin limit pair."""
+    pair = await seed_kraken_pair(repository, index)
+    await _set_command(repository, pair.create_id, leverage=leverage)
+    await _set_orders(repository, pair.order_id, leverage=leverage)
+    return pair
+
+
 async def _active_order_status(
     repository: SQLAlchemyRepository, public_id: str, status: str
 ) -> None:
@@ -654,6 +684,223 @@ async def _active_order_status(
             .values(status=status)
         )
         await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_margin_limit_records_terminal_and_previews_version_tuples(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A valid canceled, unfilled margin limit order records and exposes its checked evidence.
+
+    Given: A live leverage-3 target and two matching, zero-filled limit versions,
+    When: Its cancel is planned,
+    Then: The action is record_terminal and the preview carries leverage and both version tuples.
+    """
+    pair = await _seed_margin_pair(repository)
+    plan = await _plan(repository, pair.cancel_id)
+    line = plan.lines[0]
+    assert line.decision.action is RepairAction.RECORD_TERMINAL
+    versions = line.preview["order_versions"]
+    assert isinstance(versions, list) and len(versions) == 2
+    first, second = versions
+    assert isinstance(first, dict) and isinstance(second, dict)
+    margin = line.preview["margin"]
+    assert isinstance(margin, dict)
+    assert margin["leverage"] == 3
+    assert margin["order_versions"] == [
+        [first["id"], "open", "limit", "buy", 5.0, 0.0, 3],
+        [second["id"], "canceled", "limit", "buy", 5.0, 0.0, 3],
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        "command_leverage_missing",
+        "command_leverage_zero",
+        "command_leverage_negative",
+        "non_limit",
+        "changed_side",
+        "changed_size",
+    ],
+)
+async def test_margin_limit_requirements_refuse(
+    repository: SQLAlchemyRepository, change: str
+) -> None:
+    """Each invalid margin command or version shape refuses as not_kraken_margin_limit.
+
+    Given: A valid margin pair with only the named limit, leverage, side or size violation,
+    When: Its cancel is evaluated,
+    Then: It refuses as not_kraken_margin_limit.
+    """
+    pair = await _seed_margin_pair(repository)
+    if change == "command_leverage_missing":
+        await _set_command(repository, pair.create_id, leverage=None)
+    elif change == "command_leverage_zero":
+        await _set_command(repository, pair.create_id, leverage=0)
+    elif change == "command_leverage_negative":
+        await _set_command(repository, pair.create_id, leverage=-1)
+    elif change == "non_limit":
+        await _set_historical_order(repository, pair.order_id, order_type="market")
+    elif change == "changed_side":
+        await _set_historical_order(repository, pair.order_id, side="sell")
+    else:
+        await _set_historical_order(repository, pair.order_id, size=6.0)
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "not_kraken_margin_limit"
+
+
+@pytest.mark.asyncio
+async def test_margin_leverage_mismatch_refuses(repository: SQLAlchemyRepository) -> None:
+    """A version leverage different from the command's leverage refuses.
+
+    Given: A leverage-3 command whose otherwise valid versions carry leverage 2,
+    When: Its cancel is evaluated,
+    Then: It refuses as margin_leverage_mismatch.
+    """
+    pair = await _seed_margin_pair(repository)
+    await _set_orders(repository, pair.order_id, leverage=2)
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "margin_leverage_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["closed", "filled", "partially_filled"])
+async def test_margin_status_path_refuses(repository: SQLAlchemyRepository, status: str) -> None:
+    """A closed, filled or partly filled version refuses even when the active one canceled.
+
+    Given: A valid margin pair whose earlier open version alone has the named status,
+    When: Its cancel is evaluated,
+    Then: It refuses as margin_status_path.
+    """
+    pair = await _seed_margin_pair(repository)
+    await _set_historical_order(repository, pair.order_id, status=status)
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "margin_status_path"
+
+
+@pytest.mark.asyncio
+async def test_margin_filled_size_on_an_earlier_version_refuses(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """A nonzero fill on an earlier version refuses despite a zero-filled active version.
+
+    Given: A valid margin pair whose earlier version alone has filled_size 0.25,
+    When: Its cancel is evaluated,
+    Then: It refuses as margin_version_filled.
+    """
+    pair = await _seed_margin_pair(repository)
+    await _set_historical_order(repository, pair.order_id, filled_size=0.25)
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "margin_version_filled"
+
+
+@pytest.mark.asyncio
+async def test_margin_empty_execution_row_refuses(repository: SQLAlchemyRepository) -> None:
+    """An EMPTY executions row that spot tolerates refuses H-margin.
+
+    Given: A valid margin pair with one zero-size, zero-fee execution without ids,
+    When: Its cancel is evaluated,
+    Then: It refuses as margin_has_execution_row rather than has_execution.
+    """
+    pair = await _seed_margin_pair(repository)
+    await add_rows(repository, [execution(pair.order_id)])
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "margin_has_execution_row"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity", ["client", "exchange"])
+async def test_margin_paired_leg_refuses(repository: SQLAlchemyRepository, identity: str) -> None:
+    """A paired leg matching either the client id or only the exchange order id refuses.
+
+    Given: A valid margin pair and one paired leg carrying only the named order identity,
+    When: Its cancel is evaluated,
+    Then: It refuses as margin_has_paired_leg.
+    """
+    pair = await _seed_margin_pair(repository)
+    leg = paired_execution_leg(
+        client_order_id=pair.client_order_id if identity == "client" else None,
+        exchange_order_id=None if identity == "client" else "OX-1",
+    )
+    await add_rows(repository, [leg])
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "margin_has_paired_leg"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["fill_size", "fill_price", "trade_id", "exec_id"])
+async def test_margin_position_evidence_refuses(
+    repository: SQLAlchemyRepository, field: str
+) -> None:
+    """Any non-null venue fill field refuses, including an exchange-id-only event.
+
+    Given: A valid margin pair and one venue event with only the named fill field set,
+    When: Its cancel is evaluated,
+    Then: It refuses as margin_has_position_evidence.
+    """
+    pair = await _seed_margin_pair(repository)
+    event = venue_event(
+        "cid-other" if field == "fill_size" else pair.client_order_id,
+        event_type="fill_observed",
+    )
+    event.exchange_order_id = "OX-1"
+    if field == "fill_size":
+        event.fill_size = 1.0
+    elif field == "fill_price":
+        event.fill_price = 0.5
+    elif field == "trade_id":
+        event.trade_id = "T-1"
+    else:
+        event.exec_id = "E-1"
+    await add_rows(repository, [event])
+    decision = await _decision(repository, pair.cancel_id)
+    assert decision.reason == "margin_has_position_evidence"
+
+
+@pytest.mark.asyncio
+async def test_margin_and_spot_terminal_rows_have_parity(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """H and H-margin build identical terminal fields apart from the order identity.
+
+    Given: One valid spot pair and one valid margin pair on the same shard,
+    When: Both terminal rows are built,
+    Then: Every field except client_order_id and exchange_order_id is identical.
+    """
+    spot = await seed_kraken_pair(repository, 1)
+    margin = await _seed_margin_pair(repository, 2)
+    plan = await _plan(repository, spot.cancel_id, margin.cancel_id)
+    rows: list[dict[str, object]] = []
+    for line in plan.lines:
+        case = line.decision.kraken
+        assert case is not None
+        row: dict[str, object] = dict(repair.terminal_fields(case))
+        del row["client_order_id"], row["exchange_order_id"]
+        rows.append(row)
+    assert rows[0] == rows[1]
+
+
+@pytest.mark.asyncio
+async def test_one_spot_and_two_margin_pairs_repair_together_on_one_shard(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Naming the whole shard lets spot and margin lines pass, while spot alone still refuses.
+
+    Given: One spot pair and two valid margin pairs sharing one shard,
+    When: All three cancels are planned and then the spot cancel is planned alone,
+    Then: All three record together, and spot alone refuses shard_has_other_open_command.
+    """
+    spot = await seed_kraken_pair(repository, 1)
+    margins = [await _seed_margin_pair(repository, index) for index in (2, 3)]
+    pairs = [spot, *margins]
+    plan = await _plan(repository, *[pair.cancel_id for pair in pairs])
+    assert [line.decision.action for line in plan.lines] == [RepairAction.RECORD_TERMINAL] * 3
+    assert "margin" not in plan.lines[0].preview
+    assert all("margin" in line.preview for line in plan.lines[1:])
+    alone = await _decision(repository, spot.cancel_id)
+    assert alone.reason == "shard_has_other_open_command"
 
 
 @pytest.mark.asyncio
@@ -681,7 +928,7 @@ async def test_two_orders_for_one_target_refuse(repository: SQLAlchemyRepository
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
-        ("leverage", "not_kraken_spot"),
+        ("leverage", "not_kraken_margin_limit"),
         ("not_canceled", "order_not_canceled"),
         ("same_time", "canceled_not_after_cancel"),
         ("closed_last", "order_versions_inconsistent"),
@@ -690,7 +937,7 @@ async def test_two_orders_for_one_target_refuse(repository: SQLAlchemyRepository
 async def test_order_history_checks_refuse(
     repository: SQLAlchemyRepository, change: str, reason: str
 ) -> None:
-    """Stage H refuses margin orders, inconsistent histories and late or missing cancels.
+    """Stage H and H-margin refuse inconsistent histories and late or missing cancels.
 
     Given: The seeded order changed as stated,
     When: The cancel is evaluated,

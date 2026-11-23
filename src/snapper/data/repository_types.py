@@ -617,7 +617,8 @@ class OrderVersionRow(TypedDict):
 
     Returned by ``get_order_versions_by_client_order_id`` for every version of
     every order carrying a client order id, closed versions included, so the
-    cancel-target repair can find when the executor first stored ``canceled``.
+    cancel-target repair can check its full status, order shape, size, fill and
+    leverage history and find when the executor first stored ``canceled``.
     """
 
     id: int
@@ -628,6 +629,9 @@ class OrderVersionRow(TypedDict):
     client_order_id: str | None
     exchange_order_id: str | None
     status: str
+    order_type: str
+    side: str
+    size: float
     filled_size: float
     leverage: int | None
     timestamp: datetime

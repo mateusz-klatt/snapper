@@ -20,6 +20,7 @@ from tests.helpers.cancel_target_repair import add_rows
 from tests.helpers.cancel_target_repair import checkpoint
 from tests.helpers.cancel_target_repair import command
 from tests.helpers.cancel_target_repair import execution
+from tests.helpers.cancel_target_repair import paired_execution_leg
 from tests.helpers.cancel_target_repair import seed_kraken_pair
 from tests.helpers.cancel_target_repair import sqlite_repository
 from tests.helpers.cancel_target_repair import venue_event
@@ -75,6 +76,10 @@ async def test_order_versions_include_closed_versions_in_id_order(
     assert [version["status"] for version in versions] == ["open", "canceled"]
     assert versions[0]["known_to"] == CANCELED_AT
     assert versions[1]["exchange_order_id"] == "OX-1"
+    assert [(version["order_type"], version["side"], version["size"]) for version in versions] == [
+        ("limit", "buy", 5.0),
+        ("limit", "buy", 5.0),
+    ]
 
 
 @pytest.mark.asyncio
@@ -131,6 +136,44 @@ async def test_venue_events_and_open_commands_and_wallets(
     active = await reads.get_active_checkpoint(repository, KRAKEN_SHARD)
     assert active is not None and active["wallet_public_id"] == OTHER_WALLET
     assert await reads.get_active_checkpoint(repository, "kraken.none.live") is None
+
+
+@pytest.mark.asyncio
+async def test_venue_events_can_match_an_exchange_order_id(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The margin evidence read also finds an event whose client id is unrelated.
+
+    Given: A seeded pair and a second event with another client id but its exchange order id,
+    When: Events are read with that exchange order id,
+    Then: Both events come back in id order without duplication.
+    """
+    pair = await seed_kraken_pair(repository)
+    event = venue_event("cid-other", event_type="fill_observed")
+    event.exchange_order_id = "OX-1"
+    event.fill_size = 1.0
+    await add_rows(repository, [event])
+    events = await reads.get_venue_events_for_client_order_id(
+        repository, pair.client_order_id, ["OX-1"]
+    )
+    assert [event["event_type"] for event in events] == ["order_accepted", "fill_observed"]
+
+
+@pytest.mark.asyncio
+async def test_paired_leg_existence_matches_either_order_identity(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """The existence read matches client and exchange ids and returns false for no row.
+
+    Given: No paired leg, then one leg with both order identities,
+    When: Existence is checked by either identity,
+    Then: The empty read is false and both matching reads are true.
+    """
+    assert not await reads.has_paired_execution_leg(repository, "cid-leg", [])
+    leg = paired_execution_leg(client_order_id="cid-leg", exchange_order_id="OX-leg")
+    await add_rows(repository, [leg])
+    assert await reads.has_paired_execution_leg(repository, "cid-leg", [])
+    assert await reads.has_paired_execution_leg(repository, "cid-other", ["OX-leg"])
 
 
 @pytest.mark.asyncio
