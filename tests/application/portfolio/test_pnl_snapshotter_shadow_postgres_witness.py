@@ -34,10 +34,10 @@ from snapper.application.portfolio.pnl_opening_checkpoint_metrics import reset_c
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
 from snapper.application.portfolio.pnl_snapshotter import _CheckpointDispatchRequest
+from snapper.application.portfolio.pnl_snapshotter import _PlanBasis
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import PortfolioPnlPoint
-from snapper.data.pnl_correction_state import PnlCorrectionEvidence
 from snapper.data.repository import PortfolioPnlSampleScope
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import PNL_SAMPLE_CALC_VERSION
@@ -151,7 +151,7 @@ async def _run_failing_shadow_tick(
 
     async def guarded_shadow(
         request: _CheckpointDispatchRequest,
-        evidence: PnlCorrectionEvidence,
+        basis: _PlanBasis,
         anchor_pair: tuple[ChunkWindow, PnlWalletSeriesResult, PlannedPnlCorrection],
     ) -> PnlWalletSeriesResult:
         """Arm the fault only after authoritative planning has entered shadow dispatch."""
@@ -159,7 +159,7 @@ async def _run_failing_shadow_tick(
         shadow_active = True
         shadow_entries += 1
         try:
-            return await original_shadow(request, evidence, anchor_pair)
+            return await original_shadow(request, basis, anchor_pair)
         finally:
             shadow_active = False
 

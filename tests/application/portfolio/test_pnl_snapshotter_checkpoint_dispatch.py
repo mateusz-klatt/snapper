@@ -2,6 +2,9 @@
 
 import asyncio
 import logging
+import time
+from collections.abc import Awaitable
+from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import datetime
@@ -18,6 +21,7 @@ from snapper.application.portfolio import pnl_engine_options
 from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio import pnl_snapshotter_checkpoint as dispatch
 from snapper.application.portfolio import pnl_snapshotter_config
+from snapper.application.portfolio.pnl_correction_planner import PlannedPnlCorrection
 from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_from_json
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
@@ -32,6 +36,7 @@ from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlChe
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
 from snapper.application.portfolio.pnl_snapshotter import _CheckpointReplayOptions
+from snapper.application.portfolio.pnl_snapshotter import _PlanBasis
 from snapper.application.portfolio.pnl_snapshotter import _ScopeContext
 from snapper.application.portfolio.pnl_snapshotter_checkpoint import PnlCheckpointDecision
 from snapper.application.portfolio.pnl_snapshotter_checkpoint import PnlCheckpointResumeRequest
@@ -518,6 +523,177 @@ async def test_shadow_cancelled_error_propagates_without_anchor_commit(
         await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
     assert repo.committed_chunks == []
     assert checkpoint_metrics().shadow_skipped == {}
+
+
+def _slow_resume_replay(
+    delay_seconds: float,
+) -> Callable[..., Awaitable[tuple[ChunkWindow, PnlWalletSeriesResult]]]:
+    """Build a replay double whose resumed side sleeps before failing loudly."""
+
+    async def replay(
+        unused_repo: Repository,
+        ctx: _ScopeContext,
+        chunk: ChunkWindow,
+        current: PnlCorrectionFrontier,
+        checkpoint: _CheckpointReplayOptions | None = None,
+    ) -> tuple[ChunkWindow, PnlWalletSeriesResult]:
+        """Return the cold anchor at once and stall the resumed replay."""
+        del unused_repo, ctx, current
+        if checkpoint is not None and checkpoint.resume is not None:
+            await asyncio.sleep(delay_seconds)
+            raise AssertionError("the shadow budget should have cancelled the resumed replay")
+        return chunk, fixtures._series(chunk.start, chunk.end, metadata=fixtures._meta(seq=4))
+
+    return replay
+
+
+async def test_shadow_tick_budget_cancels_slow_shadow_and_still_commits_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the authoritative commit alive when shadow work outlasts its own budget.
+
+    Given: A verified checkpoint, a tick deadline leaving only 50 ms of shadow
+        budget after the commit reserve, and a resumed replay that stalls for 5 s.
+    When: Shadow dispatch runs the chunk.
+    Then: The shadow branch is cancelled as an isolated ``TimeoutError`` failure
+        and the cold anchor plan still commits before the tick deadline.
+
+    Args:
+        monkeypatch: Pytest fixture installing the checkpoint and replay doubles.
+    """
+    reset_checkpoint_metrics()
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+    repo = fixtures._FakeRepo()
+    frontier = _pending(repo)
+    resume = await _resume(monkeypatch)
+    _permit_capture(monkeypatch)
+    _install_resume(monkeypatch, repo, frontier, resume)
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    monkeypatch.setattr(snap, "_replay_series", _slow_resume_replay(5.0))
+    reserve = snap.interval_seconds * pnl_snapshotter.SHADOW_COMMIT_RESERVE_FRACTION
+    snap._tick_deadline = time.monotonic() + reserve + 0.05
+
+    started = time.monotonic()
+    await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
+
+    assert time.monotonic() - started < 2.0
+    assert len(repo.committed_chunks) == 1
+    assert checkpoint_metrics().shadow_skipped == {"shadow_error:TimeoutError": 1}
+
+
+async def test_shadow_without_tick_budget_skips_shadow_and_commits_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip shadow work entirely once the commit reserve is all that remains.
+
+    Given: A verified checkpoint and a tick deadline already inside the commit reserve.
+    When: Shadow dispatch runs the chunk.
+    Then: The resumed replay never starts, ``tick_budget`` is counted, and the
+        anchor plan commits.
+
+    Args:
+        monkeypatch: Pytest fixture installing the checkpoint and replay doubles.
+    """
+    reset_checkpoint_metrics()
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+    repo = fixtures._FakeRepo()
+    frontier = _pending(repo)
+    resume = await _resume(monkeypatch)
+    _permit_capture(monkeypatch)
+    _install_resume(monkeypatch, repo, frontier, resume)
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    monkeypatch.setattr(snap, "_replay_series", _slow_resume_replay(5.0))
+    snap._tick_deadline = time.monotonic()
+
+    await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
+
+    assert len(repo.committed_chunks) == 1
+    assert checkpoint_metrics().shadow_skipped == {"tick_budget": 1}
+
+
+async def test_shadow_external_cancel_propagates_under_tick_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate a task cancellation that arrives while the shadow budget is armed.
+
+    Given: A verified checkpoint, a generous tick deadline, and a resumed replay
+        that stalls until the dispatching task is cancelled from outside.
+    When: The task is cancelled during the shadow branch.
+    Then: ``CancelledError`` reaches the caller, nothing commits, and no shadow
+        failure is recorded.
+
+    Args:
+        monkeypatch: Pytest fixture installing the checkpoint and replay doubles.
+    """
+    reset_checkpoint_metrics()
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+    repo = fixtures._FakeRepo()
+    frontier = _pending(repo)
+    resume = await _resume(monkeypatch)
+    _permit_capture(monkeypatch)
+    _install_resume(monkeypatch, repo, frontier, resume)
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    monkeypatch.setattr(snap, "_replay_series", _slow_resume_replay(30.0))
+    snap._tick_deadline = time.monotonic() + 3600.0
+
+    task = asyncio.create_task(
+        snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert repo.committed_chunks == []
+    assert checkpoint_metrics().shadow_skipped == {}
+
+
+async def test_shadow_plans_both_sides_from_one_planning_input_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read planning evidence once so a racing write cannot fake a mismatch.
+
+    Given: A verified checkpoint and identical anchor and resumed paths.
+    When: Shadow plans the anchor and the resumed side for one chunk.
+    Then: Observation and position evidence are read exactly once and both
+        planners receive the same snapshot.
+
+    Args:
+        monkeypatch: Pytest fixture installing the checkpoint and replay doubles.
+    """
+    reset_checkpoint_metrics()
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+    repo = fixtures._FakeRepo()
+    frontier = _pending(repo)
+    write = await _write(monkeypatch, frontier)
+    resume = await _resume(monkeypatch)
+    _permit_capture(monkeypatch)
+    _install_resume(monkeypatch, repo, frontier, resume)
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    _install_replay(monkeypatch, snap, frontier, _ReplayBehavior(write))
+    evidence_reads = AsyncMock(wraps=snap._load_chunk_evidence)
+    position_reads = AsyncMock(wraps=snap._load_position_versions)
+    monkeypatch.setattr(snap, "_load_chunk_evidence", evidence_reads)
+    monkeypatch.setattr(snap, "_load_position_versions", position_reads)
+    seen: list[_PlanBasis] = []
+    original_impl = snap._plan_chunk_impl
+
+    async def recording_impl(
+        request: pnl_snapshotter._ChunkPlanRequest, *, advance_sequence: bool
+    ) -> PlannedPnlCorrection:
+        """Record each planner's basis before delegating to the real planner."""
+        seen.append(request.basis)
+        return await original_impl(request, advance_sequence=advance_sequence)
+
+    monkeypatch.setattr(snap, "_plan_chunk_impl", recording_impl)
+
+    await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
+
+    assert checkpoint_metrics().shadow_comparisons == 1
+    assert evidence_reads.await_count == 1
+    assert position_reads.await_count == 1
+    assert len(seen) == 2
+    assert seen[0].inputs is not None
+    assert seen[0].inputs is seen[1].inputs
 
 
 async def test_shadow_mismatch_deletes_row_and_logs_error(
@@ -1313,6 +1489,53 @@ async def test_verify_error_becomes_closed_refusal_and_commits_anchor(
     assert fixtures._WALLET not in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("decision", "charged"),
+    [
+        (PnlCheckpointDecision(recapture="fallback", verification_attempted=True), 1),
+        (PnlCheckpointDecision(recapture="absent"), 0),
+    ],
+)
+async def test_shadow_charges_comparison_slot_when_verification_runs_without_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    decision: PnlCheckpointDecision,
+    charged: int,
+) -> None:
+    """Charge the shadow slot for the verification work, not only for a comparison.
+
+    Given: Shadow mode and a resume decision that either ran a refused verification
+        or found no stored checkpoint at all.
+    When: The chunk is dispatched.
+    Then: A refused verification consumes one comparison slot while an absent
+        checkpoint consumes none, and the anchor chunk commits either way.
+
+    Args:
+        monkeypatch: Pytest fixture installing the decision and replay doubles.
+        decision: Decision returned by the patched resume preparation.
+        charged: Expected comparison slots consumed by the dispatch.
+    """
+    reset_checkpoint_metrics()
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+    repo = fixtures._FakeRepo()
+    frontier = _pending(repo)
+    write = await _write(monkeypatch, frontier)
+    _permit_capture(monkeypatch)
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    _install_replay(monkeypatch, snap, frontier, _ReplayBehavior(write))
+
+    async def prepare(request: PnlCheckpointResumeRequest) -> PnlCheckpointDecision:
+        """Return the parametrised pre-replay decision."""
+        del request
+        return decision
+
+    monkeypatch.setattr(pnl_snapshotter, "prepare_checkpoint_resume", prepare)
+
+    await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
+
+    assert snap._tick_shadow_comparisons == charged
+    assert len(repo.committed_chunks) == 1
+
+
 async def test_shadow_planning_is_side_effect_free_on_sequence_and_cursor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1365,7 +1588,7 @@ async def test_shadow_planning_is_side_effect_free_on_sequence_and_cursor(
         cast(Repository, shadow_repo),
         empty_ctx,
         fixtures._series(plan_window.start, plan_window.end, metadata=fixtures._meta(seq=4)),
-        evidence,
+        _PlanBasis(evidence),
     )
     assert shadow_snap._sequence == seq_before
     assert shadow_repo.frontier() == frontier_before

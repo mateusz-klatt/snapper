@@ -160,6 +160,7 @@ async def test_prepare_resume_returns_verified_state_and_handles_start_at_tip(
     monkeypatch.setattr(repo, "get_portfolio_pnl_opening_checkpoint", read)
     empty = await dispatch.prepare_checkpoint_resume(request)
     assert empty.recapture == "absent"
+    assert empty.verification_attempted is False
     read.assert_awaited_once()
     read.side_effect = None
     read.return_value = replace(
@@ -173,6 +174,7 @@ async def test_prepare_resume_returns_verified_state_and_handles_start_at_tip(
     monkeypatch.setattr(dispatch, "verify_checkpoint_for_resume", AsyncMock(return_value=resume))
     decision = await dispatch.prepare_checkpoint_resume(replace(request, start=fixtures._minute(3)))
     assert decision.resume is resume
+    assert decision.verification_attempted is True
     monkeypatch.setattr(
         dispatch,
         "verify_checkpoint_for_resume",
@@ -183,7 +185,7 @@ async def test_prepare_resume_returns_verified_state_and_handles_start_at_tip(
     exhausted = await dispatch.prepare_checkpoint_resume(
         replace(request, start=fixtures._minute(3), recapture_budget_exhausted=True)
     )
-    assert exhausted == dispatch.PnlCheckpointDecision()
+    assert exhausted == dispatch.PnlCheckpointDecision(verification_attempted=True)
 
 
 async def test_resume_fallback_reason_and_delete_fence_miss(

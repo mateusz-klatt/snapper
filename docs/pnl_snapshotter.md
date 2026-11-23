@@ -347,10 +347,24 @@ Mode semantics:
 
 Shadow verification and resumed replay are limited to two wallets per tick,
 with budget-consuming wallets rotating the next tick's starting position.
-Wallets beyond that limit use the exact `off` cold-replay path for the tick.
+A wallet consumes a slot as soon as live checkpoint verification runs, even
+when the verifier then refuses, so the cap bounds verification cost as well as
+comparisons. Wallets beyond that limit use the exact `off` cold-replay path for
+the tick.
 Shadow errors increment `shadow_skipped` with reason `shadow_error:<Type>`,
 log one warning per scope failure episode, and never prevent the authoritative
 anchor samples and frontier from committing.
+The whole tick runs under one deadline equal to the loop interval, and shadow
+work runs before the authoritative commit. Shadow work therefore gets its own
+nested deadline that ends a quarter of the interval
+(`SHADOW_COMMIT_RESERVE_FRACTION`) before the tick deadline. A shadow branch
+that overruns it is cancelled and counted as `shadow_error:TimeoutError`; when
+no shadow budget remains, the comparison is skipped as `tick_budget`. In both
+cases the cold anchor plan still commits. External task cancellation is never
+converted into a shadow failure.
+The cold anchor and the resumed side are planned from one shared read of the
+chunk's observation, valuation and position evidence, so a write committed
+between two reads cannot appear as a mismatch that deletes a valid checkpoint.
 
 Rollout and rollback:
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime
 from datetime import timedelta
 from typing import Final
@@ -239,10 +240,18 @@ class PnlCheckpointResumeRequest:
 
 @dataclass(frozen=True)
 class PnlCheckpointDecision:
-    """One pre-replay choice: verified suffix resume or anchor recapture."""
+    """One pre-replay choice: verified suffix resume or anchor recapture.
+
+    ``verification_attempted`` is ``True`` whenever the expensive live
+    verification of a stored checkpoint ran, or may have run before an
+    unexpected error, whatever its verdict. Shadow mode charges its
+    per-tick comparison budget on that flag, so a checkpoint that refuses
+    late still consumes a slot.
+    """
 
     resume: PnlCheckpointResume | None = None
     recapture: PnlCheckpointRecaptureTrigger | None = None
+    verification_attempted: bool = False
 
 
 def recapture_trigger(
@@ -382,7 +391,7 @@ async def _prepare_with_record(
     bounded = recapture_trigger(frontier, record, suffix)
     if bounded is not None and not request.recapture_budget_exhausted:
         return _recapture(scope, bounded)
-    return await _verify_stored_checkpoint(request, record)
+    return replace(await _verify_stored_checkpoint(request, record), verification_attempted=True)
 
 
 async def prepare_checkpoint_resume(
@@ -419,10 +428,13 @@ async def prepare_checkpoint_resume(
             type(exc).__name__,
         )
         _log_fallback(scope, frontier, PnlCheckpointFallback("checkpoint_verify_error", False))
-        return (
-            _exhausted_recapture_decision(scope)
-            if request.recapture_budget_exhausted
-            else _recapture(scope, "fallback")
+        return replace(
+            (
+                _exhausted_recapture_decision(scope)
+                if request.recapture_budget_exhausted
+                else _recapture(scope, "fallback")
+            ),
+            verification_attempted=True,
         )
 
 

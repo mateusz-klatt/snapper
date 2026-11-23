@@ -27,7 +27,7 @@ type PnlCheckpointRecaptureTrigger = Literal[
     "suffix_size",
 ]
 
-type PnlCheckpointShadowSkipReason = Literal["window_mismatch"]
+type PnlCheckpointShadowSkipReason = Literal["window_mismatch", "tick_budget"]
 """Closed vocabulary for skipped checkpoint shadow comparisons."""
 
 type PnlCheckpointScopeKey = tuple[str, str, str]
