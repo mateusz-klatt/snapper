@@ -211,13 +211,23 @@ stuck terminal once per episode in `meta.unrecorded_order_terminal_drop_count`
 and logs one WARN per episode pointing operators to the G3-C repair tool
 (`snapper repair-cancel-targets`).
 
+The executor also increments `meta.requested_cancel_terminal_held_count` and
+logs one G3-C WARN per held requested-cancel episode for each client order ID.
+The episode ends when the evidence is recorded, the order is forgotten, or
+the executor stops. For an untracked order, dropping its retry entry also
+ends the episode.
+
 When a stream cancellation or expiry is held for retry, the executor leaves
 the `Order` row non-terminal, skips the stream terminal publish, and keeps the
 order tracked. On executors that recheck disappeared orders, the next
 reconciliation cycle (about 60 s) can record the evidence and publish the
-stream terminal to release the engine's in-flight guard. After a restart that
-loses the in-memory retry map, the still-active `Order` row remains eligible
-for startup recovery.
+stream terminal to release the engine's in-flight guard. Once evidence is
+recorded, the executor attempts the `Order` row update before publishing.
+If the update fails, the executor still publishes and keeps the order tracked
+so reconciliation can retry the update. After a successful publish, later
+attempts to update that row skip the publish. After a restart that loses the
+in-memory retry map, the still-active `Order` row remains eligible for startup
+recovery.
 
 After three consecutive venue reconciliation failures, the coordinator
 uses the heartbeat to halt known real shard keys for the matching
@@ -1468,13 +1478,18 @@ row to `CANCELED`. A hold leaves the row active for startup recovery, which
 uses the durable command's shard when recording a recovered terminal.
 Reconciliation retries held evidence. For exchanges that recheck disappeared
 orders, this also retries the row update, including when terminal evidence
-was already recorded. Kraken Futures reconciliation retries locally retained
-venue confirmations before observing native inventory. On restart it parks
-active orders because inventory absence alone cannot establish terminal status.
+was already recorded. Before observing native inventory, Kraken Futures
+reconciliation retries locally retained cancel confirmations and stream
+terminals whose evidence was recorded. On restart it parks active orders
+because inventory absence alone cannot establish terminal status.
 The executor still publishes `CANCELLED` on the cancel-result topic so the
-engine releases its in-flight guard on the venue confirmation. A hold logs a
-WARN pointing to the G3-C repair tool (`snapper repair-cancel-targets`),
-including when the executor has no tracked order for that cancel.
+engine releases its in-flight guard on the venue confirmation. A held
+requested cancel logs one G3-C WARN per episode, including when the executor
+has no tracked order for that cancel. For both requested and stream cancels,
+if an order has a database row and the exchange client lacks a repository or
+tracker, the executor logs one ERROR naming the order and stops automatic
+row-update retries for that order. The row stays active for recovery after
+the configuration is repaired and the executor restarts.
 
 Before the venue order-placement call, each submit passes the pre-placement
 safety checks. The duplicate-submit guard drops outbox replays of an

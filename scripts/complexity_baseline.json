@@ -1084,9 +1084,6 @@
       "ExchangeExecutorService._consume_ghost_adoption_budget": {
         "PLR0913": 6
       },
-      "ExchangeExecutorService._publish_stream_terminal_event": {
-        "PLR0913": 6
-      },
       "ExchangeExecutorService._record_correlated_fill_event": {
         "PLR0913": 6
       },
