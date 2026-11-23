@@ -20806,6 +20806,9 @@ class SQLAlchemyRepository(Repository):
     def consume_last_pnl_checkpoint_invalidation_deleted(self) -> int:
         """Return and clear the latest committed repository-fence deletion rowcount.
 
+        The count is instance state on a shared repository, so the caller must
+        consume it in the same task, directly after the frontier write that set it.
+
         Returns:
             Deleted rowcount from the latest frontier write, or zero when none matched.
         """
