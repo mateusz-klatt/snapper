@@ -30,9 +30,12 @@ import pytest
 import zmq
 import zmq.asyncio
 from loguru import logger
+from sqlalchemy.exc import SQLAlchemyError
 
 import snapper.application.process_manager.launcher as launcher_module
 import snapper.messaging.executors.base as base_module
+from snapper.application.engine.service import TradingEngineService
+from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.command_material import TradeCommandMaterialUnavailableError
@@ -69,6 +72,7 @@ from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderCancelData
 from snapper.messaging.schemas.data import OrderData
+from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import OrderReplaceData
 from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.schemas.data import SettingChangedData
@@ -12822,17 +12826,27 @@ class TestVenueDuplicateIdRejectionDisposition:
 _CANCEL_CID = "cid-cancel"
 
 
-def _cancel_request(instrument: str = "BTC-USD") -> SimpleNamespace:
+def _cancel_request(
+    instrument: str = "BTC-USD", *, exchange: OrderExchange = "kraken"
+) -> OrderCancelData:
     """Build the confirmed-cancel request for the target order ``cid-cancel``.
 
     Args:
         instrument: Instrument the cancel message carries.
+        exchange: Venue targeted by the request.
 
     Returns:
         A cancel request carrying the target's client order id.
     """
-    return SimpleNamespace(
-        exchange_order_id="ex-cancel", instrument=instrument, client_order_id=_CANCEL_CID
+    return OrderCancelData(
+        public_id="cancel-request",
+        timestamp=datetime.now(UTC),
+        session_id="cancel-test",
+        sequence_id=1,
+        exchange=exchange,
+        exchange_order_id="ex-cancel",
+        instrument=instrument,
+        client_order_id=_CANCEL_CID,
     )
 
 
@@ -12956,17 +12970,22 @@ class TestConfirmedCancelTerminal:
         ex, repo = _cancel_executor(tracked=True, exchange="paper")
         steps: list[str] = []
 
-        async def record(row: Any) -> bool:
+        async def record(_row: VenueEventInsertRow) -> bool:
             """Log the record step and check the order is still tracked."""
             steps.append("terminal")
             assert _CANCEL_CID in ex.pending_orders
             return True
 
-        async def update_row(**_kwargs: Any) -> None:
-            """Log the order-row step."""
+        async def update_row(*, db_order_id: int, status: ExchangeOrderStatusEnum) -> int:
+            """Log the order-row step and check correlation is still available."""
             steps.append("row")
+            assert db_order_id == 5
+            assert status is ExchangeOrderStatusEnum.CANCELED
+            assert _CANCEL_CID in ex.pending_orders
+            assert ex.client_by_exchange["ex-cancel"] == _CANCEL_CID
+            return 6
 
-        async def publish(_cancel: Any, _event: Any) -> None:
+        async def publish(_cancel: OrderCancelData, _event: OrderEventEnum) -> None:
             """Log the publish step and check the entries are gone."""
             steps.append("publish")
             assert _CANCEL_CID not in ex.pending_orders
@@ -13029,19 +13048,24 @@ class TestConfirmedCancelTerminal:
         assert any(_CANCEL_CID in call.args[0] for call in warning.call_args_list)
 
     @pytest.mark.asyncio
-    async def test_raising_lookup_holds_the_terminal_for_retry(self) -> None:
-        """Keep a confirmed cancel CANCELLED when its metadata lookup fails.
+    async def test_untracked_cancel_hold_warns_with_g3c_repair_hint(self) -> None:
+        """Warn operators and publish CANCELLED when an untracked cancel is held.
 
         Given: an untracked order whose command lookup raises,
         When: the venue confirms the requested cancel,
         Then: the terminal waits in the retry map without metadata, a critical
-            log names both order ids, and only CANCELLED is published.
+            log names both order ids, a warning points to G3-C repair, and
+            only CANCELLED is published.
         """
         ex, repo = _cancel_executor(tracked=False)
+        ex.client_by_exchange["ex-cancel"] = _CANCEL_CID
         repo.get_active_create_command_by_client_order_id = AsyncMock(
             side_effect=RuntimeError("multiple active create/submit commands")
         )
-        with patch.object(base_module.logger, "critical") as critical:
+        with (
+            patch.object(base_module.logger, "critical") as critical,
+            patch.object(base_module.logger, "warning") as warning,
+        ):
             await ex._process_cancel(_cancel_request())
 
         held = ex._unrecorded_order_terminals[_CANCEL_CID]
@@ -13051,6 +13075,12 @@ class TestConfirmedCancelTerminal:
             _CANCEL_CID in call.args[0] and "ex-cancel" in call.args[0]
             for call in critical.call_args_list
         )
+        assert any(
+            "snapper repair-cancel-targets" in entry.args[0] and _CANCEL_CID in entry.args[0]
+            for entry in warning.call_args_list
+        )
+        assert ex.pending_orders == {}
+        assert ex.client_by_exchange == {}
         repo.insert_order_terminal_once.assert_not_awaited()
         assert _published_events(ex) == [OrderEventEnum.CANCELLED]
 
@@ -13080,7 +13110,7 @@ class TestConfirmedCancelTerminal:
     @pytest.mark.asyncio
     async def test_cancel_removal_allows_a_new_drop_episode_for_the_same_cid(self) -> None:
         """Allow a fresh WARN and metric after a confirmed cancel forgets the order."""
-        ex, _ = _cancel_executor(tracked=True, exchange="paper")
+        ex, repo = _cancel_executor(tracked=True, exchange="paper")
         order = ex.pending_orders[_CANCEL_CID].request
         order.instrument = ""
         params: RecordVenueEventParams = {
@@ -13102,11 +13132,25 @@ class TestConfirmedCancelTerminal:
             assert ex.unrecorded_order_terminal_drop_count == 1
 
             await ex._process_cancel(_cancel_request(instrument=""))
+            assert _CANCEL_CID in ex.pending_orders
+            assert ex.client_by_exchange["ex-cancel"] == _CANCEL_CID
+            assert _CANCEL_CID in ex._unrecorded_order_terminal_dropped_cids
+            assert _CANCEL_CID in ex._unrecorded_order_terminals
+            assert _published_events(ex) == [OrderEventEnum.CANCELLED]
+            ex.exchange_client._log_order_update_to_db.assert_not_awaited()
+            repo.insert_order_terminal_once.assert_not_awaited()
+            await ex._retry_unrecorded_order_terminals()
+            assert ex.unrecorded_order_terminal_drop_count == 1
+
+            order.instrument = "BTC-USD"
+            await ex._process_cancel(_cancel_request())
             assert _CANCEL_CID not in ex.pending_orders
             assert _CANCEL_CID not in ex._unrecorded_order_terminal_dropped_cids
-            assert _CANCEL_CID in ex._unrecorded_order_terminals
+            assert _CANCEL_CID not in ex._unrecorded_order_terminals
 
+            order.instrument = ""
             ex.pending_orders[_CANCEL_CID] = base_module.PendingOrderState(request=order)
+            ex._hold_unrecorded_order_terminal(_CANCEL_CID, params, "paper")
             await ex._retry_unrecorded_order_terminals()
 
         drop_warnings = [
@@ -13247,6 +13291,53 @@ class TestConfirmedCancelTerminal:
         repo.insert_order_terminal_once.assert_awaited_once()
         ex._recover_native_inventory_orders.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("terminal_held", [True, False], ids=["held", "row-update"])
+    async def test_kraken_futures_retries_confirmed_cancel_before_native_inventory(
+        self, terminal_held: bool
+    ) -> None:
+        """Retry confirmed Futures cancels without another venue call or publication."""
+        ex, repo = _cancel_executor(tracked=True, exchange="kraken_futures")
+        client = MagicMock(spec=base_module.KrakenFuturesExchangeClient)
+        client.cancel_order = AsyncMock(
+            return_value=SimpleNamespace(status=ExchangeOrderStatusEnum.CANCELED)
+        )
+        client._log_order_update_to_db = AsyncMock(return_value=6)
+        ex.exchange_client = client
+        ex._recover_native_inventory_orders = AsyncMock()
+        if terminal_held:
+            retry_error = RuntimeError("terminal write unavailable")
+            repo.insert_order_terminal_once = AsyncMock(
+                side_effect=[retry_error, retry_error, retry_error, True, False]
+            )
+        else:
+            client._log_order_update_to_db.side_effect = [None, None, 6]
+
+        holder = ex.pending_orders[_CANCEL_CID]
+        ex.pending_orders["unrelated"] = base_module.PendingOrderState(
+            request=make_order(client_order_id="unrelated")
+        )
+        await ex._process_cancel(_cancel_request(exchange="kraken_futures"))
+        await ex._reconcile_with_exchange()
+
+        assert ex.pending_orders[_CANCEL_CID] is holder
+        assert ex.client_by_exchange["ex-cancel"] == _CANCEL_CID
+        assert (_CANCEL_CID in ex._unrecorded_order_terminals) is terminal_held
+        if terminal_held:
+            client._log_order_update_to_db.assert_not_awaited()
+
+        await ex._reconcile_with_exchange()
+
+        assert list(ex.pending_orders) == ["unrelated"]
+        assert ex.client_by_exchange == {}
+        assert ex._unrecorded_order_terminals == {}
+        assert ex._recover_native_inventory_orders.await_count == 2
+        client.cancel_order.assert_awaited_once_with("ex-cancel", "BTC-USD")
+        client._log_order_update_to_db.assert_awaited_with(
+            db_order_id=5, status=ExchangeOrderStatusEnum.CANCELED
+        )
+        assert _published_events(ex) == [OrderEventEnum.CANCELLED]
+
     def test_retry_map_is_bounded_and_reported_in_health(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -13343,8 +13434,8 @@ class TestConfirmedCancelTerminal:
 
         Given: a tracked order whose order-row update raises,
         When: the venue confirms the requested cancel,
-        Then: the terminal is recorded, the error is logged, and only CANCELLED
-            is published.
+        Then: the terminal is recorded, tracking remains, the error is logged,
+            and only CANCELLED is published.
         """
         ex, repo = _cancel_executor(tracked=True)
         ex.exchange_client._log_order_update_to_db = AsyncMock(side_effect=RuntimeError("db"))
@@ -13353,7 +13444,29 @@ class TestConfirmedCancelTerminal:
 
         repo.insert_order_terminal_once.assert_awaited_once()
         exception.assert_called_once()
+        assert _CANCEL_CID in ex.pending_orders
+        assert ex.client_by_exchange["ex-cancel"] == _CANCEL_CID
         assert _published_events(ex) == [OrderEventEnum.CANCELLED]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("during_row_update", [False, True], ids=["insert", "row-update"])
+    async def test_requested_cancel_propagates_cancellation(self, during_row_update: bool) -> None:
+        """Propagate task cancellation without losing tracking or publishing a result."""
+        ex, repo = _cancel_executor(tracked=True)
+        cancelled = AsyncMock(side_effect=asyncio.CancelledError)
+        if during_row_update:
+            ex.exchange_client._log_order_update_to_db = cancelled
+        else:
+            repo.insert_order_terminal_once = cancelled
+
+        with pytest.raises(asyncio.CancelledError):
+            await ex._process_cancel(_cancel_request())
+
+        cancelled.assert_awaited_once()
+        assert _CANCEL_CID in ex.pending_orders
+        assert ex.client_by_exchange["ex-cancel"] == _CANCEL_CID
+        assert ex._unrecorded_order_terminals == {}
+        assert _published_events(ex) == []
 
     @pytest.mark.asyncio
     async def test_stream_terminal_waiting_on_the_lock_writes_no_second_row(self) -> None:
@@ -13767,6 +13880,203 @@ def _build_paper_executor_for_repo(
     client.set_tracker(executor._tracker)
     executor.exchange_client = client
     return executor, client
+
+
+_REQUESTED_CANCEL_WALLET = "00000000-0000-7000-8000-000000000001"
+
+
+def _stub_cancelled_paper_order(client: PaperExchangeClient) -> None:
+    """Report a confirmed cancel and a disappeared order without a fill gap."""
+    snapshot = ExchangeOrderSnapshot(
+        id="ex-cancel",
+        client_order_id=_CANCEL_CID,
+        symbol="BTC-USD",
+        side=OrderSideEnum.BUY,
+        type=ExchangeOrderTypeEnum.LIMIT,
+        status=ExchangeOrderStatusEnum.CANCELED,
+        amount=1.0,
+        filled=0.0,
+        remaining=1.0,
+        price=50000.0,
+        timestamp=datetime.now(UTC).timestamp(),
+    )
+    client.cancel_order = AsyncMock(return_value=snapshot)
+    client.get_order = AsyncMock(return_value=snapshot)
+    client.get_orders = AsyncMock(return_value=[])
+    client.get_balance = AsyncMock(return_value={})
+
+
+@pytest.fixture
+async def requested_cancel_book(
+    tmp_path: Path,
+) -> AsyncIterator[tuple[SQLAlchemyRepository, MergedDummyExecutor, str]]:
+    """Provide a tracked paper order with durable rows and a confirmed venue cancel."""
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'requested_cancel.db'}")
+    await repository.create_all()
+    try:
+        db_order_id, order_public_id, shard_key = await _seed_open_order_and_commands(
+            repository, _REQUESTED_CANCEL_WALLET, datetime.now(UTC) - timedelta(minutes=5)
+        )
+        ex, client = _build_paper_executor_for_repo(repository, _REQUESTED_CANCEL_WALLET)
+        _stub_cancelled_paper_order(client)
+        order = make_order(client_order_id=_CANCEL_CID, wallet_public_id=_REQUESTED_CANCEL_WALLET)
+        order.strategy_tag = "scalp"
+        ex.pending_orders[_CANCEL_CID] = base_module.PendingOrderState(
+            request=order,
+            db_order_id=db_order_id,
+            order_public_id=order_public_id,
+            exchange_order_id="ex-cancel",
+        )
+        ex.client_by_exchange["ex-cancel"] = _CANCEL_CID
+        yield repository, ex, shard_key
+    finally:
+        await repository.engine.dispose()
+
+
+async def _assert_requested_cancel_durable_state(
+    repository: SQLAlchemyRepository, shard_key: str, *, terminal: bool
+) -> None:
+    """Check the actual order row and its durable terminal evidence independently."""
+    orders = await repository.get_orders(
+        limit=10,
+        offset=0,
+        as_of=datetime.now(UTC),
+        wallet_public_ids=[_REQUESTED_CANCEL_WALLET],
+    )
+    assert [(order["client_order_id"], order["status"]) for order in orders] == [
+        (_CANCEL_CID, "canceled" if terminal else "open")
+    ]
+    events = await repository.get_venue_events_after(shard_key, 0)
+    terminal_rows = [event for event in events if event["event_type"] == "order_terminal"]
+    if terminal:
+        assert [(row["client_order_id"], row["status"]) for row in terminal_rows] == [
+            (_CANCEL_CID, "canceled")
+        ]
+    else:
+        assert terminal_rows == []
+
+
+class TestRequestedCancelEvidenceFirst:
+    """Requested cancels preserve durable recovery and release the engine guard."""
+
+    @pytest.mark.asyncio
+    async def test_held_requested_cancel_keeps_active_row_for_restart_recovery(
+        self, requested_cancel_book: tuple[SQLAlchemyRepository, MergedDummyExecutor, str]
+    ) -> None:
+        """Recover a held requested cancel from its still-active row after shutdown."""
+        repository, ex, shard_key = requested_cancel_book
+        holder = ex.pending_orders[_CANCEL_CID]
+        with patch.object(
+            repository, "insert_order_terminal_once", side_effect=RuntimeError("transient write")
+        ):
+            await ex._process_cancel(_cancel_request(exchange="paper"))
+
+        assert ex.pending_orders[_CANCEL_CID] is holder
+        assert ex.client_by_exchange["ex-cancel"] == _CANCEL_CID
+        assert _CANCEL_CID in ex._unrecorded_order_terminals
+        await _assert_requested_cancel_durable_state(repository, shard_key, terminal=False)
+        active = await repository.get_active_orders_for_recovery(
+            "paper", datetime.now(UTC), _REQUESTED_CANCEL_WALLET
+        )
+        assert [row["client_order_id"] for row in active] == [_CANCEL_CID]
+
+        await ex.stop()
+        assert ex._unrecorded_order_terminals == {}
+        restarted, client = _build_paper_executor_for_repo(repository, _REQUESTED_CANCEL_WALLET)
+        _stub_cancelled_paper_order(client)
+
+        await restarted._recover_pending_orders("paper")
+
+        client.get_order.assert_awaited_once_with("ex-cancel", symbol="BTC-USD")
+        assert restarted.pending_orders == {}
+        assert restarted.client_by_exchange == {}
+        await _assert_requested_cancel_durable_state(repository, shard_key, terminal=True)
+
+    @pytest.mark.asyncio
+    async def test_held_requested_cancel_reconciles_once_and_duplicate_cancelled_is_harmless(
+        self, requested_cancel_book: tuple[SQLAlchemyRepository, MergedDummyExecutor, str]
+    ) -> None:
+        """Release the guard on confirmation and preserve newer intent on the recon terminal."""
+        repository, ex, shard_key = requested_cancel_book
+        with patch("snapper.application.engine.trader.get_repository", return_value=repository):
+            trader = TraderCoordinator()
+        assert ex.msg_publisher is not None
+        engine = TradingEngineService("BTC-USD", ex.msg_publisher, strategy_tag="scalp")
+        trader.engines[shard_key] = engine
+        assert engine.rearm_pending_intent(_CANCEL_CID)
+        publish = AsyncMock(wraps=trader._handle_order_event)
+        ex.msg_publisher.send = publish
+
+        with (
+            patch.object(
+                repository,
+                "insert_order_terminal_once",
+                side_effect=RuntimeError("trial write failed"),
+            ),
+            patch.object(base_module.logger, "warning") as warning,
+        ):
+            await ex._process_cancel(_cancel_request(exchange="paper"))
+
+        publish.assert_awaited_once()
+        assert not engine.order_in_flight
+        assert _CANCEL_CID in ex._unrecorded_order_terminals
+        assert any(
+            "snapper repair-cancel-targets" in entry.args[0] for entry in warning.call_args_list
+        )
+        assert engine.rearm_pending_intent("newer-order")
+
+        with patch.object(
+            repository, "insert_order_terminal_once", wraps=repository.insert_order_terminal_once
+        ) as insert:
+            await ex._reconcile_with_exchange()
+
+        assert insert.await_count == 2
+        assert ex._unrecorded_order_terminals == {}
+        assert ex.pending_orders == {}
+        assert ex.client_by_exchange == {}
+        assert publish.await_count == 2
+        for publication in publish.await_args_list:
+            topic, payload = publication.args
+            assert topic == "orders.events.paper.BTC-USD.cancelled"
+            assert isinstance(payload, OrderEventData)
+            assert (payload.client_order_id, payload.event) == (
+                _CANCEL_CID,
+                OrderEventEnum.CANCELLED,
+            )
+        assert engine.pending_client_order_id == "newer-order"
+        assert engine.order_in_flight
+        await _assert_requested_cancel_durable_state(repository, shard_key, terminal=True)
+
+    @pytest.mark.asyncio
+    async def test_requested_cancel_with_failed_row_update_reconciles_from_durable_terminal(
+        self, requested_cancel_book: tuple[SQLAlchemyRepository, MergedDummyExecutor, str]
+    ) -> None:
+        """Keep an active order tracked when a real SQL projection returns no new row."""
+        repository, ex, shard_key = requested_cancel_book
+        holder = ex.pending_orders[_CANCEL_CID]
+        assert ex.msg_publisher is not None
+        with patch.object(
+            repository, "update_order", side_effect=SQLAlchemyError("db unavailable")
+        ):
+            await ex._process_cancel(_cancel_request(exchange="paper"))
+
+        assert ex.pending_orders[_CANCEL_CID] is holder
+        assert ex.client_by_exchange["ex-cancel"] == _CANCEL_CID
+        assert ex._unrecorded_order_terminals == {}
+        assert await repository.has_venue_event(_CANCEL_CID, "order_terminal")
+        active = await repository.get_active_orders_for_recovery(
+            "paper", datetime.now(UTC), _REQUESTED_CANCEL_WALLET
+        )
+        assert [(row["client_order_id"], row["status"]) for row in active] == [
+            (_CANCEL_CID, "open")
+        ]
+        ex.msg_publisher.send.assert_awaited_once()
+
+        await ex._reconcile_with_exchange()
+
+        assert ex.pending_orders == {}
+        assert ex.client_by_exchange == {}
+        await _assert_requested_cancel_durable_state(repository, shard_key, terminal=True)
 
 
 class TestStreamCancellationEvidenceFirst:

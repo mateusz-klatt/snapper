@@ -749,6 +749,10 @@ class PendingOrderState:
             one atomic section (see ``_book_correlated_fill``). Lifecycle
             is tied to the entry itself, so the lock vanishes with the
             order and cannot leak.
+        confirmed_requested_cancel: Venue-confirmed cancel awaiting evidence
+            or projection. Native Futures reconciliation retries it directly.
+        recovered: True when the request was rebuilt from the Order row,
+            which carries no strategy tag.
     """
 
     request: OrderRequestData
@@ -768,6 +772,8 @@ class PendingOrderState:
     adopted_accept_publish_pending: bool = field(default=False)
     open_row_projected: bool = field(default=False)
     fill_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    confirmed_requested_cancel: OrderCancelData | None = field(default=None)
+    recovered: bool = field(default=False)
 
 
 class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
@@ -1336,6 +1342,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             last_recorded_cum_qty=durable_max,
             last_recorded_fee=self._sum_row_fees(fill_rows),
             last_published_fee=published_fee_seed,
+            recovered=True,
         )
         self.pending_orders[client_order_id] = pending
         self.client_by_exchange[exchange_order_id] = client_order_id
@@ -3379,14 +3386,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _process_cancel(self, cancel: OrderCancelData) -> None:
         """Cancel an existing order on the exchange.
 
-        Cleans up pending_orders and client_by_exchange on success. The
-        lifecycle pop runs under the order's ``fill_lock``: an
-        unserialized pop could yank the entry out from under an in-flight
-        fill booking, stranding that fill (uncorrelatable, orphan-TTL
-        dropped, invisible to recon once untracked) — the same interleave
-        class the stream-side cancellation path serializes against. A
-        trailing fill arriving AFTER a completed cancel pop remains
-        recon/P0-3 territory: the order is legitimately gone.
+        Cleanup waits for terminal evidence and any order-row update.
+        The order's ``fill_lock`` serializes cleanup with fill booking so
+        in-flight fills retain their correlation. A trailing fill arriving
+        after cleanup remains recon/P0-3 territory.
 
         Args:
             cancel: Cancel request data containing order ID to cancel.
@@ -3428,61 +3431,73 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
     async def _finalize_successful_cancel(
         self, cancel: OrderCancelData, exchange_name: OrderExchange
     ) -> None:
-        """Record a venue-confirmed cancel and drop its tracked state; never raises.
+        """Finalize a venue-confirmed cancel under the tracked order's fill lock.
 
-        For a tracked order the terminal is recorded under the order's
-        ``fill_lock`` before the order row is updated and the entries are
-        removed, so a concurrent stream terminal for the same order writes
-        no second row (:meth:`_record_order_terminal_once`). An untracked
-        order still gets its terminal, with metadata from the durable
-        create or submit command. A failed order-row update is logged and
-        does not stop the caller's publish.
+        Keep correlation until terminal evidence and any applicable order-row
+        update succeed. This leaves a failed projection eligible for reconciliation
+        and an active row eligible for startup recovery. An untracked order still
+        gets a terminal attempt using its durable create or submit command.
 
         Args:
             cancel: The cancel request the venue confirmed.
             exchange_name: Executor exchange, for lookups and logs.
         """
-        client_id = self.client_by_exchange.get(cancel.exchange_order_id)
+        client_id = self.client_by_exchange.get(cancel.exchange_order_id, "")
         holder = self.pending_orders.get(client_id) if client_id else None
         if holder is None:
             self.client_by_exchange.pop(cancel.exchange_order_id, None)
             await self._record_confirmed_cancel_terminal(cancel, None, exchange_name)
             return
         async with holder.fill_lock:
-            await self._record_confirmed_cancel_terminal(cancel, holder, exchange_name)
+            holder.confirmed_requested_cancel = cancel
+            if not await self._record_confirmed_cancel_terminal(cancel, holder, exchange_name):
+                return
+            if self.pending_orders.get(client_id) is not holder:
+                return
+            if holder.db_order_id is not None and not await self._mark_cancelled_order_row(
+                holder.db_order_id, cancel, exchange_name
+            ):
+                return
             self.client_by_exchange.pop(cancel.exchange_order_id, None)
-            pending = self._forget_pending_order(client_id) if client_id else None
-            if pending and pending.db_order_id is not None:
-                await self._mark_cancelled_order_row(pending.db_order_id, cancel, exchange_name)
+            self._forget_pending_order(client_id)
 
     async def _mark_cancelled_order_row(
         self, db_order_id: int, cancel: OrderCancelData, exchange_name: OrderExchange
-    ) -> None:
-        """Project a confirmed cancel onto the order row, logging instead of raising.
+    ) -> bool:
+        """Project a confirmed cancel onto the order row and report success.
 
         Args:
             db_order_id: Local order row to update.
             cancel: The confirmed cancel request, for the log.
             exchange_name: Executor exchange, for the log.
+
+        Returns:
+            True when the exchange client returns a new order version.
         """
+        failure_message = (
+            f"[{exchange_name}] Confirmed cancel of {cancel.client_order_id} "
+            f"(exchange {cancel.exchange_order_id}): order row update failed"
+        )
         try:
             exchange_client = self._require_exchange_client()
-            await exchange_client._log_order_update_to_db(
+            updated_order_id = await exchange_client._log_order_update_to_db(
                 db_order_id=db_order_id,
                 status=ExchangeOrderStatusEnum.CANCELED,
             )
         except Exception:
-            logger.exception(
-                f"[{exchange_name}] Confirmed cancel of {cancel.client_order_id} "
-                f"(exchange {cancel.exchange_order_id}): order row update failed"
-            )
+            logger.exception(failure_message)
+            return False
+        if updated_order_id is None:
+            logger.error(failure_message)
+            return False
+        return True
 
     async def _record_confirmed_cancel_terminal(
         self,
         cancel: OrderCancelData,
         holder: PendingOrderState | None,
         exchange_name: OrderExchange,
-    ) -> None:
+    ) -> bool:
         """Record the confirmed cancel's ``order_terminal`` once, or hold it for retry.
 
         The cancel carries the target order's client order id. The
@@ -3497,6 +3512,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             cancel: The cancel request the venue confirmed.
             holder: The tracked entry the caller locked, or ``None``.
             exchange_name: Executor exchange, for lookups and logs.
+
+        Returns:
+            True when the evidence was recorded, already existed, or the
+            repository keeps no venue events. False when evidence is held.
         """
         client_order_id = cancel.client_order_id
         params: RecordVenueEventParams = {
@@ -3507,7 +3526,17 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             "client_order_id": client_order_id,
             "status": "canceled",
         }
-        await self._record_or_hold_order_terminal(client_order_id, params, holder, exchange_name)
+        instrument = await self._record_or_hold_order_terminal(
+            client_order_id, params, holder, exchange_name
+        )
+        if instrument is None:
+            logger.warning(
+                f"[{exchange_name}] Requested cancel order_terminal held for {client_order_id} "
+                f"(exchange {cancel.exchange_order_id}). If evidence remains missing, "
+                f"run G3-C repair tool (snapper repair-cancel-targets)"
+            )
+            return False
+        return True
 
     @staticmethod
     def _order_terminal_identifiers_complete(params: RecordVenueEventParams) -> bool:
@@ -3682,9 +3711,10 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
 
         The tracked request is canonical only while ``pending_orders``
         still maps the client order id to ``holder``, which the caller has
-        locked. Otherwise the durable create or submit command's
-        ``shard_key`` decides; without such a command the fallback
-        instrument is used without a tag, and a warning names the order.
+        locked, and the request carries original submission metadata. A
+        recovered request has no strategy tag, so its terminal must use the
+        durable command's ``shard_key``. Untracked orders also use that key.
+        Without a command, the fallback instrument is used without a tag.
 
         Args:
             client_order_id: Target order's client order id.
@@ -3696,7 +3726,9 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             The instrument and the strategy tag, ``None`` when absent.
         """
         if holder is not None and self.pending_orders.get(client_order_id) is holder:
-            return holder.request.instrument, holder.request.strategy_tag
+            if not holder.recovered:
+                return holder.request.instrument, holder.request.strategy_tag
+            fallback_instrument = holder.request.instrument
         command = None
         if isinstance(self.repository, SQLAlchemyRepository):
             command = await self.repository.get_active_create_command_by_client_order_id(
@@ -5862,6 +5894,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         exchange_name = self._get_exchange_name()
 
         if isinstance(self.exchange_client, KrakenFuturesExchangeClient):
+            await self._retry_native_confirmed_requested_cancels(exchange_name)
             await self._recover_native_inventory_orders(self.exchange_client, exchange_name)
             return
 
@@ -5879,6 +5912,18 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
         await self._verify_unresolved_dispatched(adopted_this_cycle)
 
         await self._warn_on_balance_mismatches(exchange_name)
+
+    async def _retry_native_confirmed_requested_cancels(self, exchange_name: OrderExchange) -> None:
+        """Retry persistence of confirmed requests before observing native Futures inventory.
+
+        The native inventory cannot infer terminal status from absence. The
+        retained confirmation directly authorizes the persistence retry without
+        another venue request or cancel-result notification.
+        """
+        for client_id in tuple(self.pending_orders):
+            pending = self.pending_orders.get(client_id)
+            if pending is not None and (cancel := pending.confirmed_requested_cancel) is not None:
+                await self._finalize_successful_cancel(cancel, exchange_name)
 
     async def _retry_pending_reconciliation_work(self) -> None:
         """Retry durable work that previous order/recon paths left pending."""

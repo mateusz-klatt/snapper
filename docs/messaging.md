@@ -210,15 +210,15 @@ SQL repository, or at executor shutdown — the executor counts each distinct
 stuck terminal once per episode in `meta.unrecorded_order_terminal_drop_count`
 and logs one WARN per episode pointing operators to the G3-C repair tool
 (`snapper repair-cancel-targets`).
-While an `order_terminal` is held for retry, the executor deliberately leaves
+
+When a stream cancellation or expiry is held for retry, the executor leaves
 the `Order` row non-terminal, skips the stream terminal publish, and keeps the
-order tracked. This is fail-closed: no order becomes canceled or expired
-without durable evidence. The engine's in-flight guard for that order
-therefore stays engaged until the next reconciliation cycle (about 60 s)
-records the evidence and re-enters the cancellation handler. A brief delayed
-release after a database error is intended, not a bug. After a restart that
-loses the in-memory retry map, the still-open `Order` row is re-detected as a
-disappeared order and recorded afresh.
+order tracked. On executors that recheck disappeared orders, the next
+reconciliation cycle (about 60 s) can record the evidence and publish the
+stream terminal to release the engine's in-flight guard. After a restart that
+loses the in-memory retry map, the still-active `Order` row remains eligible
+for startup recovery.
+
 After three consecutive venue reconciliation failures, the coordinator
 uses the heartbeat to halt known real shard keys for the matching
 exchange/wallet scope and to drop new cold-path signals for that scope.
@@ -1461,6 +1461,20 @@ Executor:
     be recorded at once, it waits in a bounded retry map that the next
     reconciliation cycle drains.
 5.  Publishes `ExecutionData`, `OrderData`, or lightweight `OrderEventData`
+
+For a tracked, venue-confirmed requested cancel, the executor keeps the
+order tracked until it has recorded `order_terminal` and updated the `Order`
+row to `CANCELED`. A hold leaves the row active for startup recovery, which
+uses the durable command's shard when recording a recovered terminal.
+Reconciliation retries held evidence. For exchanges that recheck disappeared
+orders, this also retries the row update, including when terminal evidence
+was already recorded. Kraken Futures reconciliation retries locally retained
+venue confirmations before observing native inventory. On restart it parks
+active orders because inventory absence alone cannot establish terminal status.
+The executor still publishes `CANCELLED` on the cancel-result topic so the
+engine releases its in-flight guard on the venue confirmation. A hold logs a
+WARN pointing to the G3-C repair tool (`snapper repair-cancel-targets`),
+including when the executor has no tracked order for that cancel.
 
 Before the venue order-placement call, each submit passes the pre-placement
 safety checks. The duplicate-submit guard drops outbox replays of an
