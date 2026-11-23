@@ -453,11 +453,13 @@ class AppSettings:
 
     @property
     def position_dust_notional_threshold(self) -> Decimal:
-        """Return the quote-currency notional below which a position is dust.
+        """Return the USD notional below which a position is dust.
 
-        The position API also marks a position as dust when its lot-rounded
-        absolute quantity is below the instrument's venue minimum order size.
-        The default is ``0.50`` quote-currency units.
+        Quote notionals are converted with the portfolio FX candles. A
+        missing rate skips this rule. The position API also marks a
+        position as dust when its lot-rounded absolute quantity is below
+        the instrument's venue minimum order size. A zero quantity is not
+        dust. The default is ``0.50`` USD.
 
         Returns:
             Finite, non-negative decimal threshold.

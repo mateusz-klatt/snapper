@@ -151,7 +151,7 @@ execution safety.
 | `PAIRED_EXECUTION_GUARD_ENABLED` | `false` | Fail-closed live multi-leg strategy gate. With the default, live exchanges refuse multi-leg groups while paper multi-leg remains allowed. Enable only after the paired-execution guard is deployed. |
 | `PAIRED_EXECUTION_ASSEMBLY_TIMEOUT_S` | `5.0` | Seconds a paired-execution group waits for all sibling legs to register durable commands before the guard can break the group. |
 | `PAIRED_EXECUTION_FILL_TIMEOUT_S` | `30.0` | Seconds an armed paired-execution group waits for fills before the guard treats a lagging leg as breakage and compensates. |
-| `POSITION_DUST_NOTIONAL_THRESHOLD` | `0.50` | Quote-currency notional below which a position is dust. The comparison uses the lot-rounded absolute quantity times the quote price. A position is also dust when that quantity is below the venue minimum order size. Zero disables only the notional rule. |
+| `POSITION_DUST_NOTIONAL_THRESHOLD` | `0.50` | USD notional below which a position is dust. Spot notionals are the lot-rounded absolute quantity times the quote price. Kraken futures use the contract multiplier and payoff. The quote amount is converted with the portfolio FX candles. A missing rate, or a derivative whose contract value is unknown, skips this rule. A position is also dust when its quantity is below the venue minimum order size. A zero quantity is not dust. Zero disables only the notional rule. |
 
 ### Observability Pipeline
 

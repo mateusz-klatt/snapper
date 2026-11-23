@@ -35,6 +35,7 @@ from snapper.data.repository import Repository
 from snapper.data.repository_types import PositionCycleRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.server.dependencies import get_repository_dependency
+from snapper.server.position_display import load_position_quote_prices
 from snapper.server.position_display import load_position_spec_steps
 from snapper.server.position_display import position_dust_threshold
 
@@ -50,9 +51,11 @@ class PositionCycleData(StrictDataSchema[Literal["position_cycle"]]):
     """Position cycle summary for admin display.
 
     Attributes:
-        is_dust: True when the cycle peak quantity is below the venue
-            minimum order size. The open-cycle read has no quote price,
-            so the notional rule does not mark a cycle by itself.
+        is_dust: True when the cycle peak quantity, priced with the
+            matching position's mark or average, is below the venue
+            minimum or the USD notional threshold. A zero peak is not
+            dust. A cycle with no matching price, USD rate, or known
+            contract value uses the minimum-size rule only.
         quantity_decimals: Decimal places of the instrument lot step,
             or None when the spec has no positive lot size.
         price_decimals: Decimal places of the instrument tick size,
@@ -105,15 +108,36 @@ async def _open_cycle_payloads(
     rows: list[PositionCycleRow],
     now: datetime,
 ) -> list[PositionCycleData]:
-    """Attach dust and precision fields to open cycle rows."""
+    """Attach dust and precision fields to open cycle rows.
+
+    The peak quantity is classified with the same steps, USD rate, and
+    mark-or-average price as the matching open position. An orphan cycle
+    has no price, so only its venue minimum can mark it as dust.
+    """
     threshold = position_dust_threshold()
     specs = await load_position_spec_steps(
         repo,
         [row["instrument_public_id"] for row in rows],
         now,
     )
+    prices = await load_position_quote_prices(repo, now)
     return [
-        _cycle_to_data(row, now, specs.get(row["instrument_public_id"]), threshold) for row in rows
+        _cycle_to_data(
+            row,
+            now,
+            specs.get(row["instrument_public_id"]),
+            threshold,
+            prices.get(
+                (
+                    row["instrument_public_id"],
+                    row["exchange"],
+                    row["mode"],
+                    row["wallet_public_id"],
+                ),
+                (None, None),
+            ),
+        )
+        for row in rows
     ]
 
 
@@ -122,18 +146,23 @@ def _cycle_to_data(
     now: datetime,
     steps: PositionSpecSteps | None,
     notional_threshold: Decimal,
+    prices: tuple[float | None, float | None],
 ) -> PositionCycleData:
     """Convert a PositionCycleRow dict to API response data.
 
-    Dust uses the cycle peak quantity and the venue minimum. The open-cycle
-    read has no quote price, so the notional rule does not fire here.
+    Dust uses the cycle peak quantity, the venue minimum, and the same
+    mark or average price the matching position uses. The notional is
+    USD. A missing price skips the notional rule.
     """
     opened_at = row["opened_at"]
     age = now - opened_at
+    mark_price, average_price = prices
     display = display_for_quantity(
         quantity=row["max_qty"],
         steps=steps,
         notional_threshold=notional_threshold,
+        mark_price=mark_price,
+        average_price=average_price,
     )
     return PositionCycleData(
         public_id=row["public_id"],

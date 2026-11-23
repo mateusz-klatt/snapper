@@ -293,8 +293,10 @@ class BootstrapSettingsLoader(BaseSettings):
         default=DEFAULT_POSITION_DUST_NOTIONAL_THRESHOLD,
         alias="POSITION_DUST_NOTIONAL_THRESHOLD",
         description=(
-            "Quote-currency notional below which a position is dust. "
-            "The quantity rule still applies when this threshold is zero."
+            "USD notional below which a position is dust. Quote notionals "
+            "are converted with the portfolio FX candles; a missing rate "
+            "skips this rule. The quantity rule still applies when this "
+            "threshold is zero. A zero quantity is not dust."
         ),
     )
 
@@ -319,7 +321,7 @@ class BootstrapSettingsLoader(BaseSettings):
         """Reject a non-finite or negative dust notional threshold.
 
         Args:
-            value: Parsed threshold in quote-currency units.
+            value: Parsed threshold in USD.
 
         Returns:
             The accepted threshold.

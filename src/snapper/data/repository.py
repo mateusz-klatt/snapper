@@ -499,6 +499,7 @@ from snapper.data.repository_types import PortfolioReconciliationReadContextRow
 from snapper.data.repository_types import PortfolioReconciliationStateRow
 from snapper.data.repository_types import PositionCycleInsertRow
 from snapper.data.repository_types import PositionCycleRow
+from snapper.data.repository_types import PositionDisplayFactRow
 from snapper.data.repository_types import PositionProjectionUpsertRow
 from snapper.data.repository_types import PositionRow
 from snapper.data.repository_types import ScopeGrantRow
@@ -5014,6 +5015,29 @@ class Repository(ABC):
 
         Returns:
             InstrumentSpecRow dict or None if no spec exists.
+        """
+        ...
+
+    @abstractmethod
+    async def get_position_display_facts(
+        self,
+        instrument_public_ids: Sequence[str],
+        as_of: datetime,
+    ) -> list[PositionDisplayFactRow]:
+        """Return dust-classification columns for one instrument set.
+
+        One query reads the active instrument, its symbol, and the active
+        spec columns. Observation spans are not loaded. Blank ids are
+        ignored and duplicates are read once. An instrument with no spec
+        is still returned so its quote currency can be converted; the
+        step and contract columns are null. Unknown ids are omitted.
+
+        Args:
+            instrument_public_ids: Instrument ids to read.
+            as_of: Point-in-time for the temporal query.
+
+        Returns:
+            One fact row per matched instrument.
         """
         ...
 
@@ -11515,6 +11539,121 @@ def _never_submitted_audit(command: TradeCommand) -> SpotNeverSubmittedAudit:
     }
 
 
+_DisplayFactColumns = tuple[
+    str,
+    str,
+    str,
+    str | None,
+    float | None,
+    float | None,
+    float | None,
+    Decimal | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+]
+
+
+def _position_display_fact_query(
+    instrument_public_ids: tuple[str, ...],
+    as_of: datetime,
+) -> Select[Any]:
+    """Build the batched position-display fact query.
+
+    Args:
+        instrument_public_ids: Distinct non-blank instrument ids.
+        as_of: Point in time for the temporal filters.
+
+    Returns:
+        A select of identity, quote, step, and contract columns.
+    """
+    instrument_timestamp, instrument_known_to = where_active(Instrument, as_of)
+    symbol_timestamp, symbol_known_to = where_active(Symbol, as_of)
+    spec_timestamp, spec_known_to = where_active(InstrumentSpec, as_of)
+    query = (
+        select(
+            Instrument.public_id,
+            Instrument.exchange,
+            Symbol.base,
+            Symbol.quote,
+            InstrumentSpec.lot_size,
+            InstrumentSpec.tick_size,
+            InstrumentSpec.min_order_size,
+            InstrumentSpec.contract_size,
+            InstrumentSpec.quantity_unit,
+            InstrumentSpec.native_order_quantity_unit,
+            InstrumentSpec.contract_payoff_model,
+            InstrumentSpec.contract_value_currency,
+            InstrumentSpec.settlement_currency,
+            InstrumentSpec.instrument_kind,
+        )
+        .select_from(Instrument)
+        .join(Symbol, Instrument.symbol_public_id == Symbol.public_id)
+        .outerjoin(
+            InstrumentSpec,
+            and_(
+                InstrumentSpec.instrument_public_id == Instrument.public_id,
+                spec_timestamp,
+                spec_known_to,
+            ),
+        )
+        .where(
+            Instrument.public_id.in_(instrument_public_ids),
+            instrument_timestamp,
+            instrument_known_to,
+            symbol_timestamp,
+            symbol_known_to,
+        )
+    )
+    return cast(Select[Any], query)
+
+
+def _position_display_fact_row(values: _DisplayFactColumns) -> PositionDisplayFactRow:
+    """Project one fact query row.
+
+    Args:
+        values: Column tuple in query order.
+
+    Returns:
+        The dust-classification fact row.
+    """
+    (
+        instrument_public_id,
+        exchange,
+        base,
+        quote,
+        lot_size,
+        tick_size,
+        min_order_size,
+        contract_size,
+        quantity_unit,
+        native_order_quantity_unit,
+        contract_payoff_model,
+        contract_value_currency,
+        settlement_currency,
+        instrument_kind,
+    ) = values
+    return PositionDisplayFactRow(
+        instrument_public_id=instrument_public_id,
+        exchange=exchange,
+        base=base,
+        quote=quote,
+        lot_size=lot_size,
+        tick_size=tick_size,
+        min_order_size=min_order_size,
+        contract_size=contract_size,
+        quantity_unit=quantity_unit,
+        native_order_quantity_unit=native_order_quantity_unit,
+        contract_payoff_model=contract_payoff_model,
+        contract_value_currency=contract_value_currency,
+        settlement_currency=settlement_currency,
+        instrument_kind=instrument_kind,
+    )
+
+
 class SQLAlchemyRepository(Repository):
     """Async SQLAlchemy repository for SQLite and PostgreSQL.
 
@@ -12948,6 +13087,22 @@ class SQLAlchemyRepository(Repository):
                 row,
                 spans_by_key.get((row.instrument_public_id, row.public_id, row.timestamp), ()),
             )
+
+    async def get_position_display_facts(
+        self,
+        instrument_public_ids: Sequence[str],
+        as_of: datetime,
+    ) -> list[PositionDisplayFactRow]:
+        """Return dust-classification columns for one instrument set."""
+        ids = tuple(dict.fromkeys(item for item in instrument_public_ids if item))
+        if not ids:
+            return []
+        async with self.session() as session:
+            result = await session.execute(_position_display_fact_query(ids, as_of))
+            return [
+                _position_display_fact_row(cast(_DisplayFactColumns, tuple(row)))
+                for row in result.all()
+            ]
 
     async def _acquire_spot_asset_precision_evidence_process_lock(
         self,
