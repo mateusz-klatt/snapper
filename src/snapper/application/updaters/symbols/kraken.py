@@ -796,12 +796,20 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         except TimeoutError:
             if upstream_timeout or not deadline.expired():
                 raise
+            verified_count = len(verified)
+            expected_count = len(ws_symbols)
+            outcome = (
+                "window closed"
+                if expected_count > 0 and verified_count / expected_count >= _VERIFICATION_THRESHOLD
+                else "timeout"
+            )
             logger.info(
-                "Snapshot collection timeout ({:.1f}s): verified {}/{} symbols, "
+                "Snapshot collection {} ({:.1f}s): verified {}/{} symbols, "
                 "{} WS-only discovered",
+                outcome,
                 timeout_seconds,
-                len(verified),
-                len(ws_symbols),
+                verified_count,
+                expected_count,
                 len(ws_only),
             )
         if len(verified) == len(ws_symbols) and ws_symbols:

@@ -2861,6 +2861,46 @@ class TestKrakenCollectVerifiedSymbolsWsOnly:
         assert timed_out
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("verified_count", "expected_count", "expected_status"),
+        [(19, 20, "window closed"), (18, 20, "timeout"), (0, 0, "timeout")],
+    )
+    async def test_collect_verified_symbols_logs_deadline_status(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        verified_count: int,
+        expected_count: int,
+        expected_status: str,
+    ) -> None:
+        """Verify the deadline log describes the observed snapshot coverage.
+
+        Given: An open stream that verifies some or none of the expected symbols,
+        When: The collection deadline expires,
+        Then: The INFO message names the outcome and includes the observed counts.
+        """
+        symbols = [f"TOKEN{index}/USD" for index in range(expected_count)]
+        extra = {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"}
+        client = _mock_snapshot_client(
+            [{"symbol": symbol} for symbol in symbols[:verified_count]] + [extra],
+            hold_open=True,
+        )
+        captured: list[str] = []
+        sink_id = logger.add(captured.append, format="{level}: {message}", level="INFO")
+        try:
+            _, _, timed_out = await updater._collect_verified_symbols(client, set(symbols), 0.0)
+        finally:
+            logger.remove(sink_id)
+
+        expected_message = (
+            f"INFO: Snapshot collection {expected_status} (0.0s): "
+            f"verified {verified_count}/{expected_count} symbols, 1 WS-only discovered\n"
+        )
+        assert timed_out
+        assert [entry for entry in captured if "Snapshot collection " in entry] == [
+            expected_message
+        ]
+
+    @pytest.mark.asyncio
     async def test_collect_verified_symbols_discovers_ws_only(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
