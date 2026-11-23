@@ -252,39 +252,34 @@ class TestKrakenSymbolUpdater:
         factory.assert_called_once_with()
 
     @pytest.mark.asyncio
-    async def test_verify_websocket_symbols_exits_after_final_expected_pair(
+    async def test_build_verified_mappings_includes_ws_only_after_final_rest_pair(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
-        """Verify collection closes the stream when all expected symbols are found.
+        """Verify late WS-only instruments reach the final symbol mappings.
 
-        Given: A stream with an extra instrument after the last expected pair,
-        When: verify_websocket_symbols called,
-        Then: The iterator closes without waiting for or requesting the extra instrument.
+        Given: A stream with a WS-only instrument after the final REST pair,
+        When: The updater builds verified mappings,
+        Then: Both instruments are present, with the discovered instrument marked WS-only.
         """
-        ws_symbols_to_verify = {"BTC/USD"}
-        resumed = False
-        closed = False
+        rest_pairs = {"XXBTZUSD": {"base": "XXBT", "quote": "ZUSD", "ccxt_symbol": "BTC/USD"}}
+        client = _mock_snapshot_client(
+            [
+                {"symbol": "BTC/USD"},
+                {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"},
+            ]
+        )
+        with (
+            patch.object(updater, "load_kraken_rest_symbols", return_value=rest_pairs),
+            patch.object(updater, "_create_exchange_client", return_value=client) as factory,
+        ):
+            mappings, success = await updater.build_verified_mappings()
 
-        async def mock_subscribe(raw: bool = False) -> AsyncIterator[dict[str, str]]:
-            """Detect whether collection resumes the completed stream or closes it."""
-            nonlocal closed, resumed
-            try:
-                yield {"symbol": "BTC/USD"}
-                resumed = True
-                yield {"symbol": "EXTRA/USD", "base": "EXTRA", "quote": "USD"}
-            finally:
-                closed = True
-
-        mock_client = AsyncMock()
-        mock_client.subscribe_instruments = mock_subscribe
-        mock_client.disconnect_websocket = AsyncMock()
-        with patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory:
-            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols_to_verify)
-        assert verified == ws_symbols_to_verify
-        assert ws_only == []
-        assert not resumed
-        assert closed
+        assert success is True
+        assert set(mappings) == {"BTC-USD", "BTGOX-USD"}
+        assert mappings["BTGOX-USD"]["ws_only"] == "true"
+        assert mappings["BTGOX-USD"]["kraken_websocket_symbol"] == "BTGOx/USD"
         factory.assert_called_once_with()
+        client.disconnect_websocket.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2846,23 +2841,24 @@ class TestKrakenCollectVerifiedSymbolsWsOnly:
             return KrakenSymbolUpdaterService()
 
     @pytest.mark.asyncio
-    async def test_collect_exits_when_snapshots_together_confirm_all_symbols(
+    async def test_collect_verified_symbols_waits_for_deadline_after_final_rest_pair(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
-        """Verify retry collection exits when it finds the last missing symbol.
+        """Verify an open stream is collected through the deadline at full verification.
 
-        Given: The original snapshot confirmed ETH/USD and the retry confirms BTC/USD then waits,
-        When: The retry collector receives BTC/USD,
-        Then: It completes without timing out or claiming ETH/USD was seen again.
+        Given: A stream that emits the final REST pair and a WS-only instrument, then waits,
+        When: The collector reads the stream,
+        Then: Both observations are returned once the deadline expires.
         """
-        client = _mock_snapshot_client([{"symbol": "BTC/USD"}], hold_open=True)
+        extra = {"symbol": "BTGOx/USD", "base": "BTGOx", "quote": "USD"}
+        client = _mock_snapshot_client([{"symbol": "BTC/USD"}, extra], hold_open=True)
         verified, ws_only, timed_out = await updater._collect_verified_symbols(
-            client, {"BTC/USD", "ETH/USD"}, 0.0, previously_verified={"ETH/USD"}
+            client, {"BTC/USD"}, 0.0
         )
 
         assert verified == {"BTC/USD"}
-        assert ws_only == []
-        assert not timed_out
+        assert ws_only == [extra]
+        assert timed_out
 
     @pytest.mark.asyncio
     async def test_collect_verified_symbols_discovers_ws_only(

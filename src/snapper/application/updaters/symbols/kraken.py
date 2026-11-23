@@ -648,9 +648,9 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         of 1,614 symbols has about 16 seconds to arrive. A floor gives small
         catalogs time to connect and a ceiling bounds each collection.
         A deadline expiry below the coverage threshold for a nonempty catalog
-        permits one fresh subscription. Collection stops as soon as every
-        expected symbol is verified across the snapshots, so discovery of
-        later WS-only instruments is best-effort.
+        permits one fresh subscription. Each collection runs until its
+        deadline or the stream ends to include WS-only instruments sent later
+        in the snapshot.
 
         Args:
             ws_symbols: Set of REST-derived symbols to verify.
@@ -728,7 +728,7 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         retry_client = self._create_exchange_client(fresh=True)
         try:
             retry_verified, retry_ws_only, _ = await self._collect_verified_symbols(
-                retry_client, ws_symbols, timeout, previously_verified=first_verified
+                retry_client, ws_symbols, timeout
             )
         finally:
             await self._safe_disconnect_ws(retry_client)
@@ -754,18 +754,16 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         client: Any,
         ws_symbols: set[str],
         timeout_seconds: float,
-        *,
-        previously_verified: set[str] | None = None,
     ) -> tuple[set[str], list[dict[str, str]], bool]:
         """Collect verified symbols and WS-only instruments from feed.
 
-        Stops once all expected symbols are verified or the deadline expires.
+        Reads until the deadline or stream end to collect WS-only instruments
+        throughout the snapshot.
 
         Args:
             client: Kraken exchange client.
             ws_symbols: Set of REST-derived WS symbols to verify.
             timeout_seconds: Maximum time to spend collecting.
-            previously_verified: Symbols already confirmed by the first attempt.
 
         Returns:
             Verified REST symbols, WS-only instruments with symbol, base and
@@ -773,7 +771,6 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         """
         verified: set[str] = set()
         ws_only: list[dict[str, str]] = []
-        remaining = ws_symbols.difference(previously_verified or ())
         deadline = asyncio.timeout(timeout_seconds)
         upstream_timeout = False
         try:
@@ -786,9 +783,6 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
                                 continue
                             if ws_symbol in ws_symbols:
                                 verified.add(ws_symbol)
-                                remaining.discard(ws_symbol)
-                                if not remaining:
-                                    break
                             else:
                                 base = raw_instrument.get("base", "")
                                 quote = raw_instrument.get("quote", "")
