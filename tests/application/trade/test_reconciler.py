@@ -1341,20 +1341,24 @@ def _awaiting_target_cmd(public_id: str, age_seconds: float) -> TradeCommandRow:
 class TestStaleAwaitingTargetMonitoring:
     """Periodic visibility, episode dedup, metrics, and health heartbeats for stuck holds."""
 
-    def test_configure_held_cancel_monitor_validates_positive_threshold(self) -> None:
+    def test_constructor_validates_held_cancel_monitor_configuration(self) -> None:
         """Threshold must be finite and strictly positive and cap at least 1.
 
-        Given: A ReconciliationLoop instance,
-        When: ``configure_held_cancel_monitor`` receives invalid threshold or cap values,
+        Given: ReconciliationLoop constructor arguments,
+        When: The monitor receives invalid threshold or cap values,
         Then: ``ValueError`` is raised.
         """
         recon, _ = _make_loop(_make_repo())
         assert recon._awaiting_target_stale_threshold_s == DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
         for bad in (0.0, -5.0, float("nan"), float("inf")):
             with pytest.raises(ValueError, match="finite and positive"):
-                recon.configure_held_cancel_monitor(stale_threshold_s=bad)
+                ReconciliationLoop(
+                    "kraken", _make_repo(), MagicMock(spec=TradeService), stale_threshold_s=bad
+                )
         with pytest.raises(ValueError, match="max_hydrate_per_cycle"):
-            recon.configure_held_cancel_monitor(max_hydrate_per_cycle=0)
+            ReconciliationLoop(
+                "kraken", _make_repo(), MagicMock(spec=TradeService), max_hydrate_per_cycle=0
+            )
 
     @pytest.mark.asyncio
     async def test_fresh_awaiting_target_is_silent_and_publishes_healthy_heartbeat(
@@ -1370,7 +1374,10 @@ class TestStaleAwaitingTargetMonitoring:
         repo = _make_repo(cmds=[cmd])
         trade_svc = TradeService()
         publisher, sent = _make_heartbeat_publisher()
-        recon = ReconciliationLoop("kraken", repo, trade_svc).configure_held_cancel_monitor(
+        recon = ReconciliationLoop(
+            "kraken",
+            repo,
+            trade_svc,
             stale_threshold_s=900.0,
             msg_publisher=publisher,
         )
@@ -1407,7 +1414,10 @@ class TestStaleAwaitingTargetMonitoring:
         repo = _make_repo(cmds=[stale_one, stale_two])
         trade_svc = TradeService()
         publisher, sent = _make_heartbeat_publisher()
-        recon = ReconciliationLoop("kraken", repo, trade_svc).configure_held_cancel_monitor(
+        recon = ReconciliationLoop(
+            "kraken",
+            repo,
+            trade_svc,
             stale_threshold_s=900.0,
             msg_publisher=publisher,
         )
@@ -1451,7 +1461,10 @@ class TestStaleAwaitingTargetMonitoring:
         stale = _awaiting_target_cmd("cancel-alert-1", age_seconds=1200.0)
         repo = _make_repo(cmds=[stale])
         publisher, sent = _make_heartbeat_publisher()
-        recon = ReconciliationLoop("kraken", repo, TradeService()).configure_held_cancel_monitor(
+        recon = ReconciliationLoop(
+            "kraken",
+            repo,
+            TradeService(),
             stale_threshold_s=900.0,
             msg_publisher=publisher,
         )
@@ -1502,7 +1515,10 @@ class TestStaleAwaitingTargetMonitoring:
         publisher = MagicMock()
         publisher.tracker = MagicMock(session_id="s-err", next_sequence=MagicMock(return_value=1))
         publisher.send = AsyncMock(side_effect=RuntimeError("zmq down"))
-        recon = ReconciliationLoop("kraken", repo, trade_svc).configure_held_cancel_monitor(
+        recon = ReconciliationLoop(
+            "kraken",
+            repo,
+            trade_svc,
             stale_threshold_s=900.0,
             msg_publisher=publisher,
         )
@@ -1534,9 +1550,7 @@ class TestRuntimeAwaitingTargetHydration:
             side_effect=RuntimeError("lookup down")
         )
         trade_svc = TradeService()
-        recon = ReconciliationLoop("kraken", repo, trade_svc).configure_held_cancel_monitor(
-            stale_threshold_s=900.0
-        )
+        recon = ReconciliationLoop("kraken", repo, trade_svc, stale_threshold_s=900.0)
 
         await recon._reconcile_cycle()
         errors_c1 = [m for m in loguru_warnings if m.startswith("ERROR|")]
@@ -1573,9 +1587,7 @@ class TestRuntimeAwaitingTargetHydration:
         c3 = _awaiting_target_cmd("cancel-cap-3", age_seconds=10.0)
         repo = _make_repo(cmds=[c1, c2, c3])
         repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-cap")
-        recon = ReconciliationLoop("kraken", repo, TradeService()).configure_held_cancel_monitor(
-            max_hydrate_per_cycle=2
-        )
+        recon = ReconciliationLoop("kraken", repo, TradeService(), max_hydrate_per_cycle=2)
 
         await recon._reconcile_cycle()
         hydrated_pids = [

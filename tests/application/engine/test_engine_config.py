@@ -32,7 +32,6 @@ from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.application.trade.caps_enforcer import Guard
-from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
@@ -2776,28 +2775,9 @@ async def test_create_reconciliation_tasks_wires_stale_threshold_from_settings(
     When: ``_create_reconciliation_tasks`` constructs each exchange ``ReconciliationLoop``,
     Then: Each loop receives the configured threshold and ``msg_publisher``.
     """
-    created_loops: list[ReconciliationLoop] = []
     real_cls = trader_module.ReconciliationLoop
-
-    def _spy_loop(
-        exchange_name: str,
-        repository: SQLAlchemyRepository,
-        trade_service: TradeService,
-        interval_seconds: float = 60.0,
-        *,
-        ownership: ShardOwnership | None = None,
-    ) -> ReconciliationLoop:
-        loop = real_cls(
-            exchange_name=exchange_name,
-            repository=repository,
-            trade_service=trade_service,
-            interval_seconds=interval_seconds,
-            ownership=ownership,
-        )
-        created_loops.append(loop)
-        return loop
-
-    monkeypatch.setattr(trader_module, "ReconciliationLoop", _spy_loop)
+    reconciliation_factory = MagicMock(side_effect=real_cls)
+    monkeypatch.setattr(trader_module, "ReconciliationLoop", reconciliation_factory)
     coord = TraderCoordinator.__new__(TraderCoordinator)
     coord.trade_service = TradeService()
     coord.repository = AsyncMock(spec=SQLAlchemyRepository)
@@ -2810,10 +2790,10 @@ async def test_create_reconciliation_tasks_wires_stale_threshold_from_settings(
         t.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await t
-    assert len(created_loops) == len(tasks) > 0
-    first = created_loops[0]
-    assert first._awaiting_target_stale_threshold_s == 300.0
-    assert first._msg_publisher is coord.msg_publisher
+    assert reconciliation_factory.call_count == len(tasks) > 0
+    first_kwargs = reconciliation_factory.call_args_list[0].kwargs
+    assert first_kwargs["stale_threshold_s"] == 300.0
+    assert first_kwargs["msg_publisher"] is coord.msg_publisher
 
 
 @pytest.mark.asyncio

@@ -37,7 +37,8 @@ from datetime import UTC
 from datetime import datetime
 from typing import Final
 from typing import Protocol
-from typing import Self
+from typing import TypedDict
+from typing import Unpack
 from uuid import uuid7
 
 from loguru import logger
@@ -342,6 +343,15 @@ def cancel_retirement(
     return TradeCommandStatusEnum.REJECTED, "target order expired"
 
 
+class _ReconciliationOptions(TypedDict, total=False):
+    """Optional shard ownership and held-cancel monitoring configuration."""
+
+    ownership: ShardOwnership | None
+    stale_threshold_s: float
+    msg_publisher: _HeartbeatPublisher | None
+    max_hydrate_per_cycle: int
+
+
 class ReconciliationLoop:
     """Periodic exchange reconciliation for a single executor.
 
@@ -359,8 +369,7 @@ class ReconciliationLoop:
         repository: Database repository for reading/writing state.
         trade_service: Trade service for circuit breaker feedback.
         interval_seconds: Seconds between reconciliation cycles.
-        ownership: shard-ownership filter. ``None`` skips
-            filtering.
+        options: Optional shard ownership and held-cancel monitoring configuration.
     """
 
     def __init__(
@@ -369,8 +378,7 @@ class ReconciliationLoop:
         repository: SQLAlchemyRepository,
         trade_service: TradeService,
         interval_seconds: float = 60.0,
-        *,
-        ownership: ShardOwnership | None = None,
+        **options: Unpack[_ReconciliationOptions],
     ) -> None:
         """Initialize reconciliation loop.
 
@@ -379,57 +387,37 @@ class ReconciliationLoop:
             repository: DB repository for state queries.
             trade_service: Trade service for circuit breaker feedback.
             interval_seconds: Polling interval in seconds.
-            ownership: Optional shard-ownership filter for
-                multi-instance coordinators.
-        """
-        self._exchange = exchange_name
-        self._repo = repository
-        self._trade_service = trade_service
-        self._interval = interval_seconds
-        self._ownership = ownership
-        self._running = False
-        self._last_seen_shards: set[str] = set()
-        self._awaiting_target_stale_threshold_s: float = DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
-        self._msg_publisher: _HeartbeatPublisher | None = None
-        self._max_hydrate_per_cycle: int = DEFAULT_MAX_HYDRATE_PER_CYCLE
-        self._stale_held_alerted: set[str] = set()
-        self._hydration_error_logged: set[str] = set()
-        self._stale_awaiting_target_count: int = 0
-        self._heartbeat_sequence: int = 0
-
-    def configure_held_cancel_monitor(
-        self,
-        *,
-        stale_threshold_s: float = DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S,
-        msg_publisher: _HeartbeatPublisher | None = None,
-        max_hydrate_per_cycle: int = DEFAULT_MAX_HYDRATE_PER_CYCLE,
-    ) -> Self:
-        """Configure stale awaiting_target monitoring, runtime hydration cap, and heartbeat.
-
-        Args:
-            stale_threshold_s: Age in seconds before a held cancel becomes stale.
-            msg_publisher: Optional ZMQ publisher for ``reconciler.{exchange}``
-                health heartbeats.
-            max_hydrate_per_cycle: Maximum awaiting_target cancels inspected for
-                runtime hydration per reconciliation pass.
-
-        Returns:
-            ``self`` for fluent initialization.
+            options: Optional shard ownership, finite positive stale threshold,
+                heartbeat publisher, and hydration cap of at least one.
 
         Raises:
             ValueError: If ``stale_threshold_s`` is not finite and positive or
                 ``max_hydrate_per_cycle`` is below ``1``.
         """
+        stale_threshold_s = options.get(
+            "stale_threshold_s", DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
+        )
+        max_hydrate_per_cycle = options.get("max_hydrate_per_cycle", DEFAULT_MAX_HYDRATE_PER_CYCLE)
         if not math.isfinite(stale_threshold_s) or stale_threshold_s <= 0.0:
             raise ValueError(
                 f"stale_threshold_s must be finite and positive, got {stale_threshold_s}"
             )
         if max_hydrate_per_cycle < 1:
             raise ValueError(f"max_hydrate_per_cycle must be >= 1, got {max_hydrate_per_cycle}")
+        self._exchange = exchange_name
+        self._repo = repository
+        self._trade_service = trade_service
+        self._interval = interval_seconds
+        self._ownership = options.get("ownership")
+        self._running = False
+        self._last_seen_shards: set[str] = set()
         self._awaiting_target_stale_threshold_s = float(stale_threshold_s)
-        self._msg_publisher = msg_publisher
+        self._msg_publisher = options.get("msg_publisher")
         self._max_hydrate_per_cycle = max_hydrate_per_cycle
-        return self
+        self._stale_held_alerted: set[str] = set()
+        self._hydration_error_logged: set[str] = set()
+        self._stale_awaiting_target_count: int = 0
+        self._heartbeat_sequence: int = 0
 
     @property
     def stale_awaiting_target_count(self) -> int:

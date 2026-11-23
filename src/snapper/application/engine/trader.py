@@ -6518,7 +6518,6 @@ class TraderCoordinator(RegisterableProcess):
                 trade_service=self.trade_service,
                 interval_seconds=60.0,
                 ownership=self._ownership,
-            ).configure_held_cancel_monitor(
                 stale_threshold_s=stale_threshold_s,
                 msg_publisher=publisher,
             )
