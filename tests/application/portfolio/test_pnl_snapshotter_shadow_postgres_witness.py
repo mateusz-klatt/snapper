@@ -153,13 +153,13 @@ async def _run_failing_shadow_tick(
         request: _CheckpointDispatchRequest,
         basis: _PlanBasis,
         anchor_pair: tuple[ChunkWindow, PnlWalletSeriesResult, PlannedPnlCorrection],
-    ) -> PnlWalletSeriesResult:
-        """Arm the fault only after authoritative planning has entered shadow dispatch."""
+    ) -> None:
+        """Arm the fault only after the authoritative commit has entered shadow dispatch."""
         nonlocal shadow_active, shadow_entries
         shadow_active = True
         shadow_entries += 1
         try:
-            return await original_shadow(request, basis, anchor_pair)
+            await original_shadow(request, basis, anchor_pair)
         finally:
             shadow_active = False
 

@@ -165,14 +165,14 @@ logger = logging.getLogger(__name__)
 MAX_SHADOW_COMPARISONS_PER_TICK: Final[int] = 2
 """Maximum verified checkpoint comparisons and resumed replays permitted in one tick."""
 
-SHADOW_COMMIT_RESERVE_FRACTION: Final[float] = 0.25
-"""Share of the tick interval withheld from shadow work for the authoritative commit.
+SHADOW_TICK_RESERVE_FRACTION: Final[float] = 0.25
+"""Share of the tick interval withheld from shadow work for the rest of the tick.
 
-The tick runs under one ``asyncio.timeout(interval)``. Shadow work runs before
-the authoritative commit, so it receives its own nested deadline that ends
-this fraction of the interval before the tick deadline; a shadow branch that
-cannot finish in time is cancelled as an isolated shadow failure and the cold
-plan still commits.
+The authoritative anchor plan commits before any shadow work starts, so shadow
+work can never block it. Shadow work still runs under its own nested deadline
+that ends this fraction of the interval before the tick deadline, so a slow
+comparison is cut short as an isolated shadow failure instead of consuming the
+time later wallets in the same tick need.
 """
 
 _LIVE_MODE: Final = "live"
@@ -1377,12 +1377,17 @@ class PortfolioPnlSnapshotter:
         request: _CheckpointDispatchRequest,
         basis: _PlanBasis,
         anchor_pair: tuple[ChunkWindow, PnlWalletSeriesResult, PlannedPnlCorrection],
-    ) -> PnlWalletSeriesResult:
-        """Run only non-authoritative resumed comparison and fallback recapture work."""
+    ) -> None:
+        """Run only non-authoritative resumed comparison and fallback retirement work.
+
+        A resume fallback retires the stored checkpoint without an inline
+        recapture: the authoritative chunk has already committed, so the next
+        tick's ``absent`` path captures a fresh checkpoint on the cold path.
+        """
         repo, ctx, frontier = request.repo, request.ctx, request.frontier
         resume = request.resume
         assert resume is not None
-        anchor_chunk, anchor, anchor_plan = anchor_pair
+        anchor_chunk = anchor_pair[0]
         record_checkpoint_resume_attempted(ctx.scope)
         with activate_fx_shadow_context(None):
             resumed_chunk, resumed = await self._replay_series(
@@ -1393,30 +1398,25 @@ class PortfolioPnlSnapshotter:
                 _CheckpointReplayOptions(resume=resume),
             )
         fallback = resumed.checkpoint_resume_fallback
-        if fallback is None:
-            record_checkpoint_resume_succeeded(ctx.scope)
-            await self._compare_shadow_branch(
-                request,
-                basis,
-                anchor_pair,
-                (resumed_chunk, resumed),
-            )
-            return anchor
-        await handle_resume_fallback(repo, ctx.scope, frontier, resume, fallback)
-        recapture = self._consume_recapture(request, anchor_chunk.end)
-        if recapture is None:
-            return anchor
-        _, capture_result = await self._replay_series(
-            repo,
-            ctx,
-            anchor_chunk,
-            frontier,
-            _CheckpointReplayOptions(capture=recapture),
+        if fallback is not None:
+            await handle_resume_fallback(repo, ctx.scope, frontier, resume, fallback)
+            return
+        record_checkpoint_resume_succeeded(ctx.scope)
+        await self._compare_shadow_branch(
+            request,
+            basis,
+            anchor_pair,
+            (resumed_chunk, resumed),
         )
-        return capture_result
 
     async def _advance_shadow(self, request: _CheckpointDispatchRequest) -> None:
-        """Commit the cold anchor plan regardless of isolated shadow outcomes."""
+        """Commit the cold anchor plan first, then run isolated shadow work.
+
+        Committing before any shadow await means no shadow outcome, including
+        a valuation worker that cannot be cancelled, can skip or delay the
+        authoritative write. Shadow work then runs under its own budget and
+        every non-cancellation failure is recorded as an isolated shadow error.
+        """
         repo, ctx, frontier = request.repo, request.ctx, request.frontier
         anchor_chunk, anchor = await self._replay_series(repo, ctx, request.chunk, frontier)
         evidence = await repo.get_portfolio_pnl_correction_evidence(
@@ -1430,38 +1430,32 @@ class PortfolioPnlSnapshotter:
         )
         basis = _PlanBasis(evidence, inputs)
         anchor_plan = await self._plan_chunk(repo, ctx, anchor, basis)
-        capture_result = anchor
+        await self._commit_checkpoint_plan(request, anchor_chunk, anchor, anchor_plan)
         budget = self._shadow_budget_seconds()
         if budget is not None and budget <= 0:
             record_checkpoint_shadow_skipped("tick_budget", ctx.scope)
+            return
+        try:
+            async with asyncio.timeout(budget):
+                await self._run_shadow_branch(request, basis, (anchor_chunk, anchor, anchor_plan))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._record_shadow_failure(ctx, exc)
         else:
-            try:
-                async with asyncio.timeout(budget):
-                    capture_result = await self._run_shadow_branch(
-                        request,
-                        basis,
-                        (anchor_chunk, anchor, anchor_plan),
-                    )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                capture_result = anchor
-                self._record_shadow_failure(ctx, exc)
-            else:
-                self._shadow_failure_logged.discard(ctx.wallet_public_id)
-        await self._commit_checkpoint_plan(request, anchor_chunk, capture_result, anchor_plan)
+            self._shadow_failure_logged.discard(ctx.wallet_public_id)
 
     def _shadow_budget_seconds(self) -> float | None:
         """Return the shadow branch's time budget, or ``None`` outside a deadline-bound tick.
 
-        The budget ends ``SHADOW_COMMIT_RESERVE_FRACTION`` of the interval
-        before the tick deadline, so a slow shadow branch is cancelled as an
-        isolated shadow failure while the authoritative commit still has time
-        to land. A non-positive value means shadow work must be skipped.
+        The budget ends ``SHADOW_TICK_RESERVE_FRACTION`` of the interval
+        before the tick deadline, so a slow shadow branch is cut short as an
+        isolated shadow failure and leaves time for the tick's later wallets.
+        A non-positive value means shadow work must be skipped.
         """
         if self._tick_deadline is None:
             return None
-        reserve = self._interval_seconds * SHADOW_COMMIT_RESERVE_FRACTION
+        reserve = self._interval_seconds * SHADOW_TICK_RESERVE_FRACTION
         return self._tick_deadline - self._monotonic() - reserve
 
     async def _plan_and_commit_checkpoint(

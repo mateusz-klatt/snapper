@@ -177,7 +177,7 @@ _PG_UNIT_MS: Final[dict[str, int]] = {
     "min": 60_000,
     "h": 3_600_000,
 }
-_DSN_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^\s'\"@]+)(@)")
+_DSN_USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^\s'\"@/][^\s'\"@]*)(@)")
 _SECRET_KV_RE = re.compile(
     r"(?i)(\b(?:password|passwd|pwd|secret|token|api_key)\s*=\s*)(?:'[^']*'|\"[^\"]*\"|[^\s&'\",;)]+)"
 )
@@ -553,7 +553,7 @@ def _assert_fragment_read_only(
     if _allow_bound_pg_timeout_select(raw_fragment):
         return
     normalized = " ".join(fragment.split()).upper()
-    if _FORBIDDEN_SQL_CALL_RE.search(normalized):
+    if _FORBIDDEN_SQL_CALL_RE.search(normalized.replace('"', "")):
         raise CheckpointResumeProbeError("write_sql_refused:forbidden_function")
     tokens = re.findall(r"[A-Z_]+", normalized)
     if not tokens:

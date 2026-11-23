@@ -420,6 +420,9 @@ def test_postgres_shaped_statement_allowlist_and_duration_parsing() -> None:
         "SELECT pg_advisory_unlock(1)",
         "SELECT pg_try_advisory_lock(1)",
         "SELECT pg_try_advisory_xact_lock_shared(1)",
+        'SELECT "pg_try_advisory_lock"(1)',
+        'SELECT pg_catalog."pg_advisory_lock"(1)',
+        "SELECT \"setval\"('candles_id_seq', 1)",
         "SELECT setval('candles_id_seq', 1)",
         "SELECT 1 INTO TEMP probe_mutation",
         "WITH s AS (SELECT pg_sleep(1)) SELECT * FROM s",
@@ -2596,3 +2599,5 @@ def test_dsn_redaction_covers_slash_in_password() -> None:
     assert "pa/ss" not in slashed
     assert "ss@" not in slashed
     assert slashed == "postgresql+asyncpg://***:***@10.0.1.5:5432/prod"
+    sqlite_path = "sqlite+aiosqlite:////srv/snap@shot/probe.db"
+    assert probe._redact_secrets(sqlite_path) == sqlite_path

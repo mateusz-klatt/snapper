@@ -21,6 +21,7 @@ from snapper.application.portfolio import pnl_engine_options
 from snapper.application.portfolio import pnl_snapshotter
 from snapper.application.portfolio import pnl_snapshotter_checkpoint as dispatch
 from snapper.application.portfolio import pnl_snapshotter_config
+from snapper.application.portfolio import pnl_timeline_service
 from snapper.application.portfolio.pnl_correction_planner import PlannedPnlCorrection
 from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_from_json
@@ -40,7 +41,9 @@ from snapper.application.portfolio.pnl_snapshotter import _PlanBasis
 from snapper.application.portfolio.pnl_snapshotter import _ScopeContext
 from snapper.application.portfolio.pnl_snapshotter_checkpoint import PnlCheckpointDecision
 from snapper.application.portfolio.pnl_snapshotter_checkpoint import PnlCheckpointResumeRequest
+from snapper.application.portfolio.pnl_timeline import PnlTimelineResult
 from snapper.application.portfolio.pnl_timeline import PnlTimelineWorkBudgetError
+from snapper.application.portfolio.pnl_timeline_service import PnlFxRateSource
 from snapper.application.portfolio.pnl_timeline_service import PnlWalletSeriesResult
 from snapper.data.pnl_correction_state import PnlCorrectionChunk
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
@@ -484,14 +487,15 @@ async def test_shadow_replay_failures_still_commit_anchor_and_log_once(
     assert type(failure).__name__ in caplog.text
 
 
-async def test_shadow_cancelled_error_propagates_without_anchor_commit(
+async def test_shadow_cancelled_error_propagates_after_anchor_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Preserve cancellation instead of converting it to an isolated shadow failure.
 
     Given: A verified checkpoint whose resumed replay is cancelled.
     When: Shadow dispatch reaches the resumed replay.
-    Then: CancelledError propagates and no anchor commit or shadow-error metric occurs.
+    Then: The anchor chunk has already committed, CancelledError propagates,
+        and no shadow-error metric occurs.
 
     Args:
         monkeypatch: Pytest fixture installing the checkpoint and replay doubles.
@@ -521,7 +525,7 @@ async def test_shadow_cancelled_error_propagates_without_anchor_commit(
     monkeypatch.setattr(snap, "_replay_series", replay)
     with pytest.raises(asyncio.CancelledError):
         await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
-    assert repo.committed_chunks == []
+    assert len(repo.committed_chunks) == 1
     assert checkpoint_metrics().shadow_skipped == {}
 
 
@@ -570,7 +574,7 @@ async def test_shadow_tick_budget_cancels_slow_shadow_and_still_commits_anchor(
     _install_resume(monkeypatch, repo, frontier, resume)
     snap = fixtures._snapshotter(repo, frontier.as_of)
     monkeypatch.setattr(snap, "_replay_series", _slow_resume_replay(5.0))
-    reserve = snap.interval_seconds * pnl_snapshotter.SHADOW_COMMIT_RESERVE_FRACTION
+    reserve = snap.interval_seconds * pnl_snapshotter.SHADOW_TICK_RESERVE_FRACTION
     snap._tick_deadline = time.monotonic() + reserve + 0.05
 
     started = time.monotonic()
@@ -619,8 +623,8 @@ async def test_shadow_external_cancel_propagates_under_tick_budget(
     Given: A verified checkpoint, a generous tick deadline, and a resumed replay
         that stalls until the dispatching task is cancelled from outside.
     When: The task is cancelled during the shadow branch.
-    Then: ``CancelledError`` reaches the caller, nothing commits, and no shadow
-        failure is recorded.
+    Then: ``CancelledError`` reaches the caller after the anchor chunk has
+        committed, and no shadow failure is recorded.
 
     Args:
         monkeypatch: Pytest fixture installing the checkpoint and replay doubles.
@@ -643,8 +647,61 @@ async def test_shadow_external_cancel_propagates_under_tick_budget(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert repo.committed_chunks == []
+    assert len(repo.committed_chunks) == 1
     assert checkpoint_metrics().shadow_skipped == {}
+
+
+async def test_shadow_uncancellable_worker_past_both_deadlines_cannot_skip_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Commit the anchor even when a shielded valuation worker outlives every deadline.
+
+    Given: A verified checkpoint, a shadow budget of 50 ms, an enclosing tick
+        timeout of 150 ms, and a resumed replay whose valuation runs in the
+        production shielded worker for 300 ms, which no cancellation can stop.
+    When: The tick deadline expires while the worker is still running.
+    Then: The tick timeout surfaces as before, yet the cold anchor chunk has
+        already committed, because the commit precedes every shadow await.
+
+    Args:
+        monkeypatch: Pytest fixture installing the checkpoint and replay doubles.
+    """
+    reset_checkpoint_metrics()
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+    repo = fixtures._FakeRepo()
+    frontier = _pending(repo)
+    resume = await _resume(monkeypatch)
+    _permit_capture(monkeypatch)
+    _install_resume(monkeypatch, repo, frontier, resume)
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+
+    def blocking_valuation() -> tuple[PnlTimelineResult, tuple[PnlFxRateSource, ...]]:
+        """Hold the worker thread past both deadlines, then fail loudly."""
+        time.sleep(0.3)
+        raise AssertionError("the shielded worker result must never reach planning")
+
+    async def replay(
+        unused_repo: Repository,
+        ctx: _ScopeContext,
+        chunk: ChunkWindow,
+        current: PnlCorrectionFrontier,
+        checkpoint: _CheckpointReplayOptions | None = None,
+    ) -> tuple[ChunkWindow, PnlWalletSeriesResult]:
+        """Return the cold anchor and run the resumed valuation in the shielded worker."""
+        del unused_repo, ctx, current
+        if checkpoint is not None and checkpoint.resume is not None:
+            await pnl_timeline_service._offload_series_valuation(blocking_valuation)
+        return chunk, fixtures._series(chunk.start, chunk.end, metadata=fixtures._meta(seq=4))
+
+    monkeypatch.setattr(snap, "_replay_series", replay)
+    reserve = snap.interval_seconds * pnl_snapshotter.SHADOW_TICK_RESERVE_FRACTION
+    snap._tick_deadline = time.monotonic() + reserve + 0.05
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.15):
+            await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
+
+    assert len(repo.committed_chunks) == 1
 
 
 async def test_shadow_plans_both_sides_from_one_planning_input_read(
@@ -772,7 +829,9 @@ async def test_service_resume_fallback_deletes_and_commits_anchor(
 
     Given: A verified row whose suffix load reports ``checkpoint_late_execution``.
     When: Shadow or active dispatches the replay.
-    Then: The old generation is deleted and an anchor capture commits instead.
+    Then: The old generation is deleted and the anchor chunk commits. Active
+        recaptures inline; shadow commits first and defers the recapture to the
+        next tick's ``absent`` path, so its shadow branch never captures.
     """
     reset_checkpoint_metrics()
     if mode != "off":
@@ -794,7 +853,7 @@ async def test_service_resume_fallback_deletes_and_commits_anchor(
 
     await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
 
-    expected = ["anchor", "resume", "capture"] if mode == "shadow" else ["resume", "capture"]
+    expected = ["anchor", "resume"] if mode == "shadow" else ["resume", "capture"]
     assert events == expected
     assert checkpoint_metrics().fallbacks == {"checkpoint_late_execution": 1}
     assert checkpoint_metrics().invalidations_deleted == 1
@@ -802,14 +861,16 @@ async def test_service_resume_fallback_deletes_and_commits_anchor(
     assert len(repo.committed_chunks) == 1
 
 
-async def test_shadow_capture_evidence_refusal_still_commits_anchor(
+async def test_shadow_fallback_retires_checkpoint_without_inline_recapture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Commit anchor samples when fallback recapture softly refuses after a DB error.
+    """Retire a fallen-back checkpoint in shadow without any capture inside the branch.
 
-    Given: A resumed fallback followed by recapture returning ``capture_evidence_error``.
-    When: Shadow dispatch commits its already-planned cold anchor.
-    Then: Samples and frontier advance without a checkpoint and the refusal is counted.
+    Given: A verified checkpoint whose resumed replay falls back, and a
+        recapture that would refuse with ``capture_evidence_error`` if attempted.
+    When: Shadow dispatch commits the cold anchor and then runs its branch.
+    Then: Samples and frontier advance, the stored checkpoint is deleted, and
+        no capture is attempted, so no capture refusal or commit is counted.
 
     Args:
         monkeypatch: Pytest fixture installing resume and replay behavior.
@@ -837,11 +898,12 @@ async def test_shadow_capture_evidence_refusal_still_commits_anchor(
 
     await snap._advance_replay(cast(Repository, repo), _context(snap, frontier), frontier)
 
-    assert events == ["anchor", "resume", "capture"]
+    assert events == ["anchor", "resume"]
     assert len(repo.committed_chunks) == 1
     assert len(repo.persisted) == 1
     assert repo.frontier().next_minute is None
-    assert checkpoint_metrics().capture_refusals == {"capture_evidence_error": 1}
+    assert checkpoint_metrics().invalidations_deleted == 1
+    assert checkpoint_metrics().capture_refusals == {}
     assert checkpoint_metrics().captures_committed == 0
 
 

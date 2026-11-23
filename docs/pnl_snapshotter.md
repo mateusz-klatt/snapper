@@ -354,14 +354,19 @@ the tick.
 Shadow errors increment `shadow_skipped` with reason `shadow_error:<Type>`,
 log one warning per scope failure episode, and never prevent the authoritative
 anchor samples and frontier from committing.
-The whole tick runs under one deadline equal to the loop interval, and shadow
-work runs before the authoritative commit. Shadow work therefore gets its own
-nested deadline that ends a quarter of the interval
-(`SHADOW_COMMIT_RESERVE_FRACTION`) before the tick deadline. A shadow branch
-that overruns it is cancelled and counted as `shadow_error:TimeoutError`; when
-no shadow budget remains, the comparison is skipped as `tick_budget`. In both
-cases the cold anchor plan still commits. External task cancellation is never
+In shadow mode the cold anchor plan commits before any shadow work starts, so
+no shadow outcome can skip or delay the authoritative write. That includes a
+valuation worker thread that cannot be cancelled and outlives every deadline.
+Shadow work then runs under its own nested deadline that ends a quarter of the
+loop interval (`SHADOW_TICK_RESERVE_FRACTION`) before the tick deadline, which
+leaves time for the tick's later wallets. A shadow branch that overruns it is
+counted as `shadow_error:TimeoutError`; when no shadow budget remains, the
+comparison is skipped as `tick_budget`. External task cancellation is never
 converted into a shadow failure.
+A resume fallback found by the shadow branch deletes the stored checkpoint but
+does not recapture inline, because the chunk has already committed. The next
+tick finds no checkpoint and captures a fresh one on the cold path, so shadow
+mode recaptures one tick later than active mode does.
 The cold anchor and the resumed side are planned from one shared read of the
 chunk's observation, valuation and position evidence, so a write committed
 between two reads cannot appear as a mismatch that deletes a valid checkpoint.

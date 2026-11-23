@@ -429,3 +429,57 @@ async def test_every_recapture_trigger_and_forward_resume_decision(
         dispatch.recapture_trigger(forward, record, dispatch.RECAPTURE_SUFFIX_FILLS)
         == "suffix_size"
     )
+
+
+async def test_verification_flag_tracks_verifier_entry_not_earlier_lookup_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Charge verification only once the live verifier has actually been entered.
+
+    Given: A clean generation whose stored-row lookup raises first, and then a
+        stored row whose live verifier raises.
+    When: Resume preparation runs for each failure.
+    Then: Both fall back as ``checkpoint_verify_error``, but only the verifier
+        failure reports ``verification_attempted``.
+
+    Args:
+        monkeypatch: Pytest fixture injecting the lookup and verifier failures.
+    """
+    reset_checkpoint_metrics()
+    cases._permit_capture(monkeypatch)
+    repo = fixtures._FakeRepo()
+    frontier = cases._pending(repo)
+    resume = await cases._resume(monkeypatch)
+    cases._permit_capture(monkeypatch)
+    request = dispatch.PnlCheckpointResumeRequest(
+        cast(Repository, repo),
+        fixtures._sample_scope(),
+        fixtures._anchor(),
+        frontier,
+        fixtures._minute(3),
+        "shadow",
+    )
+    lookup = AsyncMock(side_effect=RuntimeError("checkpoint lookup timeout"))
+    monkeypatch.setattr(repo, "get_portfolio_pnl_opening_checkpoint", lookup)
+    before_verifier = await dispatch.prepare_checkpoint_resume(request)
+    assert before_verifier.recapture == "fallback"
+    assert before_verifier.verification_attempted is False
+
+    lookup.side_effect = None
+    lookup.return_value = replace(
+        resume.record,
+        certificate=replace(
+            resume.record.certificate,
+            key=frontier.key,
+            source_generation=frontier.generation,
+        ),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "verify_checkpoint_for_resume",
+        AsyncMock(side_effect=RuntimeError("verifier timeout")),
+    )
+    inside_verifier = await dispatch.prepare_checkpoint_resume(request)
+    assert inside_verifier.recapture == "fallback"
+    assert inside_verifier.verification_attempted is True
+    assert checkpoint_metrics().fallbacks == {"checkpoint_verify_error": 2}

@@ -243,8 +243,9 @@ class PnlCheckpointDecision:
     """One pre-replay choice: verified suffix resume or anchor recapture.
 
     ``verification_attempted`` is ``True`` whenever the expensive live
-    verification of a stored checkpoint ran, or may have run before an
-    unexpected error, whatever its verdict. Shadow mode charges its
+    verification of a stored checkpoint was entered, whatever its verdict and
+    including an unexpected error raised inside it. A failure in the stored
+    record lookup or suffix count before verification leaves it ``False``. Shadow mode charges its
     per-tick comparison budget on that flag, so a checkpoint that refuses
     late still consumes a slot.
     """
@@ -362,6 +363,15 @@ async def _verify_stored_checkpoint(
     return _recapture(scope, "fallback")
 
 
+class _VerifierEnteredError(Exception):
+    """Wrap a failure raised after live checkpoint verification has started.
+
+    Shadow mode charges its comparison slot only for verification work, so a
+    lookup or suffix-count failure before the verifier must stay uncharged
+    while a failure inside the verifier is charged.
+    """
+
+
 async def _prepare_with_record(
     request: PnlCheckpointResumeRequest,
 ) -> PnlCheckpointDecision:
@@ -391,7 +401,13 @@ async def _prepare_with_record(
     bounded = recapture_trigger(frontier, record, suffix)
     if bounded is not None and not request.recapture_budget_exhausted:
         return _recapture(scope, bounded)
-    return replace(await _verify_stored_checkpoint(request, record), verification_attempted=True)
+    try:
+        verified = await _verify_stored_checkpoint(request, record)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise _VerifierEnteredError from exc
+    return replace(verified, verification_attempted=True)
 
 
 async def prepare_checkpoint_resume(
@@ -421,11 +437,13 @@ async def prepare_checkpoint_resume(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        entered = isinstance(exc, _VerifierEnteredError)
+        cause = exc.__cause__ if entered and exc.__cause__ is not None else exc
         logger.warning(
             "PortfolioPnlSnapshotter: checkpoint verify failed; wallet=%s generation=%s (%s)",
             checkpoint_wallet_alias(scope.wallet_public_id),
             frontier.generation,
-            type(exc).__name__,
+            type(cause).__name__,
         )
         _log_fallback(scope, frontier, PnlCheckpointFallback("checkpoint_verify_error", False))
         return replace(
@@ -434,7 +452,7 @@ async def prepare_checkpoint_resume(
                 if request.recapture_budget_exhausted
                 else _recapture(scope, "fallback")
             ),
-            verification_attempted=True,
+            verification_attempted=entered,
         )
 
 
