@@ -49,6 +49,8 @@ class _RunResult(Protocol):
     cursor_timestamp: datetime
     cursor_id: int
     covered_through: datetime
+    lag_seconds: int
+    lagged: bool
     pass_completed: bool
 
 
@@ -1061,4 +1063,271 @@ async def test_exact_and_windowed_chunks_share_one_finding_cap(
     repository, result = await _run_monitor(path, "m1")
 
     assert [finding.trade_id for finding in result.findings] == ["owed-1", "owed-2", "swept-1"]
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("monitor", ["m1", "m2"])
+async def test_full_page_advances_covered_through_to_strict_bound_and_shrinks_lag(
+    tmp_path: Path,
+    monitor: _Monitor,
+) -> None:
+    """Advance covered_through per clean full page up to the strict bound.
+
+    Given: Eight clean trades spanning five hours before now, with ties at the
+        boundary of each four-row page so rows with the last timestamp remain
+        unscanned across page boundaries.
+    When: The monitor runs two full four-row pages followed by pass completion.
+    Then: Each full page advances covered_through only to the greatest
+        timestamp strictly below its last row, shrinking lag_seconds and
+        clearing lagged once within three hours, and completion reaches scan_end.
+    """
+    path = tmp_path / f"strict-bound-{monitor}.db"
+    _create_constraint_free_monitor_db(path)
+    timestamps = (
+        _NOW - timedelta(hours=5),
+        _NOW - timedelta(hours=4),
+        _NOW - timedelta(hours=2),
+        _NOW - timedelta(hours=2),
+        _NOW - timedelta(hours=2),
+        _NOW - timedelta(hours=1),
+        _NOW - timedelta(minutes=30),
+        _NOW - timedelta(minutes=30),
+    )
+    for index, timestamp in enumerate(timestamps):
+        _insert_trade(
+            path,
+            public_id=f"3c000000-0000-0000-0000-{index + 1:012d}",
+            trade_id=f"strict-{index}",
+            executed_at=timestamp - timedelta(minutes=1),
+            timestamp=timestamp,
+        )
+
+    repository, first_result = await _run_monitor(path, monitor, sweep_limit=4)
+    second_result = await repository.run_trade_integrity_monitor(
+        monitor=monitor,
+        now=_NOW,
+        sweep_limit=4,
+        worklog_limit=100,
+    )
+    final_result = await repository.run_trade_integrity_monitor(
+        monitor=monitor,
+        now=_NOW,
+        sweep_limit=4,
+        worklog_limit=100,
+    )
+
+    assert first_result.sweep_rows == 4
+    assert not first_result.pass_completed
+    assert first_result.covered_through == _NOW - timedelta(hours=4)
+    assert first_result.lag_seconds == int(timedelta(hours=3, minutes=55).total_seconds())
+    assert first_result.lagged
+
+    assert second_result.sweep_rows == 4
+    assert not second_result.pass_completed
+    assert second_result.covered_through == _NOW - timedelta(hours=1)
+    assert second_result.lag_seconds == int(timedelta(minutes=55).total_seconds())
+    assert not second_result.lagged
+
+    assert final_result.sweep_rows == 0
+    assert final_result.pass_completed
+    assert final_result.covered_through == _NOW - timedelta(minutes=5)
+    assert final_result.lag_seconds == 0
+    assert not final_result.lagged
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_single_timestamp_page_does_not_advance_covered_through(tmp_path: Path) -> None:
+    """Keep covered_through unchanged when all rows in a full page share one timestamp.
+
+    Given: A full initial page whose rows share one timestamp, followed by a
+        full page with mixed timestamps, followed by another single-timestamp
+        full page.
+    When: M1 advances across those pages with sweep_limit equal to two.
+    Then: Both single-timestamp pages advance the durable cursor without moving
+        covered_through, while the mixed-timestamp page advances it.
+    """
+    path = tmp_path / "same-timestamp-page.db"
+    _create_constraint_free_monitor_db(path)
+    t_initial = _NOW - timedelta(hours=5)
+    t_later = _NOW - timedelta(hours=3)
+    t_flat = _NOW - timedelta(hours=1)
+    for index, timestamp in enumerate((t_initial, t_initial, t_initial, t_later, t_flat, t_flat)):
+        _insert_trade(
+            path,
+            public_id=f"3d000000-0000-0000-0000-{index + 1:012d}",
+            trade_id=f"flat-{index}",
+            executed_at=timestamp - timedelta(minutes=1),
+            timestamp=timestamp,
+        )
+
+    repository, first_result = await _run_monitor(path, "m1", sweep_limit=2)
+    second_result = await repository.run_trade_integrity_monitor(
+        monitor="m1",
+        now=_NOW,
+        sweep_limit=2,
+        worklog_limit=100,
+    )
+    third_result = await repository.run_trade_integrity_monitor(
+        monitor="m1",
+        now=_NOW,
+        sweep_limit=2,
+        worklog_limit=100,
+    )
+
+    assert not first_result.pass_completed
+    assert first_result.covered_through == _NOW - timedelta(hours=6, minutes=5)
+    assert first_result.cursor_timestamp == t_initial
+    assert first_result.cursor_id == 2
+
+    assert not second_result.pass_completed
+    assert second_result.covered_through == t_initial
+
+    assert not third_result.pass_completed
+    assert third_result.covered_through == t_initial
+    assert (third_result.cursor_timestamp, third_result.cursor_id) == (t_flat, 6)
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_covered_through_remains_monotone_across_overlap_restart_and_completion(
+    tmp_path: Path,
+) -> None:
+    """Never lower covered_through when a pass restarts inside the six-hour overlap.
+
+    Given: Clean trades inside the initial overlap window and newer trades
+        settling before the following pass starts.
+    When: Pass one completes at scan_end, pass two pages through the overlap
+        and sets a newer scan_end on completion, and pass three pages from
+        the restarted overlap to the newer scan_end.
+    Then: Covered_through stays at pass one's scan_end throughout every page
+        inside the overlap and advances monotonically past it only once a page
+        strict bound or completion exceeds it.
+    """
+    path = tmp_path / "monotone-restart.db"
+    _create_constraint_free_monitor_db(path)
+    overlap_times = (
+        _NOW - timedelta(hours=4),
+        _NOW - timedelta(hours=3),
+        _NOW - timedelta(hours=2),
+    )
+    for index, timestamp in enumerate(overlap_times):
+        _insert_trade(
+            path,
+            public_id=f"3e000000-0000-0000-0000-{index + 1:012d}",
+            trade_id=f"overlap-{index}",
+            executed_at=timestamp - timedelta(minutes=1),
+            timestamp=timestamp,
+        )
+
+    repository, pass_one = await _run_monitor(path, "m1", sweep_limit=10)
+    first_scan_end = _NOW - timedelta(minutes=5)
+    assert pass_one.pass_completed
+    assert pass_one.covered_through == first_scan_end
+
+    later_now = _NOW + timedelta(minutes=3)
+    second_scan_end = later_now - timedelta(minutes=5)
+    for index, offset_minutes in enumerate((2, 1, 0), start=4):
+        timestamp = second_scan_end - timedelta(minutes=offset_minutes)
+        _insert_trade(
+            path,
+            public_id=f"3e000000-0000-0000-0000-{index:012d}",
+            trade_id=f"new-{index}",
+            executed_at=timestamp - timedelta(minutes=1),
+            timestamp=timestamp,
+        )
+
+    pass_two_pages = [
+        await repository.run_trade_integrity_monitor(
+            monitor="m1",
+            now=later_now,
+            sweep_limit=2,
+            worklog_limit=100,
+        )
+        for _ in range(2)
+    ]
+    pass_three_pages = [
+        await repository.run_trade_integrity_monitor(
+            monitor="m1",
+            now=later_now,
+            sweep_limit=2,
+            worklog_limit=100,
+        )
+        for _ in range(4)
+    ]
+
+    assert [page.pass_completed for page in pass_two_pages] == [False, True]
+    assert [page.covered_through for page in pass_two_pages] == [
+        first_scan_end,
+        first_scan_end,
+    ]
+    assert [page.pass_completed for page in pass_three_pages] == [False, False, False, True]
+    assert [page.covered_through for page in pass_three_pages] == [
+        first_scan_end,
+        first_scan_end,
+        second_scan_end - timedelta(minutes=1),
+        second_scan_end,
+    ]
+    await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_findings_do_not_advance_covered_through(tmp_path: Path) -> None:
+    """Keep covered_through pinned when a sweep page detects a finding.
+
+    Given: Two clean trades on page one and a violating trade pair on page two
+        with distinct timestamps inside the page.
+    When: Page one commits cleanly and page two encounters the violation.
+    Then: Page one advances covered_through to its strict bound, while page
+        two holds both the cursor and covered_through unchanged.
+    """
+    path = tmp_path / "finding-freezes-coverage.db"
+    _create_constraint_free_monitor_db(path)
+    _insert_trade(
+        path,
+        public_id="3f000000-0000-0000-0000-000000000001",
+        trade_id="clean-1",
+        executed_at=_NOW - timedelta(hours=5, minutes=1),
+        timestamp=_NOW - timedelta(hours=5),
+    )
+    _insert_trade(
+        path,
+        public_id="3f000000-0000-0000-0000-000000000002",
+        trade_id="clean-2",
+        executed_at=_NOW - timedelta(hours=4, minutes=1),
+        timestamp=_NOW - timedelta(hours=4),
+    )
+    _insert_trade(
+        path,
+        public_id="3f000000-0000-0000-0000-000000000003",
+        trade_id="conflict-1",
+        executed_at=_NOW - timedelta(hours=3, minutes=1),
+        timestamp=_NOW - timedelta(hours=3),
+    )
+    _insert_trade(
+        path,
+        public_id="3f000000-0000-0000-0000-000000000004",
+        trade_id="conflict-1",
+        executed_at=_NOW - timedelta(hours=3, minutes=2),
+        timestamp=_NOW - timedelta(hours=2),
+    )
+
+    repository, clean_page = await _run_monitor(path, "m1", sweep_limit=2)
+    violating_page = await repository.run_trade_integrity_monitor(
+        monitor="m1",
+        now=_NOW,
+        sweep_limit=2,
+        worklog_limit=100,
+    )
+
+    assert clean_page.findings == ()
+    assert clean_page.covered_through == _NOW - timedelta(hours=5)
+    assert len(violating_page.findings) == 1
+    assert not violating_page.pass_completed
+    assert violating_page.covered_through == clean_page.covered_through
+    assert (violating_page.cursor_timestamp, violating_page.cursor_id) == (
+        clean_page.cursor_timestamp,
+        clean_page.cursor_id,
+    )
     await repository.engine.dispose()

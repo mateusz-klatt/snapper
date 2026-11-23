@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from math import isfinite
+from time import monotonic
 from typing import Final
 from typing import Protocol
 from uuid import uuid7
@@ -139,7 +140,7 @@ class TradeIntegrityMonitorConfig:
     """Fixed operational bounds for the watchdog.
 
     Attributes:
-        interval_seconds: Delay between completed recurring ticks.
+        interval_seconds: Target start-to-start cadence for recurring ticks.
         startup_grace_seconds: Delay before the initial guarded tick.
         sweep_limit: Maximum recent-window rows requested per monitor.
         worklog_limit: Maximum worklog rows requested per monitor.
@@ -189,7 +190,8 @@ class TradeIntegrityWatchdog:
 
     ``start`` is non-blocking and owns one task. The task performs its
     first guarded tick after the configured startup grace, which is zero
-    by default, then repeats every minute. ``stop`` cancels and
+    by default, then repeats on a start-to-start cadence targeting
+    ``interval_seconds`` without overlapping ticks. ``stop`` cancels and
     awaits that task.
 
     The repository probes swept rows only within seven days of their own
@@ -257,16 +259,29 @@ class TradeIntegrityWatchdog:
         """Apply startup grace, take one guarded tick, and enter the loop."""
         if self._config.startup_grace_seconds > 0:
             await asyncio.sleep(self._config.startup_grace_seconds)
-        await self._guarded_tick()
-        await self._loop()
+        elapsed = await self._timed_guarded_tick()
+        await self._loop(initial_elapsed=elapsed)
 
-    async def _loop(self) -> None:
-        """Sleep, tick, and repeat until shutdown is signalled."""
+    async def _loop(self, initial_elapsed: float = 0.0) -> None:
+        """Maintain start-to-start tick cadence until shutdown is signalled.
+
+        Args:
+            initial_elapsed: Wall-clock seconds spent in the initial eager tick
+                before entering the recurring loop.
+        """
+        elapsed = initial_elapsed
         while not self._stopping.is_set():
-            await asyncio.sleep(self._config.interval_seconds)
+            delay = max(0.0, self._config.interval_seconds - elapsed)
+            await asyncio.sleep(delay)
             if self._stopping.is_set():
                 return
-            await self._guarded_tick()
+            elapsed = await self._timed_guarded_tick()
+
+    async def _timed_guarded_tick(self) -> float:
+        """Run one guarded tick sequentially and return its elapsed seconds."""
+        started = monotonic()
+        await self._guarded_tick()
+        return max(0.0, monotonic() - started)
 
     async def _guarded_tick(self) -> None:
         """Keep an unexpected scheduling or publication failure non-fatal."""
@@ -302,12 +317,14 @@ class TradeIntegrityWatchdog:
             Repository result, or ``None`` after a timeout or failure.
         """
         page = self._pages[monitor]
+        effective_sweep_limit = page.sweep_limit
+        started = monotonic()
         try:
             result = await asyncio.wait_for(
                 self._repo.run_trade_integrity_monitor(
                     monitor=monitor,
                     now=now,
-                    sweep_limit=page.sweep_limit,
+                    sweep_limit=effective_sweep_limit,
                     worklog_limit=page.worklog_limit,
                     statement_timeout_seconds=max(self._config.monitor_timeout_seconds - 2.0, 1.0),
                 ),
@@ -324,6 +341,16 @@ class TradeIntegrityWatchdog:
                     "TradeIntegrityWatchdog %s failed; continuing with next monitor", monitor
                 )
             return None
+        elapsed = max(0.0, monotonic() - started)
+        logger.info(
+            "TradeIntegrityWatchdog %s pass completed in %.3fs "
+            "(sweep_rows=%s, sweep_limit=%s, budget=%.1fs)",
+            monitor,
+            elapsed,
+            result.sweep_rows,
+            effective_sweep_limit,
+            self._config.monitor_timeout_seconds,
+        )
         self._record_success(monitor)
         return result
 

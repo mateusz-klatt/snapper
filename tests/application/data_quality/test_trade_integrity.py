@@ -644,9 +644,12 @@ async def test_success_streak_doubles_pages_and_caps_recovery(
                 assert request["sweep_limit"] == sweep_limit
                 assert request["worklog_limit"] == worklog_limit
 
-    growth_records = [record for record in caplog.records if record.levelno == logging.INFO]
+    growth_records = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.INFO and "recovered" in record.message
+    ]
     assert len(growth_records) == 2
-    assert all("recovered" in record.message for record in growth_records)
 
 
 @pytest.mark.asyncio
@@ -879,3 +882,148 @@ async def test_start_runs_immediately_and_stop_cancels_owned_task() -> None:
     assert watchdog._loop_task is not None
     await watchdog.stop()
     assert watchdog._loop_task is None
+
+
+@pytest.mark.asyncio
+async def test_loop_uses_start_to_start_cadence_without_overlap_and_honours_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sleep only remaining interval time, run immediately after overrun, and never overlap.
+
+    Given: A watchdog with a 60-second interval, a fake monotonic clock, and
+        a fake sleep, where tick one takes 20 seconds and tick two takes 70 seconds.
+    When: The recurring loop executes two ticks and shutdown is signalled on the
+        third interval sleep.
+    Then: Sleeps are 60s, 40s, and 0s, ticks run sequentially without overlap,
+        and stop prevents a third tick.
+    """
+    watchdog = _make_watchdog(
+        _make_repo(_result("m1"), _result("m2")),
+        None,
+        interval_seconds=60.0,
+    )
+    clock = [100.0]
+    sleeps: list[float] = []
+    events: list[str] = []
+    active_ticks = 0
+    max_concurrent = 0
+    durations = iter((20.0, 70.0))
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay: float) -> None:
+        """Record requested sleep delay and stop after the overrun tick's sleep."""
+        sleeps.append(delay)
+        clock[0] += delay
+        if len(sleeps) == 3:
+            watchdog._stopping.set()
+
+    async def fake_tick() -> None:
+        """Advance fake clock and assert sequential non-overlapping ticks."""
+        nonlocal active_ticks, max_concurrent
+        assert active_ticks == 0
+        active_ticks += 1
+        max_concurrent = max(max_concurrent, active_ticks)
+        events.append("start")
+        await real_sleep(0)
+        clock[0] += next(durations)
+        events.append("end")
+        active_ticks -= 1
+
+    monkeypatch.setattr(monitor_module, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(monitor_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(watchdog, "_guarded_tick", fake_tick)
+
+    await watchdog._loop()
+
+    assert sleeps == [60.0, 40.0, 0.0]
+    assert events == ["start", "end", "start", "end"]
+    assert max_concurrent == 1
+
+
+@pytest.mark.asyncio
+async def test_run_accounts_for_initial_tick_elapsed_and_stops_after_inflight_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Subtract the eager tick's duration from the first recurring sleep.
+
+    Given: A watchdog with zero startup grace and a 60-second interval, where
+        the initial eager tick takes 20 seconds and the next tick sets stop.
+    When: The lifecycle runner starts and completes that second tick.
+    Then: Only 40 seconds are slept before the second tick, and no further sleep
+        or tick runs once stop is set.
+    """
+    watchdog = _make_watchdog(
+        _make_repo(_result("m1"), _result("m2")),
+        None,
+        interval_seconds=60.0,
+        startup_grace_seconds=0.0,
+    )
+    clock = [500.0]
+    sleeps: list[float] = []
+    tick_count = 0
+
+    async def fake_sleep(delay: float) -> None:
+        """Record recurring sleep delays."""
+        sleeps.append(delay)
+        clock[0] += delay
+
+    async def fake_tick() -> None:
+        """Simulate tick durations and stop during the second tick."""
+        nonlocal tick_count
+        tick_count += 1
+        clock[0] += 20.0 if tick_count == 1 else 25.0
+        if tick_count == 2:
+            watchdog._stopping.set()
+
+    monkeypatch.setattr(monitor_module, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(monitor_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(watchdog, "_guarded_tick", fake_tick)
+
+    await watchdog._run()
+
+    assert sleeps == [40.0]
+    assert tick_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_monitor_logs_pass_duration_sweep_rows_and_effective_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log repository pass duration, sweep_rows, and effective sweep_limit at INFO.
+
+    Given: An M1 pass whose sweep_limit was halved to 7,500 and is on its
+        third consecutive success, with a fake clock advancing by 2.345 seconds.
+    When: The watchdog runs that monitor pass at INFO log level.
+    Then: The emitted INFO log reports m1, elapsed seconds, sweep_rows, and
+        the pre-recovery effective sweep_limit used for that pass.
+    """
+    repo = MagicMock()
+    repo.run_trade_integrity_monitor = AsyncMock(
+        side_effect=[TimeoutError(), _result("m1"), _result("m1"), _result("m1")]
+    )
+    watchdog = _make_watchdog(repo, None)
+    await watchdog._run_monitor("m1", _NOW)
+    await watchdog._run_monitor("m1", _NOW)
+    await watchdog._run_monitor("m1", _NOW)
+
+    ticks = iter((10.0, 12.345))
+    monkeypatch.setattr(monitor_module, "monotonic", lambda: next(ticks))
+
+    with caplog.at_level(logging.INFO):
+        result = await watchdog._run_monitor("m1", _NOW)
+
+    assert result is not None
+    duration_logs = [
+        record.message
+        for record in caplog.records
+        if record.levelno == logging.INFO and "pass completed" in record.message
+    ]
+    assert len(duration_logs) == 1
+    message = duration_logs[0]
+    assert "m1" in message
+    assert "2.345s" in message
+    assert "sweep_rows=17" in message
+    assert f"sweep_limit={DEFAULT_SWEEP_LIMIT // 2}" in message
+    assert f"budget={DEFAULT_MONITOR_TIMEOUT_SECONDS:.1f}s" in message
+    assert watchdog._pages["m1"].sweep_limit == DEFAULT_SWEEP_LIMIT

@@ -199,7 +199,8 @@ class TradeIntegrityRunResult:
         worklog_rows: Outstanding restore identities examined.
         cursor_timestamp: Durable page cursor after the pass.
         cursor_id: Durable ID tie-breaker after the pass.
-        covered_through: End of the last fully completed overlap pass.
+        covered_through: Monotone bus-time watermark covered by committed clean
+            sweep pages and completed passes.
         lag_seconds: Distance from the settled horizon to completed coverage.
         lagged: Whether lag breached half of the fixed overlap.
         pass_completed: Whether this pass reached its fixed scan end.
