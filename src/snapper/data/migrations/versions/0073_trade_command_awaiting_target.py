@@ -49,8 +49,11 @@ def _swap_status_check(expr: str) -> None:
             batch.create_check_constraint(_CONSTRAINT, expr)
         return
     with op.get_context().autocommit_block():
-        op.execute(f"ALTER TABLE {_TABLE} DROP CONSTRAINT IF EXISTS {_CONSTRAINT}")
-        op.execute(f"ALTER TABLE {_TABLE} ADD CONSTRAINT {_CONSTRAINT} CHECK ({expr}) NOT VALID")
+        op.execute(
+            f"ALTER TABLE {_TABLE} "
+            f"DROP CONSTRAINT IF EXISTS {_CONSTRAINT}, "
+            f"ADD CONSTRAINT {_CONSTRAINT} CHECK ({expr}) NOT VALID"
+        )
         op.execute(f"ALTER TABLE {_TABLE} VALIDATE CONSTRAINT {_CONSTRAINT}")
 
 

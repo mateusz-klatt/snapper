@@ -38,8 +38,10 @@ from snapper.application.plans.trailing_stop import TrailingStopEvaluator
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import register_process
+from snapper.application.trade.cancel_target import CancelHydrationStamp
 from snapper.application.trade.cancel_target import CancelTargetIdentityReader
 from snapper.application.trade.cancel_target import cancel_target_exchange_order_id
+from snapper.application.trade.cancel_target import resolve_and_hydrate_awaiting_target_cancel
 from snapper.application.trade.cancel_target import target_end_time
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -964,48 +966,6 @@ class PlanExecutorService(RegisterableProcess):
         unresolved = pending["status"] == TradeCommandStatusEnum.AWAITING_TARGET
         return not unresolved, pending if unresolved else None
 
-    async def _hydrate_unresolved_cancel(
-        self,
-        plan: ExecutionPlanRow,
-        child_client_order_id: str,
-        cancel: TradeCommandRow,
-        exchange_order_id: str,
-    ) -> None:
-        """CAS-hydrate an AWAITING_TARGET cancel to CREATED once venue id resolves.
-
-        Args:
-            plan: Parent cancel-requested plan.
-            child_client_order_id: Child whose cancel is hydrated.
-            cancel: Unresolved AWAITING_TARGET cancel row.
-            exchange_order_id: Newly resolved venue identity.
-        """
-        try:
-            hydrated = await cast(
-                SQLAlchemyRepository, self.repository
-            ).advance_trade_command_lifecycle(
-                public_id=cancel["public_id"],
-                expected_status=TradeCommandStatusEnum.AWAITING_TARGET,
-                new_status=TradeCommandStatusEnum.CREATED,
-                bus_time=datetime.now(UTC),
-                session_id=self.tracker.session_id,
-                sequence_id=self.tracker.next_sequence("plan_stranded_cancels"),
-                exchange_order_id=exchange_order_id,
-            )
-        except Exception as exc:
-            logger.error(
-                "Stranded cancel identity hydration failed for plan {} child {}: {}",
-                plan["public_id"],
-                child_client_order_id,
-                exc,
-            )
-            return
-        if not hydrated:
-            logger.info(
-                "PlanExecutorService: cancel hydration lost status race for plan {} child {}",
-                plan["public_id"],
-                child_client_order_id,
-            )
-
     async def _reemit_single_stranded_cancel(
         self,
         plan: ExecutionPlanRow,
@@ -1057,6 +1017,18 @@ class PlanExecutorService(RegisterableProcess):
             return
         if await self._stranded_cancel_target_ended(plan, child_client_order_id):
             return
+        if unresolved_cancel is not None:
+            stamp = CancelHydrationStamp(
+                bus_time=datetime.now(UTC),
+                session_id=self.tracker.session_id,
+                sequence_id=self.tracker.next_sequence("plan_stranded_cancels"),
+            )
+            await resolve_and_hydrate_awaiting_target_cancel(
+                cast(SQLAlchemyRepository, self.repository),
+                unresolved_cancel,
+                stamp,
+            )
+            return
         try:
             exchange_order_id = await cancel_target_exchange_order_id(
                 cast(CancelTargetIdentityReader, self.repository),
@@ -1067,12 +1039,6 @@ class PlanExecutorService(RegisterableProcess):
         except Exception as exc:
             logger.error("Stranded cancel venue lookup failed for {}: {}", plan["public_id"], exc)
             exchange_order_id = None
-        if unresolved_cancel is not None:
-            if exchange_order_id:
-                await self._hydrate_unresolved_cancel(
-                    plan, child_client_order_id, unresolved_cancel, exchange_order_id
-                )
-            return
         session_id = self.tracker.session_id
         sequence_id = self.tracker.next_sequence("plan_stranded_cancels")
         row: dict[str, Any] = {

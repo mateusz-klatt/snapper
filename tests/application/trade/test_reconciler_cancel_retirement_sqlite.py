@@ -19,9 +19,14 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import func
+from sqlalchemy import select
 
+from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import TradeService
+from snapper.core.types import TradeCommandStatusEnum
+from snapper.data.models import TradeCommand
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import TradeCommandRow
@@ -415,3 +420,117 @@ async def test_cycle_with_only_the_cancel_active_retires_it(
     cancel = await _command(repository, cancel_id)
     assert (cancel["status"], cancel["last_error"]) == ("cancelled", "target order ended canceled")
     assert cancel["terminal_at"] == times.after_cancel(30)
+
+
+@pytest.mark.asyncio
+async def test_runtime_order_accepted_hydrates_awaiting_target_and_dispatches_via_outbox(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Runtime order_accepted evidence hydrates a held cancel in place for outbox dispatch.
+
+    Given: An active create command without a venue id and a held ``awaiting_target``
+        cancel sharing its client order id,
+    When: A first reconciler + outbox pass finds no venue id, then a runtime
+        ``order_accepted`` event arrives with ``exchange_order_id='ex-target'`` and the
+        next reconciler + outbox pass runs without restart,
+    Then: The first pass leaves the cancel held and undispatched, and the second pass
+        hydrates the same cancel row in place to ``created`` and dispatches it.
+    """
+    times = _timeline()
+    await _insert_command(repository, "create", "dispatched", times.create_created)
+    cancel_id = await _insert_command(
+        repository, "cancel", TradeCommandStatusEnum.AWAITING_TARGET.value, times.cancel_created
+    )
+    published: list[tuple[str, str | None]] = []
+
+    async def _publish(cmd: TradeCommandRow) -> None:
+        published.append((cmd["public_id"], cmd["exchange_order_id"]))
+
+    dispatcher = OutboxDispatcher(repository=repository, publish_fn=_publish, batch_size=10)
+    trade_svc = TradeService()
+    loop = ReconciliationLoop(
+        exchange_name=_EXCHANGE, repository=repository, trade_service=trade_svc
+    )
+
+    await loop._reconcile_cycle()
+    await dispatcher._dispatch_batch()
+    assert published == []
+    held_before = await _command(repository, cancel_id)
+    assert held_before["status"] == TradeCommandStatusEnum.AWAITING_TARGET.value
+    assert held_before["exchange_order_id"] is None
+
+    await _store(repository, times, [_ACCEPTED])
+    await loop._reconcile_cycle()
+
+    hydrated = await _command(repository, cancel_id)
+    assert hydrated["status"] == TradeCommandStatusEnum.CREATED.value
+    assert hydrated["exchange_order_id"] == "ex-target"
+    assert loop.stale_awaiting_target_count == 0
+    assert trade_svc.stale_awaiting_target_count == 0
+
+    await dispatcher._dispatch_batch()
+    assert published == [(cancel_id, "ex-target")]
+    dispatched = await _command(repository, cancel_id)
+    assert dispatched["status"] == TradeCommandStatusEnum.DISPATCHED.value
+
+    async with repository.session() as session:
+        distinct_cancels = int(
+            (
+                await session.execute(
+                    select(func.count(func.distinct(TradeCommand.public_id))).where(
+                        TradeCommand.client_order_id == _CID,
+                        TradeCommand.command_type == "cancel",
+                    )
+                )
+            ).scalar_one()
+        )
+    assert distinct_cancels == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_still_unresolved_awaiting_target_stays_held(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """An awaiting_target cancel stays held when runtime events carry no venue id.
+
+    Given: An active create command, a held ``awaiting_target`` cancel, and only an
+        ``order_submit_unknown`` event lacking any exchange order id,
+    When: Reconciler and outbox run,
+    Then: The cancel remains ``awaiting_target`` with no venue id and is not dispatched.
+    """
+    times = _timeline()
+    await _insert_command(repository, "create", "dispatched", times.create_created)
+    cancel_id = await _insert_command(
+        repository, "cancel", TradeCommandStatusEnum.AWAITING_TARGET.value, times.cancel_created
+    )
+    await repository.insert_venue_event(
+        {
+            "event_type": "order_submit_unknown",
+            "shard_key": _SHARD,
+            "exchange": _EXCHANGE,
+            "instrument": "BTC-USD",
+            "mode": "live",
+            "received_at": times.after_cancel(-10),
+            "session_id": _SESSION,
+            "sequence_id": 1,
+            "timestamp": times.after_cancel(-10),
+            "client_order_id": _CID,
+            "venue_client_id": _CID,
+            "exchange_order_id": None,
+            "wallet_public_id": _WALLET,
+            "liquidity_role": "unknown",
+        }
+    )
+    published: list[str] = []
+
+    async def _publish(cmd: TradeCommandRow) -> None:
+        published.append(cmd["public_id"])
+
+    dispatcher = OutboxDispatcher(repository=repository, publish_fn=_publish, batch_size=10)
+    await _loop(repository)._reconcile_cycle()
+    await dispatcher._dispatch_batch()
+
+    still_held = await _command(repository, cancel_id)
+    assert still_held["status"] == TradeCommandStatusEnum.AWAITING_TARGET.value
+    assert still_held["exchange_order_id"] is None
+    assert published == []

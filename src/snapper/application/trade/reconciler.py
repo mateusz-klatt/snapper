@@ -42,6 +42,8 @@ from uuid import uuid7
 
 from loguru import logger
 
+from snapper.application.trade.cancel_target import CancelHydrationStamp
+from snapper.application.trade.cancel_target import resolve_and_hydrate_awaiting_target_cancel
 from snapper.application.trade.cancel_target import target_end_time
 from snapper.application.trade.command_request import parse_shard_key
 from snapper.application.trade.trade_service import TradeService
@@ -57,6 +59,7 @@ from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.topics.builders import heartbeat_topic
 
 DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S: Final[float] = 900.0
+DEFAULT_MAX_HYDRATE_PER_CYCLE: Final[int] = 100
 RECONCILER_HEARTBEAT_COMPONENT: Final[str] = "reconciler"
 _MAX_HEARTBEAT_STALE_IDS: Final[int] = 20
 
@@ -388,7 +391,9 @@ class ReconciliationLoop:
         self._last_seen_shards: set[str] = set()
         self._awaiting_target_stale_threshold_s: float = DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
         self._msg_publisher: _HeartbeatPublisher | None = None
+        self._max_hydrate_per_cycle: int = DEFAULT_MAX_HYDRATE_PER_CYCLE
         self._stale_held_alerted: set[str] = set()
+        self._hydration_error_logged: set[str] = set()
         self._stale_awaiting_target_count: int = 0
         self._heartbeat_sequence: int = 0
 
@@ -397,26 +402,33 @@ class ReconciliationLoop:
         *,
         stale_threshold_s: float = DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S,
         msg_publisher: _HeartbeatPublisher | None = None,
+        max_hydrate_per_cycle: int = DEFAULT_MAX_HYDRATE_PER_CYCLE,
     ) -> Self:
-        """Configure stale awaiting_target monitoring and optional heartbeat publisher.
+        """Configure stale awaiting_target monitoring, runtime hydration cap, and heartbeat.
 
         Args:
             stale_threshold_s: Age in seconds before a held cancel becomes stale.
             msg_publisher: Optional ZMQ publisher for ``reconciler.{exchange}``
                 health heartbeats.
+            max_hydrate_per_cycle: Maximum awaiting_target cancels inspected for
+                runtime hydration per reconciliation pass.
 
         Returns:
             ``self`` for fluent initialization.
 
         Raises:
-            ValueError: If ``stale_threshold_s`` is not finite and positive.
+            ValueError: If ``stale_threshold_s`` is not finite and positive or
+                ``max_hydrate_per_cycle`` is below ``1``.
         """
         if not math.isfinite(stale_threshold_s) or stale_threshold_s <= 0.0:
             raise ValueError(
                 f"stale_threshold_s must be finite and positive, got {stale_threshold_s}"
             )
+        if max_hydrate_per_cycle < 1:
+            raise ValueError(f"max_hydrate_per_cycle must be >= 1, got {max_hydrate_per_cycle}")
         self._awaiting_target_stale_threshold_s = float(stale_threshold_s)
         self._msg_publisher = msg_publisher
+        self._max_hydrate_per_cycle = max_hydrate_per_cycle
         return self
 
     @property
@@ -738,6 +750,55 @@ class ReconciliationLoop:
             return True
         return False
 
+    async def _hydrate_awaiting_target_cancels(
+        self, commands: list[TradeCommandRow], now: datetime
+    ) -> set[str]:
+        """Resolve and CAS-hydrate held awaiting_target cancels in this cycle.
+
+        ``commands`` is already scoped to ``self._exchange`` and filtered by
+        ``self._ownership``. Processing is capped by ``_max_hydrate_per_cycle``
+        per pass, and repeated lookup/CAS errors for the same row log once per
+        failing episode while leaving the row held.
+
+        Args:
+            commands: Owned active commands for this exchange.
+            now: Cycle bus timestamp.
+
+        Returns:
+            Public ids of cancels hydrated to ``created`` in this pass.
+        """
+        awaiting = [
+            cmd
+            for cmd in commands
+            if cmd["command_type"] == _CANCEL_COMMAND_TYPE
+            and cmd["status"] == TradeCommandStatusEnum.AWAITING_TARGET
+        ]
+        if not awaiting:
+            self._hydration_error_logged.clear()
+            return set()
+        self._hydration_error_logged.intersection_update({cmd["public_id"] for cmd in awaiting})
+        hydrated: set[str] = set()
+        for cmd in awaiting[: self._max_hydrate_per_cycle]:
+            public_id = cmd["public_id"]
+            stamp = CancelHydrationStamp(
+                bus_time=now,
+                session_id=cmd["session_id"],
+                sequence_id=cmd["sequence_id"],
+            )
+            outcome = await resolve_and_hydrate_awaiting_target_cancel(
+                self._repo,
+                cmd,
+                stamp,
+                log_error=public_id not in self._hydration_error_logged,
+            )
+            if outcome == "error":
+                self._hydration_error_logged.add(public_id)
+                continue
+            self._hydration_error_logged.discard(public_id)
+            if outcome == "hydrated":
+                hydrated.add(public_id)
+        return hydrated
+
     def _collect_stale_report(
         self,
         commands: list[TradeCommandRow],
@@ -890,12 +951,15 @@ class ReconciliationLoop:
             advanced = await self._advance_foldable_commands(fold_cmds, events_by_cid, now)
             retired = await self._retire_ended_cancels(active_cmds, now)
             advanced += await self._resurrect_falsely_rejected(now)
-            reportable = [cmd for cmd in active_cmds if cmd["public_id"] not in retired]
+            hydrated = await self._hydrate_awaiting_target_cancels(active_cmds, now)
+            advanced += len(hydrated)
+            excluded = retired | hydrated
+            reportable = [cmd for cmd in active_cmds if cmd["public_id"] not in excluded]
             stale_count, seen_shards = self._collect_stale_report(reportable, events_by_cid, now)
             stale_held = self._check_stale_awaiting_target_cancels(reportable, now)
             await self._publish_held_cancel_heartbeat(stale_held, now)
             seen_shards.update(
-                cmd["shard_key"] for cmd in active_cmds if cmd["public_id"] in retired
+                cmd["shard_key"] for cmd in active_cmds if cmd["public_id"] in excluded
             )
             self._log_cycle_result(advanced, stale_count)
             self._record_cycle_successes(seen_shards)

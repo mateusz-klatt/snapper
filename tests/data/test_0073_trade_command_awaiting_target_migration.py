@@ -287,15 +287,20 @@ def test_0073_postgresql_ddl_and_offline_sql(capsys: pytest.CaptureFixture[str])
     pg_cfg = make_alembic_config("postgresql+psycopg://user:pass@localhost/snapper")
     command.upgrade(pg_cfg, "0072:0073", sql=True)
     upgrade_sql = capsys.readouterr().out
-    assert "DROP CONSTRAINT IF EXISTS ck_trade_commands_status" in upgrade_sql
-    assert "ADD CONSTRAINT ck_trade_commands_status CHECK" in upgrade_sql
+    assert (
+        "ALTER TABLE trade_commands DROP CONSTRAINT IF EXISTS ck_trade_commands_status, "
+        "ADD CONSTRAINT ck_trade_commands_status CHECK"
+    ) in upgrade_sql
     assert "'awaiting_target'" in upgrade_sql
     assert "NOT VALID" in upgrade_sql
     assert "VALIDATE CONSTRAINT ck_trade_commands_status" in upgrade_sql
 
     command.downgrade(pg_cfg, "0073:0072", sql=True)
     downgrade_sql = capsys.readouterr().out
-    assert "DROP CONSTRAINT IF EXISTS ck_trade_commands_status" in downgrade_sql
+    assert (
+        "ALTER TABLE trade_commands DROP CONSTRAINT IF EXISTS ck_trade_commands_status, "
+        "ADD CONSTRAINT ck_trade_commands_status CHECK"
+    ) in downgrade_sql
     assert "'awaiting_target'" not in downgrade_sql
     assert "NOT VALID" in downgrade_sql
     assert "VALIDATE CONSTRAINT ck_trade_commands_status" in downgrade_sql
@@ -319,9 +324,11 @@ def test_0073_postgresql_ddl_and_offline_sql(capsys: pytest.CaptureFixture[str])
         _MIGRATION_0073.downgrade()
 
     ctx_zero.autocommit_block.assert_called_once()
-    assert len(executed) == 3
-    assert "NOT VALID" in executed[1]
-    assert "VALIDATE CONSTRAINT ck_trade_commands_status" in executed[2]
+    assert len(executed) == 2
+    assert "DROP CONSTRAINT IF EXISTS ck_trade_commands_status" in executed[0]
+    assert "ADD CONSTRAINT ck_trade_commands_status CHECK" in executed[0]
+    assert "NOT VALID" in executed[0]
+    assert "VALIDATE CONSTRAINT ck_trade_commands_status" in executed[1]
 
     bind_nonzero = MagicMock()
     bind_nonzero.dialect.name = "postgresql"

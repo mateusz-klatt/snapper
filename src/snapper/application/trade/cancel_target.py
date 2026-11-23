@@ -8,12 +8,20 @@ evidence, is not ended here.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 from typing import Protocol
 
+from loguru import logger
+
 from snapper.core.types import TradeCommandStatusEnum
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
+
+CancelHydrationOutcome = Literal["hydrated", "unresolved", "race_lost", "error"]
+"""Result of attempting to resolve and CAS-hydrate one awaiting_target cancel."""
 
 
 class VenueEventTimeReader(Protocol):
@@ -84,6 +92,15 @@ class CancelTargetIdentityReader(Protocol):
         """
 
 
+@dataclass(frozen=True, slots=True)
+class CancelHydrationStamp:
+    """Provenance stamp written onto a hydrated cancel successor row."""
+
+    bus_time: datetime
+    session_id: str
+    sequence_id: int
+
+
 async def cancel_target_exchange_order_id(
     reader: CancelTargetIdentityReader,
     client_order_id: str,
@@ -116,6 +133,107 @@ async def cancel_target_exchange_order_id(
         ):
             return event["exchange_order_id"]
     return None
+
+
+async def hydrate_awaiting_target_cancel(
+    store: SQLAlchemyRepository,
+    cancel: TradeCommandRow,
+    exchange_order_id: str,
+    stamp: CancelHydrationStamp,
+    *,
+    log_error: bool = True,
+) -> CancelHydrationOutcome:
+    """CAS-hydrate a held ``awaiting_target`` cancel to ``created`` in place.
+
+    Args:
+        store: Repository supporting the lifecycle CAS.
+        cancel: Held cancel row currently expected at ``awaiting_target``.
+        exchange_order_id: Newly resolved venue order identifier.
+        stamp: Temporal and sequence stamp for the successor version.
+        log_error: Whether unexpected exceptions should log an error.
+
+    Returns:
+        ``"hydrated"`` when the CAS succeeded, ``"race_lost"`` when the row
+        moved concurrently, or ``"error"`` on a storage failure.
+    """
+    try:
+        applied = await store.advance_trade_command_lifecycle(
+            public_id=cancel["public_id"],
+            expected_status=TradeCommandStatusEnum.AWAITING_TARGET,
+            new_status=TradeCommandStatusEnum.CREATED,
+            bus_time=stamp.bus_time,
+            session_id=stamp.session_id,
+            sequence_id=stamp.sequence_id,
+            exchange_order_id=exchange_order_id,
+        )
+    except Exception as exc:
+        if log_error:
+            logger.error(
+                "Cancel identity hydration failed for {} cid={}: {}",
+                cancel["public_id"],
+                cancel["client_order_id"],
+                exc,
+            )
+        return "error"
+    if not applied:
+        logger.info(
+            "Cancel identity hydration lost status race for {} cid={}",
+            cancel["public_id"],
+            cancel["client_order_id"],
+        )
+        return "race_lost"
+    logger.info(
+        "Hydrated awaiting_target cancel {} cid={} -> created (exchange_order_id={})",
+        cancel["public_id"],
+        cancel["client_order_id"],
+        exchange_order_id,
+    )
+    return "hydrated"
+
+
+async def resolve_and_hydrate_awaiting_target_cancel(
+    store: SQLAlchemyRepository,
+    cancel: TradeCommandRow,
+    stamp: CancelHydrationStamp,
+    *,
+    log_error: bool = True,
+) -> CancelHydrationOutcome:
+    """Resolve a held cancel's target venue id and hydrate it in place.
+
+    Args:
+        store: Repository supporting cancel target reads and lifecycle CAS.
+        cancel: Held cancel row in ``awaiting_target`` status.
+        stamp: Temporal and sequence stamp used for lookup and CAS write.
+        log_error: Whether lookup or hydration exceptions log an error.
+
+    Returns:
+        ``"hydrated"``, ``"unresolved"``, ``"race_lost"``, or ``"error"``.
+    """
+    try:
+        exchange_order_id = await cancel_target_exchange_order_id(
+            store,
+            cancel["client_order_id"],
+            cancel["exchange"],
+            stamp.bus_time,
+        )
+    except Exception as exc:
+        if log_error:
+            logger.error(
+                "Cancel target resolution failed for {} cid={}: {}",
+                cancel["public_id"],
+                cancel["client_order_id"],
+                exc,
+            )
+        return "error"
+    if not exchange_order_id:
+        return "unresolved"
+    return await hydrate_awaiting_target_cancel(
+        store,
+        cancel,
+        exchange_order_id,
+        stamp,
+        log_error=log_error,
+    )
 
 
 async def target_end_time(

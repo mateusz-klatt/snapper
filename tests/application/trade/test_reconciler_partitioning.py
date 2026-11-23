@@ -35,6 +35,8 @@ def _repo(cmds: list[dict[str, Any]]) -> Any:
     repo.get_order_lifecycle_events = AsyncMock(return_value=[])
     repo.advance_trade_command_lifecycle = AsyncMock(return_value=True)
     repo.get_rejected_commands_with_later_live_evidence = AsyncMock(return_value=[])
+    repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value=None)
+    repo.get_active_create_command_by_client_order_id = AsyncMock(return_value=None)
     return repo
 
 
@@ -150,3 +152,44 @@ async def test_failure_targets_only_owned_known_shards() -> None:
     await recon._reconcile_cycle()
     recorded_shards = {call.args[0] for call in trade_svc.record_recon_failure.call_args_list}
     assert recorded_shards == {owned_shard}
+
+
+@pytest.mark.asyncio
+async def test_runtime_hydration_respects_shard_ownership() -> None:
+    """Reconcile cycle hydrates held awaiting_target cancels only on owned shards.
+
+    Given: An owned awaiting_target cancel and a foreign awaiting_target cancel, both
+        with resolvable venue ids,
+    When: ``_reconcile_cycle`` executes with ``ShardOwnership``,
+    Then: Only the owned shard's cancel is CAS-hydrated to created.
+    """
+    owned_shard = "kraken.MINE.live"
+    foreign_shard = "kraken.FOREIGN.live"
+    owner_id = ShardOwnership._hash(owned_shard) % 2
+    ownership = ShardOwnership(instance_id=owner_id, instance_count=2)
+    owned_cmd = {
+        **_cmd(owned_shard, "cancel-owned"),
+        "exchange": "kraken",
+        "command_type": "cancel",
+        "status": "awaiting_target",
+    }
+    foreign_cmd = {
+        **_cmd(foreign_shard, "cancel-foreign"),
+        "exchange": "kraken",
+        "command_type": "cancel",
+        "status": "awaiting_target",
+    }
+    repo = _repo([owned_cmd, foreign_cmd])
+    repo.get_exchange_order_id_for_client_order_id = AsyncMock(return_value="ex-owned-1")
+    recon = ReconciliationLoop(
+        exchange_name="kraken",
+        repository=repo,
+        trade_service=MagicMock(spec=TradeService),
+        interval_seconds=60.0,
+        ownership=ownership,
+    )
+
+    await recon._reconcile_cycle()
+
+    repo.advance_trade_command_lifecycle.assert_awaited_once()
+    assert repo.advance_trade_command_lifecycle.await_args.kwargs["public_id"] == "cancel-owned"
