@@ -5,8 +5,8 @@ row stamped after it, so these queries bound only ``known_to > now`` in SQL,
 which every open version passes, and then prove each loaded row open-ended
 with :func:`~snapper.data.models.is_open_ended_version`, the sanctioned
 exact comparison, which drops a version closed later than now. A read that finds more than one active row raises, as
-``get_active_create_command_by_client_order_id`` does. Orders, executions and
-venue events are read without joins, so a row whose instrument or symbol
+``get_active_create_command_by_client_order_id`` does. Orders, executions,
+paired legs and venue events are read without joins, so a row whose instrument or symbol
 lineage is incomplete is still found. Nothing here writes; the repair writes
 only through ``insert_order_terminal_once`` and
 ``advance_trade_command_lifecycle``.
@@ -16,11 +16,13 @@ from collections.abc import Sequence
 from datetime import UTC
 from datetime import datetime
 
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import union
 
 from snapper.data.models import Execution
 from snapper.data.models import Order
+from snapper.data.models import PairedExecutionLeg
 from snapper.data.models import TradeCommand
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import VenueEvent
@@ -124,6 +126,9 @@ async def get_order_versions_by_client_order_id(
             "client_order_id": order.client_order_id,
             "exchange_order_id": order.exchange_order_id,
             "status": order.status,
+            "order_type": order.order_type,
+            "side": order.side,
+            "size": order.size,
             "filled_size": order.filled_size,
             "leverage": order.leverage,
             "timestamp": order.timestamp,
@@ -175,26 +180,57 @@ async def get_executions_by_order_public_ids(
 
 
 async def get_venue_events_for_client_order_id(
-    repository: SQLAlchemyRepository, client_order_id: str
+    repository: SQLAlchemyRepository,
+    client_order_id: str,
+    exchange_order_ids: Sequence[str] = (),
 ) -> list[VenueEventRow]:
-    """Return every venue event of one client order id, oldest first.
+    """Return every venue event matching one client id or optional exchange ids.
 
     Args:
         repository: Repository whose session is used.
         client_order_id: Client order id of the events.
+        exchange_order_ids: Exchange order ids that H-margin also treats as
+            the same order's identity. Empty for the unchanged spot read.
 
     Returns:
         Every event of every type, ordered by ``id``, in the shape the
         reconciler's fold consumes.
     """
+    identities = [VenueEvent.client_order_id == client_order_id]
+    if exchange_order_ids:
+        identities.append(VenueEvent.exchange_order_id.in_(list(exchange_order_ids)))
     async with repository.session() as session:
         result = await session.execute(
-            select(VenueEvent)
-            .where(VenueEvent.client_order_id == client_order_id)
-            .order_by(VenueEvent.id)
+            select(VenueEvent).where(or_(*identities)).order_by(VenueEvent.id)
         )
         events = result.scalars().all()
     return [SQLAlchemyRepository._venue_event_to_row(event) for event in events]
+
+
+async def has_paired_execution_leg(
+    repository: SQLAlchemyRepository,
+    client_order_id: str,
+    exchange_order_ids: Sequence[str],
+) -> bool:
+    """Return whether any paired-execution leg names either order identity.
+
+    Args:
+        repository: Repository whose session is used.
+        client_order_id: Client order id to match.
+        exchange_order_ids: Exchange order ids to match.
+
+    Returns:
+        True when at least one historical or active paired-execution leg matches.
+    """
+    identities = [PairedExecutionLeg.client_order_id == client_order_id]
+    if exchange_order_ids:
+        identities.append(PairedExecutionLeg.exchange_order_id.in_(list(exchange_order_ids)))
+    async with repository.session() as session:
+        result = await session.execute(
+            select(PairedExecutionLeg.id).where(or_(*identities)).limit(1)
+        )
+        leg_id = result.scalars().first()
+    return leg_id is not None
 
 
 async def get_open_commands_on_shard(
