@@ -5,6 +5,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 2
     open-pull-requests-limit: 10
     ignore:
       # ccxt 4.5.93 pins multidict==6.9.1; revisit the major when ccxt supports 7.x.
@@ -19,6 +21,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 2
     open-pull-requests-limit: 5
     ignore:
       - dependency-name: "python"
@@ -33,6 +37,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 2
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
