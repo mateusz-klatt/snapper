@@ -210,15 +210,27 @@ SQL repository, or at executor shutdown — the executor counts each distinct
 stuck terminal once per episode in `meta.unrecorded_order_terminal_drop_count`
 and logs one WARN per episode pointing operators to the G3-C repair tool
 (`snapper repair-cancel-targets`).
-While an `order_terminal` is held for retry, the executor deliberately leaves
+
+The executor also increments `meta.requested_cancel_terminal_held_count` and
+logs one G3-C WARN per held requested-cancel episode for each client order ID.
+The episode ends when the evidence is recorded, the order is forgotten, or
+the executor stops. For an untracked order, dropping its retry entry also
+ends the episode. If a retry drops a requested cancel because its identifiers
+are still incomplete, it logs the first drop at CRITICAL alongside the G3-C
+drop WARN.
+
+When a stream cancellation or expiry is held for retry, the executor leaves
 the `Order` row non-terminal, skips the stream terminal publish, and keeps the
-order tracked. This is fail-closed: no order becomes canceled or expired
-without durable evidence. The engine's in-flight guard for that order
-therefore stays engaged until the next reconciliation cycle (about 60 s)
-records the evidence and re-enters the cancellation handler. A brief delayed
-release after a database error is intended, not a bug. After a restart that
-loses the in-memory retry map, the still-open `Order` row is re-detected as a
-disappeared order and recorded afresh.
+order tracked. On executors that recheck disappeared orders, the next
+reconciliation cycle (about 60 s) can record the evidence and publish the
+stream terminal to release the engine's in-flight guard. Once evidence is
+recorded, the executor attempts the `Order` row update before publishing.
+If the update fails, the executor still publishes and keeps the order tracked
+so reconciliation can retry the update. After a successful publish, later
+attempts to update that row skip the publish. After a restart that loses the
+in-memory retry map, the still-active `Order` row remains eligible for startup
+recovery.
+
 After three consecutive venue reconciliation failures, the coordinator
 uses the heartbeat to halt known real shard keys for the matching
 exchange/wallet scope and to drop new cold-path signals for that scope.
@@ -1461,6 +1473,28 @@ Executor:
     be recorded at once, it waits in a bounded retry map that the next
     reconciliation cycle drains.
 5.  Publishes `ExecutionData`, `OrderData`, or lightweight `OrderEventData`
+
+For a tracked, venue-confirmed requested cancel, the executor keeps the
+order tracked until it has recorded `order_terminal` and updated the `Order`
+row to `CANCELED`. A hold leaves the row active for startup recovery, which
+uses the durable command's shard when recording a recovered terminal.
+Reconciliation retries held evidence. For exchanges that recheck disappeared
+orders, this also retries the row update, including when terminal evidence
+was already recorded. Before observing native inventory, Kraken Futures
+reconciliation retries locally retained cancel confirmations and stream
+terminals whose evidence was recorded. On restart it parks active orders
+because inventory absence alone cannot establish terminal status.
+The executor still publishes `CANCELLED` on the cancel-result topic so the
+engine releases its in-flight guard on the venue confirmation. A held
+requested cancel logs one G3-C WARN per episode, including when the executor
+has no tracked order for that cancel. For both requested and stream cancels,
+if an order has a database row and the exchange client lacks a repository or
+tracker, the executor logs one ERROR naming the order and stops automatic
+terminal-row update retries for that order. Reconciliation still checks orders
+missing from the open-order snapshot and publishes any trailing fills it finds.
+If the stream path already sent a terminal notification, re-entry skips that
+publish. The row stays active for recovery after the configuration is repaired
+and the executor restarts.
 
 Before the venue order-placement call, each submit passes the pre-placement
 safety checks. The duplicate-submit guard drops outbox replays of an
