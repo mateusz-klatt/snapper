@@ -105,8 +105,11 @@ one `public_id`. The current U2 constraint and active-identity partial
 unique index make those conditions impossible, establishing the
 required zero baseline before U2 is widened.
 First startup does not pre-credit the window: completed coverage starts
-at the overlap boundary and becomes current only after the full initial
-pass completes.
+at the overlap boundary, advances monotonically per committed clean full
+page up to the greatest row timestamp strictly below the page's last row
+(never advancing when every row in the page shares one timestamp, and
+never lowering `covered_through` when a new pass restarts at the overlap
+boundary), and reaches at least `scan_end` when a pass completes.
 
 For rows reached through the recent sweep, each probe considers only
 stored rows whose `executed_at` lies within seven days
@@ -143,7 +146,10 @@ consecutive successful passes double the limits, capped at the configured
 maximums. Explicitly configured limits below those floors remain capped
 at their configured values. Adaptive state is independent for M1 and M2,
 held in memory, and resets on restart. Shrinks log at WARNING and growth
-at INFO; heartbeat metadata exposes the next pass's effective `sweep_limit`
+at INFO; every committed repository pass logs its elapsed seconds,
+`sweep_rows`, and effective `sweep_limit` at INFO so operators can see
+headroom under `monitor_timeout_seconds` before raising `sweep_limit`.
+Heartbeat metadata exposes the next pass's effective `sweep_limit`
 and `worklog_limit`, alongside `configured_sweep_limit` and
 `configured_worklog_limit`. A cancelled transaction rolls back its cursor and worklog
 changes so the next pass retries the same candidates with smaller pages.
@@ -156,25 +162,31 @@ HEALTHY frame. The existing `critical_system_error` rule handles the
 three-frame gate, hourly deduplication, and operator fan-out. With
 successful calls and an available publisher, a committed worklog
 identity with no backlog is reported by the next call of its monitor
-that reads the worklog. M1 runs before M2 in every tick, and every
-tick ends with the scheduled wait. An obligation committed just after
-its monitor read the worklog waits for the rest of that call, the other
-monitor's call, the wait and its own next call. With every call using
-its full 45-second timeout and four-second warning bursts, the third
-warning frame follows the commit by at most about 207 seconds for
-either monitor, publication overhead excluded. Counted from the start
-of the scheduled wait, the bounds are about 109 seconds for M1 and
-158 seconds for M2.
+that reads the worklog. M1 runs before M2 in every tick without
+overlapping ticks, and each tick sleeps `max(0, interval - elapsed)` to
+maintain start-to-start cadence when the tick finishes inside the
+interval (or runs the next tick immediately when it exceeds the
+interval). An obligation committed just after its monitor read the
+worklog waits for the rest of that call, the other monitor's call, any
+remaining cadence wait, and its own next call. With every call using its
+full 45-second timeout and four-second warning bursts (a ~98-second tick
+with zero wait), the third warning frame follows the commit by at most
+about 147 seconds for either monitor, publication overhead excluded.
+Counted from the start of the scheduled wait, the bounds are at most
+about 109 seconds for M1 and 158 seconds for M2.
 
-Sweep coverage advances one page per monitor per tick, and every pass
-rereads the six-hour overlap. With `X` swept rows processed per minute
-(one page divided by the tick duration, including both monitors,
-publication and the wait) and an ingestion rate `I` across all venues,
-a steady pass lasts about `T = 6 h × r / (1 − r)` with `r = I / X` while
-`I` stays below `X`, and the reported lag rises from about `T` towards
-`2 × T` before each pass completes. At the default 15,000-row page, `X`
-is at most about 14,500 rows a minute, and about half that when both
-calls use their full budget. Measured ingestion is about 2,700 to 2,900
+Sweep coverage advances one page per monitor per tick, `covered_through`
+advances monotonically per committed clean page to the strict bound
+below the page's last row, and every pass rereads the six-hour overlap.
+With `X` swept rows processed per minute (one page divided by
+`max(interval, tick_duration)`, including both monitors, publication and
+any wait) and an ingestion rate `I` across all venues, a steady pass
+lasts about `T = 6 h × r / (1 − r)` with `r = I / X` while `I` stays
+below `X`, and completed coverage updates smoothly per page rather than
+waiting until pass completion. At the default 15,000-row page, `X` is up
+to 15,000 rows a minute when ticks finish inside the 60-second cadence,
+and about 9,200 rows a minute when both calls use their full budget.
+Measured ingestion is about 2,700 to 2,900
 trades a minute outside the US session, a weekday average of 6,700 to
 12,600, and about 45,000 a minute during the US session, mostly
 equities. For much of a weekday `I` therefore exceeds `X`. A pass keeps

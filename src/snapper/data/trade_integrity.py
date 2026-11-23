@@ -826,19 +826,51 @@ async def _ack_worklog(
     )
 
 
+def _strict_page_bound(sweep: list[Trade]) -> datetime | None:
+    """Return the greatest row timestamp strictly before the page's last row.
+
+    Rows sharing ``sweep[-1].timestamp`` with a higher ``id`` may remain
+    unscanned until the next page, so only timestamps strictly below that
+    last row's timestamp are fully covered by this page. When every row in
+    the page carries the same timestamp, no strict bound exists within the
+    page and ``None`` is returned.
+    """
+    last_timestamp = sweep[-1].timestamp
+    earlier = [row.timestamp for row in sweep if row.timestamp < last_timestamp]
+    return max(earlier) if earlier else None
+
+
 def _advance_cursor(
     state: TradeIntegrityMonitorCursor,
     sweep: list[Trade],
     request: TradeIntegrityPassRequest,
 ) -> bool:
-    """Advance one page or start the next complete overlap pass."""
+    """Advance one page or start the next complete overlap pass.
+
+    A full page moves the cursor to the last scanned row and advances
+    ``covered_through`` monotonically up to the greatest row timestamp
+    strictly below that row's timestamp, leaving same-timestamp higher-``id``
+    rows outside the reported bound until a later page clears them. When
+    every row in the page shares one timestamp, ``covered_through`` stays
+    unchanged.
+
+    A partial page ends the pass, raises ``covered_through`` monotonically to
+    at least ``scan_end``, and restarts the next pass at
+    ``scan_end - TRADE_INTEGRITY_OVERLAP``. Late-commit protection is
+    unchanged because it still comes from re-reading that six-hour overlap on
+    the next pass; per-page updates make the reported coverage metric honest
+    during long passes without changing detection correctness.
+    """
     if len(sweep) >= request.sweep_limit:
         last = sweep[-1]
+        strict_bound = _strict_page_bound(sweep)
+        if strict_bound is not None:
+            state.covered_through = max(state.covered_through, strict_bound)
         state.scan_cursor_timestamp = last.timestamp
         state.scan_cursor_id = last.id
         state.updated_at = request.now
         return False
-    state.covered_through = state.scan_end
+    state.covered_through = max(state.covered_through, state.scan_end)
     next_end = max(state.scan_end, _settled_horizon(request.now))
     state.scan_cursor_timestamp = state.scan_end - TRADE_INTEGRITY_OVERLAP
     state.scan_cursor_id = 0
@@ -876,8 +908,23 @@ async def run_trade_integrity_monitor(
     """Run and durably checkpoint one bounded M1 or M2 pass.
 
     A finding commits only first-use cursor initialization. It never
-    advances the sweep page or acknowledges worklog rows, so the same
-    evidence remains level-triggered after process restart.
+    advances the sweep page, ``covered_through``, or worklog
+    acknowledgements, so the same evidence remains level-triggered after
+    process restart.
+
+    On a clean pass, ``covered_through`` advances monotonically per committed
+    full page up to the strict bound below the page's last row timestamp, and
+    to at least ``scan_end`` when the pass completes. Late-commit protection
+    still comes from the next pass re-reading ``TRADE_INTEGRITY_OVERLAP``, so
+    correctness is unchanged while the reported coverage lag stays honest.
+
+    Args:
+        session: Open async database session owning the pass transaction.
+        dialect_name: Active SQL dialect (``postgresql`` or ``sqlite``).
+        request: Monitor key, reference timestamp, and row bounds.
+
+    Returns:
+        Durable cursor, coverage watermark, lag status, and bounded findings.
     """
     if not 0 < request.sweep_limit <= TRADE_INTEGRITY_SWEEP_LIMIT:
         raise ValueError(
