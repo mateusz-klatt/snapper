@@ -63,8 +63,8 @@ def _configured_backend_name() -> str:
 pytestmark = pytest.mark.skipif(
     _configured_backend_name() != "postgresql",
     reason=(
-        "live-PostgreSQL witness module: opt in via "
-        "make test TEST_DB_URL=postgresql+asyncpg://... (see module docstring)"
+        "live-PostgreSQL witness module: opt in by setting "
+        "PNL_TEST_POSTGRES_URL=postgresql+asyncpg://... (see module docstring)"
     ),
 )
 
