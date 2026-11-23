@@ -1201,6 +1201,42 @@ another authoritative internal charge. No quantity threshold applies. Actual
 financing cost remains unavailable until native posting evidence is supported;
 `margin_ledger_replay` retains its error-only dispatch.
 
+Kraken spot accounts whose active method is `margin_ledger_replay` persist
+private `Ledgers` and `TradeBalance` evidence on the same 240 second
+account-observer cycle. Reads use the executor's existing Kraken client and
+nonce. Each pass spends at most 6 Kraken API-counter points (`Ledgers` costs
+2, `TradeBalance` costs 1) and waits while that executor has an open pending
+order or an in-flight order command. Postings are appended to
+`venue_ledger_entries`, idempotent on `(wallet_public_id, exchange, mode,
+venue_ledger_id)`. `venue_ledger_cursors` stores the cursor (the maximum
+ledger second and the ids at that second), the reconciliation boundary the
+backfill started from (`as_of`, source watermark, session, and sequence), the
+latest `TradeBalance` evidence (`eb`, `tb`, `m`, `n`, `c`, `v`, `ml`), and
+the latest evidence status. A later pass overlaps the cursor second. When the
+ingested id count differs from Kraken's `count` after the window is fully
+paged, the status is `ledger_cursor_gap`. When the 6-point budget stops paging
+before `count` is reached, the status is `ledger_backlog` and the cursor stays
+put. A missing Query Ledger Entries permission records
+`ledger_permission_missing` and disables automatic ledger retries until an owner
+resets that account's cursor evidence after granting permission. Rate-limit and
+network errors also receive no hidden retries inside a pass; normal executor
+reads retain their existing retry policy. Command activity is checked before
+TradeBalance and each ledger page.
+Open-position snapshots retain `vol_closed`, `fee`, and `rollovertm` beside
+the existing price fields. A partially closed row keeps the existing position
+refusal. Dispatch of `margin_ledger_replay` stays `error` /
+`margin_ledger_replay_not_implemented`.
+
+PR 1 retains all ledger postings; it introduces no deletion or retention job.
+Before deployment, estimate daily rows from DB-only account fill counts as
+approximately two postings per fill plus margin settlement/fee postings and six
+rollover postings per continuously open position per day (a four-hour interval).
+Measure bytes per stored row and index overhead after observation begins; no
+private Kraken probe is needed for sizing. A window larger than the pass budget
+remains explicit backlog with its completed cursor unchanged. Deployment requires
+the owner's specific approval for this new persistent write class and a tested
+migration backup restore. None of these rollout gates changes reconciliation.
+
 Paper and backtest schedule models retain their existing paths. The coordinator
 still requires consistent durable order or command leverage evidence for every
 fill in the current position cycle before modelling margin rollover. Default

@@ -790,7 +790,11 @@ class FundingRateSnapshot:
 
 @dataclass
 class OpenPositionSnapshot:
-    """Snapshot of an open leveraged or margin position."""
+    """Snapshot of an open leveraged or margin position.
+
+    ``vol_closed``, ``fee``, and ``rollovertm`` retain Kraken spot evidence when
+    the venue sent them. They do not change size or unrealized funding.
+    """
 
     symbol: str
     side: OrderSideEnum
@@ -800,6 +804,9 @@ class OpenPositionSnapshot:
     unrealized_pnl: float
     unrealized_funding: float
     timestamp: datetime
+    vol_closed: float | None = None
+    fee: str | None = None
+    rollovertm: str | None = None
 
 
 @dataclass(frozen=True)

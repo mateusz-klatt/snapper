@@ -37,6 +37,9 @@ from snapper.application.engine.service import compute_shard_key
 from snapper.application.portfolio.account_status import ACCOUNT_FRESHNESS_CEILING_S
 from snapper.application.portfolio.account_view import build_portfolio_account_state
 from snapper.application.portfolio.execution_chain import execution_chain_genesis
+from snapper.application.portfolio.kraken_margin_ledger import LedgerBoundaryMark
+from snapper.application.portfolio.kraken_margin_ledger import MarginLedgerObservationRequest
+from snapper.application.portfolio.kraken_margin_ledger import run_kraken_margin_ledger_observation
 from snapper.application.portfolio.reconciliation_dispatch import SpotReplayBoundaryCapture
 from snapper.application.portfolio.reconciliation_dispatch import dispatch_portfolio_reconciliation
 from snapper.application.portfolio.spot_anchor_assembly import build_owned_witnesses_from_reads
@@ -151,6 +154,7 @@ from snapper.infrastructure.exchanges.contracts import order_status_is_terminal
 from snapper.infrastructure.exchanges.contracts import to_fill_status
 from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
+from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
@@ -547,6 +551,12 @@ _ACCOUNT_FETCH_TIMEOUT_S = 15.0
 """Per-call bound on a native balance/position read. A wedged venue call is
 recorded as an ``error`` observation (last-good retained, stale-visible) and
 never blocks the observer loop or the order-reconciliation cycle."""
+_MARGIN_LEDGER_OBSERVE_TIMEOUT_S = 30.0
+"""Bound on one Kraken margin-ledger observation pass.
+
+The pass is a handful of private reads after the account snapshot is already
+durable. The bound keeps a wedged Ledgers call from holding the observer
+loop."""
 _PORTFOLIO_RECONCILIATION_TIMEOUT_S = 60.0
 """Bound on the complete observer-side portfolio reconciliation branch."""
 _UNRECORDED_ORDER_TERMINAL_LIMIT = 1_000
@@ -782,6 +792,46 @@ class PendingOrderState:
     terminal_row_projection: Literal["pending", "projected", "blocked"] = "pending"
     stream_terminal_pending: ExecutionUpdate | None = None
     stream_terminal_published: bool = False
+
+
+def _ledger_boundary_mark(
+    boundary: SpotReplayBoundaryCapture | None,
+) -> LedgerBoundaryMark | None:
+    """Copy the reconciliation boundary used as the ledger backfill floor.
+
+    Args:
+        boundary: This cycle's capture, or ``None`` when capture failed.
+
+    Returns:
+        The ledger floor, or ``None`` when no capture exists.
+    """
+    if boundary is None:
+        return None
+    return LedgerBoundaryMark(
+        as_of=boundary.as_of,
+        source_watermark=boundary.source_watermark,
+        session_id=boundary.session_id,
+        sequence_id=boundary.sequence_id,
+    )
+
+
+def _position_evidence_fields(position: OpenPositionSnapshot) -> dict[str, float | str]:
+    """Return Kraken position evidence keys that the venue actually sent.
+
+    Args:
+        position: Parsed open-position snapshot.
+
+    Returns:
+        Evidence fields present on the snapshot. Absent fields stay omitted.
+    """
+    fields: dict[str, float | str] = {}
+    if position.vol_closed is not None:
+        fields["vol_closed"] = position.vol_closed
+    if position.fee is not None:
+        fields["fee"] = position.fee
+    if position.rollovertm is not None:
+        fields["rollovertm"] = position.rollovertm
+    return fields
 
 
 class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
@@ -5568,6 +5618,52 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             mode=cast(ExecutionMode, attempt["mode"]),
             kind="snapshot",
         )
+        await self._observe_kraken_margin_ledger(repository, client, boundary, now)
+
+    async def _observe_kraken_margin_ledger(
+        self,
+        repository: SQLAlchemyRepository,
+        client: ExchangeClientBase,
+        boundary: SpotReplayBoundaryCapture | None,
+        pass_started_at: datetime,
+    ) -> None:
+        """Ingest Kraken ledger evidence without changing the account snapshot.
+
+        Args:
+            repository: Durable repository that already stored this cycle's snapshot.
+            client: The executor's exchange client.
+            boundary: This cycle's reconciliation boundary, when the capture succeeded.
+            pass_started_at: Fixed end of the ledger window.
+        """
+        mode = self._account_mode()
+        if mode != "live" or not isinstance(client, KrakenExchangeClient):
+            return
+        exchange = self._get_exchange_name()
+        try:
+            async with asyncio.timeout(_MARGIN_LEDGER_OBSERVE_TIMEOUT_S):
+                await run_kraken_margin_ledger_observation(
+                    MarginLedgerObservationRequest(
+                        repository=repository,
+                        client=client,
+                        wallet_public_id=self.wallet_public_id,
+                        exchange=exchange,
+                        mode=mode,
+                        boundary=_ledger_boundary_mark(boundary),
+                        pass_started_at=pass_started_at,
+                        paused=self._margin_ledger_reads_paused(),
+                        pause_check=self._margin_ledger_reads_paused,
+                    )
+                )
+        except Exception as exc:
+            logger.warning("[{}] kraken margin ledger observation failed: {}", exchange, exc)
+
+    def _margin_ledger_reads_paused(self) -> bool:
+        """Return whether open or in-flight order work should pause ledger reads.
+
+        Returns:
+            True when a command is inside a venue call or a pending order is open.
+        """
+        return self._order_inflight_started is not None or bool(self.pending_orders)
 
     async def _capture_actual_balance_route(
         self,
@@ -5887,6 +5983,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                     "unrealized_pnl": p.unrealized_pnl,
                     "unrealized_funding": p.unrealized_funding,
                     "timestamp": p.timestamp.isoformat(),
+                    **_position_evidence_fields(p),
                 }
                 for p in positions
             ]

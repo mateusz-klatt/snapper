@@ -572,6 +572,9 @@ async def test_read_native_positions_maps_zero_closed_short_on_shared_basis() ->
         unrealized_pnl=-10.0,
         unrealized_funding=0.0,
         timestamp=position.timestamp,
+        vol_closed=0.0,
+        fee="0.13000",
+        rollovertm="1785585600",
     )
     assert before <= position.timestamp <= after
 

@@ -102,6 +102,12 @@ from snapper.infrastructure.exchanges.execution_wire_receipts import is_executio
 from snapper.infrastructure.exchanges.kraken_closed_candles import ClosedCandleRequest
 from snapper.infrastructure.exchanges.kraken_closed_candles import parse_closed_candles
 from snapper.infrastructure.exchanges.kraken_execution_routes import spot_execution_route
+from snapper.infrastructure.exchanges.kraken_ledger import KrakenLedgerPage
+from snapper.infrastructure.exchanges.kraken_ledger import KrakenLedgerPermissionMissingError
+from snapper.infrastructure.exchanges.kraken_ledger import KrakenTradeBalance
+from snapper.infrastructure.exchanges.kraken_ledger import is_kraken_ledger_permission_error
+from snapper.infrastructure.exchanges.kraken_ledger import parse_ledgers_payload
+from snapper.infrastructure.exchanges.kraken_ledger import parse_trade_balance_payload
 from snapper.infrastructure.exchanges.kraken_rest_egress import KrakenRestOperationKind
 from snapper.infrastructure.exchanges.kraken_rest_egress import RestProxyTarget
 from snapper.infrastructure.exchanges.kraken_rest_egress import ccxt_proxy_target
@@ -137,6 +143,7 @@ apply_kraken_ws_teardown_hardening()
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _NATIVE_BALANCE_CREDENTIALS_MSG = "API credentials required for balance"
 _NATIVE_POSITION_CREDENTIALS_MSG = "API credentials required for positions"
+_LEDGER_CREDENTIALS_MSG = "API credentials required for ledger"
 _NATIVE_BALANCE_MALFORMED_ROW_MSG = (
     "Kraken spot balance currency row is not a mapping (malformed envelope)"
 )
@@ -681,7 +688,29 @@ def _parse_native_position_entry(position: object, observed_at: datetime) -> Ope
         unrealized_pnl=unrealized_pnl,
         unrealized_funding=_KRAKEN_NO_SEPARATE_UNREALIZED_FUNDING,
         timestamp=observed_at,
+        vol_closed=closed_size,
+        fee=_optional_position_text(info, "fee"),
+        rollovertm=_optional_position_text(info, "rollovertm"),
     )
+
+
+def _optional_position_text(info: dict[str, object], field: str) -> str | None:
+    """Retain textual or numeric Kraken position evidence.
+
+    Args:
+        info: Raw OpenPositions object.
+        field: Venue field name such as ``fee`` or ``rollovertm``.
+
+    Returns:
+        The original string or a finite number rendered as text. Absent, blank,
+        boolean, and nonfinite fields return ``None``.
+    """
+    value = info.get(field)
+    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
+        return str(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value
 
 
 class KrakenExchangeClient(ExchangeClientBase):
@@ -2245,8 +2274,11 @@ class KrakenExchangeClient(ExchangeClientBase):
         Kraken exposes no accrued rollover amount: ``unrealized_funding`` is
         explicitly ``0.0`` meaning "no separately venue-reported
         unrealized-funding component", NOT "no carrying cost". ``net`` maps
-        wholly to ``unrealized_pnl``; ``terms``, ``rollovertm``, and the opening
-        ``fee`` are never estimated, prorated, or relabelled as funding.
+        wholly to ``unrealized_pnl``. ``vol_closed``, the opening ``fee``, and
+        ``rollovertm`` are retained on the snapshot as evidence and are not
+        estimated, prorated, or relabelled as funding. A positive ``vol_closed``
+        still raises because the cost/value basis after a partial close is
+        unverified.
 
         A genuine empty list is authoritative observed-empty. Any malformed
         envelope raises so the observer records a position failure instead.
@@ -2278,6 +2310,90 @@ class KrakenExchangeClient(ExchangeClientBase):
             raise ValueError(_NATIVE_POSITION_MALFORMED_ENVELOPE_MSG)
         observed_at = datetime.now(UTC)
         return [_parse_native_position_entry(position, observed_at) for position in positions_data]
+
+    async def read_venue_ledger_page(self, start: int, end: int, offset: int) -> KrakenLedgerPage:
+        """Read one Kraken Ledgers page through this client's private nonce.
+
+        Args:
+            start: Inclusive window start as a unix second.
+            end: Inclusive window end as a unix second.
+            offset: Newest-first ``ofs`` inside the frozen window.
+
+        Returns:
+            The page entries and Kraken's window count.
+
+        Raises:
+            RuntimeError: When API credentials are missing.
+            KrakenLedgerPermissionMissingError: When the key cannot query ledgers.
+            ValueError: When the envelope is malformed.
+        """
+        return await self._read_private_ledger_payload(
+            self._ccxt_client.privatePostLedgers,
+            {"start": start, "end": end, "ofs": offset},
+            "privatePostLedgers",
+            parse_ledgers_payload,
+        )
+
+    async def read_trade_balance(self) -> KrakenTradeBalance:
+        """Read Kraken TradeBalance through this client's private nonce.
+
+        Returns:
+            Evidence fields ``eb``, ``tb``, ``m``, ``n``, ``c``, ``v``, and ``ml``.
+
+        Raises:
+            RuntimeError: When API credentials are missing.
+            KrakenLedgerPermissionMissingError: When the key cannot query the endpoint.
+            ValueError: When the envelope is malformed.
+        """
+        return await self._read_private_ledger_payload(
+            self._ccxt_client.privatePostTradeBalance,
+            {},
+            "privatePostTradeBalance",
+            parse_trade_balance_payload,
+        )
+
+    async def _read_private_ledger_payload[PayloadT](
+        self,
+        func: Callable[..., object],
+        params: dict[str, object],
+        operation: str,
+        parse: Callable[[object], PayloadT],
+    ) -> PayloadT:
+        """Call one private read on ``_ccxt_client`` and parse its envelope.
+
+        Args:
+            func: Bound method of this instance's ccxt client.
+            params: Endpoint parameters.
+            operation: Egress operation name.
+            parse: Envelope parser.
+
+        Returns:
+            The parsed payload.
+
+        Raises:
+            RuntimeError: When API credentials are missing.
+            KrakenLedgerPermissionMissingError: When Kraken denies the read.
+            ValueError: When the envelope is malformed.
+        """
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError(_LEDGER_CREDENTIALS_MSG)
+        try:
+            payload = await self._with_retry(
+                func,
+                params,
+                retry_network_errors=False,
+                retry_rate_limit_errors=False,
+                egress_kind="private_idempotent_read",
+                egress_operation=operation,
+                egress_target=ccxt_proxy_target(self._ccxt_client),
+            )
+        except KrakenLedgerPermissionMissingError:
+            raise
+        except Exception as exc:
+            if is_kraken_ledger_permission_error(exc):
+                raise KrakenLedgerPermissionMissingError(str(exc)) from exc
+            raise
+        return parse(payload)
 
     def subscribe_ticks(
         self, symbols: list[str], *, req_id: int | None = None
@@ -4011,6 +4127,8 @@ class KrakenExchangeClient(ExchangeClientBase):
         Args:
             func: Function to call (sync or async).
             *args: Positional arguments for func.
+            retry_rate_limit_errors: Whether a rejected request may spend another
+                API-counter reservation. Disabled for budgeted ledger reads.
             retry_network_errors: When False, raise network-class errors
                 immediately after circuit-breaker accounting instead of
                 retrying. Required for non-idempotent venue mutations.
@@ -4027,6 +4145,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             RuntimeError: If circuit breaker is open.
             Exception: If all retries exhausted or unexpected error.
         """
+        retry_rate_limit_errors = kwargs.pop("retry_rate_limit_errors", True)
         if time.time() < self._circuit_open_until:
             raise CircuitBreakerOpenError("Circuit breaker open")
         max_retries = 3
@@ -4043,6 +4162,8 @@ class KrakenExchangeClient(ExchangeClientBase):
                     **kwargs,
                 )
             except ccxt.RateLimitExceeded:
+                if not retry_rate_limit_errors:
+                    raise
                 attempt = await self._handle_rate_limit(attempt, max_retries, base_delay)
             except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
                 if not retry_network_errors:

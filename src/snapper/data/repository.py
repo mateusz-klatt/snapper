@@ -559,6 +559,13 @@ from snapper.data.trade_integrity import TradeIntegrityPassRequest
 from snapper.data.trade_integrity import (
     run_trade_integrity_monitor as run_trade_integrity_monitor_pass,
 )
+from snapper.data.venue_ledger_store import VenueLedgerCursorRecord
+from snapper.data.venue_ledger_store import VenueLedgerCursorWrite
+from snapper.data.venue_ledger_store import VenueLedgerEntryRecord
+from snapper.data.venue_ledger_store import VenueLedgerInsertRow
+from snapper.data.venue_ledger_store import fetch_ledger_cursor
+from snapper.data.venue_ledger_store import fetch_ledger_entries
+from snapper.data.venue_ledger_store import write_ledger_pass
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_QUANTITY_ETL_VERSIONS
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 
@@ -33082,6 +33089,63 @@ class SQLAlchemyRepository(Repository):
         ):
             raise RuntimeError("invalid active portfolio reconciliation method config")
         return row
+
+    async def commit_venue_ledger_pass(
+        self,
+        entries: Sequence[VenueLedgerInsertRow],
+        cursor: VenueLedgerCursorWrite,
+    ) -> int:
+        """Insert new ledger postings and save the cursor in one transaction.
+
+        Args:
+            entries: Append-only postings from one observation pass.
+            cursor: Cursor and evidence for that pass. An existing boundary is kept.
+
+        Returns:
+            How many postings were newly inserted.
+        """
+        async with self.session() as session:
+            inserted = await write_ledger_pass(session, self.dialect_name, entries, cursor)
+            await session.commit()
+            return inserted
+
+    async def get_venue_ledger_cursor(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+    ) -> VenueLedgerCursorRecord | None:
+        """Return the ledger cursor for one account.
+
+        Args:
+            wallet_public_id: Account wallet.
+            exchange: Lowercase exchange name.
+            mode: Account mode.
+
+        Returns:
+            The cursor, or ``None`` before the first ledger pass.
+        """
+        async with self.session() as session:
+            return await fetch_ledger_cursor(session, wallet_public_id, exchange, mode)
+
+    async def list_venue_ledger_entries(
+        self,
+        wallet_public_id: str,
+        exchange: str,
+        mode: str,
+    ) -> list[VenueLedgerEntryRecord]:
+        """Return stored ledger postings for one account.
+
+        Args:
+            wallet_public_id: Account wallet.
+            exchange: Lowercase exchange name.
+            mode: Account mode.
+
+        Returns:
+            Postings in insertion order.
+        """
+        async with self.session() as session:
+            return await fetch_ledger_entries(session, wallet_public_id, exchange, mode)
 
     async def get_active_portfolio_reconciliation_method_config(
         self,
