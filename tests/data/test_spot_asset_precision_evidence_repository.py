@@ -777,15 +777,68 @@ async def _independent_precision_lock(_exchange: str, _asset: str) -> asyncio.Lo
     return lock
 
 
-async def _bypass_precision_reservation(session: AsyncSession, _exchange: str, _asset: str) -> None:
-    """Simulate a PostgreSQL absence race on SQLite while keeping reservation state."""
-    session.info["scd2_write_reserved"] = True
-
-
-def _is_precision_absent_loser() -> bool:
-    """Return whether the current asyncio task is the designated conflict loser."""
+def _is_precision_absent_task(name: str) -> bool:
+    """Return whether the current asyncio task matches the given test role name."""
     task = asyncio.current_task()
-    return task is not None and task.get_name() == "precision-absent-loser"
+    return task is not None and task.get_name() == name
+
+
+class _AbsentKeyRaceHarness:
+    """Deterministic synchronization harness for absent-key SAVEPOINT conflict testing."""
+
+    def __init__(self, repository: SQLAlchemyRepository) -> None:
+        """Initialize coordination events and loser attempt counters."""
+        self.repository = repository
+        self.loser_before_flush = asyncio.Event()
+        self.winner_committed = asyncio.Event()
+        self.loser_flush_attempts = 0
+        self.loser_conflicts = 0
+        self.loser_select_attempts = 0
+        self._original_flush = AsyncSession.flush
+        self._original_execute = AsyncSession.execute
+
+    async def bypass_reservation(
+        self,
+        session: AsyncSession,
+        _exchange: str,
+        _asset: str,
+    ) -> None:
+        """Gate the winner until the loser enters flush, then bypass SQLite locking."""
+        if _is_precision_absent_task("precision-absent-winner"):
+            await asyncio.wait_for(self.loser_before_flush.wait(), timeout=5)
+        session.info["scd2_write_reserved"] = True
+
+    async def ordered_flush(self, session: AsyncSession) -> None:
+        """Pause the loser before its first real flush so the winner commits first."""
+        if not _is_precision_absent_task("precision-absent-loser"):
+            await self._original_flush(session)
+            return
+        self.loser_flush_attempts += 1
+        if self.loser_flush_attempts == 1:
+            self.loser_before_flush.set()
+            await asyncio.wait_for(self.winner_committed.wait(), timeout=5)
+        try:
+            await self._original_flush(session)
+        except IntegrityError:
+            self.loser_conflicts += 1
+            raise
+
+    async def observed_execute(self, session: AsyncSession, statement: Executable) -> object:
+        """Count loser SELECT statements without altering transaction state."""
+        if _is_precision_absent_task("precision-absent-loser") and getattr(
+            statement, "is_select", False
+        ):
+            self.loser_select_attempts += 1
+        return await self._original_execute(session, statement)
+
+    async def run_producer(self, signal_on_exit: asyncio.Event) -> int:
+        """Execute one concurrent upsert and always signal completion on exit."""
+        try:
+            return await self.repository.upsert_spot_asset_precision_evidence(
+                _evidence(replace_balance=False)
+            )
+        finally:
+            signal_on_exit.set()
 
 
 @pytest.mark.asyncio
@@ -793,54 +846,19 @@ async def test_concurrent_absent_key_unique_conflict_retries_to_winner(
     repository: SQLAlchemyRepository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A deterministic absent-key loser retries via SAVEPOINT and returns the winner id."""
-    loser_ready_for_winner = asyncio.Event()
-    winner_committed = asyncio.Event()
-    loser_conflicted = False
-    reset_snapshot = False
-    original_flush = AsyncSession.flush
-    original_execute = AsyncSession.execute
-    original_commit = AsyncSession.commit
+    """A deterministic absent-key loser hits a real unique conflict and returns the winner id."""
+    harness = _AbsentKeyRaceHarness(repository)
 
     async def ordered_flush(session: AsyncSession) -> None:
-        """Force the first absent-key attempt to hit a SAVEPOINT unique conflict."""
-        nonlocal loser_conflicted
-        if _is_precision_absent_loser() and not loser_conflicted:
-            loser_conflicted = True
-            raise IntegrityError(
-                "insert",
-                {},
-                sqlite3.IntegrityError(
-                    "UNIQUE constraint failed: spot_asset_precision_evidence.exchange, "
-                    "spot_asset_precision_evidence.asset"
-                ),
-            )
-        await original_flush(session)
+        """Forward AsyncSession.flush calls to the race harness."""
+        await harness.ordered_flush(session)
 
-    async def ordered_execute(session: AsyncSession, statement: Executable) -> object:
-        """Wait for the winner to commit and refresh SQLite snapshot before retry re-read."""
-        nonlocal reset_snapshot
-        if _is_precision_absent_loser() and loser_conflicted and not reset_snapshot:
-            reset_snapshot = True
-            await session.rollback()
-            loser_ready_for_winner.set()
-            await winner_committed.wait()
-            session.info["scd2_write_reserved"] = True
-        return await original_execute(session, statement)
-
-    async def ordered_commit(session: AsyncSession) -> None:
-        """Commit the winner once the loser released its initial SQLite snapshot."""
-        task = asyncio.current_task()
-        if task is not None and task.get_name() == "precision-absent-winner":
-            await loser_ready_for_winner.wait()
-            await original_commit(session)
-            winner_committed.set()
-            return
-        await original_commit(session)
+    async def observed_execute(session: AsyncSession, statement: Executable) -> object:
+        """Forward AsyncSession.execute calls to the race harness."""
+        return await harness.observed_execute(session, statement)
 
     monkeypatch.setattr(AsyncSession, "flush", ordered_flush)
-    monkeypatch.setattr(AsyncSession, "execute", ordered_execute)
-    monkeypatch.setattr(AsyncSession, "commit", ordered_commit)
+    monkeypatch.setattr(AsyncSession, "execute", observed_execute)
     with (
         patch.object(
             repository,
@@ -850,19 +868,22 @@ async def test_concurrent_absent_key_unique_conflict_retries_to_winner(
         patch.object(
             repository,
             "_acquire_spot_asset_precision_evidence_advisory_lock",
-            side_effect=_bypass_precision_reservation,
+            side_effect=harness.bypass_reservation,
         ),
     ):
         loser = asyncio.create_task(
-            repository.upsert_spot_asset_precision_evidence(_evidence(replace_balance=False)),
+            harness.run_producer(harness.loser_before_flush),
             name="precision-absent-loser",
         )
         winner = asyncio.create_task(
-            repository.upsert_spot_asset_precision_evidence(_evidence(replace_balance=False)),
+            harness.run_producer(harness.winner_committed),
             name="precision-absent-winner",
         )
         loser_id, winner_id = await asyncio.gather(loser, winner)
 
+    assert harness.loser_flush_attempts == 1
+    assert harness.loser_conflicts == 1
+    assert harness.loser_select_attempts == 2
     assert loser_id == winner_id
     async with repository.session() as session:
         rows = (await session.execute(select(SpotAssetPrecisionEvidence))).scalars().all()
