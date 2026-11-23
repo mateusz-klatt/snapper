@@ -629,13 +629,13 @@ ui-gen-ws-types:
 ui-gen-zod:
 	$(info Generating Zod schemas from WebSocket JSON Schema...)
 	$(GENSCRIPT) --frontend-ws
-	$(PRETTIER) src/lib/schemas/ws.generated.zod.ts
+	$(PRETTIER) src/lib/schemas/ws.generated.zod.ts src/lib/schemas/shared.generated.zod.ts
 	$(info Generated frontend/src/lib/schemas/ws.generated.zod.ts)
 
 ui-gen-api-zod:
 	$(info Generating Zod schemas from OpenAPI schema...)
 	$(GENSCRIPT) --frontend-api
-	$(PRETTIER) src/lib/schemas/api.generated.zod.ts
+	$(PRETTIER) src/lib/schemas/api.generated.zod.ts src/lib/schemas/shared.generated.zod.ts
 	$(info Generated frontend/src/lib/schemas/api.generated.zod.ts)
 
 ui-gen-entities:

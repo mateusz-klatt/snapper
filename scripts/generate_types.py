@@ -72,6 +72,13 @@ top-level enum whose values (``read:market_data``) carry colons that are not
 valid Swift identifier characters, so ``Permissions.swift`` is the only correct
 source for it."""
 _DEFS_KEY = "$defs"
+_SHARED_ZOD_SCHEMA_NAMES = frozenset({"PositionDisplayFields"})
+_SHARED_ZOD_NAMESPACE = "sharedSchemas"
+_ORDER_IGNORED_REFS = frozenset({"PositionDisplayFields"})
+_SHARED_ZOD_PATH = Path("frontend") / "src" / "lib" / "schemas" / "shared.generated.zod.ts"
+_MIN_OMIT_PREFIX_FIELDS = 9
+_MIN_FACTORED_FIELD_SPAN = 10
+_FACTOR_SENTINEL = "__factor__"
 _STRIP_ESLINT_DISABLE_TARGET = Path("frontend") / "src" / "types" / "ws.generated.ts"
 _OPENAPI_TYPESCRIPT_TARGET = Path("frontend") / "src" / "types" / "api.generated.ts"
 _SWIFT_HEADER_LINES = [
@@ -766,6 +773,108 @@ def _swift_struct_coding_key_lines(properties: list[SwiftPropertySpec]) -> list[
     return lines
 
 
+def _deref_local_schema(schema: dict[str, Any], definitions: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a local JSON Schema ``$ref`` to its definition.
+
+    Args:
+        schema: Schema object that may contain ``$ref``.
+        definitions: Schema definitions keyed by name.
+
+    Returns:
+        The referenced definition, or ``schema`` when it is not a local ref.
+    """
+    ref = schema.get("$ref")
+    if not isinstance(ref, str):
+        return schema
+    target = definitions.get(ref.rsplit("/", 1)[-1])
+    if isinstance(target, dict):
+        return target
+    return schema
+
+
+def _ordered_allof_members(members: list[Any]) -> list[Any]:
+    """Place object members before ``$ref`` members.
+
+    Display-field components are referenced from ``allOf``. Emitting the
+    payload's own properties first keeps generated Swift fields in their
+    previous order, with the shared fields appended.
+
+    Args:
+        members: ``allOf`` members in schema order.
+
+    Returns:
+        Members with plain objects before references.
+    """
+    objects: list[Any] = []
+    refs: list[Any] = []
+    for member in members:
+        if isinstance(member, dict) and isinstance(member.get("$ref"), str):
+            refs.append(member)
+        else:
+            objects.append(member)
+    return [*objects, *refs]
+
+
+def _append_object_fields(
+    schema: dict[str, Any],
+    properties: dict[str, Any],
+    required: list[Any],
+) -> None:
+    """Merge one object's properties and required names into accumulators.
+
+    Args:
+        schema: Object schema or a schema that may carry those keywords.
+        properties: Accumulated properties in emission order.
+        required: Accumulated required names in emission order.
+    """
+    member_properties = schema.get("properties")
+    if isinstance(member_properties, dict):
+        properties.update(member_properties)
+    member_required = schema.get("required")
+    if isinstance(member_required, list):
+        required.extend(member_required)
+
+
+def _flatten_schema_allof(schema: dict[str, Any], definitions: dict[str, Any]) -> dict[str, Any]:
+    """Merge ``allOf`` members into one object schema.
+
+    Swift structs stay flat so decoding matches the JSON object. A shared
+    display component contributes its properties instead of becoming a
+    nested value.
+
+    Args:
+        schema: JSON Schema definition, possibly composed with ``allOf``.
+        definitions: Schema definitions for reference resolution.
+
+    Returns:
+        The original schema, or an object schema with merged properties.
+    """
+    members = schema.get("allOf")
+    if not isinstance(members, list):
+        return schema
+    properties: dict[str, Any] = {}
+    required: list[Any] = []
+    for member in _ordered_allof_members(members):
+        if not isinstance(member, dict):
+            continue
+        flat = _flatten_schema_allof(_deref_local_schema(member, definitions), definitions)
+        _append_object_fields(flat, properties, required)
+    _append_object_fields(schema, properties, required)
+    return {**schema, "type": "object", "properties": properties, "required": required}
+
+
+def _is_swift_struct_schema(schema: dict[str, Any]) -> bool:
+    """Return whether a definition should be emitted as a Swift struct.
+
+    Args:
+        schema: JSON Schema definition.
+
+    Returns:
+        True for object schemas and for ``allOf`` compositions of objects.
+    """
+    return schema.get("type") == "object" or isinstance(schema.get("allOf"), list)
+
+
 def generate_swift_struct(
     name: str, schema: dict[str, Any], definitions: dict[str, Any]
 ) -> list[str]:
@@ -779,6 +888,7 @@ def generate_swift_struct(
     Returns:
         List of Swift code lines for the struct.
     """
+    schema = _flatten_schema_allof(schema, definitions)
     properties = _swift_struct_property_specs(schema, definitions)
     lines = [f"struct {name}: Codable, Sendable {{"]
     lines.extend(_swift_struct_field_lines(properties))
@@ -921,9 +1031,10 @@ def _collect_inline_enums(
         generated_enums: Mutable set of already-generated enum names.
     """
     for name, type_schema in definitions.items():
-        if type_schema.get("type") != "object":
+        flat = _flatten_schema_allof(type_schema, definitions)
+        if flat.get("type") != "object":
             continue
-        for prop_name, prop_schema in type_schema.get("properties", {}).items():
+        for prop_name, prop_schema in flat.get("properties", {}).items():
             if "enum" not in prop_schema or prop_schema.get("type") != "string":
                 continue
             enum_name = f"{name}{prop_name.title().replace('_', '')}"
@@ -951,12 +1062,13 @@ def _collect_structs(
     skip = set(generated_structs or ())
     emitted: set[str] = set()
     for name, type_schema in definitions.items():
-        if type_schema.get("type") == "object":
-            if name in skip:
-                continue
-            lines.extend(generate_swift_struct(name, type_schema, definitions))
-            lines.append("")
-            emitted.add(name)
+        if not _is_swift_struct_schema(type_schema):
+            continue
+        if name in skip:
+            continue
+        lines.extend(generate_swift_struct(name, type_schema, definitions))
+        lines.append("")
+        emitted.add(name)
     return emitted
 
 
@@ -1191,6 +1303,72 @@ def json_type_to_zod(prop: dict[str, Any], required: bool, definitions: dict[str
     return "z.unknown()"
 
 
+def _zod_field_pairs(
+    schema: dict[str, Any],
+    definitions: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Return object fields as ``(name, zod type)`` pairs.
+
+    Args:
+        schema: JSON Schema object definition.
+        definitions: Schema definitions for reference resolution.
+
+    Returns:
+        Fields in schema order. Optional fields already include ``.optional()``.
+    """
+    properties = schema.get("properties", {})
+    required_fields = set(schema.get("required", []))
+    pairs: list[tuple[str, str]] = []
+    for name, prop in properties.items():
+        has_default = "default" in prop
+        default_is_none = has_default and prop.get("default") is None
+        is_required = name in required_fields or (has_default and not default_is_none)
+        zod_type = json_type_to_zod(prop, is_required, definitions)
+        if not is_required:
+            zod_type = f"{zod_type}.optional()"
+        pairs.append((name, zod_type))
+    return pairs
+
+
+def _pairs_object_expr(pairs: list[tuple[str, str]]) -> str:
+    """Return a Zod object expression for concrete fields.
+
+    Args:
+        pairs: Field name and Zod type pairs.
+
+    Returns:
+        ``z.object({...})`` expression without ``.strict()``.
+    """
+    fields = "\n".join(f"    {name}: {zod_type}," for name, zod_type in pairs)
+    return f"z.object({{\n{fields}\n  }})"
+
+
+def _pairs_shape_literal(pairs: list[tuple[str, str]]) -> str:
+    """Return an object literal suitable for Zod ``extend``.
+
+    Args:
+        pairs: Field name and Zod type pairs.
+
+    Returns:
+        A TypeScript object literal.
+    """
+    fields = "\n".join(f"    {name}: {zod_type}," for name, zod_type in pairs)
+    return f"{{\n{fields}\n  }}"
+
+
+def _zod_object_expr(schema: dict[str, Any], definitions: dict[str, Any]) -> str:
+    """Return a Zod object expression without the strict modifier.
+
+    Args:
+        schema: JSON Schema object definition.
+        definitions: Schema definitions for reference resolution.
+
+    Returns:
+        ``z.object({...})`` expression.
+    """
+    return _pairs_object_expr(_zod_field_pairs(schema, definitions))
+
+
 def generate_zod_object_schema(schema: dict[str, Any], definitions: dict[str, Any]) -> str:
     """Generate Zod object schema from JSON Schema.
 
@@ -1201,19 +1379,85 @@ def generate_zod_object_schema(schema: dict[str, Any], definitions: dict[str, An
     Returns:
         Zod object schema string.
     """
-    properties = schema.get("properties", {})
-    required_fields = set(schema.get("required", []))
-    fields = []
-    for name, prop in properties.items():
-        has_default = "default" in prop
-        default_is_none = has_default and prop.get("default") is None
-        is_required = name in required_fields or (has_default and not default_is_none)
-        zod_type = json_type_to_zod(prop, is_required, definitions)
-        if not is_required:
-            zod_type = f"{zod_type}.optional()"
-        fields.append(f"    {name}: {zod_type},")
-    fields_str = "\n".join(fields)
-    return f"z.object({{\n{fields_str}\n  }}).strict()"
+    return f"{_zod_object_expr(schema, definitions)}.strict()"
+
+
+def _zod_ref_object_allof(schema: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """Return a shared ``$ref`` and object body from a two-member ``allOf``.
+
+    Args:
+        schema: JSON Schema definition that may be an ``allOf`` composition.
+
+    Returns:
+        Reference name and the object member, or ``None`` for other shapes.
+    """
+    members = schema.get("allOf")
+    if not isinstance(members, list) or len(members) != 2:
+        return None
+    ref_member, object_member = members
+    if not isinstance(ref_member, dict) or not isinstance(object_member, dict):
+        return None
+    ref = ref_member.get("$ref")
+    if not isinstance(ref, str) or object_member.get("type") != "object":
+        return None
+    return ref.rsplit("/", 1)[-1], object_member
+
+
+def _zod_extend_binding(ref_name: str, shared_names: frozenset[str]) -> str:
+    """Return the Zod value used for an allOf extend.
+
+    Args:
+        ref_name: Component name referenced by the first allOf member.
+        shared_names: Components imported from the shared module. Their
+            re-exports in the API file are cast, so ``.shape`` is read
+            from the namespace instead of the local binding.
+
+    Returns:
+        ``sharedSchemas.{Name}Schema`` or ``{Name}Schema``.
+    """
+    if ref_name in shared_names:
+        return f"{_SHARED_ZOD_NAMESPACE}.{ref_name}Schema"
+    return f"{ref_name}Schema"
+
+
+def _zod_definition_expr(
+    name: str,
+    schema: dict[str, Any],
+    definitions: dict[str, Any],
+    shared_names: frozenset[str] = frozenset(),
+) -> str:
+    """Return the Zod expression for one named schema.
+
+    Args:
+        name: Schema name.
+        schema: JSON Schema definition.
+        definitions: Schema definitions for reference resolution.
+        shared_names: Components whose extend bindings are read from the
+            shared namespace.
+
+    Returns:
+        Zod expression without a declaration keyword.
+    """
+    if name in _RECURSIVE_JSON_TYPES:
+        if name == "JsonObject":
+            return "z.record(z.string(), z.any())"
+        return "z.unknown()"
+    if schema.get("type") == "string" and "enum" in schema:
+        enum_values = ", ".join(f"'{v}'" for v in schema["enum"])
+        return f"z.enum([{enum_values}])"
+    composed = _zod_ref_object_allof(schema)
+    if composed is not None:
+        ref_name, body = composed
+        body_expr = _zod_object_expr(body, definitions)
+        binding = _zod_extend_binding(ref_name, shared_names)
+        return f"{body_expr}.extend({binding}.shape).strict()"
+    if schema.get("type") == "object":
+        return generate_zod_object_schema(schema, definitions)
+    if schema.get("type") == "array":
+        items = schema.get("items", {})
+        item_type = json_type_to_zod(items, True, definitions)
+        return f"z.array({item_type})"
+    return json_type_to_zod(schema, True, definitions)
 
 
 def generate_zod_schema_definition(
@@ -1221,6 +1465,7 @@ def generate_zod_schema_definition(
     schema: dict[str, Any],
     definitions: dict[str, Any],
     exported: bool = True,
+    shared_names: frozenset[str] = frozenset(),
 ) -> str:
     """Generate Zod schema definition from JSON Schema.
 
@@ -1235,28 +1480,16 @@ def generate_zod_schema_definition(
             generator uses ``exported=False`` to align Zod's inferred
             output with openapi-typescript's exact-optional emission;
             the WebSocket generator keeps the default ``exported=True``.
+        shared_names: Components whose extend bindings are read from the
+            shared namespace.
 
     Returns:
         Zod schema definition statement.
     """
     decl_name = f"{name}Schema" if exported else f"_{name}RawSchema"
     decl_prefix = "export const " if exported else "const "
-    if name in _RECURSIVE_JSON_TYPES:
-        if name == "JsonObject":
-            return f"{decl_prefix}{decl_name} = z.record(z.string(), z.any())"
-        return f"{decl_prefix}{decl_name} = z.unknown()"
-    if schema.get("type") == "string" and "enum" in schema:
-        enum_values = ", ".join(f"'{v}'" for v in schema["enum"])
-        return f"{decl_prefix}{decl_name} = z.enum([{enum_values}])"
-    if schema.get("type") == "object":
-        zod_schema = generate_zod_object_schema(schema, definitions)
-        return f"{decl_prefix}{decl_name} = {zod_schema}"
-    if schema.get("type") == "array":
-        items = schema.get("items", {})
-        item_type = json_type_to_zod(items, True, definitions)
-        return f"{decl_prefix}{decl_name} = z.array({item_type})"
-    zod_type = json_type_to_zod(schema, True, definitions)
-    return f"{decl_prefix}{decl_name} = {zod_type}"
+    expression = _zod_definition_expr(name, schema, definitions, shared_names)
+    return f"{decl_prefix}{decl_name} = {expression}"
 
 
 def _build_schema_deps(
@@ -1283,17 +1516,26 @@ def _build_schema_deps(
     return deps
 
 
-def topological_sort_schemas(schemas: dict[str, Any], ref_prefix: str) -> list[str]:
+def topological_sort_schemas(
+    schemas: dict[str, Any],
+    ref_prefix: str,
+    ignore_refs: frozenset[str] = frozenset(),
+) -> list[str]:
     """Topological sort for Zod schema generation order.
 
     Args:
         schemas: Dictionary of schema definitions.
         ref_prefix: Reference prefix to match in schema references.
+        ignore_refs: Reference names removed from the graph before sorting.
+            ``PositionDisplayFields`` is ignored so adopting that shared
+            component does not move payloads that previously had no deps.
 
     Returns:
         List of schema names in dependency order.
     """
     deps = _build_schema_deps(schemas, ref_prefix)
+    for name in deps:
+        deps[name] -= ignore_refs
     result: list[str] = []
     no_deps = [n for n, d in deps.items() if not d]
     while no_deps:
@@ -1309,6 +1551,792 @@ def topological_sort_schemas(schemas: dict[str, Any], ref_prefix: str) -> list[s
     return result
 
 
+def _canonical_zod_object(schema: dict[str, Any]) -> dict[str, Any]:
+    """Reduce a component to the keywords that affect Zod object emission.
+
+    Args:
+        schema: JSON Schema component.
+
+    Returns:
+        Object schema containing properties and, when present, required names.
+    """
+    properties = schema.get("properties")
+    required = schema.get("required")
+    canonical: dict[str, Any] = {
+        "type": "object",
+        "properties": properties if isinstance(properties, dict) else {},
+    }
+    if isinstance(required, list) and required:
+        canonical["required"] = required
+    return canonical
+
+
+def _shared_zod_names(schemas: dict[str, Any]) -> list[str]:
+    """Return allowlisted Zod components present in one schema document.
+
+    Args:
+        schemas: Named JSON Schema definitions.
+
+    Returns:
+        Allowlisted component names in document order. Used when only one
+        of the WebSocket and OpenAPI documents is available.
+    """
+    return [name for name in schemas if name in _SHARED_ZOD_SCHEMA_NAMES]
+
+
+def _load_json_object(path: Path) -> dict[str, Any] | None:
+    """Return a JSON object from ``path`` when the file exists.
+
+    Args:
+        path: JSON file path.
+
+    Returns:
+        Parsed object, or ``None`` when the file is missing or not an object.
+    """
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _ws_definitions(document: dict[str, Any]) -> dict[str, Any]:
+    """Return WebSocket schema definitions from an exported document.
+
+    Args:
+        document: Parsed ``ws-schemas.json`` object.
+
+    Returns:
+        Named definitions, or an empty map when the document has none.
+    """
+    definitions = document.get("definitions", {})
+    if not isinstance(definitions, dict):
+        return {}
+    return definitions
+
+
+def _openapi_components(document: dict[str, Any]) -> dict[str, Any]:
+    """Return OpenAPI component schemas from an exported document.
+
+    Args:
+        document: Parsed ``openapi.json`` object.
+
+    Returns:
+        Named component schemas, or an empty map when the document has none.
+    """
+    components = document.get("components")
+    if not isinstance(components, dict):
+        return {}
+    schemas = components.get("schemas", {})
+    if not isinstance(schemas, dict):
+        return {}
+    return schemas
+
+
+def _paired_schema_documents(project_root: Path) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Return WebSocket and OpenAPI schemas when both documents exist.
+
+    Args:
+        project_root: Repository root.
+
+    Returns:
+        Definition map and component map, or ``None`` when either document
+        is missing or empty.
+    """
+    ws_document = _load_json_object(project_root / "build" / _WS_SCHEMAS_FILE)
+    api_document = _load_json_object(project_root / "build" / _OPENAPI_FILE)
+    if ws_document is None or api_document is None:
+        return None
+    ws_schemas = _ws_definitions(ws_document)
+    api_schemas = _openapi_components(api_document)
+    if not ws_schemas or not api_schemas:
+        return None
+    return ws_schemas, api_schemas
+
+
+def _expression_matches(name: str, left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Return whether two documents emit the same Zod expression for ``name``.
+
+    Args:
+        name: Component name.
+        left: Schema map, usually the WebSocket definitions.
+        right: Schema map, usually the OpenAPI components.
+
+    Returns:
+        ``True`` when both documents define ``name`` and the Zod text matches.
+    """
+    left_schema = left.get(name)
+    right_schema = right.get(name)
+    if not isinstance(left_schema, dict) or not isinstance(right_schema, dict):
+        return False
+    return _zod_definition_expr(name, left_schema, left) == _zod_definition_expr(
+        name, right_schema, right
+    )
+
+
+def _collect_schema_ref_names(node: object, refs: set[str]) -> None:
+    """Collect component names referenced by ``$ref`` values.
+
+    Args:
+        node: JSON Schema node.
+        refs: Set that receives the last path segment of each ``$ref``.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "$ref" and isinstance(value, str) and "/" in value:
+                refs.add(value.rsplit("/", 1)[-1])
+            else:
+                _collect_schema_ref_names(value, refs)
+        return
+    if isinstance(node, list):
+        for item in node:
+            _collect_schema_ref_names(item, refs)
+
+
+def _schema_ref_names(schema: dict[str, Any]) -> set[str]:
+    """Return component names a schema references.
+
+    Args:
+        schema: JSON Schema definition.
+
+    Returns:
+        Referenced component names.
+    """
+    refs: set[str] = set()
+    _collect_schema_ref_names(schema, refs)
+    return refs
+
+
+def _refs_stay_inside(schema: object, shared: set[str]) -> bool:
+    """Return whether a schema's references are shared or inlined.
+
+    Args:
+        schema: JSON Schema definition.
+        shared: Component names selected for the shared module.
+
+    Returns:
+        ``True`` when every ``$ref`` points at ``shared`` or at a recursive
+        JSON type whose Zod form is inlined.
+    """
+    if not isinstance(schema, dict):
+        return False
+    external = _schema_ref_names(schema) - shared - _RECURSIVE_JSON_TYPES
+    return not external
+
+
+def _closed_shared_names(ws_schemas: dict[str, Any], api_schemas: dict[str, Any]) -> list[str]:
+    """Return components both documents emit identically, refs included.
+
+    Args:
+        ws_schemas: WebSocket schema definitions.
+        api_schemas: OpenAPI component schemas.
+
+    Returns:
+        Matching names in WebSocket document order. A match that references
+        a component outside the match set is dropped, then the check repeats.
+    """
+    shared = {name for name in ws_schemas if _expression_matches(name, ws_schemas, api_schemas)}
+    while True:
+        retained = {name for name in shared if _refs_stay_inside(ws_schemas[name], shared)}
+        if retained == shared:
+            break
+        shared = retained
+    return [name for name in ws_schemas if name in shared]
+
+
+def _ordered_shared_names(
+    schemas: dict[str, Any],
+    names: list[str],
+    ref_prefix: str,
+) -> list[str]:
+    """Return shared names in dependency order.
+
+    Args:
+        schemas: Schema map that owns ``names``.
+        names: Shared component names.
+        ref_prefix: Reference prefix used by ``schemas``.
+
+    Returns:
+        ``names`` sorted so a component appears after the components it extends.
+    """
+    subset = {name: schemas[name] for name in names}
+    return topological_sort_schemas(subset, ref_prefix)
+
+
+def _shared_module_inputs(
+    project_root: Path,
+    local_schemas: dict[str, Any],
+) -> tuple[list[str], dict[str, Any], bool]:
+    """Choose the schemas written to the shared Zod module.
+
+    Args:
+        project_root: Repository root.
+        local_schemas: Schemas owned by the generator that is writing.
+
+    Returns:
+        Names in emission order, the schema map to render, and ``True`` when
+        only one document exists and object keywords must be canonicalized.
+        When both documents exist the text is rendered from the WebSocket
+        definitions so both generators write the same bytes.
+    """
+    paired = _paired_schema_documents(project_root)
+    if paired is None:
+        return _shared_zod_names(local_schemas), local_schemas, True
+    ws_schemas, api_schemas = paired
+    names = _closed_shared_names(ws_schemas, api_schemas)
+    ordered = _ordered_shared_names(ws_schemas, names, _DEFS_REF_PREFIX)
+    return ordered, ws_schemas, False
+
+
+def _plain_object_pairs(
+    schema: object,
+    definitions: dict[str, Any],
+) -> list[tuple[str, str]] | None:
+    """Return field pairs for a plain object schema.
+
+    Args:
+        schema: JSON Schema value.
+        definitions: Schema definitions for reference resolution.
+
+    Returns:
+        Field pairs, or ``None`` when ``schema`` is not a plain object.
+        ``allOf`` compositions keep their extend form instead.
+    """
+    if not isinstance(schema, dict):
+        return None
+    if schema.get("type") != "object" or "properties" not in schema or "allOf" in schema:
+        return None
+    return _zod_field_pairs(schema, definitions)
+
+
+def _longest_contiguous_match(
+    left: list[tuple[str, str]],
+    right: list[tuple[str, str]],
+) -> tuple[tuple[str, str], ...]:
+    """Return the longest identical run of fields shared by two objects.
+
+    Args:
+        left: Field pairs of the first object.
+        right: Field pairs of the second object.
+
+    Returns:
+        The longest contiguous run. Factored placeholders are not part of a run.
+    """
+    best: tuple[tuple[str, str], ...] = ()
+    for index, left_field in enumerate(left):
+        if left_field[0] == _FACTOR_SENTINEL:
+            continue
+        for offset, right_field in enumerate(right):
+            if left_field != right_field or right_field[0] == _FACTOR_SENTINEL:
+                continue
+            length = 1
+            while (
+                index + length < len(left)
+                and offset + length < len(right)
+                and left[index + length] == right[offset + length]
+                and left[index + length][0] != _FACTOR_SENTINEL
+            ):
+                length += 1
+            if length > len(best):
+                best = tuple(left[index : index + length])
+    return best
+
+
+def _longest_repeated_span(
+    field_map: dict[str, list[tuple[str, str]]],
+) -> tuple[tuple[str, str], ...] | None:
+    """Return a field run long enough to factor out of the shared module.
+
+    Args:
+        field_map: Object fields keyed by component name.
+
+    Returns:
+        The longest run of at least ``_MIN_FACTORED_FIELD_SPAN`` fields that
+        two components share, or ``None`` when no run is that long.
+    """
+    best: tuple[tuple[str, str], ...] = ()
+    names = list(field_map)
+    for index, left_name in enumerate(names):
+        left = field_map[left_name]
+        for right_name in names[index + 1 :]:
+            span = _longest_contiguous_match(left, field_map[right_name])
+            if len(span) > len(best):
+                best = span
+    if len(best) < _MIN_FACTORED_FIELD_SPAN:
+        return None
+    return best
+
+
+def _span_owners(
+    field_map: dict[str, list[tuple[str, str]]],
+    span: tuple[tuple[str, str], ...],
+) -> list[str]:
+    """Return components whose fields contain ``span`` contiguously.
+
+    Args:
+        field_map: Object fields keyed by component name.
+        span: Field run to find.
+
+    Returns:
+        Component names in ``field_map`` order.
+    """
+    width = len(span)
+    owners: list[str] = []
+    for name, pairs in field_map.items():
+        indexes = range(len(pairs) - width + 1)
+        if any(tuple(pairs[index : index + width]) == span for index in indexes):
+            owners.append(name)
+    return owners
+
+
+def _replace_span(
+    pairs: list[tuple[str, str]],
+    span: tuple[tuple[str, str], ...],
+    helper: str,
+) -> list[tuple[str, str]]:
+    """Replace the first ``span`` in ``pairs`` with a helper placeholder.
+
+    Args:
+        pairs: Field pairs.
+        span: Contiguous field run.
+        helper: Const name that will hold ``span``.
+
+    Returns:
+        Updated pairs. Unchanged when ``span`` is absent.
+    """
+    width = len(span)
+    for index in range(len(pairs) - width + 1):
+        if tuple(pairs[index : index + width]) == span:
+            return [*pairs[:index], (_FACTOR_SENTINEL, helper), *pairs[index + width :]]
+    return list(pairs)
+
+
+def _factor_helper_name(owners: list[str]) -> str:
+    """Return a stable const name for a factored field run.
+
+    Args:
+        owners: Components that contain the run.
+
+    Returns:
+        A private TypeScript const name.
+    """
+    return f"_{''.join(sorted(owners))}FieldsSchema"
+
+
+def _factor_repeated_fields(
+    field_map: dict[str, list[tuple[str, str]]],
+) -> tuple[dict[str, list[tuple[str, str]]], list[tuple[str, tuple[tuple[str, str], ...]]]]:
+    """Factor repeated field runs so each run is declared once.
+
+    Args:
+        field_map: Object fields keyed by component name.
+
+    Returns:
+        Updated field maps, using a placeholder for each factored run, and
+        the helper consts in discovery order.
+    """
+    updated = {name: list(pairs) for name, pairs in field_map.items()}
+    helpers: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+    while True:
+        span = _longest_repeated_span(updated)
+        if span is None:
+            break
+        owners = _span_owners(updated, span)
+        if len(owners) < 2:
+            break
+        helper = _factor_helper_name(owners)
+        helpers.append((helper, span))
+        for owner in owners:
+            updated[owner] = _replace_span(updated[owner], span, helper)
+    return updated, helpers
+
+
+def _append_helper(expr: str, helper: str) -> str:
+    """Extend ``expr`` with a factored object const.
+
+    Args:
+        expr: Zod expression accumulated so far. Empty at the start.
+        helper: Const that holds the factored fields.
+
+    Returns:
+        Expression that includes the helper's fields.
+    """
+    if not expr:
+        return helper
+    return f"{expr}.extend({helper}.shape)"
+
+
+def _append_field_pairs(expr: str, pairs: list[tuple[str, str]]) -> str:
+    """Extend ``expr`` with concrete fields.
+
+    Args:
+        expr: Zod expression accumulated so far. Empty at the start.
+        pairs: Field name and Zod type pairs.
+
+    Returns:
+        Expression that includes ``pairs``.
+    """
+    if not expr:
+        return _pairs_object_expr(pairs)
+    return f"{expr}.extend({_pairs_shape_literal(pairs)})"
+
+
+def _expression_from_pairs(pairs: list[tuple[str, str]]) -> str:
+    """Return a strict Zod object, extending factored helpers in place.
+
+    Args:
+        pairs: Field pairs. A placeholder ``(_FACTOR_SENTINEL, helper)``
+            stands for one factored run.
+
+    Returns:
+        Zod expression ending in ``.strict()``.
+    """
+    expr = ""
+    chunk: list[tuple[str, str]] = []
+    for field, zod in (*pairs, (_FACTOR_SENTINEL, "")):
+        if field != _FACTOR_SENTINEL:
+            chunk.append((field, zod))
+            continue
+        if chunk:
+            expr = _append_field_pairs(expr, chunk)
+            chunk = []
+        if zod:
+            expr = _append_helper(expr, zod)
+    return f"{expr}.strict()"
+
+
+def _shared_zod_header() -> list[str]:
+    """Return the banner and Zod import for the shared module.
+
+    Returns:
+        Leading source lines.
+    """
+    return [
+        "/**",
+        " * Generated Zod fragments shared by REST and WebSocket schemas.",
+        " * DO NOT EDIT - regenerate with: make ui-gen-types",
+        " */",
+        "",
+        "import { z } from 'zod/v4'",
+        "",
+    ]
+
+
+def _render_factored_shared_module(schemas: dict[str, Any], names: list[str]) -> str:
+    """Render shared components, declaring repeated field runs once.
+
+    Args:
+        schemas: WebSocket schema definitions.
+        names: Shared component names in emission order.
+
+    Returns:
+        TypeScript source for the shared Zod module.
+    """
+    field_map: dict[str, list[tuple[str, str]]] = {}
+    for name in names:
+        pairs = _plain_object_pairs(schemas[name], schemas)
+        if pairs is not None:
+            field_map[name] = pairs
+    factored, helpers = _factor_repeated_fields(field_map)
+    helper_spans = dict(helpers)
+    emitted: set[str] = set()
+    lines = _shared_zod_header()
+    for name in names:
+        for field, helper in factored.get(name, []):
+            if field == _FACTOR_SENTINEL and helper not in emitted:
+                span_pairs = list(helper_spans[helper])
+                lines.append(f"const {helper} = {_pairs_object_expr(span_pairs)}")
+                lines.append("")
+                emitted.add(helper)
+        factored_pairs = factored.get(name)
+        uses_helper = factored_pairs is not None and any(
+            field == _FACTOR_SENTINEL for field, _zod in factored_pairs
+        )
+        if uses_helper and factored_pairs is not None:
+            lines.append(f"export const {name}Schema = {_expression_from_pairs(factored_pairs)}")
+        else:
+            lines.append(generate_zod_schema_definition(name, schemas[name], schemas))
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_shared_zod_module(
+    schemas: dict[str, Any],
+    names: list[str],
+    *,
+    canonical: bool,
+) -> str:
+    """Render the module that both Zod files import.
+
+    Args:
+        schemas: Named JSON Schema definitions.
+        names: Shared component names to emit.
+        canonical: When ``True``, drop keywords that do not affect Zod object
+            text. Pair generation leaves this off so ``allOf`` compositions
+            keep their extend form and repeated field runs are factored.
+
+    Returns:
+        TypeScript source for the shared Zod module.
+    """
+    if not canonical:
+        return _render_factored_shared_module(schemas, names)
+    lines = _shared_zod_header()
+    for name in names:
+        lines.append(
+            generate_zod_schema_definition(name, _canonical_zod_object(schemas[name]), schemas)
+        )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _write_shared_zod_module(project_root: Path, schemas: dict[str, Any]) -> list[str]:
+    """Write shared Zod components once for REST and WebSocket imports.
+
+    Args:
+        project_root: Root directory of the project.
+        schemas: Named JSON Schema definitions from one generator input.
+
+    Returns:
+        Shared component names written to the module. Empty when this
+        document has none.
+    """
+    names, source, canonical = _shared_module_inputs(project_root, schemas)
+    if not names:
+        return []
+    output = project_root / _SHARED_ZOD_PATH
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(_render_shared_zod_module(source, names, canonical=canonical))
+    return names
+
+
+def _namespace_import_lines(names: list[str]) -> list[str]:
+    """Return the namespace import of the shared Zod module.
+
+    Args:
+        names: Shared component names.
+
+    Returns:
+        Import lines, or an empty list when there is nothing to import.
+        One namespace import stays under the duplication threshold that a
+        repeated named import of every shared component would cross.
+    """
+    if not names:
+        return []
+    return [f"import * as {_SHARED_ZOD_NAMESPACE} from './shared.generated.zod'", ""]
+
+
+def _shared_alias_line(name: str, *, cast_to_components: bool) -> str:
+    """Return one re-export of a shared Zod component.
+
+    Args:
+        name: Component name.
+        cast_to_components: When ``True``, cast the binding to the
+            openapi-typescript component type. The WebSocket file leaves
+            the binding as a Zod object so ``.shape`` stays available.
+
+    Returns:
+        A single export statement.
+    """
+    binding = f"{_SHARED_ZOD_NAMESPACE}.{name}Schema"
+    if not cast_to_components:
+        return f"export const {name}Schema = {binding}"
+    return (
+        f"export const {name}Schema = {binding} as unknown as "
+        f"z.ZodType<Components['schemas']['{name}']>"
+    )
+
+
+def _shared_alias_lines(names: list[str], *, cast_to_components: bool) -> list[str]:
+    """Return local bindings for every shared Zod component.
+
+    Args:
+        names: Shared component names in emission order.
+        cast_to_components: When ``True``, cast each binding to the
+            openapi-typescript component type.
+
+    Returns:
+        Export lines. Callers that reference a shared component by name
+        need these bindings because a namespace import does not define them.
+    """
+    lines: list[str] = []
+    for name in names:
+        lines.append(_shared_alias_line(name, cast_to_components=cast_to_components))
+        lines.append("")
+    return lines
+
+
+def _prefix_extra(
+    local_pairs: list[tuple[str, str]],
+    shared_pairs: list[tuple[str, str]],
+) -> list[str] | None:
+    """Return the shared fields that follow a local prefix.
+
+    Args:
+        local_pairs: Fields of the schema being emitted.
+        shared_pairs: Fields of one shared component.
+
+    Returns:
+        Extra shared field names when ``local_pairs`` is a proper prefix.
+        ``None`` when the fields differ or the local schema is not shorter.
+    """
+    if len(local_pairs) >= len(shared_pairs):
+        return None
+    if shared_pairs[: len(local_pairs)] != local_pairs:
+        return None
+    return [field for field, _zod in shared_pairs[len(local_pairs) :]]
+
+
+def _prefix_omit_expr(
+    local_pairs: list[tuple[str, str]],
+    shared_pairs: dict[str, list[tuple[str, str]]],
+) -> str | None:
+    """Return an ``omit`` expression for a long prefix of a shared object.
+
+    Args:
+        local_pairs: Fields of the schema being emitted.
+        shared_pairs: Shared object fields keyed by component name.
+
+    Returns:
+        ``sharedSchemas.{Name}Schema.omit(...).strict()`` when the local
+        object is a field-for-field prefix of at least
+        ``_MIN_OMIT_PREFIX_FIELDS`` and the shared object has further fields.
+        The shortest extra list wins so the closest component is reused.
+        ``None`` when the object should stay inline.
+    """
+    if len(local_pairs) < _MIN_OMIT_PREFIX_FIELDS:
+        return None
+    best_name = ""
+    best_extra: list[str] | None = None
+    for name, shared in shared_pairs.items():
+        extra = _prefix_extra(local_pairs, shared)
+        if extra is None:
+            continue
+        if best_extra is None or (len(extra), name) < (len(best_extra), best_name):
+            best_name = name
+            best_extra = extra
+    if best_extra is None:
+        return None
+    omitted = ", ".join(f"{field!r}: true" for field in best_extra)
+    return f"{_SHARED_ZOD_NAMESPACE}.{best_name}Schema.omit({{ {omitted} }}).strict()"
+
+
+def _shared_object_fields(project_root: Path) -> dict[str, list[tuple[str, str]]]:
+    """Return field pairs for shared object components.
+
+    Args:
+        project_root: Repository root.
+
+    Returns:
+        Fields rendered from the WebSocket definitions, keyed by component
+        name. Empty when either schema document is missing.
+    """
+    paired = _paired_schema_documents(project_root)
+    if paired is None:
+        return {}
+    ws_schemas, api_schemas = paired
+    fields: dict[str, list[tuple[str, str]]] = {}
+    for name in _closed_shared_names(ws_schemas, api_schemas):
+        pairs = _plain_object_pairs(ws_schemas[name], ws_schemas)
+        if pairs is not None:
+            fields[name] = pairs
+    return fields
+
+
+def _local_schema_expr(
+    name: str,
+    schema: dict[str, Any],
+    definitions: dict[str, Any],
+    shared_names: frozenset[str],
+    shared_pairs: dict[str, list[tuple[str, str]]],
+) -> str:
+    """Return the Zod expression for one schema that stays in a local file.
+
+    Args:
+        name: Schema name.
+        schema: JSON Schema definition.
+        definitions: Schema definitions for reference resolution.
+        shared_names: Components whose extend bindings use the namespace.
+        shared_pairs: Shared object fields used to reuse a longer component.
+
+    Returns:
+        Zod expression without a declaration keyword.
+    """
+    pairs = _plain_object_pairs(schema, definitions)
+    if pairs is not None:
+        omitted = _prefix_omit_expr(pairs, shared_pairs)
+        if omitted is not None:
+            return omitted
+    return _zod_definition_expr(name, schema, definitions, shared_names)
+
+
+def _local_ws_schema_lines(
+    sorted_names: list[str],
+    definitions: dict[str, Any],
+    shared_names: frozenset[str],
+    shared_pairs: dict[str, list[tuple[str, str]]],
+) -> list[str]:
+    """Return WebSocket Zod declarations that stay in the WebSocket file.
+
+    Args:
+        sorted_names: Schema names in dependency order.
+        definitions: WebSocket schema definitions.
+        shared_names: Components emitted in the shared module.
+        shared_pairs: Shared object fields used to reuse a longer component.
+
+    Returns:
+        Declaration lines. Extend bindings use the local alias, which is an
+        uncast Zod object.
+    """
+    lines: list[str] = []
+    for name in sorted_names:
+        if name in shared_names:
+            continue
+        expr = _local_schema_expr(name, definitions[name], definitions, frozenset(), shared_pairs)
+        lines.append(f"export const {name}Schema = {expr}")
+        lines.append("")
+    return lines
+
+
+def _local_api_schema_lines(
+    sorted_names: list[str],
+    schemas: dict[str, Any],
+    shared_names: frozenset[str],
+    shared_pairs: dict[str, list[tuple[str, str]]],
+) -> list[str]:
+    """Return REST Zod declarations that stay in the API file.
+
+    Args:
+        sorted_names: Schema names in dependency order.
+        schemas: OpenAPI component schemas.
+        shared_names: Components emitted in the shared module. Extend
+            bindings read ``.shape`` from that namespace because the cast
+            re-export is no longer a Zod object.
+        shared_pairs: Shared object fields used to reuse a longer component.
+
+    Returns:
+        Raw declaration and cast export lines.
+    """
+    lines: list[str] = []
+    for name in sorted_names:
+        if name in shared_names:
+            continue
+        expr = _local_schema_expr(name, schemas[name], schemas, shared_names, shared_pairs)
+        lines.extend(
+            [
+                f"const _{name}RawSchema = {expr}",
+                "",
+                (
+                    f"export const {name}Schema = _{name}RawSchema as unknown as "
+                    f"z.ZodType<Components['schemas']['{name}']>"
+                ),
+                "",
+            ]
+        )
+    return lines
+
+
 def generate_zod_ws(project_root: Path) -> None:
     """Generate Zod schemas for WebSocket messages.
 
@@ -1320,13 +2348,15 @@ def generate_zod_ws(project_root: Path) -> None:
     if not schema_file.exists():
         print(f"Error: {schema_file} not found. Run --export first.")
         return
-    with open(schema_file, encoding="utf-8") as f:
-        schema = json.load(f)
+    with open(schema_file, encoding="utf-8") as handle:
+        schema = json.load(handle)
     definitions = schema.get("definitions", {})
     if not definitions:
         print("Error: No definitions found in build/ws-schemas.json")
         return
-    sorted_names = topological_sort_schemas(definitions, _DEFS_REF_PREFIX)
+    sorted_names = topological_sort_schemas(definitions, _DEFS_REF_PREFIX, _ORDER_IGNORED_REFS)
+    shared_names = _write_shared_zod_module(project_root, definitions)
+    shared_fields = _shared_object_fields(project_root)
     lines = [
         "/**",
         " * Generated Zod schemas for WebSocket message validation.",
@@ -1335,12 +2365,10 @@ def generate_zod_ws(project_root: Path) -> None:
         "",
         "import { z } from 'zod/v4'",
         "",
+        *_namespace_import_lines(shared_names),
+        *_shared_alias_lines(shared_names, cast_to_components=False),
+        *_local_ws_schema_lines(sorted_names, definitions, frozenset(shared_names), shared_fields),
     ]
-    for name in sorted_names:
-        definition = definitions[name]
-        schema_def = generate_zod_schema_definition(name, definition, definitions)
-        lines.append(schema_def)
-        lines.append("")
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text("\n".join(lines))
     print(f"Generated {output_file}")
@@ -1358,13 +2386,15 @@ def generate_zod_api(project_root: Path) -> None:
     if not openapi_path.exists():
         print(f"Error: {openapi_path} not found. Run --export first.")
         return
-    with open(openapi_path, encoding="utf-8") as f:
-        openapi = json.load(f)
+    with open(openapi_path, encoding="utf-8") as handle:
+        openapi = json.load(handle)
     schemas = openapi.get("components", {}).get("schemas", {})
     if not schemas:
         print("Error: No schemas found in build/openapi.json")
         return
-    sorted_names = topological_sort_schemas(schemas, _COMPONENTS_REF_PREFIX)
+    sorted_names = topological_sort_schemas(schemas, _COMPONENTS_REF_PREFIX, _ORDER_IGNORED_REFS)
+    shared_names = _write_shared_zod_module(project_root, schemas)
+    shared_fields = _shared_object_fields(project_root)
     lines = [
         "/**",
         " * Generated Zod schemas for REST API validation.",
@@ -1384,24 +2414,13 @@ def generate_zod_api(project_root: Path) -> None:
         "",
         "import { z } from 'zod'",
         "",
+        *_namespace_import_lines(shared_names),
         "import type { Components } from '../../types/api.generated'",
         "",
+        *_shared_alias_lines(shared_names, cast_to_components=True),
+        *_local_api_schema_lines(sorted_names, schemas, frozenset(shared_names), shared_fields),
+        "// Type exports",
     ]
-    for name in sorted_names:
-        schema = schemas[name]
-        raw_definition = generate_zod_schema_definition(name, schema, schemas, exported=False)
-        lines.extend(
-            [
-                raw_definition,
-                "",
-                (
-                    f"export const {name}Schema = _{name}RawSchema as unknown as "
-                    f"z.ZodType<Components['schemas']['{name}']>"
-                ),
-                "",
-            ]
-        )
-    lines.append("// Type exports")
     for name in sorted_names:
         lines.append(f"export type {name} = Components['schemas']['{name}']")
     content = "\n".join(lines) + "\n"
@@ -1757,6 +2776,9 @@ def generate_entity_interface(
 ) -> list[str]:
     """Generate TypeScript interface for an entity.
 
+    ``allOf`` compositions are flattened so a shared component contributes
+    fields on the same interface instead of replacing the payload.
+
     Args:
         entity_name: Name of the interface to generate.
         schema: JSON Schema definition for the entity.
@@ -1767,6 +2789,8 @@ def generate_entity_interface(
         List of TypeScript code lines for the interface.
     """
     lines: list[str] = []
+    definitions = all_schemas if all_schemas is not None else {}
+    schema = _flatten_schema_allof(schema, definitions)
 
     if doc_comment:
         lines.append("/**")

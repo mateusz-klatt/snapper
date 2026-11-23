@@ -363,7 +363,13 @@ def _build_mock_settings() -> Mock:
     mock_settings.session_domain = ""
     mock_settings.coordinator_instance_id = 0
     mock_settings.coordinator_instance_count = 1
-    mock_settings.coordinator_outbox_max_scan_rows = 1000
+    (
+        mock_settings.coordinator_outbox_max_scan_rows,
+        mock_settings.position_dust_notional_threshold,
+    ) = (
+        1000,
+        bootstrap.position_dust_notional_threshold,
+    )
     return mock_settings
 
 

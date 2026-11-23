@@ -327,6 +327,81 @@ class TestGetInstrumentSpec:
         assert row is None
 
 
+class TestGetPositionDisplayFacts:
+    """Tests for the batched dust-classification spec read."""
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_without_ids(self, repo: SQLAlchemyRepository) -> None:
+        """Given no instrument ids, When facts are read, Then the result is empty."""
+        assert await repo.get_position_display_facts([], _ts()) == []
+        assert await repo.get_position_display_facts(["", ""], _ts()) == []
+
+    @pytest.mark.asyncio
+    async def test_returns_steps_quote_and_contract_columns(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Given spot, bare, and futures instruments, When facts are read, Then columns match.
+
+        Blank and duplicate ids are ignored, and an unknown id is omitted.
+        A missing spec keeps the quote currency and leaves the steps null.
+        """
+        ts = _ts()
+        spot = await _seed_instrument(repo, "BTC-USD", "kraken", ts)
+        bare = await _seed_instrument(repo, "ETH-USD", "kraken", ts)
+        future = await _seed_instrument(repo, "XBT-USD", "kraken_futures", ts)
+        await repo.revise_instrument_spec(
+            instrument_public_id=spot,
+            session_id="s1",
+            sequence_id=1,
+            timestamp=ts,
+            spec=InstrumentSpecInput(tick_size=0.1, lot_size=0.01, min_order_size=0.001),
+        )
+        await repo.revise_instrument_spec(
+            instrument_public_id=future,
+            session_id="s1",
+            sequence_id=1,
+            timestamp=ts,
+            spec=InstrumentSpecInput(
+                tick_size=0.5,
+                lot_size=1.0,
+                min_order_size=1.0,
+                contract_size=Decimal("1.5"),
+                quantity_unit="contract_count",
+                native_order_quantity_unit="contract_count",
+                contract_payoff_model="linear",
+                contract_value_currency="XBT",
+                settlement_currency="USD",
+                instrument_kind="perpetual",
+            ),
+        )
+        rows = await repo.get_position_display_facts(
+            ["", spot, spot, bare, future, "missing"],
+            ts + timedelta(seconds=1),
+        )
+        by_id = {row["instrument_public_id"]: row for row in rows}
+        assert set(by_id) == {spot, bare, future}
+        assert by_id[spot]["exchange"] == "kraken"
+        assert by_id[spot]["base"] == "BTC"
+        assert by_id[spot]["quote"] == "USD"
+        assert by_id[spot]["lot_size"] == 0.01
+        assert by_id[spot]["tick_size"] == 0.1
+        assert by_id[spot]["min_order_size"] == 0.001
+        assert by_id[spot]["contract_size"] is None
+        assert by_id[bare]["quote"] == "USD"
+        assert by_id[bare]["lot_size"] is None
+        assert by_id[bare]["contract_payoff_model"] is None
+        assert by_id[future]["exchange"] == "kraken_futures"
+        assert by_id[future]["base"] == "XBT"
+        assert by_id[future]["quote"] == "USD"
+        assert by_id[future]["contract_size"] == Decimal("1.5")
+        assert by_id[future]["quantity_unit"] == "contract_count"
+        assert by_id[future]["native_order_quantity_unit"] == "contract_count"
+        assert by_id[future]["contract_payoff_model"] == "linear"
+        assert by_id[future]["contract_value_currency"] == "XBT"
+        assert by_id[future]["settlement_currency"] == "USD"
+        assert by_id[future]["instrument_kind"] == "perpetual"
+
+
 class TestReviseInstrumentSpecWithExpiry:
     """Tests for async revise_instrument_spec with expiry_at and instrument_kind."""
 
