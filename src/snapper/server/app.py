@@ -219,7 +219,6 @@ from snapper.messaging.schemas.data import FrontMonthData
 from snapper.messaging.schemas.data import InstrumentCapabilityData
 from snapper.messaging.schemas.data import InstrumentDetailData
 from snapper.messaging.schemas.data import OrderData
-from snapper.messaging.schemas.data import PositionData
 from snapper.messaging.schemas.data import RelatedInstrumentData
 from snapper.messaging.schemas.data import RelatedInstrumentsGroup
 from snapper.messaging.schemas.data import RelatedInstrumentsPayloadData
@@ -267,6 +266,7 @@ from snapper.server.order_routes import router as order_router
 from snapper.server.paired_execution_routes import router as paired_execution_router
 from snapper.server.portfolio_timeline_routes import router as portfolio_timeline_router
 from snapper.server.position_cycle_routes import router as position_cycle_router
+from snapper.server.position_display import build_position_payloads
 from snapper.server.process_routes import router as process_router
 from snapper.server.provenance_middleware import ClientProvenanceMiddleware
 from snapper.server.rate_limiting import limiter
@@ -2839,7 +2839,7 @@ def _create_orders_executions_router() -> APIRouter:
                 wallet_public_ids=target_wallets,
                 current_marks=as_of is None,
             )
-            items = [PositionData(**cast(dict[str, Any], r)) for r in rows]
+            items = await build_position_payloads(repo, rows, processing_date)
             tracker: SequenceTracker = request.app.state.rest_tracker
             sid = tracker.session_id
             seq = tracker.next_sequence(_REST_DATA_STREAM)

@@ -1046,6 +1046,81 @@ class TestGenerateSwiftStruct:
         assert "case id" in result
         assert 'case userName = "user_name"' in result
 
+    def test_flattens_allof_with_shared_fields_last(self) -> None:
+        """AllOf refs become flat stored properties after the payload fields.
+
+        Given: a payload allOf a shared component and its own properties,
+        When: the Swift struct is generated,
+        Then: both sets of fields are stored and the shared fields come last.
+        """
+        schema = {
+            "allOf": [
+                {"$ref": "#/definitions/PositionDisplayFields"},
+                {
+                    "type": "object",
+                    "properties": {"quantity": {"type": "number"}},
+                    "required": ["quantity"],
+                },
+                "skip-me",
+            ]
+        }
+        definitions = {
+            "PositionDisplayFields": {
+                "type": "object",
+                "properties": {"is_dust": {"type": "boolean"}},
+            },
+            "Missing": {"$ref": "#/definitions/Absent"},
+        }
+        result = "\n".join(generate_swift_struct("PositionData", schema, definitions))
+        assert result.index("let quantity: Double") < result.index("let isDust: Bool?")
+        unresolved = {"allOf": [{"$ref": "#/definitions/Absent"}]}
+        assert "\n".join(generate_swift_struct("EmptyRef", unresolved, {})) == (
+            "struct EmptyRef: Codable, Sendable {\n}"
+        )
+
+    def test_collects_structs_and_enums_from_allof(self, tmp_path: Path) -> None:
+        """AllOf payloads still emit their struct and inline enums.
+
+        Given: an API schema whose payload is an allOf composition,
+        When: Swift types are generated,
+        Then: the struct and its inline enum exist.
+        """
+        schema_path = tmp_path / "schema.json"
+        schema_path.write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "PositionDisplayFields": {
+                            "type": "object",
+                            "properties": {"is_dust": {"type": "boolean"}},
+                        },
+                        "PositionData": {
+                            "allOf": [
+                                {"$ref": "#/definitions/PositionDisplayFields"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "exchange": {
+                                            "type": "string",
+                                            "enum": ["kraken"],
+                                        }
+                                    },
+                                    "required": ["exchange"],
+                                },
+                            ]
+                        },
+                    }
+                }
+            )
+        )
+        output = tmp_path / "APITypes.swift"
+        generate_swift_types(tmp_path, schema_path, output, include_any_codable=False)
+        content = output.read_text()
+        assert "struct PositionData: Codable, Sendable" in content
+        assert "struct PositionDisplayFields: Codable, Sendable" in content
+        assert "enum PositionDataExchange" in content
+        assert generate_types._is_swift_struct_schema({"type": "string"}) is False
+
 
 class TestGenerateSwiftEnum:
     """Tests for generate_swift_enum function."""
@@ -1832,6 +1907,714 @@ class TestGenerateZodObjectSchema:
         assert ".optional()" not in result or "count: z.number().int()," in result
 
 
+def _object_schema(
+    leading: list[str],
+    shared: list[str],
+    *,
+    const: str = "",
+    suffix: JsonObject | None = None,
+) -> JsonObject:
+    """Build an object schema from ordered string fields.
+
+    Args:
+        leading: Field names emitted before ``shared``.
+        shared: Field names shared with another component.
+        const: Literal stored on each leading field. Empty keeps a string.
+        suffix: Extra properties appended after ``shared``.
+
+    Returns:
+        A JSON Schema object whose property order follows the arguments.
+    """
+    properties: JsonObject = {}
+    for name in leading:
+        if const:
+            properties[name] = {"type": "string", "const": const}
+        else:
+            properties[name] = {"type": "string"}
+    for name in shared:
+        properties[name] = {"type": "string"}
+    if suffix:
+        properties.update(suffix)
+    return {"type": "object", "properties": properties, "required": list(properties)}
+
+
+def _tiny_schema(label: str) -> JsonObject:
+    """Build a one-field object that should not be factored.
+
+    Args:
+        label: Const value that keeps the schema distinct.
+
+    Returns:
+        A JSON Schema object.
+    """
+    return {
+        "type": "object",
+        "properties": {"label": {"type": "string", "const": label}},
+        "required": ["label"],
+    }
+
+
+def _write_zod_documents(
+    tmp_path: Path,
+    schemas: dict[str, JsonObject],
+    *,
+    api_names: set[str] | None = None,
+) -> None:
+    """Write WebSocket and OpenAPI documents for Zod generation.
+
+    Args:
+        tmp_path: Test directory.
+        schemas: Named JSON Schema components for the WebSocket document.
+        api_names: Subset copied into OpenAPI. ``None`` copies every schema.
+    """
+    selected = schemas if api_names is None else {key: schemas[key] for key in api_names}
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    (build_dir / "ws-schemas.json").write_text(json.dumps({"definitions": schemas}))
+    (build_dir / "openapi.json").write_text(json.dumps({"components": {"schemas": selected}}))
+    (tmp_path / "frontend" / "src" / "lib" / "schemas").mkdir(parents=True)
+
+
+def _read_generated_schema(tmp_path: Path, name: str) -> str:
+    """Return one generated Zod file.
+
+    Args:
+        tmp_path: Test directory.
+        name: File name under ``src/lib/schemas``.
+
+    Returns:
+        The generated source.
+    """
+    return (tmp_path / "frontend" / "src" / "lib" / "schemas" / name).read_text()
+
+
+class TestZodAllOfComposition:
+    """Tests for shared display-field Zod composition."""
+
+    def test_extends_a_shared_ref_object(self) -> None:
+        """A ref plus an object becomes one extend expression.
+
+        Given: an allOf schema of a component ref and the payload fields,
+        When: the Zod definition is generated,
+        Then: the payload object extends the shared schema and stays strict.
+        """
+        schema = {
+            "allOf": [
+                {"$ref": "#/components/schemas/PositionDisplayFields"},
+                {
+                    "type": "object",
+                    "properties": {"quantity": {"type": "number"}},
+                    "required": ["quantity"],
+                },
+            ]
+        }
+        result = generate_zod_schema_definition("PositionData", schema, {})
+        assert result == (
+            "export const PositionDataSchema = "
+            "z.object({\n    quantity: z.number(),\n  })"
+            ".extend(PositionDisplayFieldsSchema.shape).strict()"
+        )
+
+    def test_rejects_allof_shapes_that_are_not_one_ref_plus_one_object(self) -> None:
+        """Other allOf shapes keep the historical first-member fallback.
+
+        Given: allOf values that are not a two-member ref and object,
+        When: each shape is classified,
+        Then: none of them select the shared extend form.
+        """
+        rejected = [
+            {},
+            {"allOf": "nope"},
+            {"allOf": [{"$ref": "#/definitions/Only"}]},
+            {"allOf": ["ref", {"type": "object"}]},
+            {"allOf": [{"$ref": "#/definitions/A"}, "object"]},
+            {"allOf": [{"type": "object"}, {"type": "object"}]},
+            {
+                "allOf": [
+                    {"$ref": "#/definitions/A"},
+                    {"type": "string"},
+                ]
+            },
+        ]
+        for schema in rejected:
+            assert generate_types._zod_ref_object_allof(schema) is None
+
+    def test_writes_shared_fragment_once_for_websocket_schemas(self, tmp_path: Path) -> None:
+        """WebSocket generation imports the shared display schema.
+
+        Given: a display component and a payload that references it,
+        When: WebSocket Zod schemas are generated,
+        Then: the three fields are declared only in the shared module.
+        """
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        (build_dir / "ws-schemas.json").write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "PositionDisplayFields": {
+                            "type": "object",
+                            "properties": {
+                                "is_dust": {"type": "boolean"},
+                                "quantity_decimals": {"type": "integer"},
+                            },
+                        },
+                        "PositionData": {
+                            "allOf": [
+                                {"$ref": "#/definitions/PositionDisplayFields"},
+                                {
+                                    "type": "object",
+                                    "properties": {"quantity": {"type": "number"}},
+                                    "required": ["quantity"],
+                                },
+                            ]
+                        },
+                    }
+                }
+            )
+        )
+        (tmp_path / "frontend" / "src" / "lib" / "schemas").mkdir(parents=True)
+
+        generate_zod_ws(tmp_path)
+
+        shared = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "shared.generated.zod.ts"
+        ).read_text()
+        websocket = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "ws.generated.zod.ts"
+        ).read_text()
+        assert "is_dust: z.boolean().optional()," in shared
+        assert "export const PositionDisplayFieldsSchema" in shared
+        assert "is_dust:" not in websocket
+        assert "import * as sharedSchemas from './shared.generated.zod'" in websocket
+        assert (
+            "export const PositionDisplayFieldsSchema = sharedSchemas.PositionDisplayFieldsSchema"
+        ) in websocket
+        assert ".extend(PositionDisplayFieldsSchema.shape).strict()" in websocket
+
+    def test_writes_shared_fragment_once_for_api_schemas(self, tmp_path: Path) -> None:
+        """REST generation imports the shared display schema.
+
+        Given: an OpenAPI document with the display component and a payload,
+        When: API Zod schemas are generated,
+        Then: the component is imported and its fields are not repeated.
+        """
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        (build_dir / "openapi.json").write_text(
+            json.dumps(
+                {
+                    "components": {
+                        "schemas": {
+                            "PositionDisplayFields": {
+                                "properties": {
+                                    "is_dust": {"type": "boolean"},
+                                }
+                            },
+                            "PositionData": {
+                                "allOf": [
+                                    {"$ref": "#/components/schemas/PositionDisplayFields"},
+                                    {
+                                        "type": "object",
+                                        "properties": {"quantity": {"type": "number"}},
+                                        "required": ["quantity"],
+                                    },
+                                ]
+                            },
+                        }
+                    }
+                }
+            )
+        )
+        (tmp_path / "frontend" / "src" / "lib" / "schemas").mkdir(parents=True)
+
+        generate_zod_api(tmp_path)
+
+        shared = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "shared.generated.zod.ts"
+        ).read_text()
+        api = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "api.generated.zod.ts"
+        ).read_text()
+        assert "is_dust: z.boolean().optional()," in shared
+        assert "const _PositionDisplayFieldsRawSchema" not in api
+        assert "import * as sharedSchemas from './shared.generated.zod'" in api
+        assert (
+            "export const PositionDisplayFieldsSchema = "
+            "sharedSchemas.PositionDisplayFieldsSchema as unknown as "
+            "z.ZodType<Components['schemas']['PositionDisplayFields']>"
+        ) in api
+        assert "export type PositionDisplayFields = " in api
+        assert ".extend(sharedSchemas.PositionDisplayFieldsSchema.shape).strict()" in api
+
+    def test_extend_reads_shape_from_the_shared_namespace(self) -> None:
+        """API casts erase ``.shape``, so extend uses the namespace.
+
+        Given: an allOf payload whose parent is a shared component,
+        When: the raw API declaration is generated with that parent shared,
+        Then: the extend expression reads ``sharedSchemas.{Name}Schema.shape``.
+        """
+        schema = {
+            "allOf": [
+                {"$ref": "#/components/schemas/PositionDisplayFields"},
+                {
+                    "type": "object",
+                    "properties": {"quantity": {"type": "number"}},
+                    "required": ["quantity"],
+                },
+            ]
+        }
+        result = generate_zod_schema_definition(
+            "PositionCycleData",
+            schema,
+            {},
+            exported=False,
+            shared_names=frozenset({"PositionDisplayFields"}),
+        )
+        assert result == (
+            "const _PositionCycleDataRawSchema = "
+            "z.object({\n    quantity: z.number(),\n  })"
+            ".extend(sharedSchemas.PositionDisplayFieldsSchema.shape).strict()"
+        )
+
+    def test_shares_identical_components_and_keeps_one_sided_schemas(self, tmp_path: Path) -> None:
+        """Both documents share one expression and keep schemas that differ.
+
+        Given: a component emitted identically, one component whose fields
+        differ, and a component that exists on only one side,
+        When: both Zod generators run,
+        Then: only the identical component is declared in the shared module
+        and re-exported from each file.
+        """
+        candle = {
+            "type": "object",
+            "properties": {"close": {"type": "number"}},
+            "required": ["close"],
+        }
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        (build_dir / "ws-schemas.json").write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "CandleData": candle,
+                        "WsOnly": {
+                            "type": "object",
+                            "properties": {"channel": {"type": "string"}},
+                        },
+                        "Drifted": {
+                            "type": "object",
+                            "properties": {"close": {"type": "number"}},
+                        },
+                    }
+                }
+            )
+        )
+        (build_dir / "openapi.json").write_text(
+            json.dumps(
+                {
+                    "components": {
+                        "schemas": {
+                            "CandleData": candle,
+                            "ApiOnly": {
+                                "type": "object",
+                                "properties": {"status": {"type": "string"}},
+                            },
+                            "Drifted": {
+                                "type": "object",
+                                "properties": {"open": {"type": "number"}},
+                            },
+                        }
+                    }
+                }
+            )
+        )
+        (tmp_path / "frontend" / "src" / "lib" / "schemas").mkdir(parents=True)
+
+        generate_zod_ws(tmp_path)
+        generate_zod_api(tmp_path)
+
+        shared = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "shared.generated.zod.ts"
+        ).read_text()
+        websocket = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "ws.generated.zod.ts"
+        ).read_text()
+        api = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "api.generated.zod.ts"
+        ).read_text()
+        assert shared.count("export const CandleDataSchema") == 1
+        assert "close: z.number()," in shared
+        assert "close: z.number()," not in websocket
+        assert "close: z.number()," not in api
+        assert "export const CandleDataSchema = sharedSchemas.CandleDataSchema\n" in websocket
+        assert (
+            "export const CandleDataSchema = sharedSchemas.CandleDataSchema as unknown as "
+            "z.ZodType<Components['schemas']['CandleData']>"
+        ) in api
+        assert "channel: z.string().optional()," in websocket
+        assert "status: z.string().optional()," in api
+        assert "open: z.number().optional()," in api
+        assert "export const DriftedSchema = z.object" in websocket
+        assert "const _DriftedRawSchema" in api
+
+    def test_does_not_share_a_component_that_references_a_local_schema(
+        self, tmp_path: Path
+    ) -> None:
+        """A matching wrapper stays local when its child schemas differ.
+
+        Given: two documents whose wrapper text matches but whose child
+        component does not,
+        When: both Zod generators run,
+        Then: the wrapper is not moved into the shared module.
+        """
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        (build_dir / "ws-schemas.json").write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "LocalOnly": {
+                            "type": "object",
+                            "properties": {"left": {"type": "string"}},
+                        },
+                        "Wrapper": {
+                            "type": "object",
+                            "properties": {"child": {"$ref": "#/definitions/LocalOnly"}},
+                        },
+                    }
+                }
+            )
+        )
+        (build_dir / "openapi.json").write_text(
+            json.dumps(
+                {
+                    "components": {
+                        "schemas": {
+                            "LocalOnly": {
+                                "type": "object",
+                                "properties": {"right": {"type": "string"}},
+                            },
+                            "Wrapper": {
+                                "type": "object",
+                                "properties": {"child": {"$ref": "#/components/schemas/LocalOnly"}},
+                            },
+                        }
+                    }
+                }
+            )
+        )
+        (tmp_path / "frontend" / "src" / "lib" / "schemas").mkdir(parents=True)
+
+        generate_zod_ws(tmp_path)
+        generate_zod_api(tmp_path)
+
+        shared_path = tmp_path / "frontend" / "src" / "lib" / "schemas" / "shared.generated.zod.ts"
+        assert not shared_path.exists()
+        websocket = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "ws.generated.zod.ts"
+        ).read_text()
+        assert "export const WrapperSchema" in websocket
+        assert "child: LocalOnlySchema" in websocket
+
+    def test_display_ref_does_not_move_later_websocket_schemas(self, tmp_path: Path) -> None:
+        """Ignoring the display ref keeps a payload ahead of later schemas.
+
+        Given: a payload that only references the display component, defined
+        before an unrelated schema,
+        When: WebSocket Zod schemas are generated,
+        Then: the payload is still emitted before the later schema.
+        """
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        (build_dir / "ws-schemas.json").write_text(
+            json.dumps(
+                {
+                    "definitions": {
+                        "PositionData": {
+                            "allOf": [
+                                {"$ref": "#/definitions/PositionDisplayFields"},
+                                {
+                                    "type": "object",
+                                    "properties": {"quantity": {"type": "number"}},
+                                    "required": ["quantity"],
+                                },
+                            ]
+                        },
+                        "LaterMarker": {"type": "string"},
+                        "PositionDisplayFields": {
+                            "type": "object",
+                            "properties": {"is_dust": {"type": "boolean"}},
+                        },
+                    }
+                }
+            )
+        )
+        (tmp_path / "frontend" / "src" / "lib" / "schemas").mkdir(parents=True)
+
+        generate_zod_ws(tmp_path)
+
+        websocket = (
+            tmp_path / "frontend" / "src" / "lib" / "schemas" / "ws.generated.zod.ts"
+        ).read_text()
+        assert websocket.index("export const PositionDataSchema") < websocket.index(
+            "export const LaterMarkerSchema"
+        )
+
+    def test_factors_a_repeated_field_run_once(self, tmp_path: Path) -> None:
+        """Identical field runs are declared once in the shared module.
+
+        Given: two components that share ten fields and differ at both ends,
+        When: both Zod generators run,
+        Then: the shared run is one private const and each component extends it.
+        """
+        alpha = _object_schema(["kind"], [f"f{i}" for i in range(10)], const="alpha")
+        beta = _object_schema(
+            ["kind"],
+            [f"f{i}" for i in range(10)],
+            const="beta",
+            suffix={"flag": {"type": "boolean"}},
+        )
+        _write_zod_documents(
+            tmp_path,
+            {
+                "Alpha": alpha,
+                "Beta": beta,
+                "Gamma": _tiny_schema("Gamma"),
+                "Role": {"type": "string", "enum": ["a", "b"]},
+            },
+        )
+
+        generate_zod_ws(tmp_path)
+        generate_zod_api(tmp_path)
+
+        shared = _read_generated_schema(tmp_path, "shared.generated.zod.ts")
+        assert shared.count("f0: z.string(),") == 1
+        assert "const _AlphaBetaFieldsSchema = z.object({" in shared
+        assert shared.count(".extend(_AlphaBetaFieldsSchema.shape)") == 2
+        assert "flag: z.boolean()," in shared
+        assert "export const GammaSchema = z.object" in shared
+
+    def test_leaves_a_short_repeated_run_inline(self, tmp_path: Path) -> None:
+        """Runs shorter than the factor threshold stay in each component.
+
+        Given: two components that share nine fields,
+        When: both Zod generators run,
+        Then: each component still declares those fields.
+        """
+        alpha = _object_schema(["kind"], [f"f{i}" for i in range(9)], const="alpha")
+        beta = _object_schema(["kind"], [f"f{i}" for i in range(9)], const="beta")
+        _write_zod_documents(tmp_path, {"Alpha": alpha, "Beta": beta})
+
+        generate_zod_ws(tmp_path)
+
+        shared = _read_generated_schema(tmp_path, "shared.generated.zod.ts")
+        assert shared.count("f0: z.string(),") == 2
+        assert "FieldsSchema" not in shared
+
+    def test_omits_extra_fields_from_a_long_shared_prefix(self, tmp_path: Path) -> None:
+        """A long local prefix reuses the shared object.
+
+        Given: a shared object of eleven fields and WebSocket objects that
+        copy its first nine and its first eight,
+        When: WebSocket Zod schemas are generated,
+        Then: the nine-field object omits the tail and the eight-field object
+        stays inline.
+        """
+        fields = [f"f{i}" for i in range(11)]
+        long = _object_schema([], fields)
+        nine = _object_schema([], fields[:9])
+        eight = _object_schema([], fields[:8])
+        _write_zod_documents(
+            tmp_path,
+            {"Long": long, "Nine": nine, "Eight": eight},
+            api_names={"Long"},
+        )
+
+        generate_zod_ws(tmp_path)
+        generate_zod_api(tmp_path)
+
+        websocket = _read_generated_schema(tmp_path, "ws.generated.zod.ts")
+        shared = _read_generated_schema(tmp_path, "shared.generated.zod.ts")
+        assert (
+            "export const NineSchema = sharedSchemas.LongSchema.omit("
+            "{ 'f9': true, 'f10': true }).strict()"
+        ) in websocket
+        assert "export const EightSchema = z.object" in websocket
+        assert shared.count("f0: z.string(),") == 1
+
+    def test_canonical_object_drops_non_object_keywords(self) -> None:
+        """Shared fragments ignore titles and empty required lists.
+
+        Given: a component without properties and one with no required names,
+        When: the object is canonicalized for Zod,
+        Then: only an object schema remains.
+        """
+        without_properties = generate_types._canonical_zod_object({"title": "Ignored"})
+        assert without_properties == {"type": "object", "properties": {}}
+        without_required = generate_types._canonical_zod_object(
+            {"properties": {"is_dust": {"type": "boolean"}}, "required": []}
+        )
+        assert "required" not in without_required
+        with_required = generate_types._canonical_zod_object(
+            {"properties": {"id": {"type": "integer"}}, "required": ["id"]}
+        )
+        assert with_required["required"] == ["id"]
+
+
+class TestSharedZodFieldReuse:
+    """Tests for field-run factoring and prefix omit."""
+
+    def test_prefix_omit_picks_the_closest_component(self) -> None:
+        """The shared object with the fewest extra fields is reused.
+
+        Given: a local prefix of two shared objects,
+        When: the omit expression is chosen,
+        Then: the object with one extra field wins, and short or different
+        objects stay inline.
+        """
+        local = [(f"f{index}", "z.string()") for index in range(9)]
+        long = [*local, ("tail", "z.number()"), ("extra", "z.number()")]
+        tight = [*local, ("tail", "z.number()")]
+        assert generate_types._prefix_omit_expr(local, {"Tight": tight, "Long": long}) == (
+            "sharedSchemas.TightSchema.omit({ 'tail': true }).strict()"
+        )
+        assert generate_types._prefix_omit_expr(local[:8], {"Long": long}) is None
+        assert generate_types._prefix_omit_expr(local, {"Same": list(local)}) is None
+        drifted = [*local[:-1], ("f8", "z.number()")]
+        assert generate_types._prefix_omit_expr(drifted, {"Long": long}) is None
+
+    def test_plain_object_pairs_reject_other_shapes(self) -> None:
+        """Only plain objects expose field pairs.
+
+        Given: a string, an object without properties, and an allOf object,
+        When: each is classified,
+        Then: none of them produce field pairs.
+        """
+        assert generate_types._plain_object_pairs("nope", {}) is None
+        assert generate_types._plain_object_pairs({"type": "object"}, {}) is None
+        allof = {"allOf": [], "type": "object", "properties": {}}
+        assert generate_types._plain_object_pairs(allof, {}) is None
+
+    def test_expression_from_pairs_extends_a_helper(self) -> None:
+        """Factored runs keep surrounding fields in order.
+
+        Given: a helper placeholder with fields before it and after it,
+        When: the expression is rendered,
+        Then: the object extends the helper and stays strict.
+        """
+        expr = generate_types._expression_from_pairs(
+            [
+                ("kind", "z.literal('a')"),
+                (generate_types._FACTOR_SENTINEL, "_Core"),
+                ("flag", "z.boolean()"),
+            ]
+        )
+        assert expr.startswith("z.object({")
+        assert ".extend(_Core.shape)" in expr
+        assert "flag: z.boolean()" in expr
+        assert expr.endswith(".strict()")
+        helper_first = generate_types._expression_from_pairs(
+            [(generate_types._FACTOR_SENTINEL, "_Core"), ("flag", "z.boolean()")]
+        )
+        assert helper_first.startswith("_Core.extend(")
+
+    def test_replace_span_keeps_pairs_when_the_span_is_absent(self) -> None:
+        """A missing span does not change the field list.
+
+        Given: pairs that do not contain the requested run,
+        When: the span is replaced,
+        Then: the original fields remain.
+        """
+        pairs = [("a", "z.string()")]
+        assert generate_types._replace_span(pairs, (("b", "z.string()"),), "_H") == pairs
+
+    def test_longest_match_is_empty_when_fields_differ(self) -> None:
+        """Different fields do not invent a shared run.
+
+        Given: two single-field objects with different names,
+        When: the contiguous match is measured,
+        Then: the run is empty.
+        """
+        assert (
+            generate_types._longest_contiguous_match([("a", "z.string()")], [("b", "z.number()")])
+            == ()
+        )
+
+    def test_factoring_stops_when_a_span_has_no_owner(self) -> None:
+        """A span that no longer has two owners is left inline.
+
+        Given: two objects with a long identical run whose owner lookup is empty,
+        When: factoring runs,
+        Then: no helper is emitted.
+        """
+        pairs = [(f"f{index}", "z.string()") for index in range(10)]
+        with patch.object(generate_types, "_span_owners", return_value=[]):
+            updated, helpers = generate_types._factor_repeated_fields(
+                {"A": pairs, "B": list(pairs)}
+            )
+        assert helpers == []
+        assert updated["A"] == pairs
+
+    def test_schema_document_readers_skip_malformed_json(self, tmp_path: Path) -> None:
+        """Malformed schema documents do not become shared components.
+
+        Given: a missing file, a JSON list, and objects without schema maps,
+        When: the readers run,
+        Then: each returns an empty result.
+        """
+        assert generate_types._load_json_object(tmp_path / "missing.json") is None
+        (tmp_path / "list.json").write_text("[]")
+        assert generate_types._load_json_object(tmp_path / "list.json") is None
+        assert generate_types._ws_definitions({"definitions": []}) == {}
+        assert generate_types._openapi_components({}) == {}
+        assert generate_types._openapi_components({"components": {"schemas": []}}) == {}
+        assert generate_types._expression_matches("A", {"A": []}, {"A": {"type": "string"}}) is (
+            False
+        )
+        refs: set[str] = set()
+        generate_types._collect_schema_ref_names(
+            [{"$ref": "Bare"}, {"$ref": "#/definitions/Named"}], refs
+        )
+        assert refs == {"Named"}
+        assert generate_types._refs_stay_inside([], set()) is False
+
+    def test_paired_documents_require_both_schema_maps(self, tmp_path: Path) -> None:
+        """Empty definitions do not pair with an OpenAPI document.
+
+        Given: a WebSocket document without definitions and an OpenAPI schema,
+        When: the documents are paired,
+        Then: pairing is declined.
+        """
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        (build_dir / "ws-schemas.json").write_text(json.dumps({"definitions": {}}))
+        (build_dir / "openapi.json").write_text(
+            json.dumps({"components": {"schemas": {"A": {"type": "string"}}}})
+        )
+        assert generate_types._paired_schema_documents(tmp_path) is None
+
+    def test_shared_object_fields_skip_non_objects(self, tmp_path: Path) -> None:
+        """Enums are shared without contributing object fields.
+
+        Given: an enum and an object present in both documents,
+        When: shared object fields are collected,
+        Then: only the object is returned.
+        """
+        _write_zod_documents(
+            tmp_path,
+            {
+                "Role": {"type": "string", "enum": ["a", "b"]},
+                "Box": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
+                },
+            },
+        )
+        assert list(generate_types._shared_object_fields(tmp_path)) == ["Box"]
+
+
 class TestGenerateZodSchemaDefinition:
     """Tests for generate_zod_schema_definition function."""
 
@@ -1916,6 +2699,54 @@ class TestTopologicalSortSchemas:
         }
         result = topological_sort_schemas(schemas, "#/definitions/")
         assert set(result) == {"A", "B", "C"}
+
+    def test_ignore_refs_keeps_a_display_payload_in_document_order(self) -> None:
+        """A new display ref does not move the payload behind later schemas.
+
+        Given: a payload that gains a reference to PositionDisplayFields,
+        When: that reference is ignored during the sort,
+        Then: the payload keeps the order it had before the reference existed.
+        """
+        before = {
+            "PositionData": {"type": "object"},
+            "Later": {"type": "string"},
+        }
+        after = {
+            "PositionData": {"$ref": "#/definitions/PositionDisplayFields"},
+            "Later": {"type": "string"},
+            "PositionDisplayFields": {"type": "object"},
+        }
+        baseline = topological_sort_schemas(before, "#/definitions/")
+        naive = topological_sort_schemas(after, "#/definitions/")
+        stable = topological_sort_schemas(
+            after, "#/definitions/", frozenset({"PositionDisplayFields"})
+        )
+        assert baseline == ["PositionData", "Later"]
+        assert naive.index("Later") < naive.index("PositionData")
+        assert [name for name in stable if name != "PositionDisplayFields"] == baseline
+
+    def test_ignore_refs_keeps_other_dependencies(self) -> None:
+        """Ignored refs do not drop the remaining edges.
+
+        Given: a schema that references the display component and another
+        schema,
+        When: only the display reference is ignored,
+        Then: the other dependency is still ordered first.
+        """
+        schemas = {
+            "PositionData": {
+                "allOf": [
+                    {"$ref": "#/definitions/PositionDisplayFields"},
+                    {"$ref": "#/definitions/Alpha"},
+                ]
+            },
+            "Alpha": {"type": "string"},
+            "PositionDisplayFields": {"type": "object"},
+        }
+        result = topological_sort_schemas(
+            schemas, "#/definitions/", frozenset({"PositionDisplayFields"})
+        )
+        assert result.index("Alpha") < result.index("PositionData")
 
 
 class TestGenerateZodWs:
@@ -2177,6 +3008,33 @@ class TestGenerateEntityInterface:
         result = "\n".join(lines)
         assert "type:" not in result
         assert "data:" in result
+
+    def test_flattens_allof_shared_fields_after_payload(self) -> None:
+        """AllOf refs stay flat on the entity and follow the payload fields.
+
+        Given: an entity schema composed of a shared component and its own properties,
+        When: the interface is generated,
+        Then: both field sets are present and the shared fields come last.
+        """
+        schema = {
+            "allOf": [
+                {"$ref": "#/definitions/PositionDisplayFields"},
+                {
+                    "type": "object",
+                    "properties": {"quantity": {"type": "number"}},
+                    "required": ["quantity"],
+                },
+            ]
+        }
+        definitions = {
+            "PositionDisplayFields": {
+                "type": "object",
+                "properties": {"is_dust": {"type": "boolean"}},
+            }
+        }
+        lines = generate_entity_interface("Position", schema, all_schemas=definitions)
+        result = "\n".join(lines)
+        assert result.index("quantity: number") < result.index("isDust?: boolean")
 
 
 class TestDeriveEntityName:

@@ -2732,6 +2732,30 @@ class InstrumentValuationMetadataRow(TypedDict):
     spec: InstrumentSpecRow | None
 
 
+class PositionDisplayFactRow(TypedDict):
+    """Batched spec columns used to classify position dust.
+
+    One row is the active instrument identity plus the spec columns the
+    dust classifier needs. Spec columns are null when the instrument has
+    no active specification. Observation spans are not part of this read.
+    """
+
+    instrument_public_id: str
+    exchange: str
+    base: str
+    quote: str | None
+    lot_size: float | None
+    tick_size: float | None
+    min_order_size: float | None
+    contract_size: Decimal | None
+    quantity_unit: str | None
+    native_order_quantity_unit: str | None
+    contract_payoff_model: str | None
+    contract_value_currency: str | None
+    settlement_currency: str | None
+    instrument_kind: str | None
+
+
 class UsdFxSnapshotCandidateRow(TypedDict):
     """Current forex identity and original direct or inverse USD price evidence."""
 

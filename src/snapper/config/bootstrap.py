@@ -47,6 +47,7 @@ Example:
         TRADE_COMMAND_DISPATCH_TTL_S=30.0
 """
 
+from decimal import Decimal
 from typing import Any
 from typing import Self
 from urllib.parse import urlparse
@@ -64,6 +65,7 @@ __all__ = ["BootstrapSettingsLoader"]
 
 
 DEFAULT_MASTER_PASSWORD = "snapper_default_master_password_v1"
+DEFAULT_POSITION_DUST_NOTIONAL_THRESHOLD = Decimal("0.50")
 DEVELOPMENT_ENVIRONMENTS = frozenset({"development", "dev", "test", "testing", "ci"})
 PRODUCTION_ENVIRONMENTS = frozenset({"production", "prod", "staging"})
 SUPPORTED_ENVIRONMENTS = DEVELOPMENT_ENVIRONMENTS | PRODUCTION_ENVIRONMENTS
@@ -190,6 +192,10 @@ class BootstrapSettingsLoader(BaseSettings):
         awaiting_target_stale_threshold_s: Age in seconds after which
             a held ``awaiting_target`` cancel command is flagged stale
             by the periodic reconciler check and health heartbeat.
+        position_dust_notional_threshold: Quote-currency notional below
+            which a position is dust, as a finite non-negative decimal.
+            Default ``0.50``. A position is also dust when its lot-rounded
+            absolute quantity is below the venue minimum order size.
     """
 
     model_config = SettingsConfigDict(
@@ -292,6 +298,17 @@ class BootstrapSettingsLoader(BaseSettings):
         allow_inf_nan=False,
         alias="AWAITING_TARGET_STALE_THRESHOLD_S",
     )
+    position_dust_notional_threshold: Decimal = Field(
+        default=DEFAULT_POSITION_DUST_NOTIONAL_THRESHOLD,
+        alias="POSITION_DUST_NOTIONAL_THRESHOLD",
+        description=(
+            "USD notional below which a position is dust. Quote notionals "
+            "are converted with the portfolio FX candles; a missing rate "
+            "skips this rule. The quantity rule still applies when this "
+            "threshold is zero. An exact zero quantity is not dust. A "
+            "non-zero quantity that lot-rounds to zero is dust."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -307,6 +324,26 @@ class BootstrapSettingsLoader(BaseSettings):
         """
         validate_env_file()
         return data
+
+    @field_validator("position_dust_notional_threshold")
+    @classmethod
+    def _validate_position_dust_notional_threshold(cls, value: Decimal) -> Decimal:
+        """Reject a non-finite or negative dust notional threshold.
+
+        Args:
+            value: Parsed threshold in USD.
+
+        Returns:
+            The accepted threshold.
+
+        Raises:
+            ValueError: When the threshold is not a finite, non-negative decimal.
+        """
+        if not value.is_finite() or value < 0:
+            raise ValueError(
+                "POSITION_DUST_NOTIONAL_THRESHOLD must be a finite, non-negative decimal"
+            )
+        return value
 
     @field_validator("snapper_env")
     @classmethod
