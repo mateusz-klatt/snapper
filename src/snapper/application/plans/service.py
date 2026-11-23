@@ -942,7 +942,7 @@ class PlanExecutorService(RegisterableProcess):
     async def _stranded_cancel_pending_state(
         self, child_client_order_id: str, now: datetime
     ) -> tuple[bool, TradeCommandRow | None]:
-        """Separate healthy pending cancels from hydratable unresolved rows.
+        """Separate healthy pending cancels from hydratable awaiting-target rows.
 
         Args:
             child_client_order_id: Child whose cancel commands are inspected.
@@ -961,9 +961,7 @@ class PlanExecutorService(RegisterableProcess):
         )
         if pending is None:
             return False, None
-        unresolved = (
-            pending["status"] == TradeCommandStatusEnum.CREATED and not pending["exchange_order_id"]
-        )
+        unresolved = pending["status"] == TradeCommandStatusEnum.AWAITING_TARGET
         return not unresolved, pending if unresolved else None
 
     async def _hydrate_unresolved_cancel(
@@ -973,12 +971,12 @@ class PlanExecutorService(RegisterableProcess):
         cancel: TradeCommandRow,
         exchange_order_id: str,
     ) -> None:
-        """CAS-hydrate a CREATED cancel without reverting a dispatch winner.
+        """CAS-hydrate an AWAITING_TARGET cancel to CREATED once venue id resolves.
 
         Args:
             plan: Parent cancel-requested plan.
             child_client_order_id: Child whose cancel is hydrated.
-            cancel: Unresolved CREATED cancel row.
+            cancel: Unresolved AWAITING_TARGET cancel row.
             exchange_order_id: Newly resolved venue identity.
         """
         try:
@@ -986,7 +984,7 @@ class PlanExecutorService(RegisterableProcess):
                 SQLAlchemyRepository, self.repository
             ).advance_trade_command_lifecycle(
                 public_id=cancel["public_id"],
-                expected_status=TradeCommandStatusEnum.CREATED,
+                expected_status=TradeCommandStatusEnum.AWAITING_TARGET,
                 new_status=TradeCommandStatusEnum.CREATED,
                 bus_time=datetime.now(UTC),
                 session_id=self.tracker.session_id,
@@ -1003,7 +1001,7 @@ class PlanExecutorService(RegisterableProcess):
             return
         if not hydrated:
             logger.info(
-                "PlanExecutorService: cancel hydration lost dispatch race for plan {} child {}",
+                "PlanExecutorService: cancel hydration lost status race for plan {} child {}",
                 plan["public_id"],
                 child_client_order_id,
             )
@@ -1092,7 +1090,11 @@ class PlanExecutorService(RegisterableProcess):
             "price": params.get("price"),
             "leverage": params.get("leverage"),
             "reduce_only": False,
-            "status": TradeCommandStatusEnum.CREATED,
+            "status": (
+                TradeCommandStatusEnum.CREATED
+                if exchange_order_id
+                else TradeCommandStatusEnum.AWAITING_TARGET
+            ),
             "created_at": now,
             "correlation_id": plan["public_id"],
             "session_id": session_id,

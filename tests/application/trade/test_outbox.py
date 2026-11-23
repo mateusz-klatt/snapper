@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
@@ -14,6 +15,8 @@ from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.core.command_material import TradeCommandMaterialChangedError
 from snapper.core.types import TradeCommandStatusEnum
+from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import TradeCommandRow
 
 
@@ -177,48 +180,165 @@ async def test_dispatch_holds_unresolved_cancel_without_status_mutation() -> Non
     repo.update_trade_command_status.assert_not_awaited()
 
 
+def _make_insert_row(
+    client_order_id: str,
+    command_type: str,
+    status: str,
+    offset_seconds: int,
+    exchange_order_id: str | None = None,
+) -> TradeCommandInsertRow:
+    """Build a minimal TradeCommandInsertRow for SQLite outbox tests."""
+    created_at = datetime(2026, 4, 10, 12, 0, tzinfo=UTC) + timedelta(seconds=offset_seconds)
+    return {
+        "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+        "command_type": command_type,
+        "shard_key": "kraken.BTC-USD.live",
+        "exchange": "kraken",
+        "instrument": "BTC-USD",
+        "mode": "live",
+        "strategy_id": "engine-buy",
+        "client_order_id": client_order_id,
+        "venue_client_id": f"v{client_order_id}",
+        "side": "buy",
+        "order_type": "market",
+        "quantity": 0.5,
+        "price": None,
+        "status": status,
+        "exchange_order_id": exchange_order_id,
+        "created_at": created_at,
+        "correlation_id": f"corr-{client_order_id}",
+        "session_id": "s1",
+        "sequence_id": offset_seconds + 1,
+        "timestamp": created_at,
+    }
+
+
 @pytest.mark.asyncio
-async def test_dispatch_pages_past_held_cancels_in_same_tick() -> None:
-    """Prevent unresolved cancels from starving later commands at the batch head.
+async def test_dispatch_skips_awaiting_target_cancels_without_paging(
+    tmp_path: Path,
+) -> None:
+    """Held awaiting_target cancels never enter single-page outbox fetches.
 
-    Given: Eleven held id-less cancels before one create and one identified cancel,
+    Given: Eleven held awaiting_target cancels inserted before one created submit
+        and one created id-bearing cancel in SQLite,
     When: One outbox tick runs with batch size ten,
-    Then: Both later commands publish and are marked dispatched in that tick.
+    Then: get_undispatched_commands runs once without offset paging, both later
+        commands dispatch in the same tick, and all held rows remain awaiting_target.
     """
-    held: list[TradeCommandRow] = []
-    for index in range(11):
-        row = _make_cmd_row(f"held-{index}")
-        row["command_type"] = "cancel"
-        row["exchange_order_id"] = None
-        held.append(row)
-    create = _make_cmd_row("create-later")
-    identified = _make_cmd_row("cancel-identified")
-    identified["command_type"] = "cancel"
-    identified["exchange_order_id"] = "ex-identified"
-    rows = [*held, create, identified]
-    repo = AsyncMock()
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'outbox_held.db'}")
+    await repo.create_all()
+    try:
+        held_cids: list[str] = []
+        for index in range(11):
+            cid = f"cid-held-{index}"
+            held_cids.append(cid)
+            await repo.insert_trade_command(
+                _make_insert_row(
+                    cid,
+                    "cancel",
+                    TradeCommandStatusEnum.AWAITING_TARGET.value,
+                    index,
+                )
+            )
+        await repo.insert_trade_command(
+            _make_insert_row(
+                "cid-create-later",
+                "create",
+                TradeCommandStatusEnum.CREATED.value,
+                15,
+            )
+        )
+        await repo.insert_trade_command(
+            _make_insert_row(
+                "cid-cancel-identified",
+                "cancel",
+                TradeCommandStatusEnum.CREATED.value,
+                16,
+                "ex-identified",
+            )
+        )
 
-    async def _get_commands(
-        as_of: datetime, limit: int = 10, offset: int = 0
-    ) -> list[TradeCommandRow]:
-        return rows[offset : offset + limit]
+        orig_get = repo.get_undispatched_commands
+        get_spy = AsyncMock(side_effect=orig_get)
+        repo.get_undispatched_commands = get_spy
+        published: list[str] = []
 
-    repo.get_undispatched_commands = AsyncMock(side_effect=_get_commands)
-    repo.bulk_dispatch_trade_commands = AsyncMock(return_value=2)
-    published: list[str] = []
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if cmd["command_type"] == "cancel" and not cmd["exchange_order_id"]:
+                raise CancelTargetUnresolvedError("unresolved")
+            published.append(cmd["client_order_id"])
 
-    async def _publish(cmd: TradeCommandRow) -> None:
-        if cmd["command_type"] == "cancel" and not cmd["exchange_order_id"]:
-            raise CancelTargetUnresolvedError("unresolved")
-        published.append(cmd["public_id"])
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=_publish, batch_size=10)
+        await dispatcher._dispatch_batch()
 
-    dispatcher = OutboxDispatcher(repository=repo, publish_fn=_publish, batch_size=10)
+        assert get_spy.await_count == 1
+        assert get_spy.await_args is not None
+        assert "offset" not in get_spy.await_args.kwargs
+        assert get_spy.await_args.kwargs["limit"] == 10
+        assert published == ["cid-create-later", "cid-cancel-identified"]
 
-    await dispatcher._dispatch_batch()
+        for cid in held_cids:
+            row = await repo.get_pending_cancel_command_for_client_order_id(cid, datetime.now(UTC))
+            assert row is not None
+            assert row["status"] == TradeCommandStatusEnum.AWAITING_TARGET.value
+        assert await orig_get(as_of=datetime.now(UTC), limit=20) == []
+    finally:
+        await repo.engine.dispose()
 
-    assert published == ["create-later", "cancel-identified"]
-    updates = repo.bulk_dispatch_trade_commands.await_args.args[0]
-    assert [update["public_id"] for update in updates] == published
+
+@pytest.mark.asyncio
+async def test_held_awaiting_target_cancel_hydrates_to_created_then_dispatches(
+    tmp_path: Path,
+) -> None:
+    """Hydrating a held cancel from awaiting_target to created makes it dispatchable.
+
+    Given: An unresolved cancel persisted in awaiting_target status in SQLite,
+    When: One outbox tick runs before hydration, then the row CAS-hydrates to
+        created with an exchange_order_id and another tick runs,
+    Then: The first tick never fetches or publishes it and the second dispatches it.
+    """
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'outbox_hydrate.db'}")
+    await repo.create_all()
+    try:
+        _, cmd_id = await repo.insert_trade_command(
+            _make_insert_row(
+                "cid-hyd-1",
+                "cancel",
+                TradeCommandStatusEnum.AWAITING_TARGET.value,
+                0,
+            )
+        )
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            published.append(cmd["client_order_id"])
+
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=_publish, batch_size=10)
+        await dispatcher._dispatch_batch()
+        assert published == []
+        assert await repo.get_undispatched_commands(as_of=datetime.now(UTC), limit=10) == []
+
+        hydrated = await repo.advance_trade_command_lifecycle(
+            public_id=cmd_id,
+            expected_status=TradeCommandStatusEnum.AWAITING_TARGET.value,
+            new_status=TradeCommandStatusEnum.CREATED.value,
+            bus_time=datetime.now(UTC),
+            session_id="s1",
+            sequence_id=2,
+            exchange_order_id="ex-hydrated-1",
+        )
+        assert hydrated is True
+
+        await dispatcher._dispatch_batch()
+        assert published == ["cid-hyd-1"]
+        updated = await repo.get_pending_cancel_command_for_client_order_id(
+            "cid-hyd-1", datetime.now(UTC)
+        )
+        assert updated is not None
+        assert updated["status"] == TradeCommandStatusEnum.DISPATCHED.value
+        assert updated["exchange_order_id"] == "ex-hydrated-1"
+    finally:
+        await repo.engine.dispose()
 
 
 @pytest.mark.asyncio

@@ -39,7 +39,7 @@ class VenueEventTimeReader(Protocol):
 
 
 class CancelTargetUnresolvedError(RuntimeError):
-    """Hold a cancel in CREATED until durable evidence supplies a venue id."""
+    """Refuse blank-id cancel publish until durable evidence supplies a venue id."""
 
 
 class CancelTargetIdentityReader(Protocol):

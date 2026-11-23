@@ -84,7 +84,6 @@ async def begin_plan_settlement_transaction(
     session: AsyncSession,
     *,
     dialect_name: str,
-    isolation_level: str = "READ COMMITTED",
 ) -> None:
     """Open write serialization or explicit `READ COMMITTED` on a fresh session.
 
@@ -96,7 +95,6 @@ async def begin_plan_settlement_transaction(
     Args:
         session: Fresh SQLAlchemy async session before any query runs.
         dialect_name: Lowercase SQLAlchemy dialect name (`sqlite` or `postgresql`).
-        isolation_level: PostgreSQL isolation level, READ COMMITTED or SERIALIZABLE.
 
     Raises:
         NotImplementedError: When `dialect_name` is neither `sqlite` nor `postgresql`.
@@ -104,9 +102,7 @@ async def begin_plan_settlement_transaction(
     if dialect_name == "sqlite":
         await session.execute(text("BEGIN IMMEDIATE"))
     elif dialect_name == "postgresql":
-        if isolation_level not in ("READ COMMITTED", "SERIALIZABLE"):
-            raise ValueError(f"unsupported PostgreSQL isolation level: {isolation_level}")
-        await session.execute(text(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}"))
+        await session.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
     else:
         raise NotImplementedError(
             f"plan settlement transaction not implemented for dialect={dialect_name}"

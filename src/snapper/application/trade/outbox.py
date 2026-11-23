@@ -28,7 +28,6 @@ PublishFn = Callable[[TradeCommandRow], Awaitable[None]]
 ExpireFn = Callable[[TradeCommandRow], Awaitable[None]]
 
 _EXPIRABLE_COMMAND_TYPES: tuple[str, ...] = ("create", "submit")
-_DEFAULT_MAX_SCAN_ROWS_PER_TICK = 1000
 """Command types subject to the dispatch TTL.
 
 Cancels (and replaces) are exempt: expiring a stale cancel strands a
@@ -327,7 +326,7 @@ class OutboxDispatcher:
         """Publish or hold one command and return its dispatch update on success.
 
         Args:
-            cmd: Candidate command from the current stable pagination window.
+            cmd: Candidate command from the current undispatched batch.
 
         Returns:
             CREATED-to-DISPATCHED update, or None when held or failed.
@@ -367,37 +366,16 @@ class OutboxDispatcher:
         )
 
     async def _dispatch_batch(self) -> None:
-        """Dispatch a bounded batch while paging past unresolved held cancels.
-
-        Successful rows stay CREATED until the final bulk commit, keeping the
-        offset window stable throughout this tick. The scan cap bounds held-row
-        backlogs while still allowing later creates and identified cancels to run.
-        """
+        """Fetch one batch of undispatched commands, publish, and bulk-dispatch."""
         now = datetime.now(UTC)
+        commands = await self._fetch_owned_batch(now)
+        if not commands:
+            return
         success_updates: list[TradeCommandDispatchUpdate] = []
-        scan_cap = max(
-            self._max_scan_rows or _DEFAULT_MAX_SCAN_ROWS_PER_TICK,
-            self._batch_size,
-        )
-        page_size = max(self._batch_size * 4, 20)
-        scanned = 0
-        while scanned < scan_cap and len(success_updates) < self._batch_size:
-            page = await self._repo.get_undispatched_commands(
-                as_of=now,
-                limit=min(page_size, scan_cap - scanned),
-                offset=scanned,
-            )
-            if not page:
-                break
-            scanned += len(page)
-            for cmd in page:
-                if self._ownership is not None and not self._ownership.owns(cmd["shard_key"]):
-                    continue
-                update = await self._dispatch_command(cmd)
-                if update is not None:
-                    success_updates.append(update)
-                if len(success_updates) >= self._batch_size:
-                    break
+        for cmd in commands:
+            update = await self._dispatch_command(cmd)
+            if update is not None:
+                success_updates.append(update)
         if not success_updates:
             return
         try:

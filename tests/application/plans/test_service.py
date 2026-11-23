@@ -27,9 +27,12 @@ from snapper.application.plans.settlement import PlanSettlementCandidate
 from snapper.application.plans.settlement import PlanSettlementSkipped
 from snapper.application.plans.settlement import settle_single_recovered_plan
 from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
+from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import TradeService
+from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.models import ExecutionPlanCheckpoint
+from snapper.data.models import TradeCommand
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import ExecutionPlanRow
@@ -4934,17 +4937,85 @@ class TestStrandedCancelNeverPlacedTarget:
         finally:
             await repo.engine.dispose()
 
+    async def _run_hydration_failure_round(self, repo: SQLAlchemyRepository) -> None:
+        """Simulate a transient hydration failure leaving cancel in awaiting_target."""
+        original_hydrate = repo.advance_trade_command_lifecycle
+
+        async def _hydration_error(**_kwargs: object) -> None:
+            raise RuntimeError("hydration failed")
+
+        repo.advance_trade_command_lifecycle = _hydration_error
+        try:
+            await PlanExecutorService()._recover_plans()
+        finally:
+            repo.advance_trade_command_lifecycle = original_hydrate
+
+    async def _count_cancel_public_ids(
+        self, repo: SQLAlchemyRepository, client_order_id: str
+    ) -> int:
+        """Return distinct trade_commands public_ids of type cancel for cid."""
+        async with repo.session() as session:
+            count = (
+                await session.execute(
+                    select(func.count(func.distinct(TradeCommand.public_id))).where(
+                        TradeCommand.client_order_id == client_order_id,
+                        TradeCommand.command_type == "cancel",
+                    )
+                )
+            ).scalar_one()
+        return int(count)
+
+    async def _assert_in_place_hydration_and_dispatch(
+        self,
+        repo: SQLAlchemyRepository,
+        coordinator: TraderCoordinator,
+        publisher: AsyncMock,
+        expected_public_id: str,
+    ) -> None:
+        """Verify venue-id arrival hydrates existing row in place and dispatches once."""
+        orig_insert = repo.insert_trade_command
+        insert_spy = AsyncMock(side_effect=orig_insert)
+        repo.insert_trade_command = insert_spy
+        try:
+            await PlanExecutorService()._recover_plans()
+        finally:
+            repo.insert_trade_command = orig_insert
+        assert insert_spy.await_count == 0
+        assert await self._count_cancel_public_ids(repo, "cid-1") == 1
+
+        hydrated = await repo.get_pending_cancel_command_for_client_order_id(
+            "cid-1", datetime.now(UTC)
+        )
+        assert hydrated is not None
+        assert hydrated["public_id"] == expected_public_id
+        assert hydrated["status"] == TradeCommandStatusEnum.CREATED.value
+        assert hydrated["exchange_order_id"] == "ex-command-only"
+        assert await repo.has_pending_cancel_command("cid-1", datetime.now(UTC)) is True
+        undispatched = await repo.get_undispatched_commands(as_of=datetime.now(UTC), limit=10)
+        assert [row["public_id"] for row in undispatched] == [expected_public_id]
+
+        dispatcher = OutboxDispatcher(
+            repository=repo, publish_fn=coordinator._outbox_publish, batch_size=10
+        )
+        await dispatcher._dispatch_batch()
+        assert publisher.send.await_count == 1
+        assert publisher.send.await_args is not None
+        sent = publisher.send.await_args.args[1]
+        assert sent.exchange_order_id == "ex-command-only"
+        assert await self._count_cancel_public_ids(repo, "cid-1") == 1
+
     @pytest.mark.asyncio
     @patch("snapper.application.plans.service.get_settings")
     @patch("snapper.application.plans.service.get_repository")
     async def test_idless_cancel_is_held_then_hydrated_without_duplicate(
         self, mock_repo_fn: MagicMock, mock_settings: MagicMock, tmp_path: Path
     ) -> None:
-        """Hold an unresolved cancel and later hydrate that same row for dispatch.
+        """Hold an unresolved cancel in awaiting_target and hydrate it in place.
 
         Given a non-safe child with no venue id,
         When recovery and trader dispatch run before and after a command-only id arrives,
-        Then no blank frame is sent, dedup is nonblocking, and the same row is hydrated.
+        Then dedup blocks duplicate held inserts, the existing awaiting_target row is
+            CAS-hydrated in place without inserting a second cancel, and it dispatches.
         """
         repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'held_cancel.db'}")
         await repo.create_all()
@@ -4961,20 +5032,25 @@ class TestStrandedCancelNeverPlacedTarget:
                     )
                 ],
             )
+            publisher = AsyncMock()
             coordinator = TraderCoordinator.__new__(TraderCoordinator)
             coordinator.repository = repo
-            coordinator.msg_publisher = AsyncMock()
+            coordinator.msg_publisher = publisher
 
             await PlanExecutorService()._recover_plans()
 
             pending = await repo.get_pending_cancel_command_for_client_order_id(
                 "cid-1", datetime.now(UTC)
             )
-            assert pending is not None and pending["exchange_order_id"] is None
-            assert await repo.has_pending_cancel_command("cid-1", datetime.now(UTC)) is False
+            assert pending is not None
+            assert pending["status"] == TradeCommandStatusEnum.AWAITING_TARGET.value
+            assert pending["exchange_order_id"] is None
+            assert await self._count_cancel_public_ids(repo, "cid-1") == 1
+            assert await repo.get_undispatched_commands(as_of=datetime.now(UTC), limit=10) == []
+            assert await repo.has_pending_cancel_command("cid-1", datetime.now(UTC)) is True
             with pytest.raises(CancelTargetUnresolvedError):
                 await coordinator._outbox_publish(pending)
-            coordinator.msg_publisher.send.assert_not_awaited()
+            publisher.send.assert_not_awaited()
 
             await PlanExecutorService()._recover_plans()
             still_pending = await repo.get_pending_cancel_command_for_client_order_id(
@@ -4982,6 +5058,8 @@ class TestStrandedCancelNeverPlacedTarget:
             )
             assert still_pending is not None
             assert still_pending["public_id"] == pending["public_id"]
+            assert still_pending["status"] == TradeCommandStatusEnum.AWAITING_TARGET.value
+            assert await self._count_cancel_public_ids(repo, "cid-1") == 1
 
             create = await repo.get_active_create_command_by_client_order_id("cid-1", "kraken")
             assert create is not None
@@ -4994,34 +5072,18 @@ class TestStrandedCancelNeverPlacedTarget:
                 sequence_id=60,
                 exchange_order_id="ex-command-only",
             )
-            original_hydrate = repo.advance_trade_command_lifecycle
-
-            async def _hydration_error(**_kwargs: object) -> None:
-                raise RuntimeError("hydration failed")
-
-            repo.advance_trade_command_lifecycle = _hydration_error
-            try:
-                await PlanExecutorService()._recover_plans()
-            finally:
-                repo.advance_trade_command_lifecycle = original_hydrate
+            await self._run_hydration_failure_round(repo)
 
             unresolved = await repo.get_pending_cancel_command_for_client_order_id(
                 "cid-1", datetime.now(UTC)
             )
-            assert unresolved is not None and unresolved["exchange_order_id"] is None
+            assert unresolved is not None
+            assert unresolved["status"] == TradeCommandStatusEnum.AWAITING_TARGET.value
+            assert unresolved["exchange_order_id"] is None
 
-            await PlanExecutorService()._recover_plans()
-
-            hydrated = await repo.get_pending_cancel_command_for_client_order_id(
-                "cid-1", datetime.now(UTC)
+            await self._assert_in_place_hydration_and_dispatch(
+                repo, coordinator, publisher, pending["public_id"]
             )
-            assert hydrated is not None
-            assert hydrated["public_id"] == pending["public_id"]
-            assert hydrated["exchange_order_id"] == "ex-command-only"
-            assert await repo.has_pending_cancel_command("cid-1", datetime.now(UTC)) is True
-            await coordinator._outbox_publish(hydrated)
-            sent = coordinator.msg_publisher.send.await_args.args[1]
-            assert sent.exchange_order_id == "ex-command-only"
         finally:
             await repo.engine.dispose()
 

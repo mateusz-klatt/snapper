@@ -229,7 +229,8 @@ class BacktestRunStatusEnum(StrEnum):
 class TradeCommandStatusEnum(StrEnum):
     """Unified FSM status for TradeCommand DB rows + in-memory CommandState.
 
-    Covers both the durable-command outbox lifecycle (``created`` →
+    Covers both the durable-command outbox lifecycle (``awaiting_target``
+    for held id-less cancels waiting on a venue order id, ``created`` →
     ``dispatched`` / ``direct_dispatched``) and the venue-side
     transitions observed by ``TradeService`` in the in-memory
     ``CommandState`` projection (``accepted``, ``filled``,
@@ -237,11 +238,13 @@ class TradeCommandStatusEnum(StrEnum):
     ``failed``). A single enum is justified because the same command
     object's status field carries values from both domains across its
     lifetime: the engine inserts a ``TradeCommand`` row with
-    ``status=created``, the outbox transitions it to ``dispatched``,
+    ``status=created`` (or ``awaiting_target`` for an unresolved stranded
+    cancel), the outbox transitions ``created`` to ``dispatched``,
     and the venue events subsequently update the in-memory projection
     to the terminal status.
     """
 
+    AWAITING_TARGET = "awaiting_target"
     CREATED = "created"
     DISPATCHED = "dispatched"
     DIRECT_DISPATCHED = "direct_dispatched"

@@ -13,14 +13,19 @@ from unittest.mock import MagicMock
 import pytest
 from loguru import logger
 
+from snapper.application.notify.rules.critical_system_error import CriticalSystemErrorRule
 from snapper.application.trade import reconciler as reconciler_module
+from snapper.application.trade.reconciler import DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.reconciler import fold_lifecycle_advance
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
+from snapper.core.types import HealthStatusEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
+from snapper.messaging.schemas.data import HeartbeatData
+from snapper.messaging.topics.validation import validate_topic
 
 
 def _make_cmd(**overrides: Any) -> TradeCommandRow:
@@ -1221,15 +1226,16 @@ class TestCancelRetirement:
         repo.advance_trade_command_lifecycle.assert_awaited_once()
         assert report_stale.call_count == 1
 
+    @pytest.mark.parametrize("status", ["created", "awaiting_target"])
     @pytest.mark.asyncio
-    async def test_created_cancel_is_untouched(self) -> None:
-        """A created cancel stays the outbox's territory.
+    async def test_created_cancel_is_untouched(self, status: str) -> None:
+        """Pre-dispatch cancels (created and awaiting_target) stay untouched.
 
-        Given: an over-age cancel still in created status,
+        Given: an over-age cancel still in created or awaiting_target status,
         When: one reconciliation cycle runs,
         Then: the retirement pass reads nothing and advances nothing.
         """
-        repo = _retirement_repo([_cancel_cmd(status="created")], None, {})
+        repo = _retirement_repo([_cancel_cmd(status=status)], None, {})
         recon, _ = _make_loop(repo)
         await recon._reconcile_cycle()
         repo.get_active_create_command_by_client_order_id.assert_not_awaited()
@@ -1278,3 +1284,210 @@ class TestCancelRetirement:
         assert advance is not None
         assert advance.status == TradeCommandStatusEnum.CANCELLED
         assert advance.terminal_at == received
+
+
+def _make_heartbeat_publisher() -> tuple[MagicMock, list[tuple[str, HeartbeatData]]]:
+    """Create a typed publisher stub recording emitted heartbeat topics and frames."""
+    sent: list[tuple[str, HeartbeatData]] = []
+    seq = 0
+
+    def _next_sequence(_stream: str) -> int:
+        nonlocal seq
+        seq += 1
+        return seq
+
+    tracker = MagicMock()
+    tracker.session_id = "sess-hb"
+    tracker.next_sequence = MagicMock(side_effect=_next_sequence)
+
+    async def _send(topic: str, frame: HeartbeatData) -> None:
+        sent.append((topic, frame))
+
+    publisher = MagicMock()
+    publisher.tracker = tracker
+    publisher.send = AsyncMock(side_effect=_send)
+    return publisher, sent
+
+
+def _awaiting_target_cmd(public_id: str, age_seconds: float) -> TradeCommandRow:
+    """Build an awaiting_target cancel row aged by ``age_seconds``."""
+    return _make_cmd(
+        public_id=public_id,
+        command_type="cancel",
+        status=TradeCommandStatusEnum.AWAITING_TARGET.value,
+        created_at=datetime.now(UTC) - timedelta(seconds=age_seconds),
+        plan_public_id="plan-1",
+    )
+
+
+class TestStaleAwaitingTargetMonitoring:
+    """Periodic visibility, episode dedup, metrics, and health heartbeats for stuck holds."""
+
+    def test_configure_held_cancel_monitor_validates_positive_threshold(self) -> None:
+        """Threshold must be finite and strictly positive.
+
+        Given: A ReconciliationLoop instance,
+        When: ``configure_held_cancel_monitor`` receives zero, negative, or NaN values,
+        Then: ``ValueError`` is raised.
+        """
+        recon, _ = _make_loop(_make_repo())
+        assert recon._awaiting_target_stale_threshold_s == DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
+        for bad in (0.0, -5.0, float("nan"), float("inf")):
+            with pytest.raises(ValueError, match="finite and positive"):
+                recon.configure_held_cancel_monitor(stale_threshold_s=bad)
+
+    @pytest.mark.asyncio
+    async def test_fresh_awaiting_target_is_silent_and_publishes_healthy_heartbeat(
+        self, loguru_warnings: list[str]
+    ) -> None:
+        """Held cancels younger than threshold do not trigger generic stale WARNs.
+
+        Given: An awaiting_target cancel aged 300s (older than 3x interval, below 900s),
+        When: Multiple reconciliation cycles run with a heartbeat publisher,
+        Then: Zero WARNING logs are emitted, stale count is 0, and heartbeat is HEALTHY.
+        """
+        cmd = _awaiting_target_cmd("cancel-fresh", age_seconds=300.0)
+        repo = _make_repo(cmds=[cmd])
+        trade_svc = TradeService()
+        publisher, sent = _make_heartbeat_publisher()
+        recon = ReconciliationLoop("kraken", repo, trade_svc).configure_held_cancel_monitor(
+            stale_threshold_s=900.0,
+            msg_publisher=publisher,
+        )
+
+        await recon._reconcile_cycle()
+
+        assert [msg for msg in loguru_warnings if msg.startswith("WARNING|")] == []
+        assert recon.stale_awaiting_target_count == 0
+        assert trade_svc.stale_awaiting_target_count == 0
+        assert trade_svc.stale_awaiting_target_counts == {"kraken": 0}
+        assert len(sent) == 1
+        topic, frame = sent[0]
+        valid, err = validate_topic(topic)
+        assert valid, err
+        assert topic == "system.heartbeats.reconciler.kraken"
+        assert frame.component == "reconciler.kraken"
+        assert frame.status == HealthStatusEnum.HEALTHY
+        assert frame.meta["stale_awaiting_target_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_stale_awaiting_target_warns_once_per_row_per_episode_and_closes(
+        self, loguru_warnings: list[str]
+    ) -> None:
+        """Stale held cancels emit one WARNING per row per episode and reopen cleanly.
+
+        Given: Two awaiting_target cancels older than the 900s threshold,
+        When: Cycle 1 and 2 run while stuck, cycle 3 sees them resolved, and cycle 4 sees
+            the first row enter a fresh stale hold episode,
+        Then: Cycle 1 logs 2 WARNINGs (one per row), cycle 2 logs 0 more, cycle 3 drops
+            metric to 0 with HEALTHY heartbeat, and cycle 4 logs 1 WARNING for the new episode.
+        """
+        stale_one = _awaiting_target_cmd("cancel-stuck-1", age_seconds=950.0)
+        stale_two = _awaiting_target_cmd("cancel-stuck-2", age_seconds=1000.0)
+        repo = _make_repo(cmds=[stale_one, stale_two])
+        trade_svc = TradeService()
+        publisher, sent = _make_heartbeat_publisher()
+        recon = ReconciliationLoop("kraken", repo, trade_svc).configure_held_cancel_monitor(
+            stale_threshold_s=900.0,
+            msg_publisher=publisher,
+        )
+
+        await recon._reconcile_cycle()
+        warns = [m for m in loguru_warnings if m.startswith("WARNING|")]
+        assert len(warns) == 2
+        assert any("cancel-stuck-1" in m for m in warns)
+        assert any("cancel-stuck-2" in m for m in warns)
+        assert recon.stale_awaiting_target_count == 2
+        assert trade_svc.stale_awaiting_target_count == 2
+        assert sent[-1][1].status == HealthStatusEnum.WARNING
+        assert sent[-1][1].meta["stale_awaiting_target_count"] == 2
+
+        await recon._reconcile_cycle()
+        assert len([m for m in loguru_warnings if m.startswith("WARNING|")]) == 2
+
+        repo.get_active_commands_for_exchange = AsyncMock(return_value=[])
+        await recon._reconcile_cycle()
+        assert recon.stale_awaiting_target_count == 0
+        assert trade_svc.stale_awaiting_target_count == 0
+        assert sent[-1][1].status == HealthStatusEnum.HEALTHY
+
+        repo.get_active_commands_for_exchange = AsyncMock(return_value=[stale_one])
+        await recon._reconcile_cycle()
+        warns_after_reopen = [m for m in loguru_warnings if m.startswith("WARNING|")]
+        assert len(warns_after_reopen) == 3
+
+    @pytest.mark.asyncio
+    async def test_reconciler_heartbeat_feeds_critical_system_error_rule_without_flood(
+        self,
+    ) -> None:
+        """Three WARNING ticks open one episode alert and three HEALTHY ticks close it.
+
+        Given: A stale awaiting_target cancel driving reconciler heartbeats into
+            ``CriticalSystemErrorRule``,
+        When: Four WARNING cycles execute followed by three HEALTHY cycles,
+        Then: Cycle 3 raises one deduplicated alert, cycle 4 stays silent, and cycles
+            5-7 close cleanly.
+        """
+        stale = _awaiting_target_cmd("cancel-alert-1", age_seconds=1200.0)
+        repo = _make_repo(cmds=[stale])
+        publisher, sent = _make_heartbeat_publisher()
+        recon = ReconciliationLoop("kraken", repo, TradeService()).configure_held_cancel_monitor(
+            stale_threshold_s=900.0,
+            msg_publisher=publisher,
+        )
+        notify_repo = AsyncMock()
+        notify_repo.list_users_with_permission = AsyncMock(return_value=["admin-1"])
+        notify_repo.list_alert_events_with_dedup_key = AsyncMock(return_value=[])
+        rule = CriticalSystemErrorRule()
+        t0 = datetime.now(UTC)
+
+        alerts: list[object] = []
+        for idx in range(4):
+            await recon._reconcile_cycle()
+            topic, frame = sent[-1]
+            rows = await rule.evaluate(
+                topic,
+                frame.to_json().encode("utf-8"),
+                notify_repo,
+                t0 + timedelta(seconds=60 * idx),
+            )
+            alerts.extend(rows)
+
+        assert len(alerts) == 1
+
+        repo.get_active_commands_for_exchange = AsyncMock(return_value=[])
+        for idx in range(3):
+            await recon._reconcile_cycle()
+            topic, frame = sent[-1]
+            rows = await rule.evaluate(
+                topic,
+                frame.to_json().encode("utf-8"),
+                notify_repo,
+                t0 + timedelta(seconds=240 + 60 * idx),
+            )
+            assert rows == []
+        assert rule._episode_closed(("reconciler", "kraken")) is True
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_publish_failure_does_not_fail_reconcile_cycle(self) -> None:
+        """A failing heartbeat send logs without tripping shard reconciliation failures.
+
+        Given: A ReconciliationLoop whose heartbeat publisher raises on send,
+        When: One reconciliation cycle runs,
+        Then: ``record_recon_failure`` is not called.
+        """
+        cmd = _awaiting_target_cmd("cancel-err-hb", age_seconds=950.0)
+        repo = _make_repo(cmds=[cmd])
+        trade_svc = TradeService()
+        publisher = MagicMock()
+        publisher.tracker = MagicMock(session_id="s-err", next_sequence=MagicMock(return_value=1))
+        publisher.send = AsyncMock(side_effect=RuntimeError("zmq down"))
+        recon = ReconciliationLoop("kraken", repo, trade_svc).configure_held_cancel_monitor(
+            stale_threshold_s=900.0,
+            msg_publisher=publisher,
+        )
+
+        await recon._reconcile_cycle()
+
+        assert recon.stale_awaiting_target_count == 1
+        assert trade_svc._shards["kraken.BTC-USD.live"].recon_failure_count == 0

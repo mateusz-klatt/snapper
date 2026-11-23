@@ -31,20 +31,34 @@ Stale reporting policy:
 """
 
 import asyncio
+import math
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
+from typing import Final
+from typing import Protocol
+from typing import Self
+from uuid import uuid7
 
 from loguru import logger
 
 from snapper.application.trade.cancel_target import target_end_time
 from snapper.application.trade.command_request import parse_shard_key
 from snapper.application.trade.trade_service import TradeService
+from snapper.core.json_types import JsonObject
+from snapper.core.json_types import JsonValue
 from snapper.core.partitioning import ShardOwnership
+from snapper.core.types import HealthStatusEnum
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import VenueEventRow
+from snapper.messaging.schemas.data import HeartbeatData
+from snapper.messaging.topics.builders import heartbeat_topic
+
+DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S: Final[float] = 900.0
+RECONCILER_HEARTBEAT_COMPONENT: Final[str] = "reconciler"
+_MAX_HEARTBEAT_STALE_IDS: Final[int] = 20
 
 _FOLD_COMMAND_TYPES: tuple[str, ...] = ("create", "submit")
 _FOLD_SOURCE_STATUSES: frozenset[str] = frozenset(
@@ -56,6 +70,7 @@ _FOLD_SOURCE_STATUSES: frozenset[str] = frozenset(
     }
 )
 _STATUS_RANK: dict[str, int] = {
+    TradeCommandStatusEnum.AWAITING_TARGET: 0,
     TradeCommandStatusEnum.CREATED: 0,
     TradeCommandStatusEnum.DISPATCHED: 1,
     TradeCommandStatusEnum.DIRECT_DISPATCHED: 1,
@@ -83,7 +98,7 @@ _CANCEL_RETIREMENT_SOURCE_STATUSES: frozenset[str] = frozenset(
         TradeCommandStatusEnum.ACCEPTED,
     }
 )
-"""Cancel statuses the retirement pass may advance; ``created`` stays the outbox's."""
+"""Cancel statuses the retirement pass may advance; pre-dispatch ``created``/``awaiting_target`` are untouched."""
 
 
 @dataclass(frozen=True)
@@ -95,6 +110,28 @@ class LifecycleAdvance:
     exchange_order_id: str | None
     terminal_at: datetime | None
     last_error: str | None
+
+
+class _HeartbeatSequenceTracker(Protocol):
+    """Subset of transport tracker needed for reconciler heartbeats."""
+
+    @property
+    def session_id(self) -> str:
+        """Return the publisher session identifier."""
+
+    def next_sequence(self, stream: str) -> int:
+        """Return the next monotonic transport sequence for a topic."""
+
+
+class _HeartbeatPublisher(Protocol):
+    """Subset of message publisher needed for reconciler heartbeats."""
+
+    @property
+    def tracker(self) -> _HeartbeatSequenceTracker:
+        """Return the publisher's shared sequence tracker."""
+
+    async def send(self, stream_key: str, data: HeartbeatData) -> None:
+        """Publish one complete heartbeat frame."""
 
 
 @dataclass
@@ -349,6 +386,43 @@ class ReconciliationLoop:
         self._ownership = ownership
         self._running = False
         self._last_seen_shards: set[str] = set()
+        self._awaiting_target_stale_threshold_s: float = DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
+        self._msg_publisher: _HeartbeatPublisher | None = None
+        self._stale_held_alerted: set[str] = set()
+        self._stale_awaiting_target_count: int = 0
+        self._heartbeat_sequence: int = 0
+
+    def configure_held_cancel_monitor(
+        self,
+        *,
+        stale_threshold_s: float = DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S,
+        msg_publisher: _HeartbeatPublisher | None = None,
+    ) -> Self:
+        """Configure stale awaiting_target monitoring and optional heartbeat publisher.
+
+        Args:
+            stale_threshold_s: Age in seconds before a held cancel becomes stale.
+            msg_publisher: Optional ZMQ publisher for ``reconciler.{exchange}``
+                health heartbeats.
+
+        Returns:
+            ``self`` for fluent initialization.
+
+        Raises:
+            ValueError: If ``stale_threshold_s`` is not finite and positive.
+        """
+        if not math.isfinite(stale_threshold_s) or stale_threshold_s <= 0.0:
+            raise ValueError(
+                f"stale_threshold_s must be finite and positive, got {stale_threshold_s}"
+            )
+        self._awaiting_target_stale_threshold_s = float(stale_threshold_s)
+        self._msg_publisher = msg_publisher
+        return self
+
+    @property
+    def stale_awaiting_target_count(self) -> int:
+        """Return latest count of stale awaiting_target cancels on this exchange."""
+        return self._stale_awaiting_target_count
 
     async def run(self) -> None:
         """Run the reconciliation loop until cancelled.
@@ -546,8 +620,8 @@ class ReconciliationLoop:
 
         Item G2: a cancel in ``dispatched``, ``direct_dispatched`` or
         ``accepted`` whose create or submit command is terminal with
-        venue evidence leaves its stale state. ``created`` cancels belong
-        to the outbox and are never touched.
+        venue evidence leaves its stale state. Pre-dispatch ``created``
+        and ``awaiting_target`` cancels are never touched.
 
         Args:
             commands: Active commands of this cycle.
@@ -675,12 +749,88 @@ class ReconciliationLoop:
         seen_shards: set[str] = set()
         for cmd in commands:
             seen_shards.add(cmd["shard_key"])
+            if cmd["status"] == TradeCommandStatusEnum.AWAITING_TARGET:
+                continue
             if not self._is_stale(cmd, now):
                 continue
             age = (now - cmd["created_at"]).total_seconds()
             if self._report_stale(cmd, age, self._command_events(cmd, events_by_cid)):
                 stale_count += 1
         return stale_count, seen_shards
+
+    def _check_stale_awaiting_target_cancels(
+        self, commands: list[TradeCommandRow], now: datetime
+    ) -> list[TradeCommandRow]:
+        """Detect stale awaiting_target cancels and log once per row per episode."""
+        threshold = self._awaiting_target_stale_threshold_s
+        stale = [
+            cmd
+            for cmd in commands
+            if cmd["command_type"] == _CANCEL_COMMAND_TYPE
+            and cmd["status"] == TradeCommandStatusEnum.AWAITING_TARGET
+            and (now - cmd["created_at"]).total_seconds() >= threshold
+        ]
+        self._stale_awaiting_target_count = len(stale)
+        self._trade_service.record_stale_awaiting_target_count(self._exchange, len(stale))
+        stale_ids = {cmd["public_id"] for cmd in stale}
+        self._stale_held_alerted.intersection_update(stale_ids)
+        for cmd in stale:
+            public_id = cmd["public_id"]
+            if public_id in self._stale_held_alerted:
+                continue
+            age = (now - cmd["created_at"]).total_seconds()
+            logger.warning(
+                f"ReconciliationLoop[{self._exchange}] stale awaiting_target cancel "
+                f"{public_id} cid={cmd['client_order_id']} plan={cmd.get('plan_public_id')} "
+                f"shard={cmd['shard_key']} age={age:.0f}s threshold={threshold:.0f}s — "
+                "target venue order id unresolved"
+            )
+            self._stale_held_alerted.add(public_id)
+        return stale
+
+    async def _publish_held_cancel_heartbeat(
+        self, stale_held: list[TradeCommandRow], now: datetime
+    ) -> None:
+        """Publish HEALTHY or WARNING component heartbeat for held cancels."""
+        publisher = self._msg_publisher
+        if publisher is None:
+            return
+        topic = heartbeat_topic(RECONCILER_HEARTBEAT_COMPONENT, self._exchange)
+        self._heartbeat_sequence += 1
+        status = HealthStatusEnum.WARNING if stale_held else HealthStatusEnum.HEALTHY
+        lag_ms = (
+            int(max((now - cmd["created_at"]).total_seconds() for cmd in stale_held) * 1000)
+            if stale_held
+            else 0
+        )
+        stale_ids: list[JsonValue] = [
+            cmd["public_id"] for cmd in stale_held[:_MAX_HEARTBEAT_STALE_IDS]
+        ]
+        meta: JsonObject = {
+            "origin": "reconciler",
+            "exchange": self._exchange,
+            "stale_awaiting_target_count": len(stale_held),
+            "threshold_seconds": self._awaiting_target_stale_threshold_s,
+            "stale_command_ids": stale_ids,
+        }
+        try:
+            tracker = publisher.tracker
+            frame = HeartbeatData(
+                public_id=str(uuid7()),
+                timestamp=now,
+                session_id=tracker.session_id,
+                sequence_id=tracker.next_sequence(topic),
+                component=f"{RECONCILER_HEARTBEAT_COMPONENT}.{self._exchange}",
+                sequence=self._heartbeat_sequence,
+                status=status,
+                lag_ms=lag_ms,
+                meta=meta,
+            )
+            await publisher.send(topic, frame)
+        except Exception:
+            logger.exception(
+                f"ReconciliationLoop[{self._exchange}] held-cancel heartbeat publish failed"
+            )
 
     def _log_cycle_result(self, advanced: int, stale_count: int) -> None:
         """Emit reconciliation cycle summary logs."""
@@ -742,6 +892,8 @@ class ReconciliationLoop:
             advanced += await self._resurrect_falsely_rejected(now)
             reportable = [cmd for cmd in active_cmds if cmd["public_id"] not in retired]
             stale_count, seen_shards = self._collect_stale_report(reportable, events_by_cid, now)
+            stale_held = self._check_stale_awaiting_target_cancels(reportable, now)
+            await self._publish_held_cancel_heartbeat(stale_held, now)
             seen_shards.update(
                 cmd["shard_key"] for cmd in active_cmds if cmd["public_id"] in retired
             )

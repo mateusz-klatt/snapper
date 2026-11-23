@@ -1339,6 +1339,38 @@ class TestSystemTopicValidation:
         assert not valid
         assert "exactly 4 segments" in _err
 
+    def test_hierarchical_heartbeat_reconciler_accepts_order_exchanges(self) -> None:
+        """Reconciler heartbeat accepts supported order exchanges.
+
+        Given: A reconciler heartbeat topic for kraken,
+        When: The topic validator runs,
+        Then: Validation passes with an empty error message.
+        """
+        valid, err = validate_topic("system.heartbeats.reconciler.kraken")
+        assert valid
+        assert err == ""
+
+    @pytest.mark.parametrize(
+        "topic",
+        [
+            "system.heartbeats.reconciler",
+            "system.heartbeats.reconciler.kraken.extra",
+            "system.heartbeats.reconciler.unknown_venue",
+        ],
+    )
+    def test_hierarchical_heartbeat_reconciler_rejects_invalid_shape_or_exchange(
+        self, topic: str
+    ) -> None:
+        """Reconciler heartbeat requires 4 segments with a valid order exchange.
+
+        Given: Reconciler heartbeat topics with bad arity or unknown exchange,
+        When: The topic validator runs,
+        Then: Validation rejects the topic with a descriptive error.
+        """
+        valid, err = validate_topic(topic)
+        assert not valid
+        assert "system.heartbeats.reconciler" in err
+
     def test_hierarchical_heartbeat_feed_with_symbol_rejected(self) -> None:
         """Test non-paper feed heartbeat with extra segment is rejected.
 

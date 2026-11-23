@@ -18,6 +18,7 @@ from unittest.mock import patch
 import pytest
 from loguru import logger
 
+from snapper.application.engine import trader as trader_module
 from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import InstrumentSpecMissingError
@@ -31,6 +32,7 @@ from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.application.trade.caps_enforcer import Guard
+from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.partitioning import ShardOwnership
@@ -2761,6 +2763,57 @@ async def test_create_reconciliation_tasks_with_sql_repo() -> None:
         t.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await t
+
+
+@pytest.mark.asyncio
+async def test_create_reconciliation_tasks_wires_stale_threshold_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coordinator passes configured awaiting_target threshold and msg_publisher to loops.
+
+    Given: A TraderCoordinator with numeric ``awaiting_target_stale_threshold_s`` and
+        a mock ``msg_publisher``,
+    When: ``_create_reconciliation_tasks`` constructs each exchange ``ReconciliationLoop``,
+    Then: Each loop receives the configured threshold and ``msg_publisher``.
+    """
+    created_loops: list[ReconciliationLoop] = []
+    real_cls = trader_module.ReconciliationLoop
+
+    def _spy_loop(
+        exchange_name: str,
+        repository: SQLAlchemyRepository,
+        trade_service: TradeService,
+        interval_seconds: float = 60.0,
+        *,
+        ownership: ShardOwnership | None = None,
+    ) -> ReconciliationLoop:
+        loop = real_cls(
+            exchange_name=exchange_name,
+            repository=repository,
+            trade_service=trade_service,
+            interval_seconds=interval_seconds,
+            ownership=ownership,
+        )
+        created_loops.append(loop)
+        return loop
+
+    monkeypatch.setattr(trader_module, "ReconciliationLoop", _spy_loop)
+    coord = TraderCoordinator.__new__(TraderCoordinator)
+    coord.trade_service = TradeService()
+    coord.repository = AsyncMock(spec=SQLAlchemyRepository)
+    coord.settings = MagicMock()
+    coord.settings.awaiting_target_stale_threshold_s = 300.0
+    coord._ownership = None
+    coord.msg_publisher = AsyncMock()
+    tasks = list(coord._create_reconciliation_tasks())
+    for t in tasks:
+        t.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await t
+    assert len(created_loops) == len(tasks) > 0
+    first = created_loops[0]
+    assert first._awaiting_target_stale_threshold_s == 300.0
+    assert first._msg_publisher is coord.msg_publisher
 
 
 @pytest.mark.asyncio

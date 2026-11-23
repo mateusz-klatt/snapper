@@ -148,6 +148,7 @@ class TradeService:
         """
         self._shards: dict[str, ShardState] = {}
         self._initial_cash = initial_cash
+        self._stale_awaiting_target_counts: dict[str, int] = {}
 
     def _get_or_create_shard(self, shard_key: str) -> ShardState:
         """Get existing shard state or create a new one."""
@@ -813,6 +814,20 @@ class TradeService:
             )
             return True
         return False
+
+    def record_stale_awaiting_target_count(self, exchange: str, count: int) -> None:
+        """Record latest stale awaiting_target cancel count for an exchange."""
+        self._stale_awaiting_target_counts[exchange] = max(0, count)
+
+    @property
+    def stale_awaiting_target_counts(self) -> dict[str, int]:
+        """Return latest stale awaiting_target cancel count keyed by exchange."""
+        return dict(self._stale_awaiting_target_counts)
+
+    @property
+    def stale_awaiting_target_count(self) -> int:
+        """Return total stale awaiting_target cancels across all exchanges."""
+        return sum(self._stale_awaiting_target_counts.values())
 
     def snapshot_for_checkpoint(
         self, shard_key: str

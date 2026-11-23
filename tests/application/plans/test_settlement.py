@@ -1329,3 +1329,68 @@ async def test_single_and_batch_locked_version_and_rowcount_guards(
             settled_at=_T0 + timedelta(seconds=10),
             session_id="s-batch-drift",
         )
+
+
+@pytest.mark.asyncio
+async def test_settle_single_recovered_plan_uses_read_committed_on_postgresql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Single-plan settle uses READ COMMITTED + locked re-read on PostgreSQL.
+
+    Given: A mocked PostgreSQL repository and a single recovery settle candidate,
+    When: `settle_single_recovered_plan` executes its transaction and re-evaluation,
+    Then: It sets `READ COMMITTED` (never `SERIALIZABLE`) before inspecting the plan.
+    """
+    plan_id = "plan-pg-read-committed"
+    observed: list[str] = []
+
+    async def _record_execute(statement: object, *_args: object, **_kwargs: object) -> MagicMock:
+        observed.append(f"sql:{statement}")
+        return MagicMock(rowcount=0)
+
+    fake_session = AsyncMock(add=MagicMock(), execute=AsyncMock(side_effect=_record_execute))
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = fake_session
+    session_cm.__aexit__.return_value = False
+
+    fake_pg_repo = MagicMock(spec=SQLAlchemyRepository)
+    fake_pg_repo.dialect_name = "postgresql"
+    fake_pg_repo.session.return_value = session_cm
+
+    candidate = MagicMock(spec=PlanSettlementCandidate)
+    candidate.plan_public_id = plan_id
+    candidate.children = ()
+    candidate.current_status = "active"
+    candidate.current_session_id = "s-orig"
+    candidate.current_sequence_id = 10
+    candidate.current_filled_quantity = 0.0
+
+    existing_orm = MagicMock(spec=ExecutionPlan)
+    existing_orm.status = "active"
+    existing_orm.session_id = "s-orig"
+    existing_orm.sequence_id = 10
+    existing_orm.filled_quantity = 0.0
+
+    async def _inspect_and_skip(*_args: object, **_kwargs: object) -> MagicMock:
+        observed.append("inspect")
+        return MagicMock(spec=PlanSettlementSkipped)
+
+    lock_children = AsyncMock(return_value={})
+    lock_plans = AsyncMock(return_value={plan_id: existing_orm})
+    monkeypatch.setattr(settlement_module, "lock_child_create_commands", lock_children)
+    monkeypatch.setattr(settlement_module, "lock_active_execution_plans", lock_plans)
+    monkeypatch.setattr(settlement_module, "inspect_plan_settlement", _inspect_and_skip)
+
+    settled = await settle_single_recovered_plan(
+        fake_pg_repo,
+        candidate,
+        settled_at=_T0 + timedelta(seconds=5),
+        session_id="s-pg-rc",
+        sequence_id=1,
+    )
+
+    assert settled is False
+    assert observed == ["sql:SET TRANSACTION ISOLATION LEVEL READ COMMITTED", "inspect"]
+    assert all("SERIALIZABLE" not in entry for entry in observed)
+    lock_children.assert_awaited_once()
+    lock_plans.assert_awaited_once()

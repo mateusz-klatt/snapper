@@ -1821,3 +1821,23 @@ def test_project_fill_state_dedups_duplicate_beyond_window() -> None:
     ]
     projection = svc.project_fill_state_from_events(events)
     assert projection["position_qty"] == pytest.approx(0.5)
+
+
+def test_stale_awaiting_target_counts_track_per_exchange_and_total() -> None:
+    """TradeService tracks per-exchange and total stale awaiting_target counts.
+
+    Given: A fresh TradeService instance,
+    When: Exchanges record positive, clamped negative, and zero counts,
+    Then: Both per-exchange and summed counts reflect latest non-negative totals.
+    """
+    svc = TradeService()
+    assert svc.stale_awaiting_target_count == 0
+    assert svc.stale_awaiting_target_counts == {}
+
+    svc.record_stale_awaiting_target_count("kraken", 2)
+    svc.record_stale_awaiting_target_count("walutomat", -3)
+    assert svc.stale_awaiting_target_counts == {"kraken": 2, "walutomat": 0}
+    assert svc.stale_awaiting_target_count == 2
+
+    svc.record_stale_awaiting_target_count("kraken", 0)
+    assert svc.stale_awaiting_target_count == 0

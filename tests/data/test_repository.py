@@ -5773,6 +5773,47 @@ async def test_has_pending_cancel_command_true_for_pending(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_has_pending_cancel_command_true_for_awaiting_target(tmp_path: Path) -> None:
+    """Held awaiting_target cancels count as pending for deduplication.
+
+    Given: an active id-less cancel command persisted in awaiting_target status,
+    When: has_pending_cancel_command is queried for that client_order_id,
+    Then: it returns True so recovery and API paths do not emit duplicate cancels.
+    """
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'pend_awaiting.db'}")
+    await r.create_all()
+    try:
+        now = datetime.now(UTC)
+        await r.insert_trade_command(
+            {
+                "wallet_public_id": "wallet-1",
+                "command_type": "cancel",
+                "shard_key": "kraken.BTC-USD.live",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "engine-buy",
+                "client_order_id": "cid-pend-awaiting",
+                "venue_client_id": "vcid-pend-awaiting",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "awaiting_target",
+                "exchange_order_id": None,
+                "created_at": now,
+                "correlation_id": "corr-awaiting",
+                "session_id": "s1",
+                "sequence_id": 1,
+                "timestamp": now,
+            }
+        )
+        assert await r.has_pending_cancel_command("cid-pend-awaiting", as_of=now) is True
+    finally:
+        await r.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_has_pending_cancel_command_ignores_create_commands(tmp_path: Path) -> None:
     """Only ``command_type='cancel'`` rows are counted."""
     r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'pend_create.db'}")
@@ -5880,6 +5921,77 @@ async def test_get_undispatched_commands(tmp_path: Path) -> None:
     assert len(cmds) == 1
     assert cmds[0]["status"] == "created"
     assert cmds[0]["exchange"] == "kraken"
+
+
+@pytest.mark.asyncio
+async def test_get_undispatched_commands_never_fetches_awaiting_target(
+    tmp_path: Path,
+) -> None:
+    """Outbox query excludes held awaiting_target cancel rows.
+
+    Given: an awaiting_target cancel inserted before a created submit command,
+    When: get_undispatched_commands is queried,
+    Then: only awaiting_target yields empty results and with a later created row only
+        the created row is returned.
+    """
+    r = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'cmd_awaiting.db'}")
+    await r.create_all()
+    try:
+        now = datetime.now(UTC)
+        await r.insert_trade_command(
+            {
+                "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+                "command_type": "cancel",
+                "shard_key": "kraken.BTC-USD.live",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "engine-buy",
+                "client_order_id": "cid-held-only",
+                "venue_client_id": "vcid-held-only",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "awaiting_target",
+                "exchange_order_id": None,
+                "created_at": now,
+                "correlation_id": "corr-held",
+                "session_id": "s1",
+                "sequence_id": 1,
+                "timestamp": now,
+            }
+        )
+        assert await r.get_undispatched_commands(as_of=now, limit=10) == []
+
+        later = now + timedelta(seconds=1)
+        await r.insert_trade_command(
+            {
+                "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+                "command_type": "submit",
+                "shard_key": "kraken.BTC-USD.live",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "engine-buy",
+                "client_order_id": "cid-created-after",
+                "venue_client_id": "vcid-created-after",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "created",
+                "created_at": later,
+                "correlation_id": "corr-created",
+                "session_id": "s1",
+                "sequence_id": 2,
+                "timestamp": later,
+            }
+        )
+        cmds = await r.get_undispatched_commands(as_of=later, limit=10)
+        assert [c["client_order_id"] for c in cmds] == ["cid-created-after"]
+    finally:
+        await r.engine.dispose()
 
 
 @pytest.mark.asyncio

@@ -64,6 +64,7 @@ from snapper.application.trade.command_request import parse_shard_key
 from snapper.application.trade.fill_aliases import aliases_cover_same_fills
 from snapper.application.trade.fill_aliases import resolve_live_fill_event
 from snapper.application.trade.outbox import OutboxDispatcher
+from snapper.application.trade.reconciler import DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
 from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import FillProjection
 from snapper.application.trade.trade_service import ShardState
@@ -6483,6 +6484,18 @@ class TraderCoordinator(RegisterableProcess):
         )
         return asyncio.create_task(self.guard_scanner.run())
 
+    def _awaiting_target_stale_threshold_s(self) -> float:
+        """Resolve stale awaiting_target threshold with MagicMock-safe default."""
+        raw = getattr(self.settings, "awaiting_target_stale_threshold_s", None)
+        if (
+            isinstance(raw, (int, float))
+            and not isinstance(raw, bool)
+            and math.isfinite(raw)
+            and raw > 0.0
+        ):
+            return float(raw)
+        return DEFAULT_AWAITING_TARGET_STALE_THRESHOLD_S
+
     def _create_reconciliation_tasks(self) -> Iterator[asyncio.Task[None]]:
         """Yield each reconciliation task immediately to the lifecycle owner.
 
@@ -6496,6 +6509,8 @@ class TraderCoordinator(RegisterableProcess):
         if not isinstance(self.repository, SQLAlchemyRepository):
             return
         exchanges: list[str] = list(get_args(OrderExchange))
+        stale_threshold_s = self._awaiting_target_stale_threshold_s()
+        publisher = getattr(self, "msg_publisher", None)
         for exchange_name in exchanges:
             recon = ReconciliationLoop(
                 exchange_name=exchange_name,
@@ -6503,6 +6518,9 @@ class TraderCoordinator(RegisterableProcess):
                 trade_service=self.trade_service,
                 interval_seconds=60.0,
                 ownership=self._ownership,
+            ).configure_held_cancel_monitor(
+                stale_threshold_s=stale_threshold_s,
+                msg_publisher=publisher,
             )
             task = asyncio.create_task(recon.run())
             yield task

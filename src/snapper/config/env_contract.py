@@ -110,6 +110,7 @@ BOOTSTRAP_ENV_VARS: frozenset[str] = frozenset(
         "PAIRED_EXECUTION_FILL_TIMEOUT_S",
         "TRADE_COMMAND_DISPATCH_TTL_S",
         "PLAN_RECOVERY_AUTO_SETTLE_ENABLED",
+        "AWAITING_TARGET_STALE_THRESHOLD_S",
     }
 )
 """Aliases of every field on :class:`BootstrapSettingsLoader`.

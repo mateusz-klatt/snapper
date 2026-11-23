@@ -1058,12 +1058,22 @@ async def settle_single_recovered_plan(
 ) -> bool:
     """Atomically SCD2-settle one plan during startup recovery if unchanged.
 
-    Locks the child `TradeCommand` rows and active `ExecutionPlan` row `FOR
-    UPDATE` (`BEGIN IMMEDIATE` on SQLite) and re-runs `inspect_plan_settlement`
-    on the bound session before writing, aborting if either the plan version or
-    child/venue evidence changed since initial inspection. PostgreSQL uses
-    SERIALIZABLE because process startup only provides a bounded async grace
-    period, not proof that venue writers remain stopped until recovery ends.
+    Uses PostgreSQL ``READ COMMITTED`` (``BEGIN IMMEDIATE`` on SQLite), acquires
+    ``FOR UPDATE`` on the child ``TradeCommand`` rows and active
+    ``ExecutionPlan`` row, and re-runs ``inspect_plan_settlement`` on the bound
+    session before writing, aborting if the plan version or child/venue evidence
+    changed since initial inspection.
+
+    The residual ``venue_events`` append race window is moot for stranded
+    safe-unplaced settlement because that settle set consists solely of creates
+    already in ``FAILED`` status with an ``order_interlock_blocked`` or
+    ``circuit_breaker_open`` refusal, no venue order id anywhere (neither on the
+    command nor on any active ``Order``), and that refusal as the sole lifecycle
+    marker. Such creates can never reach the venue: they were refused before
+    dispatch, ``FAILED`` rows are never fetched by the outbox, and the
+    reconciler never resurrects ``FAILED`` commands. Under ``READ COMMITTED``,
+    ``FOR UPDATE`` fences command/plan mutations and the post-lock re-read sees
+    every previously committed ``venue_events`` row.
 
     Args:
         repository: Target SQLAlchemy repository.
@@ -1080,7 +1090,6 @@ async def settle_single_recovered_plan(
         await begin_plan_settlement_transaction(
             session,
             dialect_name=repository.dialect_name,
-            isolation_level="SERIALIZABLE",
         )
         await lock_child_create_commands(session, child_orders=child_orders)
         locked_plans = await lock_active_execution_plans(

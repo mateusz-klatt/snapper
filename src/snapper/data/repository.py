@@ -8845,8 +8845,9 @@ class Repository(ABC):
 
         Returns:
             True if an active ``command_type='cancel'`` row with a
-            non-terminal status (``created``/``dispatched``/``acked``)
-            exists, False otherwise.
+            non-terminal status (``awaiting_target``/``created``/
+            ``dispatched``/``direct_dispatched``/``accepted``/
+            ``partially_filled``) exists, False otherwise.
         """
         ...
 
@@ -27355,22 +27356,20 @@ class SQLAlchemyRepository(Repository):
         client_order_id: str,
         as_of: datetime,
     ) -> bool:
-        """Return True for a cancel that already blocks duplicate emission.
+        """Return True when a non-terminal cancel command exists for the order.
 
-        An unresolved CREATED cancel is deliberately nonblocking: recovery may
-        hydrate that same row once an Order, command, or ack supplies a venue id.
+        Includes held ``awaiting_target`` cancels so duplicate cancel rows are
+        never inserted while a stranded cancel awaits venue identity hydration.
 
         Args:
             client_order_id: Child client id to search.
             as_of: Temporal point for active-version selection.
 
         Returns:
-            True unless the only pending cancel is CREATED without a venue id.
+            True if any active non-terminal cancel exists, False otherwise.
         """
         pending = await self.get_pending_cancel_command_for_client_order_id(client_order_id, as_of)
-        return pending is not None and not (
-            pending["status"] == TradeCommandStatusEnum.CREATED and not pending["exchange_order_id"]
-        )
+        return pending is not None
 
     async def update_trade_command_status(
         self,
@@ -27658,11 +27657,10 @@ class SQLAlchemyRepository(Repository):
     ) -> list[TradeCommandRow]:
         """Return trade commands with status='created' for outbox dispatch.
 
-        When ``offset > 0``, the query skips the
-        first ``offset`` rows. Used by
-        class:`OutboxDispatcher._dispatch_batch` to page through the
-        ``created`` backlog while filtering for owned shards in Python
-        see for the starvation-bound contract.
+        When ``offset > 0``, the query skips the first ``offset`` rows. Used by
+        :meth:`OutboxDispatcher._fetch_owned_batch` when multi-instance
+        shard ownership filtering is active. Held id-less cancels persist as
+        ``awaiting_target`` and are never fetched by this query.
         Ordering is ``(created_at, id)`` for deterministic pagination
         plan-service dispatch inserts multiple commands within a single
         ``now`` tick (see ``application/plans/service.py``) so ties on
