@@ -30,6 +30,7 @@ from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
+from snapper.infrastructure.exchanges.implementations.kraken import PrivateRestBusyError
 from snapper.infrastructure.exchanges.kraken_ledger import KRAKEN_LEDGER_PAGE_SIZE
 from snapper.infrastructure.exchanges.kraken_ledger import KrakenLedgerEntry
 from snapper.infrastructure.exchanges.kraken_ledger import KrakenLedgerPage
@@ -209,6 +210,17 @@ class _WindowReader(_Reader):
         )
 
 
+class _BusySecondPageReader(_Reader):
+    """Raise the client's atomic busy error on the second page invocation."""
+
+    async def read_venue_ledger_page(self, start: int, end: int, offset: int) -> KrakenLedgerPage:
+        """Return one page, then emulate an atomic lock-contention skip."""
+        if self.calls:
+            self.calls.append((start, end, offset))
+            raise PrivateRestBusyError("busy")
+        return await super().read_venue_ledger_page(start, end, offset)
+
+
 def _executor() -> _LedgerExecutor:
     """Build an executor whose repository satisfies the observer's type gate."""
     with patch.object(
@@ -233,6 +245,7 @@ def _bare_kraken() -> KrakenExchangeClient:
     client.position_observation_capability = CapabilityStatus.NOT_APPLICABLE
     client.account_history_capability = CapabilityStatus.UNSUPPORTED
     client._private_rest_lock = asyncio.Lock()
+    client._private_rest_waiters = 0
     return client
 
 
@@ -911,6 +924,43 @@ async def test_dispatcher_still_returns_margin_ledger_replay_not_implemented() -
     )
     signal_read.assert_not_awaited()
     bundle_read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_atomic_busy_before_trade_balance_skips_without_a_write() -> None:
+    """An atomic skip before TradeBalance spends nothing and stores no error.
+
+    Given the private lock becomes busy after the preliminary pause checks,
+    When TradeBalance entry raises PrivateRestBusyError,
+    Then observation returns without a cursor commit or a Ledgers request.
+    """
+    reader = _Reader(balance_error=PrivateRestBusyError("busy"))
+    repo = _Repo("margin_ledger_replay")
+    stored = await _observe(repo, reader)
+    assert stored is None
+    assert reader.balance_calls == 1
+    assert reader.calls == []
+    assert repo.commits == []
+
+
+@pytest.mark.asyncio
+async def test_atomic_busy_mid_pass_spends_nothing_and_preserves_progress() -> None:
+    """An atomic mid-pass skip is a pause with no charge, gap, or cursor advance.
+
+    Given one successful page and PrivateRestBusyError on the next invocation,
+    When observation persists the interrupted window,
+    Then only the successful page is charged and next_ofs remains after page one.
+    """
+    reader = _BusySecondPageReader([_full("A", KRAKEN_LEDGER_PAGE_SIZE * 2)])
+    stored = await _observe(_Repo("margin_ledger_replay"), reader)
+    assert len(reader.calls) == 2
+    assert stored is not None
+    assert stored.evidence_status == "ledger_backlog"
+    assert stored.api_points_used == 3
+    assert stored.next_ofs == KRAKEN_LEDGER_PAGE_SIZE
+    assert stored.expected_count == KRAKEN_LEDGER_PAGE_SIZE * 2
+    assert stored.ingested_count == KRAKEN_LEDGER_PAGE_SIZE
+    assert stored.cursor_second is None
 
 
 @pytest.mark.asyncio

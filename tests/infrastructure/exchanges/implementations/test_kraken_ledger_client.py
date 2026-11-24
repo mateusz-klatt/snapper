@@ -1,5 +1,6 @@
 """Tests for Kraken ledger reads on the executor's private client."""
 
+import asyncio
 from datetime import UTC
 from datetime import datetime
 from unittest.mock import AsyncMock
@@ -8,7 +9,9 @@ from unittest.mock import patch
 import ccxt
 import pytest
 
+from snapper.infrastructure.exchanges.implementations import kraken as kr
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
+from snapper.infrastructure.exchanges.implementations.kraken import PrivateRestBusyError
 from snapper.infrastructure.exchanges.implementations.kraken import _optional_position_text
 from snapper.infrastructure.exchanges.implementations.kraken import _parse_native_position_entry
 from snapper.infrastructure.exchanges.kraken_ledger import KrakenLedgerPermissionMissingError
@@ -185,6 +188,93 @@ async def test_ledger_reads_require_credentials_on_the_same_client() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ledger_read_skips_held_lock_and_trading_still_waits() -> None:
+    """A skipped ledger read neither invokes CCXT nor leaks its skip context.
+
+    Given a held private lock and a ledger read that skips atomically,
+    When a trading invocation follows,
+    Then it waits for the lock normally and executes after release.
+    """
+    client = KrakenExchangeClient(api_key="key", api_secret="secret")
+    endpoint = AsyncMock()
+    trading_calls: list[str] = []
+
+    async def trading() -> str:
+        trading_calls.append("trading")
+        return "filled"
+
+    await client._private_rest_lock.acquire()
+    released = False
+    trading_task: asyncio.Task[str] | None = None
+    try:
+        with (
+            patch.object(client._ccxt_client, "privatePostLedgers", endpoint),
+            pytest.raises(PrivateRestBusyError),
+        ):
+            await client.read_venue_ledger_page(1, 2, 0)
+        endpoint.assert_not_awaited()
+        assert kr._SKIP_IF_PRIVATE_REST_BUSY.get() is False
+        assert client._circuit_failures == 0
+        trading_task = asyncio.create_task(client._with_retry(trading))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert client._private_rest_waiters == 1
+        assert not trading_task.done()
+        assert trading_calls == []
+        client._private_rest_lock.release()
+        released = True
+        assert await trading_task == "filled"
+        assert trading_calls == ["trading"]
+    finally:
+        if not released:
+            client._private_rest_lock.release()
+        if trading_task is not None:
+            await trading_task
+        await asyncio.sleep(0)
+        client._shutdown_rest_pool()
+
+
+@pytest.mark.asyncio
+async def test_ledger_read_skips_an_unlocked_lock_with_a_waiter() -> None:
+    """A released lock with a queued trader is still busy for ledger reads.
+
+    Given a trader queued on a lock that has just been released but not resumed,
+    When a ledger read attempts atomic acquisition,
+    Then it raises PrivateRestBusyError without invoking the endpoint.
+    """
+    client = KrakenExchangeClient(api_key="key", api_secret="secret")
+    endpoint = AsyncMock()
+
+    async def waiting_trade() -> str:
+        return "waited"
+
+    await client._private_rest_lock.acquire()
+    released = False
+    waiter = asyncio.create_task(client._run_private_rest(waiting_trade, operation="waiting_trade"))
+    try:
+        await asyncio.sleep(0)
+        assert client._private_rest_waiters == 1
+        client._private_rest_lock.release()
+        released = True
+        assert not client._private_rest_lock.locked()
+        assert client.private_rest_busy()
+        with (
+            patch.object(client._ccxt_client, "privatePostLedgers", endpoint),
+            pytest.raises(PrivateRestBusyError),
+        ):
+            await client.read_venue_ledger_page(1, 2, 0)
+        endpoint.assert_not_awaited()
+        assert kr._SKIP_IF_PRIVATE_REST_BUSY.get() is False
+        assert await waiter == "waited"
+    finally:
+        if not released:
+            client._private_rest_lock.release()
+        await waiter
+        await asyncio.sleep(0)
+        client._shutdown_rest_pool()
+
+
+@pytest.mark.asyncio
 async def test_permission_denied_becomes_ledger_permission_missing() -> None:
     """Permission failures become one typed error and other failures propagate.
 
@@ -272,6 +362,7 @@ async def test_budgeted_rate_limit_and_permission_errors_do_not_retry() -> None:
         ccxt.PermissionDenied("permission missing"),
         ccxt.NetworkError("disconnected"),
         ccxt.RequestTimeout("timed out"),
+        PrivateRestBusyError("busy"),
     ):
         client, _, _ = _client(_ledger_body(), _trade_body())
         client._circuit_open_until = 0.0
@@ -291,6 +382,8 @@ async def test_budgeted_rate_limit_and_permission_errors_do_not_retry() -> None:
             with pytest.raises(expected):
                 await client.read_venue_ledger_page(10, 20, 0)
         invoke.assert_awaited_once()
+        assert client._circuit_failures == 0
+        assert kr._SKIP_IF_PRIVATE_REST_BUSY.get() is False
         assert record.call_count == int(
             isinstance(error, ccxt.NetworkError) and not isinstance(error, ccxt.RateLimitExceeded)
         )

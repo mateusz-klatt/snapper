@@ -170,6 +170,14 @@ _NATIVE_BALANCE_AGGREGATE_KEYS: Final = frozenset(
 )
 _PRIVATE_REST_LOCK_WAIT_WARN_S: Final[float] = 5.0
 _IN_PRIVATE_REST: Final[ContextVar[bool]] = ContextVar("kraken_in_private_rest", default=False)
+_SKIP_IF_PRIVATE_REST_BUSY: Final[ContextVar[bool]] = ContextVar(
+    "kraken_skip_if_private_rest_busy",
+    default=False,
+)
+
+
+class PrivateRestBusyError(RuntimeError):
+    """A budgeted private read skipped rather than queue for the nonce lock."""
 
 
 def _kraken_native_txid(payload: dict[str, Any]) -> Any:
@@ -786,6 +794,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._ws_connect_lock: asyncio.Lock = asyncio.Lock()
         self._private_rest_lock: asyncio.Lock = asyncio.Lock()
         self._private_rest_holder: str | None = None
+        self._private_rest_waiters = 0
         self._ws_connected = False
         self._trade_client: Trade | None = None
         self._user_client: User | None = None
@@ -837,15 +846,19 @@ class KrakenExchangeClient(ExchangeClientBase):
         return self._ccxt_client
 
     def private_rest_busy(self) -> bool:
-        """Return whether a private REST invocation currently owns the nonce lock.
+        """Return whether a private REST invocation owns or waits for the nonce lock.
 
-        Background private readers can use this as a try-acquire-or-skip signal.
-        The result is observational and does not reserve the lock for the caller.
+        Background private readers use this as a preliminary skip signal. Their
+        actual invocation repeats the check atomically before lock acquisition.
 
         Returns:
-            True while one private REST invocation is executing or finishing.
+            True while one private REST invocation is executing, finishing, or queued.
         """
-        return self._private_rest_lock.locked()
+        return self._private_rest_contended()
+
+    def _private_rest_contended(self) -> bool:
+        """Return whether the lock is held or any private caller is already queued."""
+        return self._private_rest_lock.locked() or self._private_rest_waiters > 0
 
     def execution_api_route(self) -> ExecutionApiRoute | None:
         """Prove the actual production read/write and constructed WebSocket endpoints.
@@ -2397,30 +2410,37 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         Raises:
             RuntimeError: When API credentials are missing.
+            PrivateRestBusyError: When the private lock or its wait queue is occupied.
             KrakenLedgerPermissionMissingError: When Kraken denies the read.
             TimeoutError: When the CCXT private request times out.
             ValueError: When the envelope is malformed.
         """
         if not self.api_key or not self.api_secret:
             raise RuntimeError(_LEDGER_CREDENTIALS_MSG)
+        token = _SKIP_IF_PRIVATE_REST_BUSY.set(True)
         try:
-            payload = await self._with_retry(
-                func,
-                params,
-                retry_network_errors=False,
-                retry_rate_limit_errors=False,
-                egress_kind="private_idempotent_read",
-                egress_operation=operation,
-                egress_target=ccxt_proxy_target(self._ccxt_client),
-            )
-        except KrakenLedgerPermissionMissingError:
-            raise
-        except ccxt.RequestTimeout as exc:
-            raise TimeoutError(str(exc)) from exc
-        except Exception as exc:
-            if is_kraken_ledger_permission_error(exc):
-                raise KrakenLedgerPermissionMissingError(str(exc)) from exc
-            raise
+            try:
+                payload = await self._with_retry(
+                    func,
+                    params,
+                    retry_network_errors=False,
+                    retry_rate_limit_errors=False,
+                    egress_kind="private_idempotent_read",
+                    egress_operation=operation,
+                    egress_target=ccxt_proxy_target(self._ccxt_client),
+                )
+            except PrivateRestBusyError:
+                raise
+            except KrakenLedgerPermissionMissingError:
+                raise
+            except ccxt.RequestTimeout as exc:
+                raise TimeoutError(str(exc)) from exc
+            except Exception as exc:
+                if is_kraken_ledger_permission_error(exc):
+                    raise KrakenLedgerPermissionMissingError(str(exc)) from exc
+                raise
+        finally:
+            _SKIP_IF_PRIVATE_REST_BUSY.reset(token)
         return parse(payload)
 
     def subscribe_ticks(
@@ -4103,7 +4123,11 @@ class KrakenExchangeClient(ExchangeClientBase):
         after the blocking worker has actually finished. The context guard
         rejects nested entry because asyncio locks are not reentrant. It
         targets async/coroutine invocations; synchronous worker-thread
-        callables cannot await a nested private invocation.
+        callables cannot await a nested private invocation. Budgeted ledger
+        reads opt into try-acquire-or-skip. On the event loop, the contention
+        check and an uncontended ``Lock.acquire`` fast path do not yield, so
+        check-and-take is atomic. The self-maintained waiter count also catches
+        released-but-not-yet-resumed locks without using private lock attrs.
 
         CCXT's 30-second and python-kraken-sdk's 10-second HTTP bounds are
         per socket operation (connect and each read), not total wall-clock.
@@ -4121,12 +4145,19 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         Raises:
             RuntimeError: If the current invocation attempts nested entry.
+            PrivateRestBusyError: If a budgeted read would have to queue.
         """
         if _IN_PRIVATE_REST.get():
             raise RuntimeError("nested Kraken private REST call would deadlock the nonce lock")
+        if _SKIP_IF_PRIVATE_REST_BUSY.get() and self._private_rest_contended():
+            raise PrivateRestBusyError("Kraken private REST lock is busy")
         wait_started = monotonic()
         holder = self._private_rest_holder
-        await self._private_rest_lock.acquire()
+        self._private_rest_waiters += 1
+        try:
+            await self._private_rest_lock.acquire()
+        finally:
+            self._private_rest_waiters -= 1
         wait_seconds = monotonic() - wait_started
         self._private_rest_holder = operation
         try:
@@ -4266,6 +4297,8 @@ class KrakenExchangeClient(ExchangeClientBase):
                 if not retry_rate_limit_errors:
                     raise
                 attempt = await self._handle_rate_limit(attempt, max_retries, base_delay)
+            except PrivateRestBusyError:
+                raise
             except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
                 if not retry_network_errors:
                     self._record_unretried_network_failure(e)

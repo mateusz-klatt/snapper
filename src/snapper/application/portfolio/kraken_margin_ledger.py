@@ -18,6 +18,7 @@ from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
 from snapper.data.venue_ledger_store import VenueLedgerCursorRecord
 from snapper.data.venue_ledger_store import VenueLedgerCursorWrite
 from snapper.data.venue_ledger_store import VenueLedgerInsertRow
+from snapper.infrastructure.exchanges.implementations.kraken import PrivateRestBusyError
 from snapper.infrastructure.exchanges.kraken_ledger import KRAKEN_LEDGER_CALL_COST
 from snapper.infrastructure.exchanges.kraken_ledger import KRAKEN_LEDGER_PAGE_SIZE
 from snapper.infrastructure.exchanges.kraken_ledger import KRAKEN_LEDGER_PASS_BUDGET_POINTS
@@ -184,7 +185,10 @@ async def run_kraken_margin_ledger_observation(request: MarginLedgerObservationR
     ready = await _ready_pass(request)
     if ready is None or (request.pause_check is not None and request.pause_check()):
         return
-    trade = await _read_trade_balance(request)
+    try:
+        trade = await _read_trade_balance(request)
+    except PrivateRestBusyError:
+        return
     outcome = await _collect(request, ready, trade.points)
     await _persist(request, ready, trade, outcome)
     _log_outcome(request.exchange, outcome)
@@ -314,6 +318,8 @@ async def _read_trade_balance(request: MarginLedgerObservationRequest) -> _Trade
     """Read TradeBalance evidence. A failure still consumes its counter point."""
     try:
         balance = await request.client.read_trade_balance()
+    except PrivateRestBusyError:
+        raise
     except KrakenLedgerPermissionMissingError:
         logger.warning("[{}] kraken trade balance permission missing", request.exchange)
         return _TradeRead(KRAKEN_TRADE_BALANCE_CALL_COST, None, None)
@@ -337,7 +343,14 @@ async def _collect(
     async def fetch_page(query: LedgerPageQuery) -> KrakenLedgerPage:
         if request.pause_check is not None and request.pause_check():
             raise KrakenLedgerReadPausedError
-        return await request.client.read_venue_ledger_page(query.start, query.end, query.offset)
+        try:
+            return await request.client.read_venue_ledger_page(
+                query.start,
+                query.end,
+                query.offset,
+            )
+        except PrivateRestBusyError as exc:
+            raise KrakenLedgerReadPausedError from exc
 
     return await collect_ledger_window(
         LedgerCollectRequest(
