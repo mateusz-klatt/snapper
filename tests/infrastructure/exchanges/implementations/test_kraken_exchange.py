@@ -3742,6 +3742,59 @@ class TestPrivateRestSerialization:
         assert await asyncio.to_thread(event.wait, 2.0)
 
     @pytest.mark.asyncio
+    async def test_synchronous_invoke_failure_releases_private_lock(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A factory that raises before returning an awaitable releases the lock."""
+
+        async def requires_value(value: str) -> str:
+            return value
+
+        with pytest.raises(TypeError, match="value"):
+            await kraken_client._invoke_func(requires_value)
+
+        assert not kraken_client.private_rest_busy()
+        assert kraken_client._private_rest_holder is None
+        assert kr._IN_PRIVATE_REST.get() is False
+        result = await kraken_client._with_retry(lambda: "after_failure")
+        assert result == "after_failure"
+
+    @pytest.mark.asyncio
+    async def test_nested_async_private_call_raises_without_deadlock(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """Nested async entry raises promptly and restores the caller context."""
+
+        async def nested_invocation() -> None:
+            await kraken_client._invoke_func(lambda: "nested")
+
+        with pytest.raises(RuntimeError, match="nested Kraken private REST call"):
+            await asyncio.wait_for(kraken_client._with_retry(nested_invocation), timeout=1.0)
+
+        assert not kraken_client.private_rest_busy()
+        assert kraken_client._private_rest_holder is None
+        assert kr._IN_PRIVATE_REST.get() is False
+        result = await kraken_client._with_retry(lambda: "after_nested")
+        assert result == "after_nested"
+
+    @pytest.mark.asyncio
+    async def test_sequential_private_call_after_normal_call_restores_context(
+        self, kraken_client: KrakenExchangeClient
+    ) -> None:
+        """A normal async invocation does not taint its caller's next call."""
+
+        async def normal_invocation() -> str:
+            return "normal"
+
+        normal_result = await kraken_client._with_retry(normal_invocation)
+        sequential_result = await kraken_client._with_retry(lambda: "sequential")
+
+        assert (normal_result, sequential_result) == ("normal", "sequential")
+        assert kr._IN_PRIVATE_REST.get() is False
+        assert not kraken_client.private_rest_busy()
+        assert kraken_client._private_rest_holder is None
+
+    @pytest.mark.asyncio
     async def test_slow_private_lock_wait_logs_holder_and_waiter(
         self,
         kraken_client: KrakenExchangeClient,
