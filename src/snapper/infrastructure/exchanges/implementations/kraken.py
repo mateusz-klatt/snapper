@@ -35,6 +35,7 @@ from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
+from contextvars import ContextVar
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -168,6 +169,7 @@ _NATIVE_BALANCE_AGGREGATE_KEYS: Final = frozenset(
     {"free", "used", "total", "info", "timestamp", "datetime"}
 )
 _PRIVATE_REST_LOCK_WAIT_WARN_S: Final[float] = 5.0
+_IN_PRIVATE_REST: Final[ContextVar[bool]] = ContextVar("kraken_in_private_rest", default=False)
 
 
 def _kraken_native_txid(payload: dict[str, Any]) -> Any:
@@ -4098,10 +4100,17 @@ class KrakenExchangeClient(ExchangeClientBase):
         so neither slot waits nor backoff sleeps occur while the lock is
         held. Shielding leaves the dispatched invocation running when its
         caller is cancelled; only its done callback releases the lock,
-        after the blocking worker has actually finished. Lock acquisition
-        has no hard timeout or failure: each holder is bounded transitively
-        by CCXT's 30-second HTTP timeout or python-kraken-sdk's 10-second
-        per-request ``TIMEOUT``.
+        after the blocking worker has actually finished. The context guard
+        rejects nested entry because asyncio locks are not reentrant. It
+        targets async/coroutine invocations; synchronous worker-thread
+        callables cannot await a nested private invocation.
+
+        CCXT's 30-second and python-kraken-sdk's 10-second HTTP bounds are
+        per socket operation (connect and each read), not total wall-clock.
+        Worst-case trading delay is about 30 seconds per queued private call
+        ahead. A caller-side wall-clock timeout is deliberately not added:
+        queued and in-flight timeouts would be indistinguishable and could
+        manufacture order-unknown states for orders that were never sent.
 
         Args:
             invoke: Factory for the coroutine or future performing one call.
@@ -4109,19 +4118,33 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         Returns:
             Result returned by the private invocation.
+
+        Raises:
+            RuntimeError: If the current invocation attempts nested entry.
         """
+        if _IN_PRIVATE_REST.get():
+            raise RuntimeError("nested Kraken private REST call would deadlock the nonce lock")
         wait_started = monotonic()
         holder = self._private_rest_holder
         await self._private_rest_lock.acquire()
         wait_seconds = monotonic() - wait_started
         self._private_rest_holder = operation
-        if wait_seconds >= _PRIVATE_REST_LOCK_WAIT_WARN_S:
-            logger.warning(
-                f"Kraken private REST nonce lock waited {wait_seconds:.3f}s "
-                f"for {operation}; holder at wait start: {holder or 'unknown'}"
-            )
-        invocation = asyncio.ensure_future(invoke())
-        invocation.add_done_callback(self._release_private_rest_lock)
+        try:
+            if wait_seconds >= _PRIVATE_REST_LOCK_WAIT_WARN_S:
+                logger.warning(
+                    f"Kraken private REST nonce lock waited {wait_seconds:.3f}s "
+                    f"for {operation}; holder at wait start: {holder or 'unknown'}"
+                )
+            token = _IN_PRIVATE_REST.set(True)
+            try:
+                invocation = asyncio.ensure_future(invoke())
+            finally:
+                _IN_PRIVATE_REST.reset(token)
+            invocation.add_done_callback(self._release_private_rest_lock)
+        except BaseException:
+            self._private_rest_holder = None
+            self._private_rest_lock.release()
+            raise
         return await asyncio.shield(invocation)
 
     def _release_private_rest_lock[ResultT](self, invocation: asyncio.Future[ResultT]) -> None:
