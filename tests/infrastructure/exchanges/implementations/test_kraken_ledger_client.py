@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC
 from datetime import datetime
 from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import ccxt
@@ -27,6 +28,8 @@ class _Ccxt:
         self.trade_body = trade_balance
         self.ledger_params: list[dict[str, object]] = []
         self.trade_params: list[dict[str, object]] = []
+        self.constructor_kwargs: dict[str, object] = {}
+        self.proxies: dict[str, str] = {}
 
     def _nonce(self) -> int:
         return 11
@@ -63,10 +66,12 @@ class _Retry:
 def _client(ledgers: object, trade_balance: object) -> tuple[KrakenExchangeClient, _Ccxt, _Retry]:
     """Build a client that reuses one ccxt instance and records private calls."""
     ccxt_client = _Ccxt(ledgers, trade_balance)
+    main_client = _Ccxt(ledgers, trade_balance)
     client = KrakenExchangeClient.__new__(KrakenExchangeClient)
     client.api_key = "key"
     client.api_secret = "secret"
-    client._ccxt_client = ccxt_client
+    client._ccxt_client = main_client
+    client._ledger_ccxt_client = ccxt_client
     retry = _Retry(ccxt_client)
     client._with_retry = retry
     return client, ccxt_client, retry
@@ -120,15 +125,70 @@ def _info(**overrides: object) -> dict[str, object]:
     return info
 
 
-@pytest.mark.asyncio
-async def test_ledger_reads_use_the_existing_private_client(
+def test_ledger_client_mirrors_constructor_nonce_and_proxy_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ledger reads share the executor client's nonce and ccxt instance.
+    """The lazy client differs only by timeout and has identical egress metadata.
 
-    Given one Kraken client whose ccxt instance already has a nonce,
+    Given a CCXT constructor double and a connected main-client nonce,
+    When the ledger client is built twice,
+    Then one cached client receives all main options, a 10-second timeout, the
+        shared nonce, and the same proxy-target configuration without load_markets.
+    """
+    constructed: list[_Ccxt] = []
+
+    def build(kwargs: dict[str, object]) -> _Ccxt:
+        client = _Ccxt(_ledger_body(), _trade_body())
+        client.constructor_kwargs = dict(kwargs)
+        constructed.append(client)
+        return client
+
+    monkeypatch.setattr(kr.ccxt, "kraken", build)
+    client = KrakenExchangeClient(
+        api_key="key",
+        api_secret="secret",
+        enable_rate_limit=False,
+    )
+    try:
+        main = client._ccxt_client
+        main.nonce = kr._kraken_time_nonce
+        ledger = client._get_ledger_ccxt_client()
+        assert client._get_ledger_ccxt_client() is ledger
+        assert len(constructed) == 2
+        assert main.constructor_kwargs["timeout"] == 30000
+        assert ledger.constructor_kwargs == {
+            **main.constructor_kwargs,
+            "timeout": kr._LEDGER_READ_TIMEOUT_MS,
+        }
+        assert ledger.constructor_kwargs["timeout"] == 10000
+        assert ledger.nonce is main.nonce
+        main_target = kr.ccxt_proxy_target(main)
+        ledger_target = kr.ccxt_proxy_target(ledger)
+        assert main_target.client is main
+        assert ledger_target.client is ledger
+        assert (
+            ledger_target.session_attr,
+            ledger_target.proxy_attr,
+            ledger_target.proxy_attr_shape,
+        ) == (
+            main_target.session_attr,
+            main_target.proxy_attr,
+            main_target.proxy_attr_shape,
+        )
+        assert ledger.proxies == main.proxies
+    finally:
+        client._shutdown_rest_pool()
+
+
+@pytest.mark.asyncio
+async def test_ledger_reads_use_the_dedicated_private_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ledger reads use only the dedicated client and its own egress target.
+
+    Given separate main and ledger CCXT instances,
     When Ledgers and TradeBalance are read,
-    Then both calls use that instance's private methods and do not construct User.
+    Then both calls use the ledger instance and leave the main client untouched.
     """
     client, ccxt_client, retry = _client(_ledger_body(), _trade_body())
     nonce = ccxt_client.nonce
@@ -151,7 +211,9 @@ async def test_ledger_reads_use_the_existing_private_client(
     assert getattr(retry.functions[1], "__func__", None) is _Ccxt.privatePostTradeBalance
     assert ccxt_client.ledger_params == [{"start": 10, "end": 20, "ofs": 5}]
     assert ccxt_client.trade_params == [{}]
-    assert client._ccxt_client is ccxt_client
+    assert client._ledger_ccxt_client is ccxt_client
+    assert client._ccxt_client.ledger_params == []
+    assert client._ccxt_client.trade_params == []
     assert ccxt_client.nonce is nonce
     assert ccxt_client.nonce() == 11
     ledger_kwargs, trade_kwargs = retry.kwargs
@@ -196,6 +258,8 @@ async def test_ledger_read_skips_held_lock_and_trading_still_waits() -> None:
     Then it waits for the lock normally and executes after release.
     """
     client = KrakenExchangeClient(api_key="key", api_secret="secret")
+    ledger_client = _Ccxt(_ledger_body(), _trade_body())
+    client._ledger_ccxt_client = ledger_client
     endpoint = AsyncMock()
     trading_calls: list[str] = []
 
@@ -208,7 +272,7 @@ async def test_ledger_read_skips_held_lock_and_trading_still_waits() -> None:
     trading_task: asyncio.Task[str] | None = None
     try:
         with (
-            patch.object(client._ccxt_client, "privatePostLedgers", endpoint),
+            patch.object(ledger_client, "privatePostLedgers", endpoint),
             pytest.raises(PrivateRestBusyError),
         ):
             await client.read_venue_ledger_page(1, 2, 0)
@@ -243,6 +307,8 @@ async def test_ledger_read_skips_an_unlocked_lock_with_a_waiter() -> None:
     Then it raises PrivateRestBusyError without invoking the endpoint.
     """
     client = KrakenExchangeClient(api_key="key", api_secret="secret")
+    ledger_client = _Ccxt(_ledger_body(), _trade_body())
+    client._ledger_ccxt_client = ledger_client
     endpoint = AsyncMock()
 
     async def waiting_trade() -> str:
@@ -259,7 +325,7 @@ async def test_ledger_read_skips_an_unlocked_lock_with_a_waiter() -> None:
         assert not client._private_rest_lock.locked()
         assert client.private_rest_busy()
         with (
-            patch.object(client._ccxt_client, "privatePostLedgers", endpoint),
+            patch.object(ledger_client, "privatePostLedgers", endpoint),
             pytest.raises(PrivateRestBusyError),
         ):
             await client.read_venue_ledger_page(1, 2, 0)
@@ -347,6 +413,33 @@ def test_position_evidence_fields_are_retained_without_partial_close() -> None:
             {"symbol": "BTC/EUR", "info": _info(vol_closed="0.00200000")},
             observed_at,
         )
+
+
+@pytest.mark.asyncio
+async def test_disconnect_closes_main_and_dedicated_ledger_sessions() -> None:
+    """Disconnect closes both CCXT sessions without touching their identities.
+
+    Given existing main and lazily built ledger clients with open sessions,
+    When disconnect runs,
+    Then both session close methods and the normal worker shutdown are called.
+    """
+    client, ledger, _ = _client(_ledger_body(), _trade_body())
+    main = client._ccxt_client
+    main.session = MagicMock()
+    ledger.session = MagicMock()
+    close_ws = AsyncMock()
+    shutdown = MagicMock()
+    with (
+        patch.object(client, "_close_ws_client", close_ws),
+        patch.object(client, "_shutdown_rest_pool", shutdown),
+    ):
+        await client.disconnect()
+    close_ws.assert_awaited_once()
+    main.session.close.assert_called_once_with()
+    ledger.session.close.assert_called_once_with()
+    shutdown.assert_called_once_with()
+    assert client._ccxt_client is main
+    assert client._ledger_ccxt_client is ledger
 
 
 @pytest.mark.asyncio

@@ -146,6 +146,7 @@ _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _NATIVE_BALANCE_CREDENTIALS_MSG = "API credentials required for balance"
 _NATIVE_POSITION_CREDENTIALS_MSG = "API credentials required for positions"
 _LEDGER_CREDENTIALS_MSG = "API credentials required for ledger"
+_LEDGER_READ_TIMEOUT_MS: Final = 10_000
 _NATIVE_BALANCE_MALFORMED_ROW_MSG = (
     "Kraken spot balance currency row is not a mapping (malformed envelope)"
 )
@@ -178,6 +179,11 @@ _SKIP_IF_PRIVATE_REST_BUSY: Final[ContextVar[bool]] = ContextVar(
 
 class PrivateRestBusyError(RuntimeError):
     """A budgeted private read skipped rather than queue for the nonce lock."""
+
+
+def _kraken_time_nonce() -> int:
+    """Return the shared time-based nonce used by every Kraken CCXT signer."""
+    return int(time.time() * 100_000_000)
 
 
 def _kraken_native_txid(payload: dict[str, Any]) -> Any:
@@ -781,7 +787,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         self.api_key = api_key
         self.api_secret = api_secret
         self.sandbox = sandbox
-        ccxt_kwargs: dict[str, Any] = {
+        self._ccxt_kwargs: dict[str, object] = {
             "apiKey": api_key,
             "secret": api_secret,
             "sandbox": sandbox,
@@ -789,7 +795,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             "timeout": 30000,
             "rateLimit": 1000,
         }
-        self._ccxt_client = cast(Any, ccxt.kraken)(ccxt_kwargs)
+        self._ccxt_client = cast(Any, ccxt.kraken)(dict(self._ccxt_kwargs))
+        self._ledger_ccxt_client: ccxt.kraken | None = None
         self._ws_client: SpotWSClient | None = None
         self._ws_connect_lock: asyncio.Lock = asyncio.Lock()
         self._private_rest_lock: asyncio.Lock = asyncio.Lock()
@@ -844,6 +851,28 @@ class KrakenExchangeClient(ExchangeClientBase):
             The CCXT Kraken client for direct access to CCXT methods.
         """
         return self._ccxt_client
+
+    def _get_ledger_ccxt_client(self) -> ccxt.kraken:
+        """Build the dedicated short-timeout CCXT ledger client on first use.
+
+        Constructor options mirror the main client except for the 10-second
+        socket timeout. Both clients use the same nonce function and private
+        REST lock; egress scopes proxies on this client's own session.
+        """
+        client = self._ledger_ccxt_client
+        if client is not None:
+            return client
+        kwargs = dict(self._ccxt_kwargs)
+        kwargs["timeout"] = _LEDGER_READ_TIMEOUT_MS
+        client = ccxt.kraken(kwargs)
+        client.nonce = _kraken_time_nonce
+        self._ledger_ccxt_client = client
+        return client
+
+    def _close_ledger_ccxt_session(self) -> None:
+        """Close the dedicated ledger session when that lazy client exists."""
+        if self._ledger_ccxt_client is not None:
+            self._ledger_ccxt_client.session.close()
 
     def private_rest_busy(self) -> bool:
         """Return whether a private REST invocation owns or waits for the nonce lock.
@@ -931,7 +960,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         self._reopen_rest_pool()
         try:
-            self._ccxt_client.nonce = lambda: int(time.time() * 100_000_000)
+            self._ccxt_client.nonce = _kraken_time_nonce
             await self._with_retry(
                 self._ccxt_client.load_markets,
                 egress_kind="public_read",
@@ -946,6 +975,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             with contextlib.suppress(Exception):
                 if self._ccxt_client and hasattr(self._ccxt_client, "session"):
                     self._ccxt_client.session.close()
+            with contextlib.suppress(Exception):
+                self._close_ledger_ccxt_session()
             logger.error(f"Failed to connect to Kraken: {e}")
             raise
 
@@ -1017,6 +1048,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             if self._ccxt_client and hasattr(self._ccxt_client, "session"):
                 self._ccxt_client.session.close()
                 logger.info("Kraken REST client session closed")
+            self._close_ledger_ccxt_session()
         except Exception as e:
             logger.warning(f"Error during disconnect: {e}")
         finally:
@@ -2366,7 +2398,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             ValueError: When the envelope is malformed.
         """
         return await self._read_private_ledger_payload(
-            self._ccxt_client.privatePostLedgers,
+            self._get_ledger_ccxt_client().privatePostLedgers,
             {"start": start, "end": end, "ofs": offset},
             "privatePostLedgers",
             parse_ledgers_payload,
@@ -2384,7 +2416,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             ValueError: When the envelope is malformed.
         """
         return await self._read_private_ledger_payload(
-            self._ccxt_client.privatePostTradeBalance,
+            self._get_ledger_ccxt_client().privatePostTradeBalance,
             {},
             "privatePostTradeBalance",
             parse_trade_balance_payload,
@@ -2397,7 +2429,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         operation: str,
         parse: Callable[[object], PayloadT],
     ) -> PayloadT:
-        """Call one private read on ``_ccxt_client`` and parse its envelope.
+        """Call one private read on the dedicated ledger client and parse it.
 
         Args:
             func: Bound method of this instance's ccxt client.
@@ -2427,7 +2459,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                     retry_rate_limit_errors=False,
                     egress_kind="private_idempotent_read",
                     egress_operation=operation,
-                    egress_target=ccxt_proxy_target(self._ccxt_client),
+                    egress_target=ccxt_proxy_target(self._get_ledger_ccxt_client()),
                 )
             except PrivateRestBusyError:
                 raise

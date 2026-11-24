@@ -2616,12 +2616,13 @@ class TestKrakenCoverageImprovement:
     async def test_connect_success_resets_circuit_breaker(
         self, mock_ccxt: MagicMock, kraken_client: KrakenExchangeClient
     ) -> None:
-        """Verify connect success resets circuit breaker."""
+        """Verify connect success resets circuit breaker and installs the shared nonce."""
         mock_client = AsyncMock()
         mock_client.load_markets.return_value = {}
         with patch.object(kraken_client, "_ccxt_client", mock_client):
             await kraken_client.connect()
             mock_client.load_markets.assert_called_once()
+            assert mock_client.nonce is kr._kraken_time_nonce
 
     async def test_connect_failure_raises_exception(
         self, kraken_client: KrakenExchangeClient
