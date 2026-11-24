@@ -209,12 +209,12 @@ def test_default_budget_fits_one_windowed_page_in_45_seconds() -> None:
 
     Given the module defaults,
     When a watchdog configuration is built without arguments,
-    Then the sweep page is 15,000 rows and the monitor timeout is 45 seconds.
+    Then the sweep page is 25,000 rows and the monitor timeout is 45 seconds.
     """
     config = TradeIntegrityMonitorConfig()
 
-    assert (DEFAULT_SWEEP_LIMIT, DEFAULT_MONITOR_TIMEOUT_SECONDS) == (15_000, 45.0)
-    assert (config.sweep_limit, config.monitor_timeout_seconds) == (15_000, 45.0)
+    assert (DEFAULT_SWEEP_LIMIT, DEFAULT_MONITOR_TIMEOUT_SECONDS) == (25_000, 45.0)
+    assert (config.sweep_limit, config.monitor_timeout_seconds) == (25_000, 45.0)
 
 
 def test_m2_finding_details_retain_active_identity_evidence() -> None:
