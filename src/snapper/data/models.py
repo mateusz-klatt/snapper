@@ -6987,3 +6987,149 @@ def _install_futures_inventory_read_immutability(
 ) -> None:
     """Apply identical physical lifecycle guards to model-created and migrated databases."""
     install_futures_inventory_read_triggers(connection, str(getattr(target, "name", "")))
+
+
+CK_VENUE_LEDGER_EXCHANGE = (
+    "exchange IS NOT NULL AND LENGTH(TRIM(exchange)) > 0 AND exchange = LOWER(exchange)"
+)
+CK_VENUE_LEDGER_MODE = "mode = 'live'"
+CK_VENUE_LEDGER_ENTRY_TEXT = (
+    "LENGTH(TRIM(venue_ledger_id)) > 0 AND venue_ledger_id = TRIM(venue_ledger_id) AND "
+    "LENGTH(TRIM(ledger_time_text)) > 0 AND ledger_time_text = TRIM(ledger_time_text) AND "
+    "LENGTH(TRIM(ledger_type)) > 0 AND ledger_type = TRIM(ledger_type) AND "
+    "LENGTH(TRIM(aclass)) > 0 AND aclass = TRIM(aclass) AND "
+    "LENGTH(TRIM(asset)) > 0 AND asset = TRIM(asset) AND "
+    "LENGTH(TRIM(amount_text)) > 0 AND amount_text = TRIM(amount_text) AND "
+    "LENGTH(TRIM(fee_text)) > 0 AND fee_text = TRIM(fee_text) AND "
+    "LENGTH(TRIM(balance_text)) > 0 AND balance_text = TRIM(balance_text)"
+)
+CK_VENUE_LEDGER_EVIDENCE_STATUS = (
+    "evidence_status IS NULL OR evidence_status IN "
+    "('ledger_cursor_gap', 'ledger_backlog', 'ledger_permission_missing')"
+)
+CK_VENUE_LEDGER_CURSOR_COUNTS = (
+    "api_points_used >= 0 AND ingested_count >= 0 AND "
+    "(reported_count IS NULL OR reported_count >= 0) AND "
+    "(cursor_second IS NULL OR cursor_second >= 0) AND "
+    "LENGTH(cursor_ids_json) > 0"
+)
+CK_VENUE_LEDGER_WINDOW = (
+    "(window_start IS NULL AND window_end IS NULL AND next_ofs IS NULL AND "
+    "expected_count IS NULL AND window_cursor_second IS NULL AND "
+    "window_cursor_ids_json IS NULL) OR "
+    "(window_start IS NOT NULL AND window_end IS NOT NULL AND next_ofs IS NOT NULL AND "
+    "window_cursor_ids_json IS NOT NULL AND window_start >= 0 AND "
+    "window_end >= window_start AND next_ofs >= 0 AND "
+    "(expected_count IS NULL OR expected_count >= 0) AND "
+    "(window_cursor_second IS NULL OR window_cursor_second >= 0))"
+)
+
+
+class VenueLedgerEntry(Base):
+    """Append-only Kraken ledger posting observed for one live account.
+
+    Identity is ``(wallet_public_id, exchange, mode, venue_ledger_id)``. Amounts
+    stay the venue's decimal text. Rows are inserted once and never updated.
+    """
+
+    __tablename__ = "venue_ledger_entries"
+    __table_args__ = (
+        UniqueConstraint(
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            "venue_ledger_id",
+            name="uq_venue_ledger_entries_identity",
+        ),
+        CheckConstraint(CK_VENUE_LEDGER_EXCHANGE, name="ck_venue_ledger_entries_exchange"),
+        CheckConstraint(CK_VENUE_LEDGER_MODE, name="ck_venue_ledger_entries_mode"),
+        CheckConstraint(CK_VENUE_LEDGER_ENTRY_TEXT, name="ck_venue_ledger_entries_text"),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), nullable=False)
+    venue_ledger_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    refid: Mapped[str] = mapped_column(String(64), nullable=False)
+    ledger_time_text: Mapped[str] = mapped_column(String(64), nullable=False)
+    ledger_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    subtype: Mapped[str] = mapped_column(String(32), nullable=False)
+    aclass: Mapped[str] = mapped_column(String(32), nullable=False)
+    asset: Mapped[str] = mapped_column(String(32), nullable=False)
+    amount_text: Mapped[str] = mapped_column(String(64), nullable=False)
+    fee_text: Mapped[str] = mapped_column(String(64), nullable=False)
+    balance_text: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    observation_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+
+
+class VenueLedgerCursor(Base):
+    """Latest Kraken ledger cursor and pass evidence for one live account.
+
+    The reconciliation boundary columns are written on the first insert and
+    left unchanged when a later pass updates the cursor. Frozen-window columns
+    retain paging progress across passes and clear after a reconciled drain.
+    """
+
+    __tablename__ = "venue_ledger_cursors"
+    __table_args__ = (
+        UniqueConstraint(
+            "wallet_public_id",
+            "exchange",
+            "mode",
+            name="uq_venue_ledger_cursors_scope",
+        ),
+        CheckConstraint(CK_VENUE_LEDGER_EXCHANGE, name="ck_venue_ledger_cursors_exchange"),
+        CheckConstraint(CK_VENUE_LEDGER_MODE, name="ck_venue_ledger_cursors_mode"),
+        CheckConstraint(CK_VENUE_LEDGER_EVIDENCE_STATUS, name="ck_venue_ledger_cursors_status"),
+        CheckConstraint(CK_VENUE_LEDGER_CURSOR_COUNTS, name="ck_venue_ledger_cursors_counts"),
+        CheckConstraint(CK_VENUE_LEDGER_WINDOW, name="ck_venue_ledger_cursors_window"),
+    )
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    wallet_public_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), nullable=False)
+    cursor_second: Mapped[int | None] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=True,
+    )
+    cursor_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    window_start: Mapped[int | None] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=True,
+    )
+    window_end: Mapped[int | None] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=True,
+    )
+    next_ofs: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expected_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    window_cursor_second: Mapped[int | None] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=True,
+    )
+    window_cursor_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    boundary_as_of: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    boundary_watermark: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=False,
+    )
+    boundary_session_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    boundary_sequence_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    evidence_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reported_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ingested_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    pass_started_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
+    observation_id: Mapped[str] = mapped_column(UUIDColumn(), nullable=False)
+    trade_balance_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trade_balance_observed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), nullable=True)
+    api_points_used: Mapped[int] = mapped_column(Integer, nullable=False)

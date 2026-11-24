@@ -669,6 +669,8 @@ WALLET_SCOPED_SCHEMA_TABLES = frozenset(
         "venue_account_observations",
         "venue_account_states",
         "venue_events",
+        "venue_ledger_cursors",
+        "venue_ledger_entries",
         "wallet_credentials",
         "wallet_operator_scope_grants",
         "wallet_user_read_grants",
@@ -687,6 +689,10 @@ theorem. Discovering only *populated* tables would let a new EMPTY wallet-scoped
 table vanish from the comparison and pass vacuously — reopening the D1 overclaim
 in a new shape, where a rival seed path targets a fresh wallet-scoped table that
 the alias fixture happens to leave empty.
+
+``venue_ledger_entries`` and ``venue_ledger_cursors`` (migration 0074) are live
+Kraken margin-ledger observation state written only by the executor, so they are
+deliberately out of the demo seed's scope.
 """
 
 WALLET_SCOPED_SEED_TABLES = frozenset(

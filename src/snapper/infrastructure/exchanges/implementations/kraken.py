@@ -104,6 +104,12 @@ from snapper.infrastructure.exchanges.execution_wire_receipts import is_executio
 from snapper.infrastructure.exchanges.kraken_closed_candles import ClosedCandleRequest
 from snapper.infrastructure.exchanges.kraken_closed_candles import parse_closed_candles
 from snapper.infrastructure.exchanges.kraken_execution_routes import spot_execution_route
+from snapper.infrastructure.exchanges.kraken_ledger import KrakenLedgerPage
+from snapper.infrastructure.exchanges.kraken_ledger import KrakenLedgerPermissionMissingError
+from snapper.infrastructure.exchanges.kraken_ledger import KrakenTradeBalance
+from snapper.infrastructure.exchanges.kraken_ledger import is_kraken_ledger_permission_error
+from snapper.infrastructure.exchanges.kraken_ledger import parse_ledgers_payload
+from snapper.infrastructure.exchanges.kraken_ledger import parse_trade_balance_payload
 from snapper.infrastructure.exchanges.kraken_rest_egress import KrakenRestOperationKind
 from snapper.infrastructure.exchanges.kraken_rest_egress import RestProxyTarget
 from snapper.infrastructure.exchanges.kraken_rest_egress import ccxt_proxy_target
@@ -139,6 +145,8 @@ apply_kraken_ws_teardown_hardening()
 _CREDENTIALS_REQUIRED_MSG = "API credentials required for trading"
 _NATIVE_BALANCE_CREDENTIALS_MSG = "API credentials required for balance"
 _NATIVE_POSITION_CREDENTIALS_MSG = "API credentials required for positions"
+_LEDGER_CREDENTIALS_MSG = "API credentials required for ledger"
+_LEDGER_READ_TIMEOUT_MS: Final = 10_000
 _NATIVE_BALANCE_MALFORMED_ROW_MSG = (
     "Kraken spot balance currency row is not a mapping (malformed envelope)"
 )
@@ -163,6 +171,20 @@ _NATIVE_BALANCE_AGGREGATE_KEYS: Final = frozenset(
 )
 _PRIVATE_REST_LOCK_WAIT_WARN_S: Final[float] = 5.0
 _IN_PRIVATE_REST: Final[ContextVar[bool]] = ContextVar("kraken_in_private_rest", default=False)
+_BUDGETED_LEDGER_READ: Final[ContextVar[bool]] = ContextVar(
+    "kraken_budgeted_ledger_read",
+    default=False,
+)
+"""Mark budgeted ledger reads for atomic lock skipping and circuit-state isolation."""
+
+
+class PrivateRestBusyError(RuntimeError):
+    """A budgeted private read skipped rather than queue for the nonce lock."""
+
+
+def _kraken_time_nonce() -> int:
+    """Return the shared time-based nonce used by every Kraken CCXT signer."""
+    return int(time.time() * 100_000_000)
 
 
 def _kraken_native_txid(payload: dict[str, Any]) -> Any:
@@ -685,7 +707,29 @@ def _parse_native_position_entry(position: object, observed_at: datetime) -> Ope
         unrealized_pnl=unrealized_pnl,
         unrealized_funding=_KRAKEN_NO_SEPARATE_UNREALIZED_FUNDING,
         timestamp=observed_at,
+        vol_closed=closed_size,
+        fee=_optional_position_text(info, "fee"),
+        rollovertm=_optional_position_text(info, "rollovertm"),
     )
+
+
+def _optional_position_text(info: dict[str, object], field: str) -> str | None:
+    """Retain textual or numeric Kraken position evidence.
+
+    Args:
+        info: Raw OpenPositions object.
+        field: Venue field name such as ``fee`` or ``rollovertm``.
+
+    Returns:
+        The original string or a finite number rendered as text. Absent, blank,
+        boolean, and nonfinite fields return ``None``.
+    """
+    value = info.get(field)
+    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
+        return str(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value
 
 
 class KrakenExchangeClient(ExchangeClientBase):
@@ -744,7 +788,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         self.api_key = api_key
         self.api_secret = api_secret
         self.sandbox = sandbox
-        ccxt_kwargs: dict[str, Any] = {
+        self._ccxt_kwargs: dict[str, object] = {
             "apiKey": api_key,
             "secret": api_secret,
             "sandbox": sandbox,
@@ -752,11 +796,13 @@ class KrakenExchangeClient(ExchangeClientBase):
             "timeout": 30000,
             "rateLimit": 1000,
         }
-        self._ccxt_client = cast(Any, ccxt.kraken)(ccxt_kwargs)
+        self._ccxt_client = cast(Any, ccxt.kraken)(dict(self._ccxt_kwargs))
+        self._ledger_ccxt_client: ccxt.kraken | None = None
         self._ws_client: SpotWSClient | None = None
         self._ws_connect_lock: asyncio.Lock = asyncio.Lock()
         self._private_rest_lock: asyncio.Lock = asyncio.Lock()
         self._private_rest_holder: str | None = None
+        self._private_rest_waiters = 0
         self._ws_connected = False
         self._trade_client: Trade | None = None
         self._user_client: User | None = None
@@ -807,16 +853,42 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         return self._ccxt_client
 
-    def private_rest_busy(self) -> bool:
-        """Return whether a private REST invocation currently owns the nonce lock.
+    def _get_ledger_ccxt_client(self) -> ccxt.kraken:
+        """Build the dedicated short-timeout CCXT ledger client on first use.
 
-        Background private readers can use this as a try-acquire-or-skip signal.
-        The result is observational and does not reserve the lock for the caller.
+        Constructor options mirror the main client except for the 10-second
+        socket timeout. Both clients use the same nonce function and private
+        REST lock; egress scopes proxies on this client's own session.
+        """
+        client = self._ledger_ccxt_client
+        if client is not None:
+            return client
+        kwargs = dict(self._ccxt_kwargs)
+        kwargs["timeout"] = _LEDGER_READ_TIMEOUT_MS
+        client = ccxt.kraken(kwargs)
+        client.nonce = _kraken_time_nonce
+        self._ledger_ccxt_client = client
+        return client
+
+    def _close_ledger_ccxt_session(self) -> None:
+        """Close the dedicated ledger session when that lazy client exists."""
+        if self._ledger_ccxt_client is not None:
+            self._ledger_ccxt_client.session.close()
+
+    def private_rest_busy(self) -> bool:
+        """Return whether a private REST invocation owns or waits for the nonce lock.
+
+        Background private readers use this as a preliminary skip signal. Their
+        actual invocation repeats the check atomically before lock acquisition.
 
         Returns:
-            True while one private REST invocation is executing or finishing.
+            True while one private REST invocation is executing, finishing, or queued.
         """
-        return self._private_rest_lock.locked()
+        return self._private_rest_contended()
+
+    def _private_rest_contended(self) -> bool:
+        """Return whether the lock is held or any private caller is already queued."""
+        return self._private_rest_lock.locked() or self._private_rest_waiters > 0
 
     def execution_api_route(self) -> ExecutionApiRoute | None:
         """Prove the actual production read/write and constructed WebSocket endpoints.
@@ -889,7 +961,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         self._reopen_rest_pool()
         try:
-            self._ccxt_client.nonce = lambda: int(time.time() * 100_000_000)
+            self._ccxt_client.nonce = _kraken_time_nonce
             await self._with_retry(
                 self._ccxt_client.load_markets,
                 egress_kind="public_read",
@@ -904,6 +976,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             with contextlib.suppress(Exception):
                 if self._ccxt_client and hasattr(self._ccxt_client, "session"):
                     self._ccxt_client.session.close()
+            with contextlib.suppress(Exception):
+                self._close_ledger_ccxt_session()
             logger.error(f"Failed to connect to Kraken: {e}")
             raise
 
@@ -975,6 +1049,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             if self._ccxt_client and hasattr(self._ccxt_client, "session"):
                 self._ccxt_client.session.close()
                 logger.info("Kraken REST client session closed")
+            self._close_ledger_ccxt_session()
         except Exception as e:
             logger.warning(f"Error during disconnect: {e}")
         finally:
@@ -2270,8 +2345,11 @@ class KrakenExchangeClient(ExchangeClientBase):
         Kraken exposes no accrued rollover amount: ``unrealized_funding`` is
         explicitly ``0.0`` meaning "no separately venue-reported
         unrealized-funding component", NOT "no carrying cost". ``net`` maps
-        wholly to ``unrealized_pnl``; ``terms``, ``rollovertm``, and the opening
-        ``fee`` are never estimated, prorated, or relabelled as funding.
+        wholly to ``unrealized_pnl``. ``vol_closed``, the opening ``fee``, and
+        ``rollovertm`` are retained on the snapshot as evidence and are not
+        estimated, prorated, or relabelled as funding. A positive ``vol_closed``
+        still raises because the cost/value basis after a partial close is
+        unverified.
 
         A genuine empty list is authoritative observed-empty. Any malformed
         envelope raises so the observer records a position failure instead.
@@ -2303,6 +2381,103 @@ class KrakenExchangeClient(ExchangeClientBase):
             raise ValueError(_NATIVE_POSITION_MALFORMED_ENVELOPE_MSG)
         observed_at = datetime.now(UTC)
         return [_parse_native_position_entry(position, observed_at) for position in positions_data]
+
+    async def read_venue_ledger_page(self, start: int, end: int, offset: int) -> KrakenLedgerPage:
+        """Read one Kraken Ledgers page through this client's private nonce.
+
+        Args:
+            start: Inclusive window start as a unix second.
+            end: Inclusive window end as a unix second.
+            offset: Newest-first ``ofs`` inside the frozen window.
+
+        Returns:
+            The page entries and Kraken's window count.
+
+        Raises:
+            RuntimeError: When API credentials are missing.
+            KrakenLedgerPermissionMissingError: When the key cannot query ledgers.
+            ValueError: When the envelope is malformed.
+        """
+        return await self._read_private_ledger_payload(
+            self._get_ledger_ccxt_client().privatePostLedgers,
+            {"start": start, "end": end, "ofs": offset},
+            "privatePostLedgers",
+            parse_ledgers_payload,
+        )
+
+    async def read_trade_balance(self) -> KrakenTradeBalance:
+        """Read Kraken TradeBalance through this client's private nonce.
+
+        Returns:
+            Evidence fields ``eb``, ``tb``, ``m``, ``n``, ``c``, ``v``, and ``ml``.
+
+        Raises:
+            RuntimeError: When API credentials are missing.
+            KrakenLedgerPermissionMissingError: When the key cannot query the endpoint.
+            ValueError: When the envelope is malformed.
+        """
+        return await self._read_private_ledger_payload(
+            self._get_ledger_ccxt_client().privatePostTradeBalance,
+            {},
+            "privatePostTradeBalance",
+            parse_trade_balance_payload,
+        )
+
+    async def _read_private_ledger_payload[PayloadT](
+        self,
+        func: Callable[..., object],
+        params: dict[str, object],
+        operation: str,
+        parse: Callable[[object], PayloadT],
+    ) -> PayloadT:
+        """Call one private read on the dedicated ledger client and parse it.
+
+        The scoped budgeted-read marker selects atomic lock skipping and keeps
+        both successful and failed observations out of trading circuit state.
+
+        Args:
+            func: Bound method of this instance's ccxt client.
+            params: Endpoint parameters.
+            operation: Egress operation name.
+            parse: Envelope parser.
+
+        Returns:
+            The parsed payload.
+
+        Raises:
+            RuntimeError: When API credentials are missing.
+            PrivateRestBusyError: When the private lock or its wait queue is occupied.
+            KrakenLedgerPermissionMissingError: When Kraken denies the read.
+            TimeoutError: When the CCXT private request times out.
+            ValueError: When the envelope is malformed.
+        """
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError(_LEDGER_CREDENTIALS_MSG)
+        token = _BUDGETED_LEDGER_READ.set(True)
+        try:
+            try:
+                payload = await self._with_retry(
+                    func,
+                    params,
+                    retry_network_errors=False,
+                    retry_rate_limit_errors=False,
+                    egress_kind="private_idempotent_read",
+                    egress_operation=operation,
+                    egress_target=ccxt_proxy_target(self._get_ledger_ccxt_client()),
+                )
+            except PrivateRestBusyError:
+                raise
+            except KrakenLedgerPermissionMissingError:
+                raise
+            except ccxt.RequestTimeout as exc:
+                raise TimeoutError(str(exc)) from exc
+            except Exception as exc:
+                if is_kraken_ledger_permission_error(exc):
+                    raise KrakenLedgerPermissionMissingError(str(exc)) from exc
+                raise
+        finally:
+            _BUDGETED_LEDGER_READ.reset(token)
+        return parse(payload)
 
     def subscribe_ticks(
         self, symbols: list[str], *, req_id: int | None = None
@@ -3984,7 +4159,11 @@ class KrakenExchangeClient(ExchangeClientBase):
         after the blocking worker has actually finished. The context guard
         rejects nested entry because asyncio locks are not reentrant. It
         targets async/coroutine invocations; synchronous worker-thread
-        callables cannot await a nested private invocation.
+        callables cannot await a nested private invocation. Budgeted ledger
+        reads opt into try-acquire-or-skip. On the event loop, the contention
+        check and an uncontended ``Lock.acquire`` fast path do not yield, so
+        check-and-take is atomic. The self-maintained waiter count also catches
+        released-but-not-yet-resumed locks without using private lock attrs.
 
         CCXT's 30-second and python-kraken-sdk's 10-second HTTP bounds are
         per socket operation (connect and each read), not total wall-clock.
@@ -4002,12 +4181,19 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         Raises:
             RuntimeError: If the current invocation attempts nested entry.
+            PrivateRestBusyError: If a budgeted read would have to queue.
         """
         if _IN_PRIVATE_REST.get():
             raise RuntimeError("nested Kraken private REST call would deadlock the nonce lock")
+        if _BUDGETED_LEDGER_READ.get() and self._private_rest_contended():
+            raise PrivateRestBusyError("Kraken private REST lock is busy")
         wait_started = monotonic()
         holder = self._private_rest_holder
-        await self._private_rest_lock.acquire()
+        self._private_rest_waiters += 1
+        try:
+            await self._private_rest_lock.acquire()
+        finally:
+            self._private_rest_waiters -= 1
         wait_seconds = monotonic() - wait_started
         self._private_rest_holder = operation
         try:
@@ -4055,6 +4241,9 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         The REST slot is acquired before any private nonce lock, ensuring a
         slot waiter never blocks other private requests by holding that lock.
+        Successful trading calls reset the shared failure count; budgeted ledger
+        reads preserve it. A skipped read has already consumed a local REST-slot
+        token, which is the local limiter and not Kraken's API counter.
 
         Args:
             func: Function to call (sync or async).
@@ -4079,7 +4268,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             egress_target=egress_target,
             **kwargs,
         )
-        self._circuit_failures = 0
+        if not _BUDGETED_LEDGER_READ.get():
+            self._circuit_failures = 0
         return result
 
     async def _with_retry(
@@ -4101,17 +4291,20 @@ class KrakenExchangeClient(ExchangeClientBase):
         Kraken deduplicates ``cl_ord_id`` only among OPEN orders and all
         strategy orders are MARKET (filled instantly, never open), so a
         blind re-send after a send-then-timeout can double-place a real
-        position. With the flag off, network failures still feed the
-        circuit breaker but raise immediately; rate-limit retries remain
-        enabled because a 429 is a definitive venue-side rejection and
-        re-sending cannot duplicate.
+        position. With the flag off, trading network failures still feed the
+        circuit breaker but raise immediately. Budgeted ledger reads instead
+        preserve the trading circuit's failure count on both failure and success.
+        Rate-limit retries remain enabled for other calls because a 429 is a
+        definitive venue-side rejection and re-sending cannot duplicate.
 
         Args:
             func: Function to call (sync or async).
             *args: Positional arguments for func.
+            retry_rate_limit_errors: Whether a rejected request may spend another
+                API-counter reservation. Disabled for budgeted ledger reads.
             retry_network_errors: When False, raise network-class errors
-                immediately after circuit-breaker accounting instead of
-                retrying. Required for non-idempotent venue mutations.
+                immediately instead of retrying. Trading calls account for the
+                failure; budgeted ledger reads leave shared circuit state intact.
             egress_kind: Optional REST routing classification for sync
                 Kraken calls.
             egress_operation: Stable operation name for the egress identity.
@@ -4125,6 +4318,7 @@ class KrakenExchangeClient(ExchangeClientBase):
             RuntimeError: If circuit breaker is open.
             Exception: If all retries exhausted or unexpected error.
         """
+        retry_rate_limit_errors = kwargs.pop("retry_rate_limit_errors", True)
         if time.time() < self._circuit_open_until:
             raise CircuitBreakerOpenError("Circuit breaker open")
         max_retries = 3
@@ -4141,10 +4335,15 @@ class KrakenExchangeClient(ExchangeClientBase):
                     **kwargs,
                 )
             except ccxt.RateLimitExceeded:
+                if not retry_rate_limit_errors:
+                    raise
                 attempt = await self._handle_rate_limit(attempt, max_retries, base_delay)
+            except PrivateRestBusyError:
+                raise
             except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
                 if not retry_network_errors:
-                    self._record_unretried_network_failure(e)
+                    if not _BUDGETED_LEDGER_READ.get():
+                        self._record_unretried_network_failure(e)
                     raise
                 attempt = await self._handle_network_error(e, attempt, max_retries, base_delay)
             except Exception as e:
