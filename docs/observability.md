@@ -184,13 +184,14 @@ With `X` swept rows processed per minute (one page divided by
 any wait) and an ingestion rate `I` across all venues, a steady pass
 lasts about `T = 6 h × r / (1 − r)` with `r = I / X` while `I` stays
 below `X`, and completed coverage updates smoothly per page rather than
-waiting until pass completion. At the default 15,000-row page, `X` is up
-to 15,000 rows a minute when ticks finish inside the 60-second cadence,
-and about 9,200 rows a minute when both calls use their full budget.
-Measured ingestion is about 2,700 to 2,900
+waiting until pass completion. At the default 25,000-row page, `X` is up
+to 25,000 rows a minute when ticks finish inside the 60-second cadence,
+and about 15,300 rows a minute (25,000 × 60 / ~98 s) when both calls use
+their full budget. Measured ingestion is about 2,700 to 2,900
 trades a minute outside the US session, a weekday average of 6,700 to
 12,600, and about 45,000 a minute during the US session, mostly
-equities. For much of a weekday `I` therefore exceeds `X`. A pass keeps
+equities. Outside the US session `I` therefore stays below `X`, while
+during the US session `I` still exceeds `X`. A pass keeps
 a fixed end and can still complete, but while ingestion meets or exceeds
 sweep throughput, successive passes take longer, completed-coverage lag
 has no finite steady state, and the lag warning keeps firing until the
