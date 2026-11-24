@@ -222,6 +222,15 @@ same trust decision at every chunk width. Pointwise FX shadow proofs use the
 that used the range-wide policy. That excludes pointwise `5C.5` and `5C.6`
 consumers.
 
+The tick persists its shadow proofs under a 10-second deadline. A flush that
+misses it drops the remaining evaluations without failing valuation and logs
+its ERROR only once per failure class and pair in each process. Every 10 ticks
+the snapshotter logs the cumulative process-local counters at INFO as
+`fx_shadow_pin_metrics_summary creation=… reuse=… conflict=… upgrade_required=…
+mismatch=… failure=… dropped=…`. A `dropped` or `failure` count that keeps
+rising after the first minutes following a restart means the drops are
+sustained, not start-up load.
+
 Each snapshotter minute has a separate faithful flow-recovery allowance.
 Its financial result is independent of the recovery work performed for
 other minutes in the same chunk. A separate limit on recovery work for an

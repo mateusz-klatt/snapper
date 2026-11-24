@@ -1,6 +1,7 @@
 """Failure-isolated write-through shadow pinning for raw fiat elections."""
 
 import asyncio
+import logging
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Iterator
@@ -140,6 +141,61 @@ def fx_shadow_pin_metrics() -> FxShadowPinMetrics:
         failure=_METRICS.failure,
         dropped=_METRICS.dropped,
     )
+
+
+FX_SHADOW_PIN_SUMMARY_EVERY_TICKS = 10
+"""Snapshotter ticks between two cumulative ``fx_shadow_pin_metrics_summary`` lines."""
+
+
+def format_fx_shadow_pin_metrics_summary(metrics: FxShadowPinMetrics) -> str:
+    """Format one deterministic ``fx_shadow_pin_metrics_summary`` line.
+
+    Args:
+        metrics: Cumulative process-local shadow pin counters.
+
+    Returns:
+        Single-line log string starting with ``fx_shadow_pin_metrics_summary``.
+    """
+    return (
+        "fx_shadow_pin_metrics_summary "
+        f"creation={metrics.creation} "
+        f"reuse={metrics.reuse} "
+        f"conflict={metrics.conflict} "
+        f"upgrade_required={metrics.upgrade_required} "
+        f"mismatch={metrics.mismatch} "
+        f"failure={metrics.failure} "
+        f"dropped={metrics.dropped}"
+    )
+
+
+def advance_fx_shadow_pin_summary_tick(
+    tick_count: int,
+    target_logger: logging.Logger,
+    *,
+    every_ticks: int = FX_SHADOW_PIN_SUMMARY_EVERY_TICKS,
+) -> int:
+    """Advance the tick counter and log the cumulative shadow pin counters every N ticks.
+
+    The counters are process-local and otherwise visible only to the backfill
+    CLI; a failed flush logs its ERROR once per failure class and pair, so this
+    periodic line is how operators see repeated drops and failures.
+
+    Args:
+        tick_count: Completed snapshotter ticks before this tick.
+        target_logger: Logger receiving the summary line when the period elapses.
+        every_ticks: Tick period between emitted summaries.
+
+    Returns:
+        Updated tick count.
+    """
+    next_tick = tick_count + 1
+    if next_tick % every_ticks == 0:
+        target_logger.info(
+            "%s",
+            format_fx_shadow_pin_metrics_summary(fx_shadow_pin_metrics()),
+            extra={"fx_shadow_pin_metrics_summary": True},
+        )
+    return next_tick
 
 
 def reset_fx_shadow_pin_metrics() -> None:

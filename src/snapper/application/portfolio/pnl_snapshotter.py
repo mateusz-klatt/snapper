@@ -59,6 +59,7 @@ from snapper.application.portfolio.basket_valuation import PositionInventoryEntr
 from snapper.application.portfolio.basket_valuation import ValuationEvidence
 from snapper.application.portfolio.fx_conversion_shadow import FxShadowPinContext
 from snapper.application.portfolio.fx_conversion_shadow import activate_fx_shadow_context
+from snapper.application.portfolio.fx_conversion_shadow import advance_fx_shadow_pin_summary_tick
 from snapper.application.portfolio.pnl_correction_planner import PlannedPnlCorrection
 from snapper.application.portfolio.pnl_correction_planner import PnlCorrectionPlanInputs
 from snapper.application.portfolio.pnl_correction_planner import plan_correction_chunk
@@ -456,6 +457,7 @@ class PortfolioPnlSnapshotter:
         self._configured_checkpoint_mode: CheckpointMode = checkpoint_resolution.configured
         self._checkpoint_mode: CheckpointMode = checkpoint_resolution.effective
         self._checkpoint_summary_ticks: int = 0
+        self._fx_shadow_summary_ticks: int = 0
         self._tick_recaptures: int = 0
         self._tick_shadow_comparisons: int = 0
         self._tick_last_budgeted_wallet: str | None = None
@@ -570,6 +572,9 @@ class PortfolioPnlSnapshotter:
             self._checkpoint_mode,
             logger,
             every_ticks=CHECKPOINT_SUMMARY_EVERY_TICKS,
+        )
+        self._fx_shadow_summary_ticks = advance_fx_shadow_pin_summary_tick(
+            self._fx_shadow_summary_ticks, logger
         )
 
     async def _tick_valuation(self, repo: Repository, as_of: datetime) -> None:
