@@ -1,5 +1,5 @@
 {
-  "alerts.argument.reason.ambiguous": "Jibu lisiloeleweka kutoka soko la biashara",
+  "alerts.argument.reason.ambiguous": "Jibu lisiloeleweka kutoka soko la ubadilishaji",
   "alerts.argument.reason.unknown": "Sababu haijulikani",
   "alerts.argument.side.buy": "UNUNUZI",
   "alerts.argument.side.sell": "UUZAJI",
@@ -11,13 +11,13 @@
   "alerts.body.order_fill_full": "%@ %@ %@ @ %@ limetekelezwa kwenye %@",
   "alerts.body.order_fill_full_quoted": "%@ %@ %@ @ %@ limetekelezwa kwenye %@",
   "alerts.body.order_rejected": "%@ %@ %@ limekataliwa: %@",
-  "alerts.body.order_unknown": "%@ %@ %@ hali haijulikani: %@ — uthibitishaji kutoka soko la biashara unasubiriwa; usidhani kuwa nafasi imefungwa",
-  "alerts.body.order_unknown_unresolved": "%@ %@ %@ hali haijulikani: %@ — uthibitishaji kutoka soko la biashara unasubiriwa; usidhani kuwa nafasi imefungwa",
+  "alerts.body.order_unknown": "%@ %@ %@ hali haijulikani: %@ — uthibitishaji kutoka jukwaa la biashara unasubiriwa; usidhani kuwa nafasi imefungwa",
+  "alerts.body.order_unknown_unresolved": "%@ %@ %@ hali haijulikani: %@ — uthibitishaji kutoka jukwaa la biashara unasubiriwa; usidhani kuwa nafasi imefungwa",
   "alerts.body.position_stop_loss_fired": "Kusitisha hasara kumetekelezwa kwa %@ (%@)",
   "alerts.title.critical_system_error": "Mfumo umezorota: %@",
   "alerts.title.margin_warning": "Onyo la dhamana",
-  "alerts.title.order_fill_full": "Agizo limetekelezwa",
-  "alerts.title.order_rejected": "Agizo limekataliwa",
-  "alerts.title.order_unknown": "Hali ya agizo haijulikani",
+  "alerts.title.order_fill_full": "Oda imetekelezwa",
+  "alerts.title.order_rejected": "Oda imekataliwa",
+  "alerts.title.order_unknown": "Hali ya oda haijulikani",
   "alerts.title.position_stop_loss_fired": "Kusitisha hasara kumetekelezwa"
 }

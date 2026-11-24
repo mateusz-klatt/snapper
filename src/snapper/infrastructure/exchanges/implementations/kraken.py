@@ -33,6 +33,7 @@ import threading
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import AsyncIterator
+from collections.abc import Awaitable
 from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
@@ -166,6 +167,7 @@ is estimated or prorated.
 _NATIVE_BALANCE_AGGREGATE_KEYS: Final = frozenset(
     {"free", "used", "total", "info", "timestamp", "datetime"}
 )
+_PRIVATE_REST_LOCK_WAIT_WARN_S: Final[float] = 5.0
 
 
 def _kraken_native_txid(payload: dict[str, Any]) -> Any:
@@ -780,6 +782,8 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._ccxt_client = cast(Any, ccxt.kraken)(ccxt_kwargs)
         self._ws_client: SpotWSClient | None = None
         self._ws_connect_lock: asyncio.Lock = asyncio.Lock()
+        self._private_rest_lock: asyncio.Lock = asyncio.Lock()
+        self._private_rest_holder: str | None = None
         self._ws_connected = False
         self._trade_client: Trade | None = None
         self._user_client: User | None = None
@@ -830,6 +834,17 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         return self._ccxt_client
 
+    def private_rest_busy(self) -> bool:
+        """Return whether a private REST invocation currently owns the nonce lock.
+
+        Background private readers can use this as a try-acquire-or-skip signal.
+        The result is observational and does not reserve the lock for the caller.
+
+        Returns:
+            True while one private REST invocation is executing or finishing.
+        """
+        return self._private_rest_lock.locked()
+
     def execution_api_route(self) -> ExecutionApiRoute | None:
         """Prove the actual production read/write and constructed WebSocket endpoints.
 
@@ -852,7 +867,9 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         The route helper runs inside the REST worker thread so mutable
         CCXT/SDK proxy state is scoped around the actual blocking HTTP
-        send, not around an ``await`` in the event loop.
+        send, not around an ``await`` in the event loop. Classified
+        synchronous ``_with_retry`` calls and direct native order creation
+        and cancellation all share this private locking path.
 
         Args:
             operation: Stable operation name for egress identity.
@@ -863,8 +880,9 @@ class KrakenExchangeClient(ExchangeClientBase):
         Returns:
             Result returned by ``sync_call``.
         """
-        return await self._dispatch_blocking(
-            lambda: route_kraken_rest_sync_call(
+
+        def routed_call() -> ResultT:
+            return route_kraken_rest_sync_call(
                 exchange=str(self.exchange_name),
                 operation=operation,
                 kind=kind,
@@ -872,6 +890,11 @@ class KrakenExchangeClient(ExchangeClientBase):
                 proxy_lock=self._rest_egress_proxy_lock,
                 sync_call=sync_call,
             )
+
+        if kind == "public_read":
+            return await self._dispatch_blocking(routed_call)
+        return await self._run_private_rest(
+            lambda: self._dispatch_blocking(routed_call), operation=operation
         )
 
     async def connect(self) -> None:
@@ -4063,6 +4086,55 @@ class KrakenExchangeClient(ExchangeClientBase):
             logger.debug("Initialized native Kraken User REST API client")
         return self._user_client
 
+    async def _run_private_rest[ResultT](
+        self, invoke: Callable[[], Awaitable[ResultT]], *, operation: str
+    ) -> ResultT:
+        """Run one private invocation under the per-instance nonce lock.
+
+        Retry callers acquire their REST slot before entering this helper,
+        so neither slot waits nor backoff sleeps occur while the lock is
+        held. Shielding leaves the dispatched invocation running when its
+        caller is cancelled; only its done callback releases the lock,
+        after the blocking worker has actually finished. Lock acquisition
+        has no hard timeout or failure: each holder is bounded transitively
+        by CCXT's 30-second HTTP timeout or python-kraken-sdk's 10-second
+        per-request ``TIMEOUT``.
+
+        Args:
+            invoke: Factory for the coroutine or future performing one call.
+            operation: Stable waiting operation name for contention logs.
+
+        Returns:
+            Result returned by the private invocation.
+        """
+        wait_started = monotonic()
+        holder = self._private_rest_holder
+        await self._private_rest_lock.acquire()
+        wait_seconds = monotonic() - wait_started
+        self._private_rest_holder = operation
+        if wait_seconds >= _PRIVATE_REST_LOCK_WAIT_WARN_S:
+            logger.warning(
+                f"Kraken private REST nonce lock waited {wait_seconds:.3f}s "
+                f"for {operation}; holder at wait start: {holder or 'unknown'}"
+            )
+        invocation = asyncio.ensure_future(invoke())
+        invocation.add_done_callback(self._release_private_rest_lock)
+        return await asyncio.shield(invocation)
+
+    def _release_private_rest_lock[ResultT](self, invocation: asyncio.Future[ResultT]) -> None:
+        """Clear the holder and release after dispatch, consuming orphan outcomes.
+
+        Args:
+            invocation: Completed private invocation holding the lock.
+
+        Returns:
+            None.
+        """
+        with contextlib.suppress(asyncio.CancelledError):
+            invocation.exception()
+        self._private_rest_holder = None
+        self._private_rest_lock.release()
+
     async def _invoke_with_retry_slot(
         self,
         func: Callable[..., Any],
@@ -4073,6 +4145,9 @@ class KrakenExchangeClient(ExchangeClientBase):
         **kwargs: Any,
     ) -> Any:
         """Given a REST callable, when one retry attempt runs, then return its result.
+
+        The REST slot is acquired before any private nonce lock, ensuring a
+        slot waiter never blocks other private requests by holding that lock.
 
         Args:
             func: Function to call (sync or async).
@@ -4190,7 +4265,8 @@ class KrakenExchangeClient(ExchangeClientBase):
         (``_dispatch_blocking``) so a slow Kraken REST round-trip (2–5s
         under network jitter has been observed) neither blocks the
         executor event loop nor competes for the loop's shared default
-        executor (audit P1-5). Async callables are awaited directly.
+        executor (audit P1-5). Async callables stay on the event loop;
+        private and unclassified calls of either kind use the nonce lock.
 
         Args:
             func: Function to call.
@@ -4205,7 +4281,12 @@ class KrakenExchangeClient(ExchangeClientBase):
             Result of the function call.
         """
         if inspect.iscoroutinefunction(func):
-            return await func(*args, **kwargs)
+            if egress_kind == "public_read":
+                return await func(*args, **kwargs)
+            return await self._run_private_rest(
+                lambda: func(*args, **kwargs),
+                operation=egress_operation or cast(str, getattr(func, "__name__", "unknown")),
+            )
         if egress_kind is not None:
             if egress_operation is None or egress_target is None:
                 raise RuntimeError("Kraken REST egress routing requires operation and target")
@@ -4215,7 +4296,10 @@ class KrakenExchangeClient(ExchangeClientBase):
                 target=egress_target,
                 sync_call=lambda: func(*args, **kwargs),
             )
-        return await self._dispatch_blocking(func, *args, **kwargs)
+        return await self._run_private_rest(
+            lambda: self._dispatch_blocking(func, *args, **kwargs),
+            operation=egress_operation or cast(str, getattr(func, "__name__", "unknown")),
+        )
 
     @staticmethod
     async def _handle_rate_limit(attempt: int, max_retries: int, base_delay: float) -> int:

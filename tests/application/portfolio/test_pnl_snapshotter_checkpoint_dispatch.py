@@ -25,6 +25,9 @@ from snapper.application.portfolio import pnl_timeline_service
 from snapper.application.portfolio.pnl_correction_planner import PlannedPnlCorrection
 from snapper.application.portfolio.pnl_engine_options import PnlEngineOptions
 from snapper.application.portfolio.pnl_opening_checkpoint_bundle import bundle_from_json
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    checkpoint_minute_fenced,
+)
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import (
     CHECKPOINT_SUMMARY_EVERY_TICKS,
 )
@@ -326,6 +329,202 @@ async def test_capture_gates_never_commit_a_row(
 
     assert await repo.get_portfolio_pnl_opening_checkpoint(fixtures._sample_scope()) is None
     assert len(repo.committed_chunks) == 1
+
+
+@pytest.mark.parametrize(
+    ("fence", "fenced"),
+    [
+        (fixtures._minute(2), True),
+        (fixtures._minute(3), True),
+        (fixtures._minute(4), False),
+        (None, False),
+    ],
+)
+def test_capture_gate_uses_the_shared_inclusive_fence(
+    monkeypatch: pytest.MonkeyPatch,
+    fence: datetime | None,
+    fenced: bool,
+) -> None:
+    """Align capture and repository comparisons below, at, above, and without a fence.
+
+    Given: A clean capture tip and a self-heal fence around that minute.
+    When: The shared comparator and capture request gate evaluate the same boundary.
+    Then: Both reject exactly the earlier-or-equal fences, including the equality case.
+
+    Args:
+        monkeypatch: Pytest fixture enabling capture for the production calc version.
+        fence: Earlier, equal, later, or absent self-heal boundary.
+        fenced: Expected shared fence and capture-refusal decision.
+    """
+    reset_checkpoint_metrics()
+    _permit_capture(monkeypatch)
+    repo = fixtures._FakeRepo()
+    frontier = _pending(repo)
+    request = dispatch.capture_request_for(
+        frontier,
+        fixtures._sample_scope(),
+        fixtures._anchor(),
+        frontier.tip,
+        self_heal_open=fence,
+    )
+    assert checkpoint_minute_fenced(frontier.tip, fence) is fenced
+    assert (request is None) is fenced
+    expected_refusals = {"self_heal_open": 1} if fenced else {}
+    assert checkpoint_metrics().capture_refusals == expected_refusals
+
+
+async def test_self_heal_open_pauses_then_restores_capture_and_shadow_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Suppress open-window capture churn, then capture and compare after lookback expiry.
+
+    Given: A settled shadow-mode frontier and a self-heal minute inside the first lookback.
+    When: The first tick opens that minute, the next tick finds it outside the lookback,
+        and a following suffix tick has a verified resume.
+    Then: The first tick records only ``self_heal_open`` with no checkpoint write or delete,
+        the next tick captures, and the following tick increments shadow comparisons.
+
+    Args:
+        monkeypatch: Pytest fixture installing checkpoint modes and deterministic replay.
+    """
+    reset_checkpoint_metrics()
+    _enable_checkpoint_modes(monkeypatch)
+    monkeypatch.setenv("PNL_SNAPSHOTTER_CHECKPOINT_MODE", "shadow")
+    _permit_capture(monkeypatch)
+    repo = fixtures._FakeRepo()
+    repo.seed_completed_replay(fixtures._minute(3))
+    frontier = repo.frontier()
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    monkeypatch.setattr(snap, "_probe_replay", AsyncMock(return_value=fixtures._meta(seq=4)))
+    healed = AsyncMock(side_effect=[fixtures._minute(2), None, None])
+    monkeypatch.setattr(snap, "_self_heal_start", healed)
+    events = _install_replay(monkeypatch, snap, frontier, _ReplayBehavior())
+    delete = AsyncMock()
+    monkeypatch.setattr(repo, "delete_portfolio_pnl_opening_checkpoint", delete)
+
+    await snap._sample_scope(cast(Repository, repo), _context(snap, frontier))
+
+    assert events == ["anchor"]
+    assert repo._opening_checkpoints == {}
+    assert checkpoint_metrics().capture_refusals == {"self_heal_open": 1}
+    assert checkpoint_metrics().invalidations_deleted == {}
+    assert checkpoint_metrics().captures_committed == 0
+    delete.assert_not_awaited()
+
+    settled = repo.frontier()
+    capture_frontier = replace(
+        settled,
+        generation=settled.generation + 1,
+        revision=0,
+        window_start=fixtures._minute(4),
+        next_minute=fixtures._minute(4),
+        tip=fixtures._minute(4),
+        as_of=fixtures._minute(6),
+    )
+    capture_write = await _write(monkeypatch, capture_frontier)
+    capture_events = _install_replay(
+        monkeypatch,
+        snap,
+        capture_frontier,
+        _ReplayBehavior(capture_write),
+    )
+
+    await snap._sample_scope(cast(Repository, repo), _context(snap, capture_frontier))
+
+    assert capture_events == ["capture"]
+    assert checkpoint_metrics().captures_committed == 1
+    captured = await repo.get_portfolio_pnl_opening_checkpoint(fixtures._sample_scope())
+    assert captured is not None
+    assert captured.certificate.checkpoint_minute == fixtures._minute(4)
+
+    resumed = repo.frontier()
+    _install_resume(monkeypatch, repo, resumed, await _resume(monkeypatch))
+    suffix_events = _install_replay(monkeypatch, snap, resumed, _ReplayBehavior())
+    suffix_ctx = replace(_context(snap, resumed), as_of=fixtures._minute(7))
+
+    await snap._sample_scope(cast(Repository, repo), suffix_ctx)
+
+    assert suffix_events == ["anchor", "resume"]
+    assert checkpoint_metrics().shadow_comparisons == 1
+    assert checkpoint_metrics().capture_refusals == {"self_heal_open": 1}
+    assert healed.await_count == 3
+
+
+def test_tip_recapture_honors_open_self_heal_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse the post-fallback tip recapture while its self-heal window remains open.
+
+    Given: A permitted settling frontier, available recapture budget, and an open fence at the tip.
+    When: The fallback path asks for a tip recapture.
+    Then: No request is issued, no budget is consumed, and ``self_heal_open`` is counted.
+
+    Args:
+        monkeypatch: Pytest fixture enabling capture for the production calc version.
+    """
+    reset_checkpoint_metrics()
+    _permit_capture(monkeypatch)
+    repo = fixtures._FakeRepo()
+    frontier = _pending(repo)
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    ctx = replace(_context(snap, frontier), self_heal_open=frontier.tip)
+    start = frontier.next_minute
+    assert start is not None
+    request = pnl_snapshotter._CheckpointDispatchRequest(
+        cast(Repository, repo),
+        ctx,
+        frontier,
+        ChunkWindow(start, frontier.tip),
+        0.0,
+        None,
+        None,
+    )
+
+    assert snap._consume_recapture(request, frontier.tip) is None
+    assert snap._tick_recaptures == 0
+    assert checkpoint_metrics().capture_refusals == {"self_heal_open": 1}
+
+
+async def test_repo_fence_metric_requires_a_nonzero_consumed_rowcount() -> None:
+    """Count repository-fence deletions only for a positive consumed rowcount.
+
+    Given: A snapshotter repository whose consume-once deletion count is zero, then one.
+    When: The snapshotter collects zero and commits a chunk whose repository delete returns one.
+    Then: Zero records nothing, the commit records ``repo_fence``, and consumption prevents repeats.
+    """
+    reset_checkpoint_metrics()
+    repo = fixtures._FakeRepo()
+    frontier = _pending(repo)
+    snap = fixtures._snapshotter(repo, frontier.as_of)
+    scope = fixtures._sample_scope()
+    typed_repo = cast(Repository, repo)
+
+    snap._record_repo_fence_deletions(typed_repo, scope)
+    assert checkpoint_metrics().invalidations_deleted == {}
+
+    start = frontier.next_minute
+    assert start is not None
+    chunk = ChunkWindow(start, frontier.tip)
+    request = pnl_snapshotter._CheckpointDispatchRequest(
+        typed_repo,
+        _context(snap, frontier),
+        frontier,
+        chunk,
+        0.0,
+        None,
+        None,
+    )
+    repo._last_pnl_checkpoint_invalidation_deleted = 1
+    await snap._commit_checkpoint_plan(
+        request,
+        chunk,
+        fixtures._series(start, frontier.tip),
+        shadow_cases._plan(frontier),
+    )
+    assert checkpoint_metrics().invalidations_deleted == {"repo_fence": 1}
+
+    snap._record_repo_fence_deletions(typed_repo, scope)
+    assert checkpoint_metrics().invalidations_deleted == {"repo_fence": 1}
 
 
 async def test_write_precheck_refusal_does_not_fail_tick(
@@ -787,7 +986,7 @@ async def test_shadow_mismatch_deletes_row_and_logs_error(
     assert events == ["anchor", "resume", "delete"]
     assert "checkpoint_shadow_mismatch" in caplog.text
     assert checkpoint_metrics().shadow_mismatches == 1
-    assert checkpoint_metrics().invalidations_deleted == 1
+    assert checkpoint_metrics().invalidations_deleted == {"generation": 1}
     assert await repo.get_portfolio_pnl_opening_checkpoint(fixtures._sample_scope()) is None
 
 
@@ -856,7 +1055,7 @@ async def test_service_resume_fallback_deletes_and_commits_anchor(
     expected = ["anchor", "resume"] if mode == "shadow" else ["resume", "capture"]
     assert events == expected
     assert checkpoint_metrics().fallbacks == {"checkpoint_late_execution": 1}
-    assert checkpoint_metrics().invalidations_deleted == 1
+    assert checkpoint_metrics().invalidations_deleted == {"generation": 1}
     assert checkpoint_metrics().resumes_succeeded == 0
     assert len(repo.committed_chunks) == 1
 
@@ -902,7 +1101,7 @@ async def test_shadow_fallback_retires_checkpoint_without_inline_recapture(
     assert len(repo.committed_chunks) == 1
     assert len(repo.persisted) == 1
     assert repo.frontier().next_minute is None
-    assert checkpoint_metrics().invalidations_deleted == 1
+    assert checkpoint_metrics().invalidations_deleted == {"generation": 1}
     assert checkpoint_metrics().capture_refusals == {}
     assert checkpoint_metrics().captures_committed == 0
     assert checkpoint_metrics().recaptures == {}
@@ -1196,7 +1395,7 @@ async def test_periodic_summary_emits_every_n_ticks_and_separates_scopes(
             "captures_committed=0 "
             "capture_refusals={} "
             "resumes_attempted=0 resumes_succeeded=0 "
-            "fallbacks={checkpoint_absent:1} invalidations_deleted=0 "
+            "fallbacks={checkpoint_absent:1} invalidations_deleted={} "
             "shadow_comparisons=0 shadow_mismatches=0 "
             "shadow_skipped={} recaptures={absent:1}"
         ),
@@ -1206,7 +1405,7 @@ async def test_periodic_summary_emits_every_n_ticks_and_separates_scopes(
             "captures_committed=0 "
             "capture_refusals={} "
             "resumes_attempted=0 resumes_succeeded=0 "
-            "fallbacks={checkpoint_absent:1} invalidations_deleted=0 "
+            "fallbacks={checkpoint_absent:1} invalidations_deleted={} "
             "shadow_comparisons=0 shadow_mismatches=0 "
             "shadow_skipped={} recaptures={absent:1}"
         ),
@@ -1354,7 +1553,7 @@ async def test_two_scopes_count_commits_and_resumes_independently(
     assert by_scope[key_a].recaptures == {"absent": 1}
     assert by_scope[key_b].shadow_comparisons == 1
     assert by_scope[key_b].shadow_mismatches == 1
-    assert by_scope[key_b].invalidations_deleted == 1
+    assert by_scope[key_b].invalidations_deleted == {"generation": 1}
     assert checkpoint_metrics().captures_committed == 1
     assert checkpoint_metrics().shadow_mismatches == 1
 
@@ -1374,7 +1573,7 @@ async def test_two_scopes_count_commits_and_resumes_independently(
             f"wallet={key_a[0]} mode=live ccy=USD "
             "captures_committed=1 capture_refusals={} "
             "resumes_attempted=0 resumes_succeeded=0 "
-            "fallbacks={checkpoint_absent:1} invalidations_deleted=0 "
+            "fallbacks={checkpoint_absent:1} invalidations_deleted={} "
             "shadow_comparisons=0 shadow_mismatches=0 "
             "shadow_skipped={} recaptures={absent:1}"
         ),
@@ -1383,7 +1582,7 @@ async def test_two_scopes_count_commits_and_resumes_independently(
             f"wallet={key_b[0]} mode=live ccy=USD "
             "captures_committed=0 capture_refusals={} "
             "resumes_attempted=1 resumes_succeeded=1 "
-            "fallbacks={} invalidations_deleted=1 "
+            "fallbacks={} invalidations_deleted={generation:1} "
             "shadow_comparisons=1 shadow_mismatches=1 "
             "shadow_skipped={} recaptures={}"
         ),
@@ -2050,7 +2249,7 @@ async def test_resume_fallback_without_recapture_avoids_second_anchor_replay(
 
     assert events == (["resume"] if mode == "active" else ["anchor", "resume"])
     assert checkpoint_metrics().fallbacks == {"checkpoint_late_execution": 1}
-    assert checkpoint_metrics().invalidations_deleted == 1
+    assert checkpoint_metrics().invalidations_deleted == {"generation": 1}
     assert checkpoint_metrics().resumes_succeeded == 0
     assert len(repo.committed_chunks) == 1
 

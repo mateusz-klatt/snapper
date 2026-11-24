@@ -373,6 +373,17 @@ neither recaptures inline nor counts a recapture, because the chunk has already
 committed. A fresh checkpoint is captured by the next eligible clean-tip replay
 on the cold path; at a stationary tip that waits until new evidence opens a
 replay chunk.
+While a retryable `incomplete` minute remains inside the 15-minute self-heal
+lookback, capture at or after that minute is refused with `self_heal_open` and
+shadow comparisons pause. This avoids capturing a tip that the next frontier
+commit's invalidation fence would delete. Once the minute leaves the lookback,
+an eligible clean-tip capture and subsequent suffix comparisons resume.
+The gate is evaluated when a replay generation opens, so a self-heal window that
+needs more than one replay chunk can still capture on its final continuation
+chunk; the next generation then deletes that row once, which appears as a single
+`invalidations_deleted{repo_fence}` count.
+Repository-fence deletions are counted as `invalidations_deleted{repo_fence}`;
+generation-fenced deletions retain the `generation` label.
 The cold anchor and the resumed side are planned from one shared read of the
 chunk's observation, valuation and position evidence, so a write committed
 between two reads cannot appear as a mismatch that deletes a valid checkpoint.

@@ -329,6 +329,7 @@ class _FakeRepo:
         self._anchor = anchor
         self._frontiers: dict[PnlCorrectionKey, PnlCorrectionFrontier] = {}
         self._opening_checkpoints: dict[PnlCorrectionKey, PnlOpeningCheckpointRecord] = {}
+        self._last_pnl_checkpoint_invalidation_deleted = 0
         self._samples = {
             self._sample_key(row): PnlCorrectionSampleVersion(index, row.copy())
             for index, row in enumerate(persisted or (), start=1)
@@ -692,6 +693,12 @@ class _FakeRepo:
                 or any(lower <= row["open_at"] <= upper for lower, upper in open_intervals)
             )
         ]
+
+    def consume_last_pnl_checkpoint_invalidation_deleted(self) -> int:
+        """Return and clear the synthetic repository-fence deletion rowcount."""
+        deleted = self._last_pnl_checkpoint_invalidation_deleted
+        self._last_pnl_checkpoint_invalidation_deleted = 0
+        return deleted
 
     def consume_last_pnl_checkpoint_write_refusal(self) -> str | None:
         """Return and clear the synthetic savepoint write refusal if any."""

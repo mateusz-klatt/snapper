@@ -1,5 +1,5 @@
 {
-  "alerts.argument.reason.ambiguous": "Tvetydigt svar fra handelsstedet",
+  "alerts.argument.reason.ambiguous": "Tvetydigt svar fra børsen",
   "alerts.argument.reason.unknown": "Ukendt årsag",
   "alerts.argument.side.buy": "KØB",
   "alerts.argument.side.sell": "SALG",
@@ -11,8 +11,8 @@
   "alerts.body.order_fill_full": "%@ %@ %@ @ %@ udført på %@",
   "alerts.body.order_fill_full_quoted": "%@ %@ %@ @ %@ udført på %@",
   "alerts.body.order_rejected": "%@ %@ %@ afvist: %@",
-  "alerts.body.order_unknown": "%@ %@ %@ har ukendt status: %@ — verificering hos handelsstedet afventer; antag ikke, at positionen er lukket",
-  "alerts.body.order_unknown_unresolved": "%@ %@ %@ har ukendt status: %@ — verificering hos handelsstedet afventer; antag ikke, at positionen er lukket",
+  "alerts.body.order_unknown": "%@ %@ %@ har ukendt status: %@ — verificering hos handelsplatformen afventer; antag ikke, at positionen er lukket",
+  "alerts.body.order_unknown_unresolved": "%@ %@ %@ har ukendt status: %@ — verificering hos handelsplatformen afventer; antag ikke, at positionen er lukket",
   "alerts.body.position_stop_loss_fired": "Stop-loss udløst for %@ (%@)",
   "alerts.title.critical_system_error": "System degraderet: %@",
   "alerts.title.margin_warning": "Margin-advarsel",
