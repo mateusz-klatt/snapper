@@ -101,6 +101,7 @@ def _cursor(**overrides: object) -> dict[str, object]:
     return row
 
 
+@pytest.mark.timeout(60)
 def test_0074_upgrade_downgrade_preserves_reconciliation_schema(tmp_path: Path) -> None:
     """Add the ledger tables and remove them without changing reconciliation.
 
@@ -108,6 +109,10 @@ def test_0074_upgrade_downgrade_preserves_reconciliation_schema(tmp_path: Path) 
     When it is upgraded to 0074, populated, and downgraded to 0073,
     Then the new tables appear and disappear and portfolio reconciliation checks
         stay identical.
+
+    The test migrates an empty database through the full revision chain, which
+    runs close to the 15-second default under coverage, so it carries a scoped
+    60-second timeout instead of a raised global one.
     """
     db_url = f"sqlite:///{tmp_path / 'ledger.db'}"
     config = _config(db_url)
@@ -136,12 +141,17 @@ def test_0074_upgrade_downgrade_preserves_reconciliation_schema(tmp_path: Path) 
     engine.dispose()
 
 
+@pytest.mark.timeout(60)
 def test_0074_schema_matches_orm_model_exactly(tmp_path: Path) -> None:
     """The migrated ledger tables match the ORM tables.
 
     Given one database upgraded to 0074 and one built from the ORM models,
     When both schemas are fingerprinted,
     Then the entries table and the cursor table match.
+
+    The test migrates an empty database through the full revision chain, which
+    runs close to the 15-second default under coverage, so it carries a scoped
+    60-second timeout instead of a raised global one.
     """
     migrated_url = f"sqlite:///{tmp_path / 'migrated.db'}"
     command.upgrade(_config(migrated_url), "0074")
@@ -155,12 +165,17 @@ def test_0074_schema_matches_orm_model_exactly(tmp_path: Path) -> None:
     model.dispose()
 
 
+@pytest.mark.timeout(60)
 def test_0074_constraints_reject_duplicate_ids_and_unknown_status(tmp_path: Path) -> None:
     """The new tables enforce identity, status vocabulary, and coherent windows.
 
     Given a database upgraded to 0074 with one posting and one cursor,
     When a duplicate id, unknown status, or partial frozen window is inserted,
     Then each invalid insert raises IntegrityError.
+
+    The test migrates an empty database through the full revision chain, which
+    runs close to the 15-second default under coverage, so it carries a scoped
+    60-second timeout instead of a raised global one.
     """
     db_url = f"sqlite:///{tmp_path / 'check.db'}"
     command.upgrade(_config(db_url), "0074")
