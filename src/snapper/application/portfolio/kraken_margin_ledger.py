@@ -151,6 +151,19 @@ class _TradeRead:
 
 
 @dataclass(frozen=True)
+class _WindowState:
+    """A frozen window and its durable progress across observer passes."""
+
+    start: int
+    end: int
+    next_ofs: int
+    expected_count: int | None
+    received_count: int
+    cursor_second: int | None
+    cursor_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class _ReadyPass:
     """A pass that may call Kraken."""
 
@@ -159,8 +172,7 @@ class _ReadyPass:
     boundary_watermark: int
     boundary_session_id: str
     boundary_sequence_id: int
-    start: int
-    end: int
+    window: _WindowState
 
 
 async def run_kraken_margin_ledger_observation(request: MarginLedgerObservationRequest) -> None:
@@ -189,7 +201,7 @@ async def _ready_pass(request: MarginLedgerObservationRequest) -> _ReadyPass | N
         return None
     if request.paused or (request.pause_check is not None and request.pause_check()):
         logger.info(
-            "[{}] kraken margin ledger read paused for open or in-flight commands",
+            "[{}] kraken margin ledger read paused for in-flight private REST",
             request.exchange,
         )
         return None
@@ -211,8 +223,9 @@ async def _ready_pass(request: MarginLedgerObservationRequest) -> _ReadyPass | N
             request.exchange,
         )
         return None
-    end = ledger_unix_second(request.pass_started_at)
-    if resolved[4] > end:
+    pass_end = ledger_unix_second(request.pass_started_at)
+    window = _window_state(cursor, resolved[4], pass_end)
+    if window.start > window.end:
         logger.info(
             "[{}] kraken margin ledger skipped: cursor is ahead of the pass", request.exchange
         )
@@ -223,8 +236,39 @@ async def _ready_pass(request: MarginLedgerObservationRequest) -> _ReadyPass | N
         boundary_watermark=resolved[1],
         boundary_session_id=resolved[2],
         boundary_sequence_id=resolved[3],
-        start=resolved[4],
-        end=end,
+        window=window,
+    )
+
+
+def _window_state(
+    cursor: VenueLedgerCursorRecord | None,
+    start: int,
+    pass_end: int,
+) -> _WindowState:
+    """Resume a complete persisted window, or freeze a new one at pass start."""
+    if (
+        cursor is not None
+        and cursor.window_start is not None
+        and cursor.window_end is not None
+        and cursor.next_ofs is not None
+    ):
+        return _WindowState(
+            start=cursor.window_start,
+            end=cursor.window_end,
+            next_ofs=cursor.next_ofs,
+            expected_count=cursor.expected_count,
+            received_count=cursor.ingested_count,
+            cursor_second=cursor.window_cursor_second,
+            cursor_ids=cursor.window_cursor_ids or (),
+        )
+    return _WindowState(
+        start=start,
+        end=pass_end,
+        next_ofs=0,
+        expected_count=None,
+        received_count=0,
+        cursor_second=None,
+        cursor_ids=(),
     )
 
 
@@ -240,7 +284,7 @@ def _resolved_boundary(
     """Return the recorded boundary and the inclusive start second.
 
     The first pass uses the reconciliation boundary. Later passes keep that
-    boundary and continue from the cursor second, which overlaps that second.
+    boundary and either resume their frozen window or overlap the cursor second.
     """
     if cursor is not None:
         start = (
@@ -297,11 +341,16 @@ async def _collect(
 
     return await collect_ledger_window(
         LedgerCollectRequest(
-            start=ready.start,
-            end=ready.end,
+            start=ready.window.start,
+            end=ready.window.end,
             budget_points=KRAKEN_LEDGER_PASS_BUDGET_POINTS - spent,
             call_cost=KRAKEN_LEDGER_CALL_COST,
             page_size=KRAKEN_LEDGER_PAGE_SIZE,
+            offset=ready.window.next_ofs,
+            expected_count=ready.window.expected_count,
+            received_count=ready.window.received_count,
+            window_cursor_second=ready.window.cursor_second,
+            window_cursor_ids=ready.window.cursor_ids,
         ),
         fetch_page,
     )
@@ -317,6 +366,7 @@ async def _persist(
     observation_id = str(uuid7())
     cursor_second, cursor_ids = _progress_cursor(ready.cursor, outcome)
     status = None if outcome.status == "ok" else outcome.status
+    drained = outcome.status == "ok"
     await request.repository.commit_venue_ledger_pass(
         _entry_rows(request, outcome.entries, request.pass_started_at, observation_id),
         VenueLedgerCursorWrite(
@@ -325,13 +375,19 @@ async def _persist(
             mode=request.mode,
             cursor_second=cursor_second,
             cursor_ids=cursor_ids,
+            window_start=None if drained else ready.window.start,
+            window_end=None if drained else ready.window.end,
+            next_ofs=None if drained else outcome.next_ofs,
+            expected_count=None if drained else outcome.expected_count,
+            window_cursor_second=None if drained else outcome.window_cursor_second,
+            window_cursor_ids=None if drained else outcome.window_cursor_ids,
             boundary_as_of=ready.boundary_as_of,
             boundary_watermark=ready.boundary_watermark,
             boundary_session_id=ready.boundary_session_id,
             boundary_sequence_id=ready.boundary_sequence_id,
             evidence_status=status,
             reported_count=outcome.reported_count,
-            ingested_count=len(outcome.entries),
+            ingested_count=outcome.received_count,
             pass_started_at=request.pass_started_at,
             observed_at=request.pass_started_at,
             observation_id=observation_id,

@@ -1,8 +1,10 @@
 """Tests for Kraken margin-ledger observation without verdict changes."""
 
+import asyncio
 import json
 from collections.abc import Callable
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -130,6 +132,12 @@ class _Repo:
             mode=cursor.mode,
             cursor_second=cursor.cursor_second,
             cursor_ids=cursor.cursor_ids,
+            window_start=cursor.window_start,
+            window_end=cursor.window_end,
+            next_ofs=cursor.next_ofs,
+            expected_count=cursor.expected_count,
+            window_cursor_second=cursor.window_cursor_second,
+            window_cursor_ids=cursor.window_cursor_ids,
             boundary_as_of=cursor.boundary_as_of,
             boundary_watermark=cursor.boundary_watermark,
             boundary_session_id=cursor.boundary_session_id,
@@ -180,6 +188,27 @@ class _Reader:
         return self.pages.pop(0)
 
 
+class _WindowReader(_Reader):
+    """Serve newest-first pages from mutable venue data under the requested window."""
+
+    def __init__(self, entries: list[KrakenLedgerEntry]) -> None:
+        super().__init__()
+        self.entries = entries
+
+    async def read_venue_ledger_page(self, start: int, end: int, offset: int) -> KrakenLedgerPage:
+        """Filter new postings outside the requested window and page by offset."""
+        self.calls.append((start, end, offset))
+        eligible = sorted(
+            (entry for entry in self.entries if start <= entry.ledger_second <= end),
+            key=lambda entry: (entry.ledger_second, entry.venue_ledger_id),
+            reverse=True,
+        )
+        return KrakenLedgerPage(
+            entries=tuple(eligible[offset : offset + KRAKEN_LEDGER_PAGE_SIZE]),
+            count=len(eligible),
+        )
+
+
 def _executor() -> _LedgerExecutor:
     """Build an executor whose repository satisfies the observer's type gate."""
     with patch.object(
@@ -203,6 +232,7 @@ def _bare_kraken() -> KrakenExchangeClient:
     client.position_capability = CapabilityStatus.NOT_APPLICABLE
     client.position_observation_capability = CapabilityStatus.NOT_APPLICABLE
     client.account_history_capability = CapabilityStatus.UNSUPPORTED
+    client._private_rest_lock = asyncio.Lock()
     return client
 
 
@@ -236,6 +266,12 @@ def _preset(
         mode="live",
         cursor_second=second,
         cursor_ids=ids,
+        window_start=None,
+        window_end=None,
+        next_ofs=None,
+        expected_count=None,
+        window_cursor_second=None,
+        window_cursor_ids=None,
         boundary_as_of=_BOUNDARY_AT,
         boundary_watermark=4,
         boundary_session_id=_SESSION,
@@ -358,12 +394,12 @@ async def test_margin_ledger_observer_skips_paper_and_non_kraken_clients() -> No
 
 
 @pytest.mark.asyncio
-async def test_margin_ledger_reads_pause_for_open_or_inflight_commands() -> None:
-    """Open and in-flight order work pauses ledger reads.
+async def test_margin_ledger_reads_ignore_resting_orders_and_pause_for_private_rest() -> None:
+    """Only an order submit or a currently busy private REST lock pauses reads.
 
-    Given a pending order, then an in-flight command, then neither,
-    When the ledger hook builds its request,
-    Then the first two requests are paused and the idle request is not.
+    Given a resting pending order, an in-flight submit, an idle client, and a busy client,
+    When the ledger hook builds each request,
+    Then only the in-flight submit and busy private REST states pause observation.
     """
     executor = _executor()
     client = _bare_kraken()
@@ -376,10 +412,15 @@ async def test_margin_ledger_reads_pause_for_open_or_inflight_commands() -> None
         await executor._observe_kraken_margin_ledger(executor.repository, client, None, _PASS)
         executor._order_inflight_started = None
         await executor._observe_kraken_margin_ledger(executor.repository, client, None, _PASS)
-    paused = [
-        cast(MarginLedgerObservationRequest, call.args[0]).paused for call in run.await_args_list
-    ]
-    assert paused == [True, True, False]
+        await client._private_rest_lock.acquire()
+        try:
+            await executor._observe_kraken_margin_ledger(executor.repository, client, None, _PASS)
+        finally:
+            client._private_rest_lock.release()
+    requests = [cast(MarginLedgerObservationRequest, call.args[0]) for call in run.await_args_list]
+    assert [request.paused for request in requests] == [False, True, False, True]
+    assert requests[3].pause_check is not None
+    assert not requests[3].pause_check()
 
 
 @pytest.mark.asyncio
@@ -501,7 +542,16 @@ async def test_paused_or_unbounded_passes_do_not_call_kraken() -> None:
     Then none of them calls Kraken.
     """
     paused = _Reader()
-    await _observe(_Repo("margin_ledger_replay"), paused, paused=True)
+    busy_client = _bare_kraken()
+    await busy_client._private_rest_lock.acquire()
+    try:
+        await _observe(
+            _Repo("margin_ledger_replay"),
+            paused,
+            paused=busy_client.private_rest_busy,
+        )
+    finally:
+        busy_client._private_rest_lock.release()
     unbounded = _Reader()
     await _observe(_Repo("margin_ledger_replay"), unbounded, boundary=None)
     ahead_repo = _Repo("margin_ledger_replay")
@@ -555,6 +605,129 @@ async def test_pass_budget_stops_before_the_reported_count() -> None:
     assert stored.api_points_used == 5
     assert stored.boundary_as_of == _BOUNDARY_AT
     assert stored.ingested_count == KRAKEN_LEDGER_PAGE_SIZE * 2
+    assert stored.window_start == _START
+    assert stored.window_end == _END
+    assert stored.next_ofs == KRAKEN_LEDGER_PAGE_SIZE * 2
+    assert stored.expected_count == count
+
+
+@pytest.mark.asyncio
+async def test_three_page_window_resumes_in_a_new_observer_instance() -> None:
+    """A three-page backlog drains over two passes without recomputing its window.
+
+    Given two persisted pages and a fresh observer repository and reader,
+    When the final page arrives in a later pass,
+    Then it resumes at offset 100, reconciles all 150 rows, and clears the window.
+    """
+    count = KRAKEN_LEDGER_PAGE_SIZE * 3
+    first_repo = _Repo("margin_ledger_replay")
+    first_reader = _Reader([_full("A", count), _full("B", count)])
+    first = await _observe(first_repo, first_reader)
+    assert first is not None
+    assert first.evidence_status == "ledger_backlog"
+    assert first.next_ofs == KRAKEN_LEDGER_PAGE_SIZE * 2
+    assert first.expected_count == count
+    assert first.ingested_count == KRAKEN_LEDGER_PAGE_SIZE * 2
+    resumed_repo = _Repo("margin_ledger_replay")
+    resumed_repo.cursor = first_repo.cursor
+    resumed_reader = _Reader([_full("C", count)])
+    second = await _observe(
+        resumed_repo,
+        resumed_reader,
+        started=_PASS + timedelta(minutes=4),
+    )
+    assert resumed_reader.calls == [(_START, _END, KRAKEN_LEDGER_PAGE_SIZE * 2)]
+    assert second is not None
+    assert second.evidence_status is None
+    assert second.cursor_second == _END
+    assert second.cursor_ids is not None
+    assert len(second.cursor_ids) == count
+    assert second.ingested_count == count
+    assert second.window_start is None
+    assert second.window_end is None
+    assert second.next_ofs is None
+    assert second.expected_count is None
+    assert second.window_cursor_second is None
+    assert second.window_cursor_ids is None
+
+
+@pytest.mark.asyncio
+async def test_new_postings_do_not_move_a_frozen_window_between_passes() -> None:
+    """Postings newer than a frozen end wait for the next window.
+
+    Given a two-pass backlog and a posting created after its frozen end,
+    When a later observer pass resumes,
+    Then its end and count remain frozen and the new posting is not ingested.
+    """
+    entries = [_entry(f"L{index}", _END) for index in range(KRAKEN_LEDGER_PAGE_SIZE * 2 + 1)]
+    reader = _WindowReader(entries)
+    repo = _Repo("margin_ledger_replay")
+    first = await _observe(repo, reader)
+    assert first is not None
+    assert first.next_ofs == KRAKEN_LEDGER_PAGE_SIZE * 2
+    reader.entries.append(_entry("NEW", _END + 300))
+    second = await _observe(repo, reader, started=_PASS + timedelta(seconds=300))
+    assert reader.calls[-1] == (_START, _END, KRAKEN_LEDGER_PAGE_SIZE * 2)
+    assert second is not None
+    assert second.evidence_status is None
+    assert second.cursor_second == _END
+    assert second.ingested_count == KRAKEN_LEDGER_PAGE_SIZE * 2 + 1
+    stored_ids = {
+        row["venue_ledger_id"] for entries_written, _ in repo.commits for row in entries_written
+    }
+    assert "NEW" not in stored_ids
+
+
+@pytest.mark.asyncio
+async def test_frozen_window_count_change_records_gap_and_restarts_at_zero() -> None:
+    """A changed count invalidates progress, not the last reconciled cursor.
+
+    Given a persisted window at offset 50 and Kraken changing its count,
+    When the resume pass runs and the following pass restarts,
+    Then the gap pass keeps the committed cursor, resets offset zero, and rereads it.
+    """
+    repo = _Repo("margin_ledger_replay")
+    repo.cursor = replace(
+        _preset(second=_START, ids=("KEEP",)),
+        window_start=_START,
+        window_end=_END,
+        next_ofs=KRAKEN_LEDGER_PAGE_SIZE,
+        expected_count=KRAKEN_LEDGER_PAGE_SIZE * 2,
+        ingested_count=KRAKEN_LEDGER_PAGE_SIZE,
+        window_cursor_second=_END,
+        window_cursor_ids=("A",),
+    )
+    changed = _Reader([_full("B", KRAKEN_LEDGER_PAGE_SIZE * 2 + 1)])
+    gap = await _observe(repo, changed)
+    assert changed.calls == [(_START, _END, KRAKEN_LEDGER_PAGE_SIZE)]
+    assert gap is not None
+    assert gap.evidence_status == "ledger_cursor_gap"
+    assert gap.cursor_second == _START
+    assert gap.cursor_ids == ("KEEP",)
+    assert gap.next_ofs == 0
+    assert gap.expected_count is None
+    assert gap.ingested_count == 0
+    restarted = _Reader([KrakenLedgerPage(entries=(_entry("A", _END),), count=1)])
+    await _observe(repo, restarted, started=_PASS + timedelta(minutes=4))
+    assert restarted.calls == [(_START, _END, 0)]
+
+
+@pytest.mark.asyncio
+async def test_timed_out_ledger_request_spends_budget_and_stops_the_pass() -> None:
+    """A timeout consumes one Ledgers call and cannot trigger an unbudgeted retry.
+
+    Given TradeBalance succeeds and the first Ledgers request times out,
+    When the observer persists its pass,
+    Then three total counter points are spent and no second page is requested.
+    """
+    reader = _Reader(ledger_error=TimeoutError("venue timeout"))
+    stored = await _observe(_Repo("margin_ledger_replay"), reader)
+    assert reader.balance_calls == 1
+    assert reader.calls == [(_START, _END, 0)]
+    assert stored is not None
+    assert stored.evidence_status == "ledger_backlog"
+    assert stored.api_points_used == 3
+    assert stored.next_ofs == 0
 
 
 @pytest.mark.asyncio
@@ -738,6 +911,35 @@ async def test_dispatcher_still_returns_margin_ledger_replay_not_implemented() -
     )
     signal_read.assert_not_awaited()
     bundle_read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_private_rest_busy_mid_pass_stops_before_the_next_page() -> None:
+    """A busy shared key after one page stops before another Ledgers request.
+
+    Given private_rest_busy becomes true after the first page response,
+    When the observer considers the next page,
+    Then it records backlog with one page and spends no points on the skipped call.
+    """
+    client = _bare_kraken()
+    reader = _Reader([_full("A", KRAKEN_LEDGER_PAGE_SIZE * 2)])
+    with patch.object(
+        client,
+        "private_rest_busy",
+        side_effect=[False, False, False, True],
+    ) as busy:
+        stored = await _observe(
+            _Repo("margin_ledger_replay"),
+            reader,
+            paused=client.private_rest_busy,
+        )
+    assert busy.call_count == 4
+    assert reader.balance_calls == 1
+    assert len(reader.calls) == 1
+    assert stored is not None
+    assert stored.evidence_status == "ledger_backlog"
+    assert stored.api_points_used == 3
+    assert stored.next_ofs == KRAKEN_LEDGER_PAGE_SIZE
 
 
 @pytest.mark.asyncio

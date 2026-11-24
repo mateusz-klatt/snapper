@@ -7013,6 +7013,16 @@ CK_VENUE_LEDGER_CURSOR_COUNTS = (
     "(cursor_second IS NULL OR cursor_second >= 0) AND "
     "LENGTH(cursor_ids_json) > 0"
 )
+CK_VENUE_LEDGER_WINDOW = (
+    "(window_start IS NULL AND window_end IS NULL AND next_ofs IS NULL AND "
+    "expected_count IS NULL AND window_cursor_second IS NULL AND "
+    "window_cursor_ids_json IS NULL) OR "
+    "(window_start IS NOT NULL AND window_end IS NOT NULL AND next_ofs IS NOT NULL AND "
+    "window_cursor_ids_json IS NOT NULL AND window_start >= 0 AND "
+    "window_end >= window_start AND next_ofs >= 0 AND "
+    "(expected_count IS NULL OR expected_count >= 0) AND "
+    "(window_cursor_second IS NULL OR window_cursor_second >= 0))"
+)
 
 
 class VenueLedgerEntry(Base):
@@ -7061,7 +7071,8 @@ class VenueLedgerCursor(Base):
     """Latest Kraken ledger cursor and pass evidence for one live account.
 
     The reconciliation boundary columns are written on the first insert and
-    left unchanged when a later pass updates the cursor.
+    left unchanged when a later pass updates the cursor. Frozen-window columns
+    retain paging progress across passes and clear after a reconciled drain.
     """
 
     __tablename__ = "venue_ledger_cursors"
@@ -7076,6 +7087,7 @@ class VenueLedgerCursor(Base):
         CheckConstraint(CK_VENUE_LEDGER_MODE, name="ck_venue_ledger_cursors_mode"),
         CheckConstraint(CK_VENUE_LEDGER_EVIDENCE_STATUS, name="ck_venue_ledger_cursors_status"),
         CheckConstraint(CK_VENUE_LEDGER_CURSOR_COUNTS, name="ck_venue_ledger_cursors_counts"),
+        CheckConstraint(CK_VENUE_LEDGER_WINDOW, name="ck_venue_ledger_cursors_window"),
     )
     id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),
@@ -7090,6 +7102,21 @@ class VenueLedgerCursor(Base):
         nullable=True,
     )
     cursor_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
+    window_start: Mapped[int | None] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=True,
+    )
+    window_end: Mapped[int | None] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=True,
+    )
+    next_ofs: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expected_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    window_cursor_second: Mapped[int | None] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        nullable=True,
+    )
+    window_cursor_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     boundary_as_of: Mapped[datetime] = mapped_column(TZDateTime(), nullable=False)
     boundary_watermark: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer, "sqlite"),

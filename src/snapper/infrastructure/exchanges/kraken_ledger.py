@@ -3,8 +3,9 @@
 Ledgers calls cost 2 Kraken API-counter points. TradeBalance costs 1. One
 account-observer pass may spend at most ``KRAKEN_LEDGER_PASS_BUDGET_POINTS``.
 Paging keeps ``end`` fixed and reconciles unique ledger ids with Kraken's
-``count``. The cursor is the newest second in a reconciled window plus the ids
-at that second, so the next pass overlaps that second.
+``count``. A budget-stopped walk can resume at its persisted offset. The cursor
+is the newest second in a reconciled window plus the ids at that second, so the
+next pass overlaps that second.
 """
 
 import json
@@ -49,7 +50,7 @@ class KrakenLedgerPermissionMissingError(RuntimeError):
 
 
 class KrakenLedgerReadPausedError(RuntimeError):
-    """Command activity suspended a budgeted observation window."""
+    """In-flight private REST activity suspended a budgeted observation window."""
 
 
 @dataclass(frozen=True)
@@ -101,13 +102,18 @@ class LedgerPageQuery:
 
 @dataclass(frozen=True)
 class LedgerCollectRequest:
-    """Budget and window for one Ledgers paging walk."""
+    """Budget, frozen window, and prior progress for one Ledgers paging walk."""
 
     start: int
     end: int
     budget_points: int
     call_cost: int
     page_size: int
+    offset: int = 0
+    expected_count: int | None = None
+    received_count: int = 0
+    window_cursor_second: int | None = None
+    window_cursor_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,6 +127,11 @@ class LedgerWindowOutcome:
     calls: int
     cursor_second: int | None
     cursor_ids: tuple[str, ...]
+    next_ofs: int
+    expected_count: int | None
+    received_count: int
+    window_cursor_second: int | None
+    window_cursor_ids: tuple[str, ...]
 
 
 @dataclass
@@ -143,6 +154,7 @@ class _Collect:
     exhausted: bool = False
     permission: bool = False
     paused: bool = False
+    timed_out: bool = False
 
 
 def ledger_unix_second(value: datetime) -> int:
@@ -324,23 +336,26 @@ async def collect_ledger_window(
     """
     if request.call_cost <= 0:
         raise ValueError("ledger call cost must be positive")
-    state = _Collect()
+    state = _Collect(
+        reported=request.expected_count,
+        offset=request.offset,
+    )
     while state.points + request.call_cost <= request.budget_points:
         page = await _fetch_page(request, fetch_page, state)
         if page is None:
-            return _outcome(state, request.end)
+            return _outcome(state, request)
         if not _accept_count(state, page.count):
-            return _outcome(state, request.end, forced="ledger_cursor_gap")
+            return _outcome(state, request, forced="ledger_cursor_gap")
         _absorb_page(state.absorb, page, request)
         if _page_completes(
             len(page.entries),
-            len(state.absorb.entries),
+            _received_count(state, request),
             page.count,
             request.page_size,
         ):
-            return _outcome(state, request.end)
+            return _outcome(state, request)
     state.exhausted = True
-    return _outcome(state, request.end)
+    return _outcome(state, request)
 
 
 def entry_in_window(entry: KrakenLedgerEntry, start: int, end: int) -> bool:
@@ -495,37 +510,76 @@ async def _fetch_page(
     fetch_page: Callable[[LedgerPageQuery], Awaitable[KrakenLedgerPage]],
     state: _Collect,
 ) -> KrakenLedgerPage | None:
-    """Fetch one page. A missing permission consumes its counter points and stops."""
+    """Fetch one page, charging permission and timeout failures but not a pause."""
     query = LedgerPageQuery(start=request.start, end=request.end, offset=state.offset)
+    page: KrakenLedgerPage | None
     try:
         page = await fetch_page(query)
     except KrakenLedgerPermissionMissingError:
         state.permission = True
-        state.points += request.call_cost
-        state.calls += 1
-        return None
+        page = None
     except KrakenLedgerReadPausedError:
         state.paused = True
         return None
+    except TimeoutError:
+        state.timed_out = True
+        page = None
     state.points += request.call_cost
     state.calls += 1
-    state.offset += len(page.entries)
+    if page is not None:
+        state.offset += len(page.entries)
     return page
+
+
+def _received_count(state: _Collect, request: LedgerCollectRequest) -> int:
+    """Return unique in-window rows received in prior and current passes."""
+    return request.received_count + len(state.absorb.entries)
+
+
+def _window_cursor(
+    state: _Collect,
+    request: LedgerCollectRequest,
+) -> tuple[int | None, tuple[str, ...]]:
+    """Keep the newest second and all ids observed there across passes."""
+    previous_second = request.window_cursor_second
+    previous_ids = request.window_cursor_ids
+    if not state.absorb.entries:
+        return previous_second, previous_ids
+    current_second, current_ids = cursor_after_success(
+        tuple(state.absorb.entries.values()),
+        request.end,
+    )
+    if previous_second is None or current_second > previous_second:
+        return current_second, current_ids
+    if current_second < previous_second:
+        return previous_second, previous_ids
+    return previous_second, tuple(sorted(set(previous_ids) | set(current_ids)))
 
 
 def _outcome(
     state: _Collect,
-    end: int,
+    request: LedgerCollectRequest,
     *,
     forced: LedgerPassStatus | None = None,
 ) -> LedgerWindowOutcome:
-    """Project walk state into the public paging result."""
-    status = _status(state, forced)
+    """Project walk state into paging progress and a possible success cursor."""
+    received = _received_count(state, request)
+    status = _status(state, received, forced)
     entries = tuple(sorted(state.absorb.entries.values(), key=_entry_sort_key))
+    window_second, window_ids = _window_cursor(state, request)
+    next_ofs = state.offset
+    expected_count = state.reported
     cursor_second: int | None = None
     cursor_ids: tuple[str, ...] = ()
+    if status == "ledger_cursor_gap":
+        next_ofs = 0
+        expected_count = None
+        received = 0
+        window_second = None
+        window_ids = ()
     if status == "ok":
-        cursor_second, cursor_ids = cursor_after_success(entries, end)
+        cursor_second = request.end if received == 0 else window_second
+        cursor_ids = () if received == 0 else window_ids
     return LedgerWindowOutcome(
         status=status,
         entries=entries,
@@ -534,19 +588,28 @@ def _outcome(
         calls=state.calls,
         cursor_second=cursor_second,
         cursor_ids=cursor_ids,
+        next_ofs=next_ofs,
+        expected_count=expected_count,
+        received_count=received,
+        window_cursor_second=window_second,
+        window_cursor_ids=window_ids,
     )
 
 
-def _status(state: _Collect, forced: LedgerPassStatus | None) -> LedgerPassStatus:
-    """Resolve permission, a forced gap, or the count classification."""
+def _status(
+    state: _Collect,
+    received: int,
+    forced: LedgerPassStatus | None,
+) -> LedgerPassStatus:
+    """Resolve permission, interruption, a forced gap, or count classification."""
     if state.permission:
         return "ledger_permission_missing"
-    if state.paused:
+    if state.paused or state.timed_out:
         return "ledger_backlog"
     if forced is not None:
         return forced
     return classify_ledger_window(
-        len(state.absorb.entries),
+        received,
         state.reported,
         state.exhausted,
         state.absorb.unfaithful,

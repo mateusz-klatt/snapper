@@ -77,6 +77,12 @@ def _cursor(**overrides: object) -> dict[str, object]:
         "mode": "live",
         "cursor_second": 1700000000,
         "cursor_ids_json": "[]",
+        "window_start": None,
+        "window_end": None,
+        "next_ofs": None,
+        "expected_count": None,
+        "window_cursor_second": None,
+        "window_cursor_ids_json": None,
         "boundary_as_of": _NOW,
         "boundary_watermark": 4,
         "boundary_session_id": _SESSION,
@@ -150,11 +156,11 @@ def test_0074_schema_matches_orm_model_exactly(tmp_path: Path) -> None:
 
 
 def test_0074_constraints_reject_duplicate_ids_and_unknown_status(tmp_path: Path) -> None:
-    """The new tables enforce identity and the evidence-status vocabulary.
+    """The new tables enforce identity, status vocabulary, and coherent windows.
 
     Given a database upgraded to 0074 with one posting and one cursor,
-    When the same ledger id is inserted again and a cursor uses an unknown status,
-    Then both inserts raise IntegrityError.
+    When a duplicate id, unknown status, or partial frozen window is inserted,
+    Then each invalid insert raises IntegrityError.
     """
     db_url = f"sqlite:///{tmp_path / 'check.db'}"
     command.upgrade(_config(db_url), "0074")
@@ -167,5 +173,10 @@ def test_0074_constraints_reject_duplicate_ids_and_unknown_status(tmp_path: Path
         connection.execute(
             sa.insert(VenueLedgerCursor.__table__),
             _cursor(evidence_status="not-a-status"),
+        )
+    with engine.begin() as connection, pytest.raises(IntegrityError):
+        connection.execute(
+            sa.insert(VenueLedgerCursor.__table__),
+            _cursor(window_start=1),
         )
     engine.dispose()

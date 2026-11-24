@@ -271,6 +271,7 @@ async def test_budgeted_rate_limit_and_permission_errors_do_not_retry() -> None:
         ccxt.RateLimitExceeded("slow down"),
         ccxt.PermissionDenied("permission missing"),
         ccxt.NetworkError("disconnected"),
+        ccxt.RequestTimeout("timed out"),
     ):
         client, _, _ = _client(_ledger_body(), _trade_body())
         client._circuit_open_until = 0.0
@@ -282,11 +283,11 @@ async def test_budgeted_rate_limit_and_permission_errors_do_not_retry() -> None:
             patch.object(client, "_invoke_with_retry_slot", invoke),
             patch.object(client, "_record_unretried_network_failure") as record,
         ):
-            expected = (
-                KrakenLedgerPermissionMissingError
-                if isinstance(error, ccxt.PermissionDenied)
-                else type(error)
-            )
+            expected = type(error)
+            if isinstance(error, ccxt.PermissionDenied):
+                expected = KrakenLedgerPermissionMissingError
+            if isinstance(error, ccxt.RequestTimeout):
+                expected = TimeoutError
             with pytest.raises(expected):
                 await client.read_venue_ledger_page(10, 20, 0)
         invoke.assert_awaited_once()

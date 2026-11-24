@@ -5633,7 +5633,7 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
             repository: Durable repository that already stored this cycle's snapshot.
             client: The executor's exchange client.
             boundary: This cycle's reconciliation boundary, when the capture succeeded.
-            pass_started_at: Fixed end of the ledger window.
+            pass_started_at: Fixed end for a new window; resumed windows keep theirs.
         """
         mode = self._account_mode()
         if mode != "live" or not isinstance(client, KrakenExchangeClient):
@@ -5650,20 +5650,23 @@ class ExchangeExecutorService[T: ExchangeClientBase](RegisterableProcess, ABC):
                         mode=mode,
                         boundary=_ledger_boundary_mark(boundary),
                         pass_started_at=pass_started_at,
-                        paused=self._margin_ledger_reads_paused(),
-                        pause_check=self._margin_ledger_reads_paused,
+                        paused=self._margin_ledger_reads_paused(client),
+                        pause_check=lambda: self._margin_ledger_reads_paused(client),
                     )
                 )
         except Exception as exc:
             logger.warning("[{}] kraken margin ledger observation failed: {}", exchange, exc)
 
-    def _margin_ledger_reads_paused(self) -> bool:
-        """Return whether open or in-flight order work should pause ledger reads.
+    def _margin_ledger_reads_paused(self, client: KrakenExchangeClient) -> bool:
+        """Return whether an order submit or private REST call needs the shared key.
+
+        Args:
+            client: The executor's Kraken client and private REST lock owner.
 
         Returns:
-            True when a command is inside a venue call or a pending order is open.
+            True only for an order submit or a private REST call in flight now.
         """
-        return self._order_inflight_started is not None or bool(self.pending_orders)
+        return self._order_inflight_started is not None or client.private_rest_busy()
 
     async def _capture_actual_balance_route(
         self,

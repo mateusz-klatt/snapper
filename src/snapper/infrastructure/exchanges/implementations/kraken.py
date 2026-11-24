@@ -2396,6 +2396,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         Raises:
             RuntimeError: When API credentials are missing.
             KrakenLedgerPermissionMissingError: When Kraken denies the read.
+            TimeoutError: When the CCXT private request times out.
             ValueError: When the envelope is malformed.
         """
         if not self.api_key or not self.api_secret:
@@ -2412,6 +2413,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             )
         except KrakenLedgerPermissionMissingError:
             raise
+        except ccxt.RequestTimeout as exc:
+            raise TimeoutError(str(exc)) from exc
         except Exception as exc:
             if is_kraken_ledger_permission_error(exc):
                 raise KrakenLedgerPermissionMissingError(str(exc)) from exc

@@ -1,6 +1,7 @@
 """Tests for append-only venue ledger persistence."""
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -72,6 +73,12 @@ def _cursor(
         mode="live",
         cursor_second=second,
         cursor_ids=ids,
+        window_start=None,
+        window_end=None,
+        next_ofs=None,
+        expected_count=None,
+        window_cursor_second=None,
+        window_cursor_ids=None,
         boundary_as_of=as_of,
         boundary_watermark=4,
         boundary_session_id=session_id,
@@ -137,6 +144,54 @@ async def test_cursor_boundary_is_written_once(repository: SQLAlchemyRepository)
     assert stored.boundary_session_id == _SESSION
     assert stored.boundary_watermark == 4
     assert stored.boundary_sequence_id == 7
+
+
+@pytest.mark.asyncio
+async def test_frozen_window_progress_round_trips_and_clears(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Persist resume state on the cursor row and clear it after a drained window.
+
+    Given an active window with an offset, expected count, and newest-second ids,
+    When it is stored, read, and then cleared,
+    Then every field survives the restart read and all are null after success.
+    """
+    active = replace(
+        _cursor(second=100, as_of=_NOW),
+        window_start=90,
+        window_end=200,
+        next_ofs=50,
+        expected_count=100,
+        window_cursor_second=190,
+        window_cursor_ids=("A", "B"),
+    )
+    await repository.commit_venue_ledger_pass([], active)
+    stored = await repository.get_venue_ledger_cursor(_WALLET, "kraken", "live")
+    assert stored is not None
+    assert stored.window_start == 90
+    assert stored.window_end == 200
+    assert stored.next_ofs == 50
+    assert stored.expected_count == 100
+    assert stored.window_cursor_second == 190
+    assert stored.window_cursor_ids == ("A", "B")
+    cleared = replace(
+        active,
+        window_start=None,
+        window_end=None,
+        next_ofs=None,
+        expected_count=None,
+        window_cursor_second=None,
+        window_cursor_ids=None,
+    )
+    await repository.commit_venue_ledger_pass([], cleared)
+    after = await repository.get_venue_ledger_cursor(_WALLET, "kraken", "live")
+    assert after is not None
+    assert after.window_start is None
+    assert after.window_end is None
+    assert after.next_ofs is None
+    assert after.expected_count is None
+    assert after.window_cursor_second is None
+    assert after.window_cursor_ids is None
 
 
 @pytest.mark.asyncio

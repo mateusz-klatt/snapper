@@ -15,6 +15,7 @@ from snapper.data.models import CK_VENUE_LEDGER_ENTRY_TEXT
 from snapper.data.models import CK_VENUE_LEDGER_EVIDENCE_STATUS
 from snapper.data.models import CK_VENUE_LEDGER_EXCHANGE
 from snapper.data.models import CK_VENUE_LEDGER_MODE
+from snapper.data.models import CK_VENUE_LEDGER_WINDOW
 from snapper.data.models import TZDateTime
 from snapper.data.models import UUIDColumn
 
@@ -77,6 +78,24 @@ def upgrade() -> None:
             nullable=True,
         ),
         sa.Column("cursor_ids_json", sa.Text(), nullable=False),
+        sa.Column(
+            "window_start",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            nullable=True,
+        ),
+        sa.Column(
+            "window_end",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            nullable=True,
+        ),
+        sa.Column("next_ofs", sa.Integer(), nullable=True),
+        sa.Column("expected_count", sa.Integer(), nullable=True),
+        sa.Column(
+            "window_cursor_second",
+            sa.BigInteger().with_variant(sa.Integer(), "sqlite"),
+            nullable=True,
+        ),
+        sa.Column("window_cursor_ids_json", sa.Text(), nullable=True),
         sa.Column("boundary_as_of", TZDateTime(), nullable=False),
         sa.Column(
             "boundary_watermark",
@@ -104,6 +123,7 @@ def upgrade() -> None:
         sa.CheckConstraint(CK_VENUE_LEDGER_MODE, name="ck_venue_ledger_cursors_mode"),
         sa.CheckConstraint(CK_VENUE_LEDGER_EVIDENCE_STATUS, name="ck_venue_ledger_cursors_status"),
         sa.CheckConstraint(CK_VENUE_LEDGER_CURSOR_COUNTS, name="ck_venue_ledger_cursors_counts"),
+        sa.CheckConstraint(CK_VENUE_LEDGER_WINDOW, name="ck_venue_ledger_cursors_window"),
     )
 
 

@@ -48,13 +48,19 @@ class VenueLedgerInsertRow(TypedDict):
 
 @dataclass(frozen=True)
 class VenueLedgerCursorWrite:
-    """Cursor and latest pass evidence to persist for one account."""
+    """Cursor, frozen-window progress, and latest pass evidence for one account."""
 
     wallet_public_id: str
     exchange: str
     mode: str
     cursor_second: int | None
     cursor_ids: tuple[str, ...]
+    window_start: int | None
+    window_end: int | None
+    next_ofs: int | None
+    expected_count: int | None
+    window_cursor_second: int | None
+    window_cursor_ids: tuple[str, ...] | None
     boundary_as_of: datetime
     boundary_watermark: int
     boundary_session_id: str
@@ -72,13 +78,19 @@ class VenueLedgerCursorWrite:
 
 @dataclass(frozen=True)
 class VenueLedgerCursorRecord:
-    """Stored cursor and the latest ledger-pass evidence."""
+    """Stored cursor, resumable frozen window, and latest ledger-pass evidence."""
 
     wallet_public_id: str
     exchange: str
     mode: str
     cursor_second: int | None
     cursor_ids: tuple[str, ...]
+    window_start: int | None
+    window_end: int | None
+    next_ofs: int | None
+    expected_count: int | None
+    window_cursor_second: int | None
+    window_cursor_ids: tuple[str, ...] | None
     boundary_as_of: datetime
     boundary_watermark: int
     boundary_session_id: str
@@ -277,6 +289,12 @@ def _new_cursor(cursor: VenueLedgerCursorWrite) -> VenueLedgerCursor:
         mode=cursor.mode,
         cursor_second=cursor.cursor_second,
         cursor_ids_json=_dump_ids(cursor.cursor_ids),
+        window_start=cursor.window_start,
+        window_end=cursor.window_end,
+        next_ofs=cursor.next_ofs,
+        expected_count=cursor.expected_count,
+        window_cursor_second=cursor.window_cursor_second,
+        window_cursor_ids_json=_dump_window_ids(cursor.window_cursor_ids),
         boundary_as_of=cursor.boundary_as_of,
         boundary_watermark=cursor.boundary_watermark,
         boundary_session_id=cursor.boundary_session_id,
@@ -297,6 +315,12 @@ def _apply_cursor_progress(existing: VenueLedgerCursor, cursor: VenueLedgerCurso
     """Update pass progress and leave the original reconciliation boundary in place."""
     existing.cursor_second = cursor.cursor_second
     existing.cursor_ids_json = _dump_ids(cursor.cursor_ids)
+    existing.window_start = cursor.window_start
+    existing.window_end = cursor.window_end
+    existing.next_ofs = cursor.next_ofs
+    existing.expected_count = cursor.expected_count
+    existing.window_cursor_second = cursor.window_cursor_second
+    existing.window_cursor_ids_json = _dump_window_ids(cursor.window_cursor_ids)
     existing.evidence_status = cursor.evidence_status
     existing.reported_count = cursor.reported_count
     existing.ingested_count = cursor.ingested_count
@@ -316,6 +340,12 @@ def _cursor_record(row: VenueLedgerCursor) -> VenueLedgerCursorRecord:
         mode=row.mode,
         cursor_second=row.cursor_second,
         cursor_ids=_load_ids(row.cursor_ids_json),
+        window_start=row.window_start,
+        window_end=row.window_end,
+        next_ofs=row.next_ofs,
+        expected_count=row.expected_count,
+        window_cursor_second=row.window_cursor_second,
+        window_cursor_ids=_load_window_ids(row.window_cursor_ids_json),
         boundary_as_of=row.boundary_as_of,
         boundary_watermark=row.boundary_watermark,
         boundary_session_id=row.boundary_session_id,
@@ -351,6 +381,20 @@ def _entry_record(row: VenueLedgerEntry) -> VenueLedgerEntryRecord:
         observed_at=row.observed_at,
         observation_id=row.observation_id,
     )
+
+
+def _dump_window_ids(ids: tuple[str, ...] | None) -> str | None:
+    """Encode an active window's cursor candidate, or preserve a cleared window."""
+    if ids is None:
+        return None
+    return _dump_ids(ids)
+
+
+def _load_window_ids(raw: str | None) -> tuple[str, ...] | None:
+    """Decode an active window's cursor candidate, or preserve a cleared window."""
+    if raw is None:
+        return None
+    return _load_ids(raw)
 
 
 def _dump_ids(ids: tuple[str, ...]) -> str:

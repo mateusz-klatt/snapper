@@ -16,6 +16,7 @@ from snapper.infrastructure.exchanges.kraken_ledger import LedgerCollectRequest
 from snapper.infrastructure.exchanges.kraken_ledger import LedgerPageQuery
 from snapper.infrastructure.exchanges.kraken_ledger import classify_ledger_window
 from snapper.infrastructure.exchanges.kraken_ledger import collect_ledger_window
+from snapper.infrastructure.exchanges.kraken_ledger import cursor_after_success
 from snapper.infrastructure.exchanges.kraken_ledger import entry_in_window
 from snapper.infrastructure.exchanges.kraken_ledger import is_kraken_ledger_permission_error
 from snapper.infrastructure.exchanges.kraken_ledger import is_permission_message
@@ -307,6 +308,70 @@ async def test_collect_pages_under_a_fixed_end_until_the_count_is_met() -> None:
 
 
 @pytest.mark.asyncio
+async def test_collect_same_second_pages_advance_by_offset_and_keep_all_cursor_ids() -> None:
+    """Rows sharing one second are paginated by ofs rather than moving time.
+
+    Given two pages at the same ledger second,
+    When both are collected with page size one,
+    Then offsets zero and one are used and the success cursor retains both ids.
+    """
+    pages = [
+        KrakenLedgerPage(entries=(_entry("A", _END),), count=2),
+        KrakenLedgerPage(entries=(_entry("B", _END),), count=2),
+    ]
+    calls: list[int] = []
+
+    async def fetch(query: LedgerPageQuery) -> KrakenLedgerPage:
+        calls.append(query.offset)
+        return pages.pop(0)
+
+    outcome = await collect_ledger_window(_request(budget=4, page_size=1), fetch)
+    assert calls == [0, 1]
+    assert outcome.status == "ok"
+    assert outcome.cursor_second == _END
+    assert outcome.cursor_ids == ("A", "B")
+
+
+@pytest.mark.asyncio
+async def test_collect_resume_reconciles_prior_and_current_pages() -> None:
+    """A resumed collector starts at its persisted offset and cumulative count.
+
+    Given a two-row first pass and a persisted newest-second cursor candidate,
+    When the final older page arrives,
+    Then the window succeeds with four rows and keeps the original newest cursor.
+    """
+    first = await collect_ledger_window(
+        _request(budget=2, page_size=2),
+        _pages(KrakenLedgerPage(entries=(_entry("A", _END), _entry("B", _END)), count=4)),
+    )
+    resumed = LedgerCollectRequest(
+        start=_START,
+        end=_END,
+        budget_points=2,
+        call_cost=2,
+        page_size=2,
+        offset=first.next_ofs,
+        expected_count=first.expected_count,
+        received_count=first.received_count,
+        window_cursor_second=first.window_cursor_second,
+        window_cursor_ids=first.window_cursor_ids,
+    )
+    calls: list[int] = []
+
+    async def fetch(query: LedgerPageQuery) -> KrakenLedgerPage:
+        calls.append(query.offset)
+        return KrakenLedgerPage(entries=(_entry("C", _START), _entry("D", _START)), count=4)
+
+    second = await collect_ledger_window(resumed, fetch)
+    assert first.status == "ledger_backlog"
+    assert calls == [2]
+    assert second.status == "ok"
+    assert second.received_count == 4
+    assert second.cursor_second == _END
+    assert second.cursor_ids == ("A", "B")
+
+
+@pytest.mark.asyncio
 async def test_collect_overlap_includes_the_cursor_second() -> None:
     """The next window starts on the previous cursor second.
 
@@ -395,6 +460,32 @@ async def test_collect_stops_on_permission_without_another_call() -> None:
     assert outcome.calls == 1
     assert outcome.points_used == KRAKEN_LEDGER_CALL_COST
     assert outcome.entries == ()
+
+
+@pytest.mark.asyncio
+async def test_collect_timeout_consumes_budget_and_stops_without_a_retry() -> None:
+    """A timed-out page spends its call cost and ends the current pass.
+
+    Given one successful full page followed by a timeout,
+    When the collector stops,
+    Then two calls and four points are recorded with resume progress after page one.
+    """
+    calls: list[int] = []
+
+    async def fetch(query: LedgerPageQuery) -> KrakenLedgerPage:
+        calls.append(query.offset)
+        if len(calls) == 2:
+            raise TimeoutError("late response")
+        return KrakenLedgerPage(entries=(_entry("A", _END), _entry("B", _END)), count=4)
+
+    outcome = await collect_ledger_window(_request(budget=6, page_size=2), fetch)
+    assert calls == [0, 2]
+    assert outcome.status == "ledger_backlog"
+    assert outcome.points_used == 4
+    assert outcome.calls == 2
+    assert outcome.next_ofs == 2
+    assert outcome.expected_count == 4
+    assert outcome.received_count == 2
 
 
 @pytest.mark.asyncio
@@ -503,6 +594,7 @@ async def test_collect_empty_reconciled_window_advances_to_end() -> None:
     assert outcome.status == "ok"
     assert outcome.cursor_second == _END
     assert outcome.cursor_ids == ()
+    assert cursor_after_success((), _END) == (_END, ())
 
 
 @pytest.mark.asyncio
