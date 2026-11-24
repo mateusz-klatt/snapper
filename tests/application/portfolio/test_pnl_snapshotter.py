@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import unittest.mock as mock
 from collections.abc import Sequence
 from dataclasses import replace
@@ -26,6 +27,7 @@ from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     checkpoint_write_refusal,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_wallet_alias
 from snapper.application.portfolio.pnl_snapshot_planner import ChunkWindow
 from snapper.application.portfolio.pnl_snapshot_planner import WithheldMinute
 from snapper.application.portfolio.pnl_snapshotter import PortfolioPnlSnapshotter
@@ -1883,7 +1885,10 @@ class TestCatchupAndCorrections:
     @pytest.mark.parametrize("change", ["gap", "manifest"])
     @pytest.mark.asyncio
     async def test_stationary_probe_rewinds_when_certified_history_changes(
-        self, monkeypatch: pytest.MonkeyPatch, change: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        change: str,
     ) -> None:
         """A changed historical fact rewinds from the first sample minute.
 
@@ -1893,8 +1898,10 @@ class TestCatchupAndCorrections:
 
         Args:
             monkeypatch: Supply the changed evidence at a stationary tip.
+            caplog: Capture the full-recompute attribution line.
             change: The certified fact which changed between generations.
         """
+        caplog.set_level(logging.INFO, logger=pnl_snapshotter.__name__)
         old = _persisted_sample(_minute(3), status="complete")
         repo = _FakeRepo(credentials=[_cred("kraken")], anchor=_anchor(), persisted=[old])
         repo.seed_completed_replay(_minute(3))
@@ -1924,6 +1931,18 @@ class TestCatchupAndCorrections:
         assert repo.frontier().window_start == _minute(1)
         assert repo.frontier().baseline_watermarks == {"kraken": 4}
         assert repo.committed_chunks[0].evidence.start == _minute(1)
+        reason = "fill_gap_changed" if change == "gap" else "execution_manifest_changed"
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if "full P&L recompute from the epoch anchor" in record.getMessage()
+        ] == [
+            (
+                "PortfolioPnlSnapshotter: full P&L recompute from the epoch anchor; "
+                f"wallet={checkpoint_wallet_alias(_WALLET)} generation={frontier.generation} "
+                f"reason={reason}"
+            )
+        ]
 
     @pytest.mark.asyncio
     async def test_resumed_chunk_uses_the_generation_venue_set(

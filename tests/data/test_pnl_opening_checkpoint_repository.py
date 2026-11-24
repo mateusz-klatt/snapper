@@ -17,6 +17,7 @@ from unittest.mock import patch
 from uuid import uuid7
 
 import pytest
+from loguru import logger
 from sqlalchemy import create_engine
 from sqlalchemy import delete
 from sqlalchemy import select
@@ -36,6 +37,10 @@ from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     opening_checkpoint_fence,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    opening_checkpoint_fence_source,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_wallet_alias
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
 from snapper.data.models import Candle
@@ -803,13 +808,28 @@ async def test_choke_point_invalidates_or_retains_checkpoint_for_both_writers(
     m6 = samples._M5 + timedelta(minutes=1)
     as_of_later = m6 + timedelta(minutes=2)
     settled_g1, _ = await _seed_settled_checkpoint(repository, tip=samples._M3)
-    rewound = await repository.invalidate_portfolio_pnl_correction(
-        samples._scope(),
-        _request(start=samples._M3, tip=samples._M4, as_of=as_of_later),
-        settled_g1,
-    )
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, level="INFO", format="{message}")
+    try:
+        rewound = await repository.invalidate_portfolio_pnl_correction(
+            samples._scope(),
+            _request(start=samples._M3, tip=samples._M4, as_of=as_of_later),
+            settled_g1,
+        )
+    finally:
+        logger.remove(sink_id)
     assert checkpoint_minute_fenced(samples._M3, opening_checkpoint_fence(rewound))
     assert repository.consume_last_pnl_checkpoint_invalidation_deleted() == 1
+    fence_lines = [
+        message.strip() for message in messages if "invalidated by frontier fence" in message
+    ]
+    assert len(fence_lines) == 1
+    assert f"wallet={checkpoint_wallet_alias(samples._WALLET)} " in fence_lines[0]
+    assert f"frontier_generation={rewound.generation} " in fence_lines[0]
+    assert f"fence={opening_checkpoint_fence(rewound).isoformat()} " in fence_lines[0]
+    assert f"fence_source={opening_checkpoint_fence_source(rewound)} " in fence_lines[0]
+    assert "checkpoint_minute=" in fence_lines[0]
+    assert fence_lines[0].endswith(f"checkpoint_generation={settled_g1.generation}")
     assert repository.consume_last_pnl_checkpoint_invalidation_deleted() == 0
     assert await repository.get_portfolio_pnl_opening_checkpoint(samples._scope()) is None
 
