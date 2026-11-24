@@ -42,7 +42,8 @@ _PERMISSION_MARKERS: Final = (
     "Invalid permissions",
     "Permission denied",
 )
-_TRADE_BALANCE_FIELDS: Final = ("eb", "tb", "m", "n", "c", "v", "ml")
+_TRADE_BALANCE_FIELDS: Final = ("eb", "tb", "m", "n", "c", "v")
+_TRADE_BALANCE_OPTIONAL_MARGIN_LEVEL: Final = "ml"
 
 
 class KrakenLedgerPermissionMissingError(RuntimeError):
@@ -80,7 +81,11 @@ class KrakenLedgerPage:
 
 @dataclass(frozen=True)
 class KrakenTradeBalance:
-    """TradeBalance evidence fields. They are not a reconciliation input."""
+    """TradeBalance evidence fields. They are not a reconciliation input.
+
+    ``ml`` (margin level) is ``None`` when Kraken omits it, which the venue does
+    whenever the account holds no open margin position.
+    """
 
     eb: str
     tb: str
@@ -88,7 +93,7 @@ class KrakenTradeBalance:
     n: str
     c: str
     v: str
-    ml: str
+    ml: str | None
 
 
 @dataclass(frozen=True)
@@ -229,10 +234,12 @@ def parse_trade_balance_payload(payload: object) -> KrakenTradeBalance:
 
     Returns:
         The evidence fields ``eb``, ``tb``, ``m``, ``n``, ``c``, ``v``, and ``ml``.
+        ``ml`` is ``None`` when absent: Kraken reports the margin level only while
+        a margin position is open. A present ``ml`` must still be valid decimal text.
 
     Raises:
         KrakenLedgerPermissionMissingError: When the envelope denies the read.
-        ValueError: When the envelope or a required field is malformed.
+        ValueError: When the envelope, a required field, or a present ``ml`` is malformed.
     """
     body = _as_mapping(payload, _MALFORMED_TRADE_BALANCE)
     _raise_for_kraken_errors(body, _MALFORMED_TRADE_BALANCE)
@@ -241,6 +248,12 @@ def parse_trade_balance_payload(payload: object) -> KrakenTradeBalance:
         field_name: _decimal_text(result.get(field_name), field_name)
         for field_name in _TRADE_BALANCE_FIELDS
     }
+    raw_margin_level = result.get(_TRADE_BALANCE_OPTIONAL_MARGIN_LEVEL)
+    margin_level = (
+        None
+        if raw_margin_level is None
+        else _decimal_text(raw_margin_level, _TRADE_BALANCE_OPTIONAL_MARGIN_LEVEL)
+    )
     return KrakenTradeBalance(
         eb=values["eb"],
         tb=values["tb"],
@@ -248,7 +261,7 @@ def parse_trade_balance_payload(payload: object) -> KrakenTradeBalance:
         n=values["n"],
         c=values["c"],
         v=values["v"],
-        ml=values["ml"],
+        ml=margin_level,
     )
 
 
@@ -259,7 +272,7 @@ def trade_balance_text(balance: KrakenTradeBalance) -> str:
         balance: Parsed TradeBalance fields.
 
     Returns:
-        Canonical JSON object of the seven evidence strings.
+        Canonical JSON object of the seven evidence fields; an absent ``ml`` is ``null``.
     """
     payload = {
         "c": balance.c,

@@ -222,6 +222,35 @@ def test_trade_balance_text_is_stable_and_required() -> None:
         parse_trade_balance_payload({"error": [], "result": {"eb": "1"}})
 
 
+def test_trade_balance_without_open_margin_omits_margin_level() -> None:
+    """Accept a TradeBalance envelope that carries no margin level.
+
+    Given the envelope Kraken returns for an account with no open margin position,
+    which omits ``ml``,
+    When it is parsed and encoded,
+    Then ``ml`` is None, the JSON evidence records it as null, and a present but
+    malformed ``ml`` is still rejected.
+    """
+    balance = parse_trade_balance_payload(
+        {
+            "error": [],
+            "result": {"eb": "1", "tb": "2", "m": "0", "n": "0", "c": "0", "v": "0"},
+        }
+    )
+    assert balance.ml is None
+    assert (
+        trade_balance_text(balance)
+        == '{"c":"0","eb":"1","m":"0","ml":null,"n":"0","tb":"2","v":"0"}'
+    )
+    with pytest.raises(ValueError, match="field ml is invalid"):
+        parse_trade_balance_payload(
+            {
+                "error": [],
+                "result": {"eb": "1", "tb": "2", "m": "0", "n": "0", "c": "0", "v": "0", "ml": "x"},
+            }
+        )
+
+
 def test_ledger_unix_second_requires_an_aware_timestamp() -> None:
     """Floor an aware timestamp and reject a naive one.
 
