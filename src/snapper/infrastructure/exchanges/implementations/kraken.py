@@ -171,10 +171,11 @@ _NATIVE_BALANCE_AGGREGATE_KEYS: Final = frozenset(
 )
 _PRIVATE_REST_LOCK_WAIT_WARN_S: Final[float] = 5.0
 _IN_PRIVATE_REST: Final[ContextVar[bool]] = ContextVar("kraken_in_private_rest", default=False)
-_SKIP_IF_PRIVATE_REST_BUSY: Final[ContextVar[bool]] = ContextVar(
-    "kraken_skip_if_private_rest_busy",
+_BUDGETED_LEDGER_READ: Final[ContextVar[bool]] = ContextVar(
+    "kraken_budgeted_ledger_read",
     default=False,
 )
+"""Mark budgeted ledger reads for atomic lock skipping and circuit-state isolation."""
 
 
 class PrivateRestBusyError(RuntimeError):
@@ -2431,6 +2432,9 @@ class KrakenExchangeClient(ExchangeClientBase):
     ) -> PayloadT:
         """Call one private read on the dedicated ledger client and parse it.
 
+        The scoped budgeted-read marker selects atomic lock skipping and keeps
+        both successful and failed observations out of trading circuit state.
+
         Args:
             func: Bound method of this instance's ccxt client.
             params: Endpoint parameters.
@@ -2449,7 +2453,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         if not self.api_key or not self.api_secret:
             raise RuntimeError(_LEDGER_CREDENTIALS_MSG)
-        token = _SKIP_IF_PRIVATE_REST_BUSY.set(True)
+        token = _BUDGETED_LEDGER_READ.set(True)
         try:
             try:
                 payload = await self._with_retry(
@@ -2472,7 +2476,7 @@ class KrakenExchangeClient(ExchangeClientBase):
                     raise KrakenLedgerPermissionMissingError(str(exc)) from exc
                 raise
         finally:
-            _SKIP_IF_PRIVATE_REST_BUSY.reset(token)
+            _BUDGETED_LEDGER_READ.reset(token)
         return parse(payload)
 
     def subscribe_ticks(
@@ -4181,7 +4185,7 @@ class KrakenExchangeClient(ExchangeClientBase):
         """
         if _IN_PRIVATE_REST.get():
             raise RuntimeError("nested Kraken private REST call would deadlock the nonce lock")
-        if _SKIP_IF_PRIVATE_REST_BUSY.get() and self._private_rest_contended():
+        if _BUDGETED_LEDGER_READ.get() and self._private_rest_contended():
             raise PrivateRestBusyError("Kraken private REST lock is busy")
         wait_started = monotonic()
         holder = self._private_rest_holder
@@ -4237,6 +4241,9 @@ class KrakenExchangeClient(ExchangeClientBase):
 
         The REST slot is acquired before any private nonce lock, ensuring a
         slot waiter never blocks other private requests by holding that lock.
+        Successful trading calls reset the shared failure count; budgeted ledger
+        reads preserve it. A skipped read has already consumed a local REST-slot
+        token, which is the local limiter and not Kraken's API counter.
 
         Args:
             func: Function to call (sync or async).
@@ -4261,7 +4268,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             egress_target=egress_target,
             **kwargs,
         )
-        self._circuit_failures = 0
+        if not _BUDGETED_LEDGER_READ.get():
+            self._circuit_failures = 0
         return result
 
     async def _with_retry(
@@ -4283,10 +4291,11 @@ class KrakenExchangeClient(ExchangeClientBase):
         Kraken deduplicates ``cl_ord_id`` only among OPEN orders and all
         strategy orders are MARKET (filled instantly, never open), so a
         blind re-send after a send-then-timeout can double-place a real
-        position. With the flag off, network failures still feed the
-        circuit breaker but raise immediately; rate-limit retries remain
-        enabled because a 429 is a definitive venue-side rejection and
-        re-sending cannot duplicate.
+        position. With the flag off, trading network failures still feed the
+        circuit breaker but raise immediately. Budgeted ledger reads instead
+        preserve the trading circuit's failure count on both failure and success.
+        Rate-limit retries remain enabled for other calls because a 429 is a
+        definitive venue-side rejection and re-sending cannot duplicate.
 
         Args:
             func: Function to call (sync or async).
@@ -4294,8 +4303,8 @@ class KrakenExchangeClient(ExchangeClientBase):
             retry_rate_limit_errors: Whether a rejected request may spend another
                 API-counter reservation. Disabled for budgeted ledger reads.
             retry_network_errors: When False, raise network-class errors
-                immediately after circuit-breaker accounting instead of
-                retrying. Required for non-idempotent venue mutations.
+                immediately instead of retrying. Trading calls account for the
+                failure; budgeted ledger reads leave shared circuit state intact.
             egress_kind: Optional REST routing classification for sync
                 Kraken calls.
             egress_operation: Stable operation name for the egress identity.
@@ -4333,7 +4342,8 @@ class KrakenExchangeClient(ExchangeClientBase):
                 raise
             except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
                 if not retry_network_errors:
-                    self._record_unretried_network_failure(e)
+                    if not _BUDGETED_LEDGER_READ.get():
+                        self._record_unretried_network_failure(e)
                     raise
                 attempt = await self._handle_network_error(e, attempt, max_retries, base_delay)
             except Exception as e:

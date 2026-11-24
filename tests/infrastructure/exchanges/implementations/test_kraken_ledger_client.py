@@ -1,6 +1,7 @@
 """Tests for Kraken ledger reads on the executor's private client."""
 
 import asyncio
+import time
 from datetime import UTC
 from datetime import datetime
 from unittest.mock import AsyncMock
@@ -10,6 +11,7 @@ from unittest.mock import patch
 import ccxt
 import pytest
 
+from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
 from snapper.infrastructure.exchanges.implementations import kraken as kr
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.implementations.kraken import PrivateRestBusyError
@@ -75,6 +77,13 @@ def _client(ledgers: object, trade_balance: object) -> tuple[KrakenExchangeClien
     retry = _Retry(ccxt_client)
     client._with_retry = retry
     return client, ccxt_client, retry
+
+
+def _real_ledger_client(ledgers: object) -> KrakenExchangeClient:
+    """Build a real retry client with an isolated CCXT ledger endpoint double."""
+    client = KrakenExchangeClient(api_key="key", api_secret="secret")
+    client._ledger_ccxt_client = _Ccxt(ledgers, _trade_body())
+    return client
 
 
 def _ledger_body() -> dict[str, object]:
@@ -279,7 +288,7 @@ async def test_ledger_read_skips_held_lock_and_trading_still_waits() -> None:
         ):
             await client.read_venue_ledger_page(1, 2, 0)
         endpoint.assert_not_awaited()
-        assert kr._SKIP_IF_PRIVATE_REST_BUSY.get() is False
+        assert kr._BUDGETED_LEDGER_READ.get() is False
         assert client._circuit_failures == 0
         trading_task = asyncio.create_task(client._with_retry(trading))
         await asyncio.sleep(0)
@@ -332,7 +341,7 @@ async def test_ledger_read_skips_an_unlocked_lock_with_a_waiter() -> None:
         ):
             await client.read_venue_ledger_page(1, 2, 0)
         endpoint.assert_not_awaited()
-        assert kr._SKIP_IF_PRIVATE_REST_BUSY.get() is False
+        assert kr._BUDGETED_LEDGER_READ.get() is False
         assert await waiter == "waited"
     finally:
         if not released:
@@ -445,6 +454,117 @@ async def test_disconnect_closes_main_and_dedicated_ledger_sessions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_six_ledger_timeouts_do_not_open_or_delay_trading_circuit() -> None:
+    """Six observation timeouts leave trading circuit state untouched.
+
+    Given six consecutive CCXT RequestTimeout failures from ledger reads,
+    When a classified private trading call follows,
+    Then no observation failure is recorded, the breaker stays closed, and trading runs.
+    """
+    client = _real_ledger_client(ccxt.RequestTimeout("ledger timeout"))
+
+    async def trading() -> str:
+        return "trading-ok"
+
+    try:
+        with patch.object(
+            client,
+            "_record_unretried_network_failure",
+            wraps=client._record_unretried_network_failure,
+        ) as record:
+            for _ in range(6):
+                with pytest.raises(TimeoutError, match="ledger timeout"):
+                    await client.read_venue_ledger_page(1, 2, 0)
+            record.assert_not_called()
+        assert client._circuit_failures == 0
+        assert client._circuit_open_until == 0.0
+        assert kr._BUDGETED_LEDGER_READ.get() is False
+        result = await client._with_retry(
+            trading,
+            retry_network_errors=False,
+            egress_kind="private_mutation",
+            egress_operation="test_trading_after_ledger_timeouts",
+            egress_target=kr.ccxt_proxy_target(client._ccxt_client),
+        )
+        assert result == "trading-ok"
+    finally:
+        client._shutdown_rest_pool()
+
+
+@pytest.mark.asyncio
+async def test_successful_ledger_read_preserves_trading_failure_count() -> None:
+    """A successful observation cannot mask an existing trading outage.
+
+    Given three trading circuit failures,
+    When one ledger read succeeds,
+    Then the failure count remains three.
+    """
+    client = _real_ledger_client(_ledger_body())
+    client._circuit_failures = 3
+    try:
+        page = await client.read_venue_ledger_page(1, 2, 0)
+        assert page.count == 1
+        assert client._circuit_failures == 3
+        assert client._circuit_open_until == 0.0
+        assert kr._BUDGETED_LEDGER_READ.get() is False
+    finally:
+        client._shutdown_rest_pool()
+
+
+@pytest.mark.asyncio
+async def test_trading_network_failure_still_trips_circuit_breaker() -> None:
+    """The budgeted-read exemption never changes trading failure accounting.
+
+    Given a classified trading call one network failure from the threshold,
+    When it fails without a retry,
+    Then the trading breaker opens as before.
+    """
+    client = _real_ledger_client(_ledger_body())
+    client._circuit_failures = client._max_failures - 1
+
+    async def trading_failure() -> None:
+        raise ccxt.NetworkError("trading offline")
+
+    try:
+        with pytest.raises(ccxt.NetworkError, match="trading offline"):
+            await client._with_retry(
+                trading_failure,
+                retry_network_errors=False,
+                egress_kind="private_mutation",
+                egress_operation="test_trading_network_failure",
+                egress_target=kr.ccxt_proxy_target(client._ccxt_client),
+            )
+        assert client._circuit_failures == client._max_failures
+        assert client._circuit_open_until > time.time()
+        assert kr._BUDGETED_LEDGER_READ.get() is False
+    finally:
+        client._shutdown_rest_pool()
+
+
+@pytest.mark.asyncio
+async def test_open_trading_circuit_refuses_ledger_read_and_resets_marker() -> None:
+    """An existing trading-open breaker still refuses reads before CCXT entry.
+
+    Given an open trading circuit,
+    When a ledger read is attempted and refused,
+    Then no endpoint call occurs, trading state is preserved, and the marker resets.
+    """
+    client = _real_ledger_client(_ledger_body())
+    client._circuit_failures = 3
+    client._circuit_open_until = time.time() + 60.0
+    try:
+        with pytest.raises(CircuitBreakerOpenError, match="Circuit breaker open"):
+            await client.read_venue_ledger_page(1, 2, 0)
+        ledger = client._ledger_ccxt_client
+        assert ledger is not None
+        assert ledger.ledger_params == []
+        assert client._circuit_failures == 3
+        assert kr._BUDGETED_LEDGER_READ.get() is False
+    finally:
+        client._shutdown_rest_pool()
+
+
+@pytest.mark.asyncio
 async def test_budgeted_rate_limit_and_permission_errors_do_not_retry() -> None:
     """Budgeted private calls never hide extra counter spending.
 
@@ -478,10 +598,8 @@ async def test_budgeted_rate_limit_and_permission_errors_do_not_retry() -> None:
                 await client.read_venue_ledger_page(10, 20, 0)
         invoke.assert_awaited_once()
         assert client._circuit_failures == 0
-        assert kr._SKIP_IF_PRIVATE_REST_BUSY.get() is False
-        assert record.call_count == int(
-            isinstance(error, ccxt.NetworkError) and not isinstance(error, ccxt.RateLimitExceeded)
-        )
+        assert kr._BUDGETED_LEDGER_READ.get() is False
+        record.assert_not_called()
 
 
 @pytest.mark.parametrize("value", [1785585600, 1785585600.5, "1785585600"])

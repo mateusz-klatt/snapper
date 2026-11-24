@@ -29,6 +29,7 @@ from snapper.data.venue_ledger_store import VenueLedgerInsertRow
 from snapper.infrastructure.exchanges.contracts import CapabilityStatus
 from snapper.infrastructure.exchanges.contracts import OpenPositionSnapshot
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
+from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.exchanges.implementations.kraken import PrivateRestBusyError
 from snapper.infrastructure.exchanges.kraken_ledger import KRAKEN_LEDGER_PAGE_SIZE
@@ -924,6 +925,42 @@ async def test_dispatcher_still_returns_margin_ledger_replay_not_implemented() -
     )
     signal_read.assert_not_awaited()
     bundle_read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_open_trading_circuit_before_trade_balance_spends_no_points() -> None:
+    """A circuit-open preflight refusal is not a Kraken TradeBalance charge.
+
+    Given the trading breaker opens before the observation call,
+    When TradeBalance entry is refused,
+    Then observation stops without a cursor write or a Ledgers request.
+    """
+    reader = _Reader(balance_error=CircuitBreakerOpenError("Circuit breaker open"))
+    repo = _Repo("margin_ledger_replay")
+    stored = await _observe(repo, reader)
+    assert stored is None
+    assert reader.balance_calls == 1
+    assert reader.calls == []
+    assert repo.commits == []
+
+
+@pytest.mark.asyncio
+async def test_open_trading_circuit_before_ledger_page_spends_no_ledger_points() -> None:
+    """A circuit-open Ledgers refusal preserves progress without charging two points.
+
+    Given TradeBalance succeeds and the trading breaker refuses the first page,
+    When observation records the interrupted window,
+    Then only TradeBalance's actual venue call contributes to the pass budget.
+    """
+    reader = _Reader(ledger_error=CircuitBreakerOpenError("Circuit breaker open"))
+    stored = await _observe(_Repo("margin_ledger_replay"), reader)
+    assert reader.balance_calls == 1
+    assert len(reader.calls) == 1
+    assert stored is not None
+    assert stored.evidence_status == "ledger_backlog"
+    assert stored.api_points_used == 1
+    assert stored.next_ofs == 0
+    assert stored.cursor_second is None
 
 
 @pytest.mark.asyncio

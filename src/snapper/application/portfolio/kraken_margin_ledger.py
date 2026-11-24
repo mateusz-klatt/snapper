@@ -18,6 +18,7 @@ from snapper.data.repository_types import PortfolioReconciliationMethodConfigRow
 from snapper.data.venue_ledger_store import VenueLedgerCursorRecord
 from snapper.data.venue_ledger_store import VenueLedgerCursorWrite
 from snapper.data.venue_ledger_store import VenueLedgerInsertRow
+from snapper.infrastructure.exchanges.errors import CircuitBreakerOpenError
 from snapper.infrastructure.exchanges.implementations.kraken import PrivateRestBusyError
 from snapper.infrastructure.exchanges.kraken_ledger import KRAKEN_LEDGER_CALL_COST
 from snapper.infrastructure.exchanges.kraken_ledger import KRAKEN_LEDGER_PAGE_SIZE
@@ -187,7 +188,7 @@ async def run_kraken_margin_ledger_observation(request: MarginLedgerObservationR
         return
     try:
         trade = await _read_trade_balance(request)
-    except PrivateRestBusyError:
+    except PrivateRestBusyError, CircuitBreakerOpenError:
         return
     outcome = await _collect(request, ready, trade.points)
     await _persist(request, ready, trade, outcome)
@@ -315,10 +316,10 @@ def _resolved_boundary(
 
 
 async def _read_trade_balance(request: MarginLedgerObservationRequest) -> _TradeRead:
-    """Read TradeBalance evidence. A failure still consumes its counter point."""
+    """Read TradeBalance evidence; only venue-attempted failures spend a point."""
     try:
         balance = await request.client.read_trade_balance()
-    except PrivateRestBusyError:
+    except PrivateRestBusyError, CircuitBreakerOpenError:
         raise
     except KrakenLedgerPermissionMissingError:
         logger.warning("[{}] kraken trade balance permission missing", request.exchange)
@@ -349,7 +350,7 @@ async def _collect(
                 query.end,
                 query.offset,
             )
-        except PrivateRestBusyError as exc:
+        except (PrivateRestBusyError, CircuitBreakerOpenError) as exc:
             raise KrakenLedgerReadPausedError from exc
 
     return await collect_ledger_window(
