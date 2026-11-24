@@ -20808,22 +20808,30 @@ class SQLAlchemyRepository(Repository):
         """
         fence = opening_checkpoint_fence(frontier)
         result = await s.execute(
-            delete(PortfolioPnlOpeningCheckpoint).where(
+            delete(PortfolioPnlOpeningCheckpoint)
+            .where(
                 *self._pnl_opening_checkpoint_filters(frontier.key),
                 PortfolioPnlOpeningCheckpoint.checkpoint_minute >= fence,
             )
+            .returning(
+                PortfolioPnlOpeningCheckpoint.checkpoint_minute,
+                PortfolioPnlOpeningCheckpoint.source_generation,
+            )
         )
-        deleted = cast(CursorResult[tuple[object, ...]], result).rowcount
-        if deleted > 0:
+        rows = result.all()
+        for checkpoint_minute, source_generation in rows:
             logger.info(
                 "P&L opening checkpoint invalidated by frontier fence; wallet={} "
-                "frontier_generation={} fence={} fence_source={}",
+                "frontier_generation={} fence={} fence_source={} checkpoint_minute={} "
+                "checkpoint_generation={}",
                 checkpoint_wallet_alias(frontier.key.wallet_public_id),
                 frontier.generation,
                 fence.isoformat(),
                 opening_checkpoint_fence_source(frontier),
+                checkpoint_minute.isoformat(),
+                source_generation,
             )
-        return deleted
+        return len(rows)
 
     def consume_last_pnl_checkpoint_invalidation_deleted(self) -> int:
         """Return and clear the latest committed repository-fence deletion rowcount.
@@ -20917,7 +20925,7 @@ class SQLAlchemyRepository(Repository):
             await self._ensure_outer_tx_active_after_savepoint(s, exc)
             self._last_pnl_checkpoint_write_refusal = "capture_upsert_failed"
             logger.warning(
-                "Opening checkpoint upsert rolled back inside savepoint; chunk will commit (%s)",
+                "Opening checkpoint upsert rolled back inside savepoint; chunk will commit ({})",
                 type(exc).__name__,
             )
 

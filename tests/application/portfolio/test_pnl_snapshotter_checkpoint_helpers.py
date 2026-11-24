@@ -1,6 +1,7 @@
 """Fallback, deletion, and defensive refusal tests for checkpoint dispatch helpers."""
 
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import timedelta
 from typing import cast
@@ -10,6 +11,7 @@ import pytest
 
 from snapper.application.portfolio import pnl_snapshotter_checkpoint as dispatch
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_metrics
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_wallet_alias
 from snapper.application.portfolio.pnl_opening_checkpoint_metrics import reset_checkpoint_metrics
 from snapper.application.portfolio.pnl_opening_checkpoint_verifier import PnlCheckpointFallback
 from snapper.data.pnl_correction_state import PnlCorrectionFrontier
@@ -537,3 +539,44 @@ async def test_verifier_cancellation_propagates_unwrapped(
 
     assert raised.value.__cause__ is None
     assert checkpoint_metrics().fallbacks == {}
+
+
+async def test_delete_checkpoint_logs_the_retired_row(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Attribute a generation-fenced deletion to the row it retired.
+
+    Given: A stored checkpoint whose fenced deletion succeeds.
+    When: The deletion helper awaits the repository.
+    Then: One INFO line names the wallet alias, the retired generation and its
+        checkpoint minute, and the ``generation`` deletion is counted.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        caplog: Capture the retirement line.
+    """
+    caplog.set_level(logging.INFO, logger=dispatch.__name__)
+    reset_checkpoint_metrics()
+    repo = fixtures._FakeRepo()
+    resume = await cases._resume(monkeypatch)
+    delete = AsyncMock(return_value=True)
+    monkeypatch.setattr(repo, "delete_portfolio_pnl_opening_checkpoint", delete)
+    scope = fixtures._sample_scope()
+
+    await dispatch.delete_checkpoint(cast(Repository, repo), scope, resume.record)
+
+    certificate = resume.record.certificate
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if "checkpoint retired" in record.getMessage()
+    ] == [
+        (
+            "PortfolioPnlSnapshotter: checkpoint retired; "
+            f"wallet={checkpoint_wallet_alias(scope.wallet_public_id)} "
+            f"generation={certificate.source_generation} "
+            f"checkpoint_minute={certificate.checkpoint_minute.isoformat()}"
+        )
+    ]
+    assert checkpoint_metrics().invalidations_deleted == {"generation": 1}
