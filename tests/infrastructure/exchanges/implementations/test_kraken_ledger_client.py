@@ -86,6 +86,12 @@ def _real_ledger_client(ledgers: object) -> KrakenExchangeClient:
     return client
 
 
+async def _until_private_rest_waiter(client: KrakenExchangeClient) -> None:
+    """Yield until one private call is queued, tolerating local REST-slot backoff."""
+    while client._private_rest_waiters < 1:
+        await asyncio.sleep(0.01)
+
+
 def _ledger_body() -> dict[str, object]:
     """Return one valid one-row Ledgers envelope."""
     return {
@@ -536,6 +542,73 @@ async def test_trading_network_failure_still_trips_circuit_breaker() -> None:
             )
         assert client._circuit_failures == client._max_failures
         assert client._circuit_open_until > time.time()
+        assert kr._BUDGETED_LEDGER_READ.get() is False
+    finally:
+        client._shutdown_rest_pool()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("starting_failures", "trading_fails", "expected_failures"),
+    [(0, True, 1), (2, False, 0)],
+)
+async def test_budgeted_marker_does_not_leak_into_concurrent_trading_call(
+    starting_failures: int,
+    trading_fails: bool,
+    expected_failures: int,
+) -> None:
+    """A trading call in another task keeps normal circuit accounting.
+
+    Given a ledger read in flight in one task, holding the private lock,
+    When a classified trading call in a second task queues behind it and then
+        fails with a network error or succeeds,
+    Then the trading failure is counted or the count is reset as usual, because
+        the budgeted-read marker is scoped to the ledger task only.
+    """
+    client = KrakenExchangeClient(api_key="key", api_secret="secret")
+    ledger_client = _Ccxt(_ledger_body(), _trade_body())
+    client._ledger_ccxt_client = ledger_client
+    client._circuit_failures = starting_failures
+    ledger_started = asyncio.Event()
+    release_ledger = asyncio.Event()
+
+    async def blocking_ledgers(params: dict[str, object]) -> object:
+        ledger_client.ledger_params.append(params)
+        ledger_started.set()
+        await release_ledger.wait()
+        return ledger_client.ledgers_body
+
+    async def trading() -> str:
+        if trading_fails:
+            raise ccxt.RequestTimeout("trading timeout")
+        return "trading-ok"
+
+    async def run_trading() -> str | None:
+        try:
+            result: str = await client._with_retry(
+                trading,
+                retry_network_errors=False,
+                egress_kind="private_mutation",
+                egress_operation="test_concurrent_trading",
+                egress_target=kr.ccxt_proxy_target(client._ccxt_client),
+            )
+        except ccxt.RequestTimeout:
+            return None
+        return result
+
+    try:
+        with patch.object(ledger_client, "privatePostLedgers", blocking_ledgers):
+            ledger_task = asyncio.create_task(client.read_venue_ledger_page(1, 2, 0))
+            await asyncio.wait_for(ledger_started.wait(), timeout=5)
+            trading_task = asyncio.create_task(run_trading())
+            await asyncio.wait_for(_until_private_rest_waiter(client), timeout=5)
+            release_ledger.set()
+            page = await asyncio.wait_for(ledger_task, timeout=5)
+            trading_result = await asyncio.wait_for(trading_task, timeout=5)
+        assert page.count == 1
+        assert ledger_client.ledger_params == [{"start": 1, "end": 2, "ofs": 0}]
+        assert trading_result == (None if trading_fails else "trading-ok")
+        assert client._circuit_failures == expected_failures
         assert kr._BUDGETED_LEDGER_READ.get() is False
     finally:
         client._shutdown_rest_pool()
