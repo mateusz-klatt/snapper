@@ -61,6 +61,26 @@ def opening_checkpoint_fence(frontier: PnlCorrectionFrontier) -> datetime:
     )
 
 
+def opening_checkpoint_fence_source(frontier: PnlCorrectionFrontier) -> str:
+    """Name the frontier field whose minute sets :func:`opening_checkpoint_fence`.
+
+    ``window_start`` wins a tie, then ``next_minute``, then ``repair_from``, so the
+    name is deterministic when several fields share the fence minute.
+
+    Args:
+        frontier: Frontier state whose fence is being attributed.
+
+    Returns:
+        One of ``"window_start"``, ``"next_minute"`` or ``"repair_from"``.
+    """
+    fence = opening_checkpoint_fence(frontier)
+    if frontier.window_start == fence:
+        return "window_start"
+    if frontier.next_minute == fence:
+        return "next_minute"
+    return "repair_from"
+
+
 def checkpoint_minute_fenced(minute: datetime, fence: datetime | None) -> bool:
     """Return whether a checkpoint minute lies at or beyond an invalidation fence.
 

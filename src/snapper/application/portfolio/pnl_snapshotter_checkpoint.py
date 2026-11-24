@@ -214,6 +214,13 @@ async def delete_checkpoint(
         return
     if deleted:
         record_checkpoint_invalidation_deleted("generation", scope)
+        logger.info(
+            "PortfolioPnlSnapshotter: checkpoint retired; wallet=%s generation=%s "
+            "checkpoint_minute=%s",
+            checkpoint_wallet_alias(scope.wallet_public_id),
+            record.certificate.source_generation,
+            record.certificate.checkpoint_minute.isoformat(),
+        )
 
 
 def _log_fallback(

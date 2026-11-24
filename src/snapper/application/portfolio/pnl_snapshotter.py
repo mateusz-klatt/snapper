@@ -303,6 +303,35 @@ def _mint_excluded_spot_wallets(
     )
 
 
+def full_recompute_reason(
+    frontier: PnlCorrectionFrontier,
+    pending: PnlSeriesReplayMetadata,
+    expected_venues: frozenset[str],
+) -> str | None:
+    """Name the stored-frontier evidence that forces a replay from the epoch anchor.
+
+    Args:
+        frontier: Stored correction frontier for the scope.
+        pending: This tick's certified replay evidence.
+        expected_venues: Venues the scope expects this tick.
+
+    Returns:
+        The first differing evidence field, or ``None`` when an incremental
+        replay is allowed.
+    """
+    if frontier.raw_execution_watermarks is None:
+        return "raw_execution_watermarks_absent"
+    if frontier.venue_event_watermarks is None:
+        return "venue_event_watermarks_absent"
+    if frontier.execution_manifest_digest != pending.execution_manifest_digest:
+        return "execution_manifest_changed"
+    if frontier.has_fill_gap != pending.has_fill_gap:
+        return "fill_gap_changed"
+    if frontier.expected_venues != expected_venues:
+        return "expected_venues_changed"
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class _ScopeContext:
     """The immutable per-scope binding one tick threads through its helpers."""
@@ -938,14 +967,17 @@ class PortfolioPnlSnapshotter:
     ) -> tuple[datetime | None, datetime | None]:
         """Return the oldest unresolved minute and this tick's self-heal fence."""
         first = ctx.t0 + _MINUTE
-        if (
-            frontier is None
-            or frontier.raw_execution_watermarks is None
-            or frontier.venue_event_watermarks is None
-            or frontier.execution_manifest_digest != pending.execution_manifest_digest
-            or frontier.has_fill_gap != pending.has_fill_gap
-            or frontier.expected_venues != ctx.expected_venues
-        ):
+        if frontier is None:
+            return first, None
+        reason = full_recompute_reason(frontier, pending, ctx.expected_venues)
+        if reason is not None:
+            logger.info(
+                "PortfolioPnlSnapshotter: full P&L recompute from the epoch anchor; "
+                "wallet=%s generation=%s reason=%s",
+                checkpoint_wallet_alias(ctx.wallet_public_id),
+                frontier.generation,
+                reason,
+            )
             return first, None
         if pending.has_fill_gap:
             if await self._can_skip_persistent_fill_gap(repo, ctx, frontier, tip, pending):

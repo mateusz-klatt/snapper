@@ -186,6 +186,10 @@ from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
 from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
     opening_checkpoint_fence,
 )
+from snapper.application.portfolio.pnl_opening_checkpoint_certificate import (
+    opening_checkpoint_fence_source,
+)
+from snapper.application.portfolio.pnl_opening_checkpoint_metrics import checkpoint_wallet_alias
 from snapper.application.portfolio.reconciliation_invariants import (
     unclassified_state_has_no_retained_evidence,
 )
@@ -20791,6 +20795,9 @@ class SQLAlchemyRepository(Repository):
 
         The SQL predicate ``checkpoint_minute >= fence`` is the database form of
         ``checkpoint_minute_fenced``, so the capture gate and this delete agree.
+        A matched row is logged at INFO with the fence minute and the frontier
+        field that set it, so an operator can attribute a lost resume. The delete
+        is staged in the caller's transaction and commits with the frontier write.
 
         Args:
             s: Active fenced write session owning both frontier and checkpoint tables.
@@ -20799,14 +20806,24 @@ class SQLAlchemyRepository(Repository):
         Returns:
             Number of opening-checkpoint rows deleted by the repository fence.
         """
+        fence = opening_checkpoint_fence(frontier)
         result = await s.execute(
             delete(PortfolioPnlOpeningCheckpoint).where(
                 *self._pnl_opening_checkpoint_filters(frontier.key),
-                PortfolioPnlOpeningCheckpoint.checkpoint_minute
-                >= opening_checkpoint_fence(frontier),
+                PortfolioPnlOpeningCheckpoint.checkpoint_minute >= fence,
             )
         )
-        return cast(CursorResult[tuple[object, ...]], result).rowcount
+        deleted = cast(CursorResult[tuple[object, ...]], result).rowcount
+        if deleted > 0:
+            logger.info(
+                "P&L opening checkpoint invalidated by frontier fence; wallet={} "
+                "frontier_generation={} fence={} fence_source={}",
+                checkpoint_wallet_alias(frontier.key.wallet_public_id),
+                frontier.generation,
+                fence.isoformat(),
+                opening_checkpoint_fence_source(frontier),
+            )
+        return deleted
 
     def consume_last_pnl_checkpoint_invalidation_deleted(self) -> int:
         """Return and clear the latest committed repository-fence deletion rowcount.
