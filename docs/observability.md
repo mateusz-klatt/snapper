@@ -126,16 +126,17 @@ every partition. Completed sweep coverage therefore certifies only
 conflicts inside the window. Heartbeat metadata reports the window as
 `probe_window_days`.
 
-Each monitor starts with limits of 15,000 recent sweep rows and 2,000
+Each monitor starts with limits of 25,000 recent sweep rows and 2,000
 durable restore/import worklog rows per run, then performs targeted
-index-backed identity probes for at most 17,000 distinct candidates,
+index-backed identity probes for at most 27,000 distinct candidates,
 in chunks of at most 1,000 and with one cap of 20 findings per monitor
 and page. Each probe returns at most two matching rows. Windowed probes
 read only the partitions inside each candidate's window, while exact
 worklog probes can require index probes across every partition. The
 repository rejects sweep limits above 25,000 and worklog limits above
-2,000. Across both monitors the scheduler requests at most 30,000 sweep
-rows and 4,000 worklog rows per tick.
+2,000, so the defaults sit at those maximums. Across both monitors the
+scheduler requests at most 50,000 sweep rows and 4,000 worklog rows per
+tick.
 
 Each repository call has a 45-second wall-clock timeout. PostgreSQL also
 sets a transaction-local statement timeout two seconds below that bound

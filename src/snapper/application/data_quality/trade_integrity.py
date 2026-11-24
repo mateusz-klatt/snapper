@@ -40,6 +40,7 @@ from snapper.core.types import HealthStatusEnum
 from snapper.data.repository_types import TradeIntegrityMonitor
 from snapper.data.repository_types import TradeIntegrityRunResult
 from snapper.data.trade_integrity import TRADE_INTEGRITY_PROBE_WINDOW
+from snapper.data.trade_integrity import TRADE_INTEGRITY_SWEEP_LIMIT
 from snapper.data.trade_integrity import TRADE_INTEGRITY_WORKLOG_LIMIT
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.topics.builders import heartbeat_topic
@@ -50,8 +51,8 @@ DEFAULT_INTERVAL_SECONDS: Final = 60.0
 MIN_INTERVAL_SECONDS: Final = 30.0
 MAX_INTERVAL_SECONDS: Final = 60.0
 DEFAULT_STARTUP_GRACE_SECONDS: Final = 0.0
-DEFAULT_SWEEP_LIMIT: Final = 15_000
-"""Default sweep page per monitor, below the repository's hard maximum.
+DEFAULT_SWEEP_LIMIT: Final = TRADE_INTEGRITY_SWEEP_LIMIT
+"""Default sweep page per monitor, at the repository's hard maximum.
 
 One complete repository call, a windowed page of this size and a full
 worklog batch of exact candidates, has to finish inside

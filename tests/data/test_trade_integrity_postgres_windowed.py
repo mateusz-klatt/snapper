@@ -10,7 +10,7 @@ table on the production dialect and proves three things:
   populated partitions outside the probe window while it scans the
   in-window control partition, under a custom and under a forced generic
   plan, with the parameter types the driver binds;
-- one complete repository call of a 15,000-row windowed page and a full
+- one complete repository call of a 25,000-row windowed page and a full
   2,000-row worklog batch finishes inside the 45-second monitor budget.
 
 Every test SKIPS unless the session database URL (``DB_URL``, the Makefile's
@@ -76,7 +76,7 @@ _ACTIVE_LITERAL = "TIMESTAMPTZ '9999-12-31 23:59:59+00'"
 _SESSION_ID = "40000000-0000-0000-0000-000000000001"
 _BUDGET_NOW = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
 _BUDGET_SWEEP_START = datetime(2026, 7, 21, 6, 0, tzinfo=UTC)
-_BUDGET_SWEEP_ROWS = 15_000
+_BUDGET_SWEEP_ROWS = 25_000
 _BUDGET_WORKLOG_ROWS = 2_000
 _BUDGET_SECONDS = 45.0
 _M1_PARAMETERS = ("instrument_public_ids", "trade_ids", "executed_ats", "probe_window")
@@ -584,7 +584,7 @@ async def test_windowed_and_exact_probes_report_findings_on_postgresql(
 async def _stage_budget_rows(engine: AsyncEngine) -> None:
     """Stage one full windowed page and one full batch of clean obligations.
 
-    The 15,000 swept rows have bus times inside the first sweep of
+    The 25,000 swept rows have bus times inside the first sweep of
     ``_BUDGET_NOW`` and execution times over three days. The 2,000 owed rows
     have bus times before the sweep and execution times over all 25
     partitions, and each has a worklog obligation with its own values, so
@@ -658,7 +658,7 @@ async def test_complete_call_with_full_page_and_worklog_fits_the_budget(
 ) -> None:
     """Finish one complete repository call inside the 45-second monitor budget.
 
-    Given: A first sweep of 15,000 clean rows and 2,000 clean worklog
+    Given: A first sweep of 25,000 clean rows and 2,000 clean worklog
         obligations spread over 25 daily partitions.
     When: The repository runs one complete pass of the monitor with the
         default page, a full worklog batch and the derived statement timeout.
