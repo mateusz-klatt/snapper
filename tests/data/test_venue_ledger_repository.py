@@ -121,6 +121,42 @@ async def test_ledger_insert_is_idempotent_and_ordered(repository: SQLAlchemyRep
     assert stored[0].observation_id == _OBSERVATION
 
 
+_HEX_WALLET = "00000000-0000-7000-8000-0000000abc01"
+
+
+@pytest.mark.asyncio
+async def test_alias_wallet_spellings_share_one_cursor_and_dedup_postings(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Alias spellings of one wallet never fork its cursor or duplicate postings.
+
+    Given a pass written under the UPPERCASE spelling of a wallet UUID,
+    When a second pass repeats the same venue ledger id under the compact
+        no-hyphen spelling and reads use a third spelling,
+    Then one cursor row and one posting exist, both stored canonically.
+    """
+    upper = _HEX_WALLET.upper()
+    compact = _HEX_WALLET.replace("-", "")
+    first = await repository.commit_venue_ledger_pass(
+        [{**_entry("L1", "1.2500"), "wallet_public_id": upper}],
+        replace(_cursor(second=100, as_of=_NOW), wallet_public_id=upper),
+    )
+    second = await repository.commit_venue_ledger_pass(
+        [{**_entry("L1", "9.0000"), "wallet_public_id": compact}],
+        replace(_cursor(second=110, as_of=_NOW), wallet_public_id=compact),
+    )
+    stored = await repository.list_venue_ledger_entries(upper, "kraken", "live")
+    cursor = await repository.get_venue_ledger_cursor(compact, "kraken", "live")
+    canonical_rows = await repository.list_venue_ledger_entries(_HEX_WALLET, "kraken", "live")
+    assert first == 1
+    assert second == 0
+    assert [row.wallet_public_id for row in stored] == [_HEX_WALLET]
+    assert [row.amount_text for row in canonical_rows] == ["1.2500"]
+    assert cursor is not None
+    assert cursor.wallet_public_id == _HEX_WALLET
+    assert cursor.cursor_second == 110
+
+
 @pytest.mark.asyncio
 async def test_cursor_boundary_is_written_once(repository: SQLAlchemyRepository) -> None:
     """Later passes keep the reconciliation boundary from the first insert.

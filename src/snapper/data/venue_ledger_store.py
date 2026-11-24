@@ -1,6 +1,9 @@
 """Append-only Kraken ledger postings and the per-account ingest cursor.
 
 Inserts ignore an existing ``(wallet_public_id, exchange, mode, venue_ledger_id)``.
+Every write and read canonicalizes ``wallet_public_id`` to the lowercase hyphenated
+UUID spelling, so an alias spelling of one wallet can never fork its cursor or
+duplicate its postings.
 The cursor row is created once, and later passes keep the reconciliation
 boundary recorded on that first insert.
 """
@@ -8,9 +11,11 @@ boundary recorded on that first insert.
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from dataclasses import replace
 from datetime import datetime
 from typing import TypedDict
 from typing import cast
+from uuid import UUID
 
 from sqlalchemy import Insert
 from sqlalchemy import Select
@@ -24,6 +29,21 @@ from snapper.data.models import VenueLedgerCursor
 from snapper.data.models import VenueLedgerEntry
 
 _ENTRY_CONFLICT = ("wallet_public_id", "exchange", "mode", "venue_ledger_id")
+
+
+def _canonical_wallet(wallet_public_id: str) -> str:
+    """Return the canonical lowercase hyphenated spelling of a wallet UUID.
+
+    Args:
+        wallet_public_id: Wallet identity in any UUID spelling.
+
+    Returns:
+        The canonical spelling used as the stored ledger scope.
+
+    Raises:
+        ValueError: When the value is not a UUID.
+    """
+    return str(UUID(wallet_public_id))
 
 
 class VenueLedgerInsertRow(TypedDict):
@@ -127,6 +147,13 @@ class VenueLedgerEntryRecord:
     observation_id: str
 
 
+def _canonical_entry(row: VenueLedgerInsertRow) -> VenueLedgerInsertRow:
+    """Return a copy of one posting carrying the canonical wallet spelling."""
+    canonical = dict(row)
+    canonical["wallet_public_id"] = _canonical_wallet(row["wallet_public_id"])
+    return cast(VenueLedgerInsertRow, canonical)
+
+
 def ledger_entry_insert(dialect: str, rows: Sequence[VenueLedgerInsertRow]) -> Insert:
     """Build an idempotent ledger insert for the session dialect.
 
@@ -140,7 +167,7 @@ def ledger_entry_insert(dialect: str, rows: Sequence[VenueLedgerInsertRow]) -> I
     insert_fn = pg_insert if dialect == "postgresql" else sqlite_insert
     return (
         insert_fn(VenueLedgerEntry)
-        .values(list(rows))
+        .values([_canonical_entry(row) for row in rows])
         .on_conflict_do_nothing(index_elements=list(_ENTRY_CONFLICT))
     )
 
@@ -162,8 +189,13 @@ async def write_ledger_pass(
     Returns:
         How many postings were newly inserted.
     """
-    inserted = await _insert_entries(session, dialect, entries)
-    await _save_cursor(session, cursor)
+    canonical_entries = [_canonical_entry(row) for row in entries]
+    canonical_cursor = replace(
+        cursor,
+        wallet_public_id=_canonical_wallet(cursor.wallet_public_id),
+    )
+    inserted = await _insert_entries(session, dialect, canonical_entries)
+    await _save_cursor(session, canonical_cursor)
     return inserted
 
 
@@ -184,7 +216,7 @@ async def fetch_ledger_cursor(
     Returns:
         The cursor row, when one exists.
     """
-    row = await session.scalar(_cursor_select(wallet_public_id, exchange, mode))
+    row = await session.scalar(_cursor_select(_canonical_wallet(wallet_public_id), exchange, mode))
     if row is None:
         return None
     return _cursor_record(row)
@@ -210,7 +242,7 @@ async def fetch_ledger_entries(
     stmt = (
         select(VenueLedgerEntry)
         .where(
-            VenueLedgerEntry.wallet_public_id == wallet_public_id,
+            VenueLedgerEntry.wallet_public_id == _canonical_wallet(wallet_public_id),
             VenueLedgerEntry.exchange == exchange,
             VenueLedgerEntry.mode == mode,
         )
