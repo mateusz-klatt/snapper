@@ -384,6 +384,28 @@ chunk; the next generation then deletes that row once, which appears as a single
 `invalidations_deleted{repo_fence}` count.
 Repository-fence deletions are counted as `invalidations_deleted{repo_fence}`;
 generation-fenced deletions retain the `generation` label.
+Each deletion is also attributable from the logs at INFO:
+
+- a repository-fence deletion logs `P&L opening checkpoint invalidated by
+    frontier fence` with the fence minute and the frontier field that set it
+    (`window_start`, `next_minute` or `repair_from`);
+- a generation-fenced deletion after a resume fallback logs `checkpoint
+    retired` with the deleted row's generation and checkpoint minute, next to
+    the WARNING `checkpoint resume fallback` line that names the reason;
+- a replay that restarts from the epoch anchor logs `full P&L recompute from
+    the epoch anchor` with the stored evidence that differed
+    (`raw_execution_watermarks_absent`, `venue_event_watermarks_absent`,
+    `execution_manifest_changed`, `fill_gap_changed` or
+    `expected_venues_changed`).
+
+Operational writes to the reference data a checkpoint certifies, such as
+symbol catalogs, instrument specifications, FX candles or the execution
+manifest, can invalidate the stored checkpoint. Running `make docker-run-static`
+or `make docker-migrate-prod` (which seeds with `--profile prod`) against the
+production database is such a write. Afterwards, expect a
+`checkpoint_absent` resume fallback, a full or partial recompute, and a fresh
+capture once the self-heal lookback has closed. The P&L values stay correct;
+only the resume shortcut is lost until the next capture.
 The cold anchor and the resumed side are planned from one shared read of the
 chunk's observation, valuation and position evidence, so a write committed
 between two reads cannot appear as a mismatch that deletes a valid checkpoint.
