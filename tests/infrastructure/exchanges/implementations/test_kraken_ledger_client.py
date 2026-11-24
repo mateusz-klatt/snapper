@@ -162,6 +162,8 @@ def test_ledger_client_mirrors_constructor_nonce_and_proxy_configuration(
         }
         assert ledger.constructor_kwargs["timeout"] == 10000
         assert ledger.nonce is main.nonce
+        with patch.object(kr.time, "time", return_value=1700000000.25):
+            assert ledger.nonce() == main.nonce() == 170000000025000000
         main_target = kr.ccxt_proxy_target(main)
         ledger_target = kr.ccxt_proxy_target(ledger)
         assert main_target.client is main
