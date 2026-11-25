@@ -1497,11 +1497,10 @@ def _check_preview_values(line: Mapping[str, str]) -> None:
         "input_minutes",
         "absent_minutes",
         "current_id",
-        "current_trades",
     ):
         if line[column]:
             int(line[column])
-    for column in _VALUES[:-1]:
+    for column in _VALUES:
         if line[f"current_{column}"]:
             float(line[f"current_{column}"])
     if line["current_known_at"]:

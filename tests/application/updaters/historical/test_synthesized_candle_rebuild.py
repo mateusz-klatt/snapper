@@ -1420,6 +1420,7 @@ async def _reject_conflicting_instrument(run: _Run, resumed: Path) -> None:
         ("new_complete", "wrong"),
         ("new_price_basis", "mid"),
         ("inputs_sha256", "x"),
+        ("current_trades", "bad"),
         ("new_open", "nan"),
         ("new_trades", "1.0"),
         ("action", "rebuild"),
@@ -1898,6 +1899,50 @@ async def _seed_old_output(
         stored = cast(CandleVersionRow, dict(result.mappings().one()))
         await session.commit()
     return stored
+
+
+@pytest.mark.parametrize("trades", [7, 7.25, inf, -inf, nan, None])
+def test_preview_round_trips_current_trades(trades: int | float | None) -> None:
+    """Preserve current trade counts in the rebuild preview.
+
+    Given: Current trade counts ranging from ordinary integers to unknown legacy values.
+    When: Serialize and parse a rebuild preview.
+    Then: The parsed cell retains the writer's exact representation.
+    """
+    key = (XRP, "5m", OPEN)
+    current = cast(CandleVersionRow, {"trades": trades})
+    window = rebuild._Window(key, "XRP-EUR", 1, "protected", current=current)
+
+    preview = rebuild._parse_preview(rebuild._preview_bytes([window]))
+
+    assert preview[key]["current_trades"] == ("" if trades is None else repr(trades))
+
+
+async def test_confirm_accepts_sqlite_preview_with_infinite_current_trades(
+    recorded_repair: _Run,
+) -> None:
+    """Apply an eligible row from a preview that also records unknown current trades.
+
+    Given: A SQLite predecessor storing an infinite trade count.
+    When: Plan the rebuild and confirm its generated preview.
+    Then: The unknown count remains visible and the other eligible windows can be written.
+    """
+    run = recorded_repair
+    candidate = cast(CandleUpsertRow, (await _five_minute_candidate(run)).row)
+    predecessor = await _seed_old_output(run, candidate, trades=inf)
+    dry = run.request("voted-infinite-trades")
+    vote = await rebuild.plan_rebuild(run.context, dry)
+
+    excluded = _preview(dry.output_dir)[0]
+    assert excluded["current_trades"] == "inf"
+    assert excluded["action"] == "would_lose_observations"
+    assert excluded["reason"] == "unknown_current"
+    write = run.request("write-infinite-trades")
+    report = await rebuild.write_rebuild(run.context, write, _vote(dry.output_dir, vote.digest))
+    assert report.totals["applied"] == 5
+    assert [row for row in await _higher_rows(run.repository) if row["timeframe"] == "5m"] == [
+        predecessor
+    ]
 
 
 @pytest.mark.parametrize("subsequent", ["unchanged", "protected", "would_lose_observations"])
