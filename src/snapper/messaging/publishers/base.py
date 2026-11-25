@@ -291,6 +291,15 @@ _CANDLE_REPAIR_PENDING_MAX: Final = 100_000
 _CANDLE_REPAIR_MAX_ATTEMPTS: Final = 3
 """Maximum repair attempts before abandoning a permanently unavailable source window."""
 
+_CANDLE_REPAIR_LOCK_MAX_DEFERRALS: Final = 40
+"""Per-key lock deferrals before charging the ordinary retry budget (about 19 minutes)."""
+
+_CANDLE_REPAIR_LOCK_INITIAL_BACKOFF_S: Final = 2.0
+"""First retry delay after PostgreSQL rolls back a contended repair."""
+
+_CANDLE_REPAIR_LOCK_MAX_BACKOFF_S: Final = 30.0
+"""Maximum per-key delay between retries for database lock contention."""
+
 _SEEDED_INCOMPLETE_REPAIR_MAX_ATTEMPTS: Final = 60
 """Maximum source-gated seeded repair attempts before manual backfill warning."""
 
@@ -495,6 +504,8 @@ class _PendingCandleRepair:
     last_observed_minute_count: int | None = None
     output_sequence: int | None = None
     historical_only: bool = False
+    lock_deferrals: int = 0
+    retry_at: float = -math.inf
 
 
 @dataclass(frozen=True)
@@ -506,6 +517,7 @@ class _CandleRepairResult:
     done: bool
     output_sequence: int | None = None
     expected_source_minutes: frozenset[datetime] | None = None
+    lock_sqlstate: str | None = None
 
 
 @dataclass(frozen=True)
@@ -855,13 +867,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._egress_snapshot_publisher: EgressSnapshotPublisher | None = None
 
     def _initialize_candle_write_tracking(self) -> None:
-        """Initialize exact candle write identities and derived-output acknowledgement ownership."""
+        """Initialize exact candle write identities, repair acknowledgements, and retry timing."""
         self._candle_writer_backoff_s: float = _WRITER_RECONNECT_INITIAL_BACKOFF_S
         self._next_candle_write_sequence: int = 0
         self._candle_write_sequence_by_row_id: dict[int, _TrackedCandleWrite] = {}
         self._committed_candle_write_sequences: set[int] = set()
         self._candle_write_sequence_references: dict[int, int] = {}
         self._candle_repair_output_keys: dict[int, _CandleRepairKey] = {}
+        self._next_candle_repair_at: float = math.inf
 
     def _initialize_completion_state(self) -> None:
         """Initialize the aggregator slot and the state of consumer-driven completion.
@@ -3736,9 +3749,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         """
         while self.running:
             try:
-                await self._candle_repair_event.wait()
-                self._candle_repair_event.clear()
-                await asyncio.sleep(_CANDLE_REPAIR_DEBOUNCE_S)
+                await self._wait_for_candle_repair()
                 if not self.running:
                     break
                 await self._run_due_candle_repairs(exchange)
@@ -3746,6 +3757,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 raise
             except Exception as e:
                 logger.error(f"Candle repair loop error: {e}")
+
+    async def _wait_for_candle_repair(self) -> None:
+        """Debounce new work or wake directly when the earliest lock deferral expires."""
+        deadline = self._next_candle_repair_at
+        if deadline == math.inf:
+            await self._candle_repair_event.wait()
+        else:
+            try:
+                async with asyncio.timeout(deadline - monotonic()):
+                    await self._candle_repair_event.wait()
+            except TimeoutError:
+                return
+        self._candle_repair_event.clear()
+        await asyncio.sleep(_CANDLE_REPAIR_DEBOUNCE_S)
 
     async def _run_due_candle_repairs(self, exchange: MarketDataExchange) -> None:
         """Repair every pending key whose source commit and frontier are ready.
@@ -3782,7 +3807,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     if result.output_sequence is None:
                         self._drop_pending_candle_repair(result.key)
                         self._cleanup_committed_candle_write_sequence(result.required_sequence)
-                else:
+                elif result.lock_sqlstate is None or not self._defer_candle_repair(
+                    result.key, pending, result.lock_sqlstate
+                ):
                     retry = (
                         self._record_failed_candle_repair_attempt(
                             result.key, result.required_sequence
@@ -3791,6 +3818,37 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                     )
         if retry:
             self._candle_repair_event.set()
+
+    def _defer_candle_repair(
+        self, key: _CandleRepairKey, pending: _PendingCandleRepair, sqlstate: str
+    ) -> bool:
+        """Schedule a lock retry without charging the ordinary retry budget.
+
+        Args:
+            key: Synthesized candle affected by lock contention.
+            pending: Current generation of the repair.
+            sqlstate: PostgreSQL rollback code from the failed repair.
+
+        Returns:
+            True when the key was deferred, False when its deferral budget is exhausted.
+        """
+        deferred = pending.lock_deferrals < _CANDLE_REPAIR_LOCK_MAX_DEFERRALS
+        if deferred:
+            backoff = min(
+                _CANDLE_REPAIR_LOCK_INITIAL_BACKOFF_S * 2**pending.lock_deferrals,
+                _CANDLE_REPAIR_LOCK_MAX_BACKOFF_S,
+            )
+            pending.lock_deferrals += 1
+            pending.retry_at = monotonic() + backoff
+            self._next_candle_repair_at = min(self._next_candle_repair_at, pending.retry_at)
+            message = "candle repair deferred by database lock contention"
+        else:
+            message = "candle repair database lock deferral limit reached"
+        logger.warning(
+            f"{message}: symbol={key.symbol} timeframe={key.timeframe} "
+            f"window={key.window_begin.isoformat()} sqlstate={sqlstate}"
+        )
+        return deferred
 
     def _record_failed_candle_repair_attempt(
         self, key: _CandleRepairKey, required_sequence: int | None
@@ -3880,6 +3938,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         Returns:
             Pending repair entries grouped by native symbol and window start.
         """
+        self._next_candle_repair_at = math.inf
         aggregator = self._candle_aggregator
         if aggregator is None:
             return {}
@@ -3887,7 +3946,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             tuple[str, datetime],
             list[tuple[_CandleRepairKey, int | None, frozenset[datetime] | None]],
         ] = {}
+        now = monotonic()
         for key, pending in self._pending_candle_repairs.items():
+            if pending.retry_at > now:
+                self._next_candle_repair_at = min(self._next_candle_repair_at, pending.retry_at)
+                continue
             if pending.output_sequence is not None:
                 continue
             if (
@@ -3944,12 +4007,17 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         async with semaphore:
             results: list[_CandleRepairResult] = []
             for key, required_sequence, expected_source_minutes in entries:
-                done = await self._repair_candle_key(key, exchange, expected_source_minutes)
+                outcome = await self._repair_candle_key(key, exchange, expected_source_minutes)
                 pending = self._pending_candle_repairs.get(key)
                 output_sequence = None if pending is None else pending.output_sequence
                 results.append(
                     _CandleRepairResult(
-                        key, required_sequence, done, output_sequence, expected_source_minutes
+                        key,
+                        required_sequence,
+                        outcome is True,
+                        output_sequence,
+                        expected_source_minutes,
+                        lock_sqlstate=outcome if isinstance(outcome, str) else None,
                     )
                 )
             return results
@@ -3959,7 +4027,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         key: _CandleRepairKey,
         exchange: MarketDataExchange,
         expected_source_minutes: frozenset[datetime] | None = None,
-    ) -> bool:
+    ) -> bool | str:
         """Re-derive and publish one synthesized candle from persisted 1m rows.
 
         Args:
@@ -3969,8 +4037,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 ``None`` for exact late-correction repairs.
 
         Returns:
-            True when output was queued and now awaits its exact durable write
-            acknowledgement, False when derivation or enqueue needs a retry.
+            True when output was queued for exact acknowledgement or committed historically,
+            False for ordinary failures, or the SQLSTATE when PostgreSQL rolled back
+            due to lock contention.
         """
         try:
             pending = self._pending_candle_repairs.get(key)
@@ -3997,11 +4066,27 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 self._candle_repair_output_keys[output_sequence] = key
             return True
         except Exception as e:
-            logger.error(
-                f"candle repair failed: symbol={key.symbol} timeframe={key.timeframe} "
-                f"window={key.window_begin.isoformat()} error={e}"
-            )
-            return False
+            return self._classify_candle_repair_failure(key, e)
+
+    @staticmethod
+    def _classify_candle_repair_failure(key: _CandleRepairKey, exc: Exception) -> bool | str:
+        """Distinguish rolled-back lock failures from ordinary repair failures.
+
+        Args:
+            key: Synthesized candle whose repair raised.
+            exc: Exception raised during derivation or persistence.
+
+        Returns:
+            A transient SQLSTATE or False after logging an ordinary failure.
+        """
+        sqlstate = _database_sqlstate(exc)
+        if sqlstate is not None and sqlstate in ("55P03", "40001", "40P01"):
+            return sqlstate
+        logger.error(
+            f"candle repair failed: symbol={key.symbol} timeframe={key.timeframe} "
+            f"window={key.window_begin.isoformat()} error={exc}"
+        )
+        return False
 
     async def _commit_historical_candle_repair(
         self, candle: CandleUpdate, exchange: MarketDataExchange, timeframe: str
