@@ -1,8 +1,7 @@
 """Shared pieces of operator commands that change durable state on purpose.
 
 Such a command refuses with one line and a non-zero status, names its target
-database without credentials, and reaches it through the configured
-repository cache.
+database without credentials, and reaches it through the configured repository.
 """
 
 from typing import NoReturn
@@ -47,13 +46,18 @@ def database_identity(db_url: str) -> str:
     )
 
 
-def configured_repository(db_url: str) -> SQLAlchemyRepository:
+def configured_repository(
+    db_url: str, *, application_name: str | None = None
+) -> SQLAlchemyRepository:
     """Resolve the configured repository.
 
     Args:
         db_url: Configured SQLAlchemy database URL.
+        application_name: Optional PostgreSQL connection name for this invocation.
 
     Returns:
-        Cached repository for the target database.
+        Repository for the target database, dedicated to this invocation when named.
     """
+    if application_name is not None:
+        return SQLAlchemyRepository(db_url, application_name=application_name)
     return cast(SQLAlchemyRepository, get_repository(db_url))

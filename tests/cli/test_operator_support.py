@@ -1,11 +1,15 @@
 """Tests for the helpers shared by operator commands."""
 
+from pathlib import Path
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
 import typer
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from snapper.cli import operator_support
+from snapper.data.repository import dispose_repositories
 
 
 def test_refusal_goes_to_stderr_with_a_non_zero_status(capsys: pytest.CaptureFixture[str]) -> None:
@@ -61,3 +65,28 @@ def test_repository_resolution_uses_the_configured_url(monkeypatch: pytest.Monke
 
     assert result is resolved
     factory.assert_called_once_with("sqlite+aiosqlite:///fixture.db")
+
+
+@pytest.mark.asyncio
+async def test_named_repository_is_uncached_and_disposed_with_the_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Named SQLite repositories ignore connection naming and remain tracked for disposal."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'operator.db'}"
+    cached = operator_support.configured_repository(url)
+    named = operator_support.configured_repository(url, application_name="snapper:repair-candles")
+    another = operator_support.configured_repository(url, application_name="snapper:repair-candles")
+    assert cached is operator_support.configured_repository(url)
+    assert cached is not named and named is not another
+    await named.create_all()
+    dispose = AsyncMock(wraps=AsyncEngine.dispose)
+
+    async def dispose_engine(engine: AsyncEngine, close: bool = True) -> None:
+        """Track the actual disposal, including the named engine and its pool."""
+        await dispose(engine, close=close)
+
+    monkeypatch.setattr(type(named.engine), "dispose", dispose_engine)
+    await dispose_repositories()
+    assert {cached.engine, named.engine, another.engine} <= {
+        call.args[0] for call in dispose.await_args_list
+    }

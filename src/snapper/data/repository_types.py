@@ -272,6 +272,49 @@ class CandlePredecessor(TypedDict):
     timestamp: datetime
 
 
+class SynthesizedRebuildExpectation(TypedDict):
+    """The voted output predecessor and fingerprint of its current minute inputs."""
+
+    predecessor: CandlePredecessor | None
+    inputs_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class SynthesizedRebuildOutcome:
+    """The eligibility or committed result for one higher-timeframe key."""
+
+    status: Literal[
+        "insert",
+        "replace",
+        "inserted",
+        "replaced",
+        "predecessor_changed",
+        "protected_source",
+        "history_without_current",
+        "not_newer",
+        "unchanged",
+        "would_lose_observations",
+        "inputs_changed",
+    ]
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ClientSample:
+    """The count of other PostgreSQL client backends at one observation time."""
+
+    other_client_backends: int
+    observed_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SynthesizedRebuildResult:
+    """Outcomes by natural key and the optional precommit PostgreSQL sample."""
+
+    outcomes: Mapping[tuple[str, str, datetime], SynthesizedRebuildOutcome]
+    sample: ClientSample | None = None
+
+
 class ShadowCandleUpsertRow(TypedDict, total=False):
     """Row dict for upsert_shadow_candles.
 
