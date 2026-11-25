@@ -1220,28 +1220,17 @@ class NotifySidecar(RegisterableProcess):
         the entry boundary that drives both the retry-eligibility SELECT
         and every SCD2 write performed while processing that batch.
 
-        Root-cause diagnosis for issue #184 (121 rows stuck ``queued`` with
-        ``next_attempt_at`` in the past between 01:30Z and 02:03Z, plus 48
-        from 11-24):
-            ``SQLAlchemyRepository.list_deliveries_ready_for_retry(now)``
-            (``repository.py``) queries ``status == 'queued' AND known_to ==
-            KNOWN_TO_MAX AND (next_attempt_at IS NULL OR next_attempt_at <=
-            now)``, and ``list_queued_deliveries_all()`` selects all active
-            ``status == 'queued'`` rows — so neither SQL selection predicate
-            excludes rows whose ``next_attempt_at`` is in the past. Instead,
-            this loop processed rows sequentially and awaited
-            ``self._apns.send(...)`` with no ``asyncio.wait_for`` timeout,
-            while ``aioapns`` (``APNsBaseConnectionPool.acquire`` /
-            ``APNsBaseClientProtocol.send_notification``) can block
-            indefinitely on stalled sockets, busy pool spin loops, or
-            unresolved response futures during an outage. One hung send
-            permanently stalled this task without exiting or raising to
-            ``_run_workers``, leaving subsequent 30s ticks unexecuted and
-            queued rows stranded past ``next_attempt_at`` even after network
-            recovery (while ``_attempt_on_queued_row`` also intentionally
-            leaves ``fcm`` rows untouched when ``_android is None``).
-            Bounding ``self._apns.send`` with ``_APNS_SEND_TIMEOUT_S`` and
-            isolating per-row errors keeps the retry scheduler advancing.
+        Why every send is bounded: both retry selections
+        (``list_deliveries_ready_for_retry`` and ``list_queued_deliveries_all``)
+        already include rows whose ``next_attempt_at`` is in the past, but this
+        loop processes rows sequentially, and an unbounded
+        ``self._apns.send(...)`` can block indefinitely inside ``aioapns``
+        (pool acquire, a stalled socket, or an unresolved response future)
+        during a network outage. One hung send would stall this task without
+        raising to ``_run_workers`` and strand every due row even after the
+        network recovers. Bounding each send with ``_APNS_SEND_TIMEOUT_S`` and
+        isolating per-row errors keeps the retry scheduler advancing. FCM rows
+        are intentionally left untouched when ``_android is None``.
         """
         while not self._stop_event.is_set():
             with contextlib.suppress(TimeoutError):
