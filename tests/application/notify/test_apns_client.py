@@ -8,6 +8,7 @@ always mocked — the tests assert our routing semantics, not
 Apple's HTTP/2 stack.
 """
 
+import errno
 import socket
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -335,7 +336,13 @@ class TestNetworkDeliveryErrorClassification:
             TimeoutError("timed out"),
             socket.gaierror(-2, "Name or service not known"),
             ConnectionRefusedError("refused"),
-            OSError("network unreachable"),
+            ConnectionResetError("reset"),
+            OSError(errno.ENETUNREACH, "network unreachable"),
+            OSError(errno.EHOSTUNREACH, "no route to host"),
+            OSError(errno.ENETDOWN, "network down"),
+            OSError(errno.ETIMEDOUT, "connection timed out"),
+            OSError(errno.ECONNREFUSED, "connection refused"),
+            OSError(errno.ECONNRESET, "connection reset"),
             httpx.ConnectError("connect failed"),
             httpx.ProxyError("proxy down"),
             httpx.ReadTimeout("read timed out"),
@@ -345,7 +352,7 @@ class TestNetworkDeliveryErrorClassification:
         """Transient network/transport exception types return True.
 
         Given: An exception instance representing DNS, connect, proxy, timeout,
-            or aioapns ``MaxAttemptsExceeded`` transport failure.
+            network-errno ``OSError``, or aioapns ``MaxAttemptsExceeded``.
         When: ``is_network_delivery_error`` inspects the exception.
         Then: It returns ``True`` so the sidecar retries until TTL expiry.
         """
@@ -356,14 +363,20 @@ class TestNetworkDeliveryErrorClassification:
         [
             RuntimeError("unexpected"),
             ValueError("Unknown APNs env"),
+            FileNotFoundError(errno.ENOENT, "No such file or directory"),
+            PermissionError(errno.EACCES, "Permission denied"),
+            OSError(errno.EINVAL, "Invalid argument"),
+            OSError("bare error without errno"),
         ],
     )
     def test_non_network_exceptions_classified_false(self, exc: BaseException) -> None:
-        """Non-network exceptions keep the bounded retry path.
+        """Non-network and filesystem/config ``OSError`` exceptions return False.
 
-        Given: A non-network exception with no network cause/context.
+        Given: A non-network exception, a ``FileNotFoundError``/``PermissionError``
+            (such as a missing/unreadable APNs key), or an ``OSError`` without
+            a network errno.
         When: ``is_network_delivery_error`` inspects the exception.
-        Then: It returns ``False``.
+        Then: It returns ``False`` so the 3-attempt path applies.
         """
         assert is_network_delivery_error(exc) is False
 

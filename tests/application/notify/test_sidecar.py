@@ -11,6 +11,7 @@ are mocked or swapped in per test.
 """
 
 import asyncio
+import errno
 import socket
 from collections.abc import AsyncGenerator
 from datetime import UTC
@@ -1925,7 +1926,7 @@ class TestNetworkOutageRetryAndExpiry:
                 httpx.ProxyError("proxy unreachable"),
                 TimeoutError("connect timed out"),
                 MaxAttemptsExceeded(),
-                OSError("network down"),
+                OSError(errno.ENETUNREACH, "network down"),
                 ApnsSendResult(
                     status_code=200, status="success", apns_id="apns-rec", description=""
                 ),
@@ -2199,22 +2200,29 @@ class TestNetworkOutageRetryAndExpiry:
             )
 
         apns.send = AsyncMock(side_effect=_hang_then_succeed)
-        monkeypatch.setattr("snapper.application.notify.sidecar._APNS_SEND_TIMEOUT_S", 0.02)
-        monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 0.03)
+        original_recovery = sidecar._maybe_log_outage_recovery
 
-        task = asyncio.create_task(sidecar._process_retry_queue_loop())
-        await asyncio.sleep(0.12)
-        await sidecar.stop()
-        await asyncio.wait_for(task, timeout=2.0)
+        async def _stop_after_first_tick_recovery(
+            recovered_delivery_public_id: str, now: datetime
+        ) -> None:
+            await original_recovery(recovered_delivery_public_id, now)
+            await sidecar.stop()
+
+        monkeypatch.setattr(sidecar, "_maybe_log_outage_recovery", _stop_after_first_tick_recovery)
+        monkeypatch.setattr("snapper.application.notify.sidecar._APNS_SEND_TIMEOUT_S", 0.02)
+        monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 0.01)
+
+        await asyncio.wait_for(sidecar._process_retry_queue_loop(), timeout=2.0)
 
         row_one = await repo.get_delivery_by_public_id(hanging_pid)
         row_two = await repo.get_delivery_by_public_id(healthy_pid)
         assert row_one is not None
         assert row_one["status"] == "queued"
-        assert row_one["attempt_count"] >= 4
+        assert row_one["attempt_count"] == 4
         assert row_one["error_reason"] == "exception: TimeoutError"
         assert row_two is not None
         assert row_two["status"] == "sent"
+        assert row_one["next_attempt_at"] == row_two["last_attempt_at"]
 
 
 class TestTerminalSuppressionAndIsolation:
@@ -2406,3 +2414,170 @@ class TestTerminalSuppressionAndIsolation:
         after = await repo.get_delivery_by_public_id(pid)
         assert after is not None
         assert after["status"] == "queued"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            FileNotFoundError(errno.ENOENT, "missing key"),
+            PermissionError(errno.EACCES, "unreadable key"),
+        ],
+        ids=["file-not-found", "permission-error"],
+    )
+    async def test_filesystem_os_errors_stay_on_three_attempt_path(
+        self, repo: SQLAlchemyRepository, exc: OSError
+    ) -> None:
+        """Filesystem ``OSError`` subclasses give up after 3 attempts.
+
+        Given: A queued APNs delivery encountering ``FileNotFoundError`` or
+            ``PermissionError`` on every attempt.
+        When: Three consecutive attempts run inside the 6 h TTL.
+        Then: The delivery transitions to terminal ``failed`` at attempt 3.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, _ = _make_sidecar(repo, send_result=exc)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        for minute in (0, 1, 2):
+            await sidecar._attempt_once(pid, device, event, _ts(minute))
+
+        after = await repo.get_delivery_by_public_id(pid)
+        assert after is not None
+        assert after["status"] == "failed"
+        assert after["attempt_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_recovery_expedites_future_outage_backlog_for_next_tick(
+        self,
+        repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recovery sets ``next_attempt_at = now`` on still-queued outage rows.
+
+        Given: Outage-delayed rows where one future-scheduled row is queued at
+            ``+15 min``, one already-ready row has ``next_attempt_at <= now``,
+            one row already transitioned to ``failed``, and one row has a future
+            ``next_attempt_at`` with ``error_reason=None``.
+        When: Another delivery succeeds and triggers ``_maybe_log_outage_recovery``.
+        Then: Still-queued future rows are SCD2-rescheduled to ``next_attempt_at == now``
+            without altering ``attempt_count`` or terminal rows, and one retry-loop
+            tick drains them immediately without waiting 15 minutes.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        delayed_future_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        delayed_ready_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        delayed_terminal_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        delayed_null_reason_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        trigger_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+
+        sidecar, apns = _make_sidecar(repo, send_result=MaxAttemptsExceeded())
+        for pid in (delayed_future_pid, delayed_ready_pid, delayed_terminal_pid, trigger_pid):
+            await sidecar._attempt_once(pid, device, event, _ts(0))
+
+        recovery_now = datetime.now(UTC)
+        future_next = recovery_now + timedelta(minutes=15)
+        await repo.update_delivery_retry_schedule(
+            delayed_future_pid,
+            attempt_count=1,
+            next_attempt_at=future_next,
+            error_reason="exception: MaxAttemptsExceeded",
+            transition_at=recovery_now - timedelta(minutes=1),
+            session_id="prep",
+            sequence_id=10,
+        )
+        await repo.update_delivery_retry_schedule(
+            delayed_ready_pid,
+            attempt_count=1,
+            next_attempt_at=recovery_now - timedelta(seconds=5),
+            error_reason="exception: MaxAttemptsExceeded",
+            transition_at=recovery_now - timedelta(minutes=1),
+            session_id="prep",
+            sequence_id=11,
+        )
+        await repo.mark_delivery_failed(
+            delayed_terminal_pid,
+            error_reason="expired during outage",
+            transition_at=recovery_now - timedelta(seconds=1),
+            session_id="prep",
+            sequence_id=12,
+        )
+        await repo.update_delivery_retry_schedule(
+            delayed_null_reason_pid,
+            attempt_count=0,
+            next_attempt_at=future_next,
+            error_reason=None,
+            transition_at=recovery_now - timedelta(minutes=1),
+            session_id="prep",
+            sequence_id=13,
+        )
+        sidecar._record_outage_delay(delayed_null_reason_pid, _ts(0))
+
+        apns.send = AsyncMock(
+            return_value=ApnsSendResult(
+                status_code=200, status="success", apns_id="apns-ok", description=""
+            )
+        )
+        await sidecar._attempt_once(trigger_pid, device, event, recovery_now)
+
+        expedited = await repo.get_delivery_by_public_id(delayed_future_pid)
+        assert expedited is not None
+        assert expedited["status"] == "queued"
+        assert expedited["attempt_count"] == 1
+        assert expedited["next_attempt_at"] == recovery_now
+
+        expedited_null = await repo.get_delivery_by_public_id(delayed_null_reason_pid)
+        assert expedited_null is not None
+        assert expedited_null["next_attempt_at"] == recovery_now
+        assert expedited_null["error_reason"] is None
+
+        still_ready = await repo.get_delivery_by_public_id(delayed_ready_pid)
+        assert still_ready is not None
+        assert still_ready["next_attempt_at"] == recovery_now - timedelta(seconds=5)
+
+        monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 0.03)
+        task = asyncio.create_task(sidecar._process_retry_queue_loop())
+        await asyncio.sleep(0.12)
+        await sidecar.stop()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        assert await repo.list_queued_deliveries_all() == []
+        assert await repo.count_deliveries_by_status() == {"sent": 4, "failed": 1}

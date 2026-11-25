@@ -11,6 +11,8 @@ Returned by ``build_apns_client_pool`` rather than a classmethod so
 tests can fake out both ends without needing an event loop.
 """
 
+import errno
+import socket
 from dataclasses import dataclass
 from typing import Final
 
@@ -31,20 +33,40 @@ _NETWORK_ERROR_TYPES: Final[tuple[type[BaseException], ...]] = (
     ApnsConnectionError,
     ApnsConnectionClosed,
     TimeoutError,
-    OSError,
+    ConnectionError,
+    socket.gaierror,
     httpx.TransportError,
 )
+
+_NETWORK_OS_ERRNOS: Final[frozenset[int]] = frozenset(
+    {
+        errno.ENETUNREACH,
+        errno.EHOSTUNREACH,
+        errno.ENETDOWN,
+        errno.ETIMEDOUT,
+        errno.ECONNREFUSED,
+        errno.ECONNRESET,
+    }
+)
+
+
+def _matches_network_exception(exc: BaseException) -> bool:
+    """Return whether one exception node matches a transient network outage."""
+    if isinstance(exc, _NETWORK_ERROR_TYPES):
+        return True
+    return isinstance(exc, OSError) and exc.errno in _NETWORK_OS_ERRNOS
 
 
 def is_network_delivery_error(exc: BaseException) -> bool:
     """Classify whether a delivery exception belongs to the network outage class.
 
     Inspects ``exc`` and its ``__cause__`` / ``__context__`` chain purely by
-    exception type. Matches DNS and socket errors (``OSError`` including
-    ``socket.gaierror``), connect/proxy/transport errors (``httpx.TransportError``,
-    ``aioapns.exceptions.ConnectionError``, ``ConnectionClosed``), timeouts
-    (``TimeoutError``), and aioapns's transport exhaustion error
-    (``MaxAttemptsExceeded``, raised after ``"Failed to send after N attempts"``).
+    exception type (and ``OSError.errno`` for bare ``OSError``). Matches DNS
+    lookups (``socket.gaierror``), ``ConnectionError`` subclasses, ``TimeoutError``,
+    ``httpx.TransportError``, ``aioapns`` connection/exhaustion exceptions, and
+    ``OSError`` with network errnos (``ENETUNREACH``, ``EHOSTUNREACH``,
+    ``ENETDOWN``, ``ETIMEDOUT``, ``ECONNREFUSED``, ``ECONNRESET``). Filesystem
+    errors such as ``FileNotFoundError`` or ``PermissionError`` return ``False``.
 
     Args:
         exc: Exception raised while sending an APNs notification.
@@ -56,7 +78,7 @@ def is_network_delivery_error(exc: BaseException) -> bool:
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
-        if isinstance(current, _NETWORK_ERROR_TYPES):
+        if _matches_network_exception(current):
             return True
         seen.add(id(current))
         current = current.__cause__ if current.__cause__ is not None else current.__context__

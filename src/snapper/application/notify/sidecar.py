@@ -798,7 +798,7 @@ class NotifySidecar(RegisterableProcess):
                 session_id=sid,
                 sequence_id=seq,
             )
-            self._maybe_log_outage_recovery(now)
+            await self._maybe_log_outage_recovery(target.delivery_public_id, now)
             return
         if result.status == "unregistered":
             await self._repo.mark_delivery_unregistered(
@@ -932,15 +932,16 @@ class NotifySidecar(RegisterableProcess):
         delivery_public_id: str,
         attempt_number: int,
         next_attempt_at: datetime,
-        error_reason: str,
+        error_reason: str | None,
         now: datetime,
     ) -> None:
         """Commit an updated ``next_attempt_at`` on the queued delivery row."""
+        bounded_reason = error_reason[:_MAX_ERROR_REASON_LEN] if error_reason is not None else None
         await self._repo.update_delivery_retry_schedule(
             delivery_public_id,
             attempt_count=attempt_number,
             next_attempt_at=next_attempt_at,
-            error_reason=error_reason[:_MAX_ERROR_REASON_LEN],
+            error_reason=bounded_reason,
             transition_at=now,
             session_id=self._tracker.session_id,
             sequence_id=self._tracker.next_sequence(_ZMQ_STREAM),
@@ -952,18 +953,47 @@ class NotifySidecar(RegisterableProcess):
             self._outage_started_at = now
         self._outage_delayed_delivery_ids.add(delivery_public_id)
 
-    def _maybe_log_outage_recovery(self, now: datetime) -> None:
-        """Log one recovery summary after deliveries delayed by an outage recover."""
+    async def _maybe_log_outage_recovery(
+        self, recovered_delivery_public_id: str, now: datetime
+    ) -> None:
+        """Log one recovery summary and reschedule delayed backlog for the next tick."""
         if self._outage_started_at is None:
             return
-        logger.warning(
-            "sidecar: {count} deliveries delayed by an outage between {t1} and {t2}",
-            count=len(self._outage_delayed_delivery_ids),
-            t1=self._outage_started_at.isoformat(),
-            t2=now.isoformat(),
-        )
+        delayed_ids = sorted(self._outage_delayed_delivery_ids)
+        started_at = self._outage_started_at
         self._outage_started_at = None
         self._outage_delayed_delivery_ids.clear()
+        logger.warning(
+            "sidecar: {count} deliveries delayed by an outage between {t1} and {t2}",
+            count=len(delayed_ids),
+            t1=started_at.isoformat(),
+            t2=now.isoformat(),
+        )
+        await self._expedite_outage_backlog(delayed_ids, recovered_delivery_public_id, now)
+
+    async def _expedite_outage_backlog(
+        self,
+        delayed_ids: list[str],
+        recovered_delivery_public_id: str,
+        now: datetime,
+    ) -> None:
+        """Set ``next_attempt_at = now`` on still-queued rows delayed by the outage."""
+        for pid in delayed_ids:
+            if pid == recovered_delivery_public_id:
+                continue
+            row = await self._repo.get_delivery_by_public_id(pid)
+            if row is None or row["status"] != "queued":
+                continue
+            next_attempt = row.get("next_attempt_at")
+            if next_attempt is None or next_attempt <= now:
+                continue
+            await self._persist_retry_schedule(
+                pid,
+                row["attempt_count"],
+                now,
+                row.get("error_reason"),
+                now,
+            )
 
     async def _drain_outbox(self, now: datetime) -> None:
         """Process every ``status='queued'`` row on startup (crash recovery).
