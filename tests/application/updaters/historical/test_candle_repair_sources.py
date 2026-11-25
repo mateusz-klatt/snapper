@@ -392,16 +392,18 @@ def test_code_revision_hashes_every_installed_module_that_decides_writes() -> No
 
     Given: An extra module.
     When: The revision is taken.
-    Then: The guards, parser, builder, row builder, driver and extra module are hashed
-        from their installed files.
+    Then: The guards, parser, builders, driver, shared writer, operator helper
+        and extra module are hashed from their installed files.
     """
     extra = ModuleType("snapper.cli.example")
     extra.__file__ = __file__
     revision = code_revision([extra])
     assert sorted(revision) == [
         "snapper/application/updaters/historical/candle_repair.py",
+        "snapper/application/updaters/historical/guarded_candle_write.py",
         "snapper/application/updaters/historical/trade_candle_rows.py",
         "snapper/cli/example.py",
+        "snapper/cli/operator_support.py",
         "snapper/data/repository.py",
         "snapper/infrastructure/exchanges/_trade_candle_builder.py",
         "snapper/infrastructure/exchanges/kraken_closed_candles.py",
