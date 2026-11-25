@@ -72,6 +72,7 @@ from snapper.application.process_manager.strategy_scope import (
 from snapper.application.services.market_persist_policy import MarketPersistPolicy
 from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
+from snapper.core.process_exit import EX_TEMPFAIL
 from snapper.core.types import HealthStatus
 from snapper.core.types import HealthStatusEnum
 from snapper.core.types import ProcessAutostartProfileEnum
@@ -113,6 +114,19 @@ _RESTART_BASE_DELAY_S: Final[float] = 1.0
 _RESTART_FACTOR: Final[float] = 2.0
 _RESTART_MAX_DELAY_S: Final[float] = 60.0
 _RESTART_JITTER_FRACTION: Final[float] = 0.25
+_UPSTREAM_RESTART_DELAYS_S: Final = (30.0, 60.0, 120.0, 240.0)
+"""Exponential retry bases with room for jitter under a 300-second ceiling."""
+
+_UPSTREAM_OUTAGE_FIRST_ALERT_ATTEMPT: Final[int] = 4
+"""First retry logged at ERROR to trigger operator alerting during a continuous outage.
+
+The ERROR feeds operator alerting while the retry stays outside both restart
+budgets and never escalates to a container restart.
+"""
+
+_UPSTREAM_OUTAGE_ALERT_INTERVAL: Final[int] = 6
+"""Retry attempts between ERROR alerts after the first continuous outage alert."""
+
 _RESTART_HEALTHY_UPTIME_S: Final[float] = 120.0
 _TOTAL_RESET_UPTIME_S: Final[float] = 1200.0
 _MAX_RESTART_ATTEMPTS: Final[int] = 6
@@ -469,6 +483,7 @@ class ProcessLauncherService:
         self._desired_state: dict[str, _DesiredState] = {}
         self._restart_attempts: dict[str, int] = {}
         self._total_failed_restarts: dict[str, int] = {}
+        self._upstream_restart_attempts: dict[str, int] = {}
         self._restart_uptime_start: dict[str, float] = {}
         self._restart_configs: dict[str, ProcessConfigModel] = {}
         self._restart_tasks: dict[str, asyncio.Task[None]] = {}
@@ -1800,6 +1815,7 @@ class ProcessLauncherService:
         name = config.name
         self._restart_attempts.pop(name, None)
         self._total_failed_restarts.pop(name, None)
+        self._upstream_restart_attempts.pop(name, None)
         await self._cancel_pending_restart(name)
         if name in self.started_processes:
             await self.stop_process_by_name(name)
@@ -2480,6 +2496,7 @@ class ProcessLauncherService:
         self._desired_state.clear()
         self._restart_attempts.clear()
         self._total_failed_restarts.clear()
+        self._upstream_restart_attempts.clear()
         self._restart_uptime_start.clear()
         self._restart_configs.clear()
         self._restart_tasks.clear()
@@ -2735,6 +2752,8 @@ class ProcessLauncherService:
                 exit_code,
             )
             return ProcessRunStatusEnum.CANCELLED, None
+        if exit_code == EX_TEMPFAIL:
+            return ProcessRunStatusEnum.FAILED, f"upstream unavailable (exit_code={exit_code})"
         logger.error(
             "Native process '{}' failed with exit code {}; autostart unchanged",
             name,
@@ -2790,6 +2809,7 @@ class ProcessLauncherService:
         """
         self._desired_state.pop(name, None)
         self._restart_attempts.pop(name, None)
+        self._upstream_restart_attempts.pop(name, None)
         self._restart_uptime_start.pop(name, None)
         self._restart_tasks.pop(name, None)
         self._restart_configs.pop(name, None)
@@ -2985,20 +3005,73 @@ class ProcessLauncherService:
         if healthy:
             self._restart_attempts[name] = 0
 
-    def _record_restart_attempt(
+    def _schedule_restart_after_death(
         self,
-        name: str,
+        config: ProcessConfigModel,
         run_status: ProcessRunStatusEnum,
+        completed_instance: RegisterableProcess | None,
     ) -> None:
-        """Update restart accounting for the just-observed process death."""
+        """Apply restart accounting and schedule the next policy-eligible attempt.
+
+        Only market-data publishers are expected to emit EX_TEMPFAIL, but
+        the native exit contract applies regardless of process role.
+
+        Args:
+            config: Configuration for the process to restart.
+            run_status: The resolved terminal run status.
+            completed_instance: The dead lineage's instance, if known.
+        """
+        name = config.name
         now = _monotonic()
         uptime = now - self._restart_uptime_start.get(name, now)
         healthy = uptime > _RESTART_HEALTHY_UPTIME_S
         long_healthy = uptime > _TOTAL_RESET_UPTIME_S
+        if healthy:
+            self._upstream_restart_attempts.pop(name, None)
+        if (
+            isinstance(completed_instance, ProcessInstanceInfo)
+            and completed_instance.process.returncode == EX_TEMPFAIL
+        ):
+            self._record_non_failed_restart_attempt(name, healthy, long_healthy)
+            self._schedule_upstream_restart(name)
+            return
         if run_status is ProcessRunStatusEnum.FAILED:
             self._record_failed_restart_attempt(name, healthy, long_healthy)
+        else:
+            self._record_non_failed_restart_attempt(name, healthy, long_healthy)
+        if self._restart_budget_exhausted(name):
+            self._escalate_restart(name, config)
+            self._clear_watchdog_state(name)
             return
-        self._record_non_failed_restart_attempt(name, healthy, long_healthy)
+        self._schedule_delayed_restart(name)
+
+    def _schedule_upstream_restart(self, name: str) -> None:
+        """Schedule an outage retry outside the ordinary restart budget.
+
+        Args:
+            name: Process whose venue or proxy is unavailable.
+        """
+        attempt = self._upstream_restart_attempts.get(name, 0) + 1
+        self._upstream_restart_attempts[name] = attempt
+        base = _UPSTREAM_RESTART_DELAYS_S[min(attempt - 1, len(_UPSTREAM_RESTART_DELAYS_S) - 1)]
+        delay = base + _jitter(name, base)
+        since_first_alert = attempt - _UPSTREAM_OUTAGE_FIRST_ALERT_ATTEMPT
+        if since_first_alert >= 0 and since_first_alert % _UPSTREAM_OUTAGE_ALERT_INTERVAL == 0:
+            logger.error(
+                "Native process '{}' upstream unavailable (continuous outage); "
+                "retrying in {:.2f}s (attempt {})",
+                name,
+                delay,
+                attempt,
+            )
+        else:
+            logger.warning(
+                "Native process '{}' upstream unavailable; retrying in {:.2f}s (attempt {})",
+                name,
+                delay,
+                attempt,
+            )
+        self._restart_tasks[name] = asyncio.create_task(self._delayed_restart(name, delay))
 
     def _restart_budget_exhausted(self, name: str) -> bool:
         """Return whether the process exhausted its restart budget."""
@@ -3040,7 +3113,7 @@ class ProcessLauncherService:
         successor's watchdog state. Otherwise it decides whether the death
         warrants a restart based on the desired state, the registered
         ``restart_policy``, and the run status. Escalation is driven by
-        FAILED deaths ONLY, via two counters: :attr:`_restart_attempts`
+        FAILED deaths other than EX_TEMPFAIL, via two counters: :attr:`_restart_attempts`
         (consecutive short FAILED deaths; reset on a healthy uptime;
         escalate at ``_MAX_RESTART_ATTEMPTS``) and
         :attr:`_total_failed_restarts` (lifetime backstop; reset only on a
@@ -3048,7 +3121,8 @@ class ProcessLauncherService:
         A clean exit-0 under an ALWAYS policy is restarted but touches
         NEITHER counter, so a healthy cleanly-exiting publisher can never
         trip escalation. When a restart is warranted a delayed respawn
-        task is scheduled with the computed backoff.
+        task is scheduled with the computed backoff. EX_TEMPFAIL uses
+        a separate backoff that resets after a healthy uptime.
 
         Args:
             name: Process name that died.
@@ -3095,12 +3169,7 @@ class ProcessLauncherService:
             config = self._restart_config_for_status(name, run_status)
             if config is None:
                 return
-            self._record_restart_attempt(name, run_status)
-            if self._restart_budget_exhausted(name):
-                self._escalate_restart(name, config)
-                self._clear_watchdog_state(name)
-                return
-            self._schedule_delayed_restart(name)
+            self._schedule_restart_after_death(config, run_status, completed_instance)
 
     def _park(self, name: str) -> None:
         """Record a give-up parking and invalidate the health cache.

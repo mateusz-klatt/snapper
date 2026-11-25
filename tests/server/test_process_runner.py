@@ -10,7 +10,10 @@ the fast-path even when launched via
 """
 
 import asyncio
+import errno
 import signal
+import socket
+import ssl
 from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Coroutine
@@ -19,9 +22,17 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import aiohttp
+import ccxt
+import httpx
 import pytest
+import requests
 
 from snapper.application.ai_review.service import AiReviewService
+from snapper.core.process_exit import EX_TEMPFAIL
+from snapper.infrastructure.exchanges.base import ExchangeClientBase
+from snapper.messaging.publishers import base as publisher_base
+from snapper.messaging.publishers.startup import connect_publisher_exchange
 from snapper.server import process_runner
 from snapper.server.process_runner import _ai_review_decision_listener
 from snapper.server.process_runner import _await_result_with_listener
@@ -443,6 +454,204 @@ def test_main_logs_to_container_subprocess_logfile(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("sys.argv", ["process_runner", "--config", "not-json"])
     assert process_runner.main() == 1
     assert captured["logfile"] == expected_logfile
+
+
+def _wrapped_startup_error(wrapper: Exception, cause: Exception) -> Exception:
+    """Attach an explicit cause as Walutomat and CCXT do at startup.
+
+    Args:
+        wrapper: Exception raised by the client.
+        cause: Underlying exception attached by the client.
+
+    Returns:
+        The wrapper with its cause set.
+    """
+    wrapper.__cause__ = cause
+    return wrapper
+
+
+def _ccxt_http_error(status: int) -> Exception:
+    """Build a CCXT error with the HTTP rejection in its implicit context.
+
+    Args:
+        status: Status code from the failed HTTP response.
+
+    Returns:
+        The SDK exception and attached HTTP context.
+    """
+    response = requests.Response()
+    response.status_code = status
+    error: Exception = ccxt.ExchangeNotAvailable("Kraken market discovery failed")
+    error.__context__ = requests.exceptions.HTTPError(response=response)
+    return error
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        pytest.param(
+            _wrapped_startup_error(
+                ConnectionError("Walutomat startup failed"),
+                httpx.ProxyError("Proxy Server could not connect: Host unreachable."),
+            ),
+            EX_TEMPFAIL,
+            id="walutomat-socks-connect",
+        ),
+        pytest.param(httpx.ProxyError("502 Bad Gateway"), EX_TEMPFAIL, id="http-connect-502"),
+        pytest.param(httpx.ProxyError("407 Proxy Authentication Required"), 1, id="proxy-407"),
+        pytest.param(httpx.ProxyError("Invalid username/password"), 1, id="socks-auth"),
+        pytest.param(
+            httpx.ProxyError("Proxy Server could not connect: Connection not allowed by ruleset."),
+            1,
+            id="socks-ruleset",
+        ),
+        pytest.param(aiohttp.ServerDisconnectedError(), EX_TEMPFAIL, id="aiohttp-disconnected"),
+        pytest.param(
+            aiohttp.ClientHttpProxyError(
+                MagicMock(spec=aiohttp.RequestInfo, real_url="https://example.test"), (), status=503
+            ),
+            EX_TEMPFAIL,
+            id="aiohttp-proxy-503",
+        ),
+        pytest.param(ccxt.NetworkError("Kraken discovery"), EX_TEMPFAIL, id="ccxt-network"),
+        pytest.param(ccxt.RequestTimeout("Kraken discovery"), EX_TEMPFAIL, id="ccxt-timeout"),
+        pytest.param(_ccxt_http_error(503), EX_TEMPFAIL, id="ccxt-wrapped-503"),
+        pytest.param(_ccxt_http_error(403), 1, id="ccxt-wrapped-403"),
+        pytest.param(ccxt.AuthenticationError("Invalid API key"), 1, id="ccxt-auth"),
+        pytest.param(ccxt.RateLimitExceeded("Too many requests"), 1, id="ccxt-rate-limit"),
+        pytest.param(httpx.ConnectError("Connection failed"), EX_TEMPFAIL, id="httpx-connect"),
+        pytest.param(httpx.ReadTimeout("Upstream stalled"), EX_TEMPFAIL, id="httpx-read-timeout"),
+        pytest.param(httpx.PoolTimeout("Local pool exhausted"), 1, id="httpx-pool-timeout"),
+        pytest.param(
+            _wrapped_startup_error(
+                httpx.ConnectError("TLS failed"), ssl.SSLCertVerificationError()
+            ),
+            1,
+            id="tls-verification",
+        ),
+        pytest.param(
+            httpx.HTTPStatusError(
+                "Gateway timeout",
+                request=httpx.Request("GET", "https://example.test"),
+                response=httpx.Response(504),
+            ),
+            EX_TEMPFAIL,
+            id="httpx-status",
+        ),
+        pytest.param(
+            _wrapped_startup_error(ConnectionError("Walutomat startup failed"), ValueError()),
+            1,
+            id="wrapped-malformed-response",
+        ),
+        pytest.param(socket.gaierror(socket.EAI_AGAIN), EX_TEMPFAIL, id="dns"),
+        pytest.param(OSError(errno.ENETUNREACH, "Network unreachable"), EX_TEMPFAIL, id="errno"),
+        pytest.param(OSError(errno.ENOSPC, "Disk full"), 1, id="disk-full"),
+        pytest.param(ConnectionError("Connection failed"), EX_TEMPFAIL, id="connection"),
+        pytest.param(TimeoutError("Timed out"), EX_TEMPFAIL, id="timeout"),
+        pytest.param(RuntimeError("upstream unavailable"), 1, id="message-alone"),
+    ],
+)
+def test_main_classifies_publisher_connection_failure(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, expected_code: int
+) -> None:
+    """Map exchange connect failures to the runner's native exit contract.
+
+    Given: A publisher's startup exchange connection raises a specific exception,
+    When: The native runner invokes the startup target,
+    Then: An upstream outage exits with EX_TEMPFAIL and other errors exit with 1.
+    """
+    client = AsyncMock(spec=ExchangeClientBase)
+    client.connect.side_effect = error
+
+    class _Instance:
+        async def start(self) -> None:
+            await connect_publisher_exchange(client)
+
+    config = '{"class_path": "fake.Publisher", "method": "start", "role": "core"}'
+    monkeypatch.setattr("sys.argv", ["process_runner", "--config", config])
+    with (
+        patch.object(process_runner, "setup_logging"),
+        patch.object(process_runner, "log_kraken_sdk_patches_status"),
+        patch.object(process_runner, "_resolve_process_class", return_value=_Instance),
+        patch.object(process_runner, "logger") as log,
+    ):
+        assert process_runner.main() == expected_code
+    assert log.error.call_count == int(expected_code == 1)
+    log.warning.assert_not_called()
+
+
+@pytest.mark.parametrize("local_failure", [False, True])
+def test_main_classifies_only_the_publishers_exchange_connect(
+    monkeypatch: pytest.MonkeyPatch, local_failure: bool
+) -> None:
+    """Keep local timeouts on the ordinary startup failure path.
+
+    Given: Publisher startup times out during DB setup or the venue connection,
+    When: The runner invokes the shared publisher startup method,
+    Then: Only the venue timeout uses EX_TEMPFAIL.
+    """
+    publisher = MagicMock(spec=publisher_base.MarketDataPublisherService)
+    publisher.running = False
+    publisher.symbols = []
+    publisher.pub_endpoint = "inproc://publisher"
+    publisher._tracker = publisher_base.SequenceTracker()
+    publisher._get_max_symbols_per_connection.return_value = 1
+    client = publisher._create_exchange_client.return_value
+    client.connect = AsyncMock(side_effect=TimeoutError())
+
+    class _Instance:
+        async def start(self) -> None:
+            await publisher_base.MarketDataPublisherService.start(publisher)
+
+    config = '{"class_path": "fake.Publisher", "method": "start", "role": "core"}'
+    monkeypatch.setattr("sys.argv", ["process_runner", "--config", config])
+    with (
+        patch.object(process_runner, "setup_logging"),
+        patch.object(process_runner, "log_kraken_sdk_patches_status"),
+        patch.object(process_runner, "_resolve_process_class", return_value=_Instance),
+        patch.object(publisher_base, "get_settings_service", new_callable=AsyncMock),
+        patch.object(publisher_base, "get_settings_with_service", return_value=MagicMock()),
+        patch.object(publisher_base, "get_repository") as repository,
+        patch.object(publisher_base.zmq.asyncio, "Context"),
+    ):
+        repository.return_value.get_latest_candle_ids = AsyncMock(
+            return_value={}, side_effect=TimeoutError() if local_failure else None
+        )
+        publisher._maybe_init_egress_pool = AsyncMock()
+        assert process_runner.main() == (1 if local_failure else EX_TEMPFAIL)
+    assert client.connect.await_count == int(not local_failure)
+
+
+def test_startup_classification_ignores_suppressed_context_and_handles_cycles() -> None:
+    """Stop walking when a context is suppressed or encountered again.
+
+    Given: One error with suppressed network context and one cyclic exception chain,
+    When: Publisher startup classifies both failures,
+    Then: Both remain ordinary startup errors.
+    """
+    suppressed_error = RuntimeError("configuration failed")
+    suppressed_error.__context__ = TimeoutError()
+    suppressed_error.__suppress_context__ = True
+    cyclic_error = RuntimeError("cycle")
+    cyclic_error.__cause__ = cyclic_error
+    client = AsyncMock(spec=ExchangeClientBase)
+    for error in (suppressed_error, cyclic_error):
+        client.connect.side_effect = error
+        with pytest.raises(RuntimeError) as caught:
+            asyncio.run(connect_publisher_exchange(client))
+        assert caught.value is error
+
+
+async def test_publisher_connection_success_passes_through() -> None:
+    """Continue startup when the venue connects successfully.
+
+    Given: An exchange client whose startup connection succeeds,
+    When: The publisher connects to the exchange,
+    Then: The connection helper completes normally.
+    """
+    client = AsyncMock(spec=ExchangeClientBase)
+    await connect_publisher_exchange(client)
+    client.connect.assert_awaited_once_with()
 
 
 def test_main_sigterm_drains_and_reports_rows_left_at_deadline(
