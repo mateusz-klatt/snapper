@@ -1661,14 +1661,21 @@ _PORTFOLIO_REAL_RECONCILIATION_METHODS: Final[frozenset[str]] = frozenset(
 )
 
 
+def _synthesis_instant(value: datetime) -> str:
+    """Format a candle timestamp in UTC, including naive UTC values from SQLite."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC).isoformat()
+    return value.astimezone(UTC).isoformat()
+
+
 def synthesis_inputs_sha256(versions: Sequence[CandleVersionRow]) -> str:
     """Fingerprint current input identities and payloads in UTC minute order."""
     document = [
         [
-            version["open_at"].astimezone(UTC).isoformat(),
+            _synthesis_instant(version["open_at"]),
             version["id"],
             version["public_id"],
-            version["timestamp"].astimezone(UTC).isoformat(),
+            _synthesis_instant(version["timestamp"]),
             version["source"],
             version["complete"],
             *[
