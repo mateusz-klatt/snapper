@@ -325,6 +325,7 @@ async def _next_v3_recording(
     return request, result
 
 
+@pytest.mark.timeout(45)
 @pytest.mark.parametrize("handoff", ["predecessor_admission", "selected_result"])
 async def test_real_second_sdk_fill_reuses_anchor_and_refuses_incomplete_history_handoffs(
     tmp_path: Path,
@@ -336,6 +337,10 @@ async def test_real_second_sdk_fill_reuses_anchor_and_refuses_incomplete_history
     Given: Two real SDK fills complete the admitted two-unit order and share one genuine position anchor.
     When: Delegating reader wrappers either drop a predecessor's typed admission witness or omit the selected row.
     Then: Strict history refuses each incomplete handoff and the untouched actual graph still replays.
+
+    Two real SDK recordings take about 7 s per parameter on an idle host, so the
+    suite-wide 15 s timeout flaked under a loaded parallel gate. The explicit 45 s
+    bound keeps a genuine hang detectable while removing that false failure.
     """
     async with native_position_recording_scenario_v3(tmp_path, monkeypatch) as scenario:
         first = await record_native_position_scenario_v3(scenario)
