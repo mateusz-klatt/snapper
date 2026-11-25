@@ -60,6 +60,7 @@ from snapper.config.bootstrap import BootstrapSettingsLoader
 from snapper.config.settings import get_settings
 from snapper.core.ids import is_uuid7
 from snapper.core.json_types import JsonObject
+from snapper.core.process_exit import EX_TEMPFAIL
 from snapper.core.types import HealthStatusEnum
 from snapper.core.types import ProcessAutostartProfileEnum
 from snapper.core.types import ProcessLifecycleEnum
@@ -4024,9 +4025,10 @@ async def test_monitor_native_processes_skips_running_and_exits(
     assert sleep_calls[0] == 5
 
 
+@pytest.mark.parametrize("exit_code", [1, EX_TEMPFAIL])
 @pytest.mark.asyncio
 async def test_handle_process_completion_expected_failure(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, exit_code: int
 ) -> None:
     """Verify expected termination finalizes as CANCELLED status.
 
@@ -4043,7 +4045,7 @@ async def test_handle_process_completion_expected_failure(
         pid=123,
         started_at=datetime.now(UTC),
         config={},
-        process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=1)),
+        process=cast(subprocess.Popen[bytes], SimpleNamespace(returncode=exit_code)),
     )
     factory.started_processes["native"] = proc_info
     factory.process_lifecycles["native"] = ProcessLifecycleEnum.LONG_RUNNING
@@ -4053,7 +4055,7 @@ async def test_handle_process_completion_expected_failure(
     monkeypatch.setattr(factory, "_finalize_process_run", finalize_mock)
     await factory._handle_process_completion("native", proc_info)
     finalize_mock.assert_awaited_once_with(
-        "native", ProcessRunStatusEnum.CANCELLED, error=None, exit_code=1
+        "native", ProcessRunStatusEnum.CANCELLED, error=None, exit_code=exit_code
     )
     assert "native" not in factory.started_processes
     spawner_mock.cleanup.assert_called_once_with("native")
@@ -10314,6 +10316,105 @@ class TestRestartEscalation:
     """The two-counter escalation model (consecutive + lifetime backstop)."""
 
     @pytest.mark.asyncio
+    async def test_native_outage_retries_beyond_budget_then_local_crash_escalates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Retry every native upstream failure with capped jitter and one warning.
+
+        Given: A CORE publisher with nearly exhausted ordinary restart budgets,
+        When: It exits with EX_TEMPFAIL more times than either budget, then exits 1,
+        Then: Outage runs finalize as FAILED and back off without spending budget,
+            and the eventual local failure still escalates to a feed restart.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ON_FAILURE)
+        name = config.name
+        _arm_watchdog(factory, config)
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 0.0)
+        monkeypatch.setattr(factory.spawner, "cleanup", MagicMock())
+        finalize = AsyncMock()
+        monkeypatch.setattr(factory, "_finalize_process_run", finalize)
+        delayed_restart = AsyncMock()
+        monkeypatch.setattr(factory, "_delayed_restart", delayed_restart)
+        log = MagicMock()
+        monkeypatch.setattr(launcher_module, "logger", log)
+        attempts = launcher_module._MAX_RESTART_ATTEMPTS - 1
+        total = launcher_module._MAX_TOTAL_FAILED_RESTARTS - 1
+        factory._restart_attempts[name] = attempts
+        factory._total_failed_restarts[name] = total
+        outage_count = launcher_module._MAX_TOTAL_FAILED_RESTARTS + 1
+        finalization = mock.call(
+            name,
+            ProcessRunStatusEnum.FAILED,
+            error="upstream unavailable (exit_code=75)",
+            exit_code=EX_TEMPFAIL,
+        )
+
+        for attempt in range(1, outage_count + 1):
+            proc_info = _make_proc_info(name, EX_TEMPFAIL)
+            factory.started_processes[name] = proc_info
+            await factory._handle_process_completion(name, proc_info)
+            await factory._restart_tasks[name]
+            base = (30.0, 60.0, 120.0, 240.0)[min(attempt - 1, 3)]
+            delay = base + launcher_module._jitter(name, base)
+            assert base <= delay < 300.0
+            assert delayed_restart.await_args == mock.call(name, delay)
+            assert log.warning.call_args == mock.call(
+                "Native process '{}' upstream unavailable; retrying in {:.2f}s (attempt {})",
+                name,
+                delay,
+                attempt,
+            )
+
+        assert finalize.await_args_list == [finalization] * outage_count
+        assert log.warning.call_count == outage_count
+        log.error.assert_not_called()
+        assert factory._restart_attempts[name] == attempts
+        assert factory._total_failed_restarts[name] == total
+        assert not factory._feed_failure_event.is_set()
+
+        proc_info = _make_proc_info(name, 1)
+        factory.started_processes[name] = proc_info
+        await factory._handle_process_completion(name, proc_info)
+        assert factory._feed_failure_event.is_set()
+        assert factory._feed_failed_publisher == name
+        assert name not in factory._upstream_restart_attempts
+
+    @pytest.mark.asyncio
+    async def test_healthy_native_run_resets_upstream_backoff_for_any_role(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Restart at the first outage delay after a healthy native uptime.
+
+        Given: A non-publisher native process with a prior outage streak,
+        When: It returns EX_TEMPFAIL after more than 120 seconds of uptime,
+        Then: Its next restart uses the first outage backoff without charging a failure.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(role=ProcessRoleEnum.STRATEGY, tags=())
+        name = config.name
+        _arm_watchdog(factory, config)
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 1300.0)
+        monkeypatch.setattr(factory.spawner, "cleanup", MagicMock())
+        delayed_restart = AsyncMock()
+        monkeypatch.setattr(factory, "_delayed_restart", delayed_restart)
+        factory._upstream_restart_attempts[name] = 12
+        factory._restart_attempts[name] = 3
+        factory._total_failed_restarts[name] = 5
+
+        proc_info = _make_proc_info(name, EX_TEMPFAIL)
+        factory.started_processes[name] = proc_info
+        factory.process_roles[name] = config.role
+        await factory._handle_process_completion(name, proc_info)
+        await factory._restart_tasks[name]
+
+        base = 30.0
+        delayed_restart.assert_awaited_once_with(name, base + launcher_module._jitter(name, base))
+        assert factory._upstream_restart_attempts[name] == 1
+        assert factory._restart_attempts[name] == 0
+        assert factory._total_failed_restarts[name] == 0
+
+    @pytest.mark.asyncio
     async def test_fast_crash_loop_escalates_to_feed_event(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -11002,12 +11103,14 @@ class TestStopAllSweepsWatchdog:
         )
         factory.started_processes["pub"] = info
         factory._restart_attempts["pub"] = 2
+        factory._upstream_restart_attempts["pub"] = 3
         factory._emit_summary_snapshot = AsyncMock()
         await factory.stop_all_processes()
         spawner_mock.cleanup.assert_any_call("pub")
         assert factory.started_processes == {}
         assert factory._desired_state == {}
         assert factory._restart_attempts == {}
+        assert factory._upstream_restart_attempts == {}
         assert factory._restart_tasks == {}
 
     @pytest.mark.asyncio
@@ -11032,6 +11135,51 @@ class TestStopAllSweepsWatchdog:
 
 class TestCompletionHookSchedulesRestart:
     """_handle_process_completion drives the watchdog after finalize."""
+
+    @pytest.mark.parametrize("exit_code", [1, EX_TEMPFAIL])
+    @pytest.mark.asyncio
+    async def test_immediate_native_exit_keeps_outage_under_watchdog(
+        self, monkeypatch: pytest.MonkeyPatch, exit_code: int
+    ) -> None:
+        """Register a native outage exit even during the spawner's initial poll.
+
+        Given: A child that exits before the spawner returns,
+        When: The launcher starts and handles the native subprocess,
+        Then: An outage goes through watchdog backoff and exit 1 raises a spawn failure.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config(name="outage_test_publisher")
+        name = config.name
+        _arm_watchdog(factory, config)
+        monkeypatch.setattr(launcher_module, "_monotonic", lambda: 0.0)
+        child = MagicMock(spec=subprocess.Popen, pid=4242, returncode=exit_code)
+        child.poll.return_value = exit_code
+        monkeypatch.setattr(factory.spawner, "_validate_class_path", MagicMock())
+        monkeypatch.setattr(factory.spawner, "_launch_subprocess", MagicMock(return_value=child))
+        finalize = AsyncMock()
+        monkeypatch.setattr(factory, "_finalize_process_run", finalize)
+        delayed_restart = AsyncMock()
+        monkeypatch.setattr(factory, "_delayed_restart", delayed_restart)
+
+        if exit_code == 1:
+            with pytest.raises(RuntimeError, match="failed to start .*exit code: 1"):
+                factory._start_as_subprocess(config)
+            assert name not in factory.spawner.processes
+            return
+
+        factory._start_as_subprocess(config)
+        await factory._handle_process_completion(name, factory.spawner.processes[name])
+        await factory._restart_tasks[name]
+        assert name not in factory.spawner.processes
+        finalize.assert_awaited_once_with(
+            name,
+            ProcessRunStatusEnum.FAILED,
+            error="upstream unavailable (exit_code=75)",
+            exit_code=EX_TEMPFAIL,
+        )
+        delayed_restart.assert_awaited_once_with(name, 30.0 + launcher_module._jitter(name, 30.0))
+        assert name not in factory._restart_attempts
+        assert name not in factory._total_failed_restarts
 
     @pytest.mark.asyncio
     async def test_completion_schedules_restart_for_failed_always(
@@ -11124,7 +11272,33 @@ class TestCompletionHookSchedulesRestart:
 
 
 class TestClearWatchdogState:
-    """The single terminal-cleanup helper."""
+    """Watchdog state cleanup and resets."""
+
+    @pytest.mark.asyncio
+    async def test_reconcile_restart_clears_pending_upstream_backoff(self) -> None:
+        """Reset the outage backoff when an operator requests a restart.
+
+        Given: A sleeping upstream retry and a new desired-state restart nonce,
+        When: Reconcile applies the operator's restart,
+        Then: The sleeping retry is cancelled, the attempt count is dropped,
+            and reconcile starts the process immediately.
+        """
+        factory = ProcessLauncherService(MagicMock())
+        config = _watchdog_config()
+        config.restart_nonce = "operator-restart"
+        name = config.name
+        _arm_watchdog(factory, config)
+        factory._upstream_restart_attempts[name] = 3
+        pending = asyncio.create_task(asyncio.sleep(240.0))
+        factory._restart_tasks[name] = pending
+        start = AsyncMock(return_value=True)
+        factory._reconcile_start_owned = start
+
+        await factory._reconcile_one(config)
+
+        assert pending.cancelled()
+        assert name not in factory._upstream_restart_attempts
+        start.assert_awaited_once_with(config)
 
     def test_clear_removes_all_entries(self) -> None:
         """_clear_watchdog_state drops every watchdog entry except the lock.
@@ -11142,6 +11316,7 @@ class TestClearWatchdogState:
         _arm_watchdog(factory, config)
         factory._restart_attempts["pub"] = 1
         factory._total_failed_restarts["pub"] = 2
+        factory._upstream_restart_attempts["pub"] = 3
         factory._restart_tasks["pub"] = cast("asyncio.Task[None]", SimpleNamespace())
         factory._restart_locks["pub"] = asyncio.Lock()
         factory._clear_watchdog_state("pub")
@@ -11152,6 +11327,7 @@ class TestClearWatchdogState:
         assert "pub" not in factory._restart_configs
         assert "pub" in factory._restart_locks
         assert "pub" not in factory._total_failed_restarts
+        assert "pub" not in factory._upstream_restart_attempts
 
     def test_clear_drops_metrics_and_psutil_handle(self) -> None:
         """_clear_watchdog_state drops per-child metrics + the psutil handle.

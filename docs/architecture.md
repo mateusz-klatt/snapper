@@ -1501,6 +1501,16 @@ a died per-wallet executor task is respawned with the same backoff,
 budget, and stop-race guards as a native feed subprocess instead of
 being finalized FAILED and silently never restarted.
 
+If a native market-data publisher fails to connect to its venue or proxy
+at startup, the runner exits with code 75 and the watchdog records a
+FAILED run. For a process whose policy allows restarting, the watchdog
+logs one warning and retries with base delays of 30, 60, 120, and 240
+seconds plus per-process jitter, keeping each delay below 300 seconds.
+The outage backoff resets after more than 120 seconds of uptime. These
+failures consume neither restart budget, so an upstream outage keeps the
+feed container and its other publishers running while venue health halts
+affected trading shards.
+
 When a process exhausts its restart budget, a CORE market-data
 publisher escalates to a feed-container restart; any other process is
 parked. Parking is level-triggered and visible: `/api/health` reports

@@ -63,6 +63,8 @@ from snapper.application.ai_review.service import get_ai_review_service
 from snapper.application.process_manager.registry import discover_processes
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.settings import get_settings
+from snapper.core.process_exit import EX_TEMPFAIL
+from snapper.core.process_exit import UpstreamUnavailableError
 from snapper.core.types import ProcessRoleEnum
 from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
 from snapper.utils.logging import resolve_subprocess_logfile
@@ -311,7 +313,9 @@ def main() -> int:
     than the API container's ``data/log/snapper/snapper.log``.
 
     Returns:
-        Exit code: 0 for success, 1 for configuration error or process failure.
+        Exit code 0 for success, EX_TEMPFAIL for an unavailable upstream,
+        or 1 for any other failure. Only market-data publishers are
+        expected to signal an unavailable upstream.
     """
     setup_logging(level="INFO", json_logs=False, logfile=resolve_subprocess_logfile())
     log_kraken_sdk_patches_status()
@@ -361,6 +365,9 @@ def main() -> int:
                     _run_instance_awaitable(instance, _await_result(result))
         logger.info(f"Process '{name}' completed successfully")
         return 0
+    except UpstreamUnavailableError as e:
+        logger.info(f"Process '{name}' upstream unavailable: {e}")
+        return EX_TEMPFAIL
     except Exception as e:
         logger.error(f"Process '{name}' failed: {e}", exc_info=True)
         return 1

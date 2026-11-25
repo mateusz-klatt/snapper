@@ -94,6 +94,7 @@ from snapper.messaging.publishers.minute_completion import MinuteCompletionEmitt
 from snapper.messaging.publishers.native_candle_finalizer import NativeCandleFinalizer
 from snapper.messaging.publishers.native_candle_finalizer import is_complete_historical_minute
 from snapper.messaging.publishers.native_candle_finalizer import window_seconds
+from snapper.messaging.publishers.startup import connect_publisher_exchange
 from snapper.messaging.schemas.data import CandleData
 from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import SettingChangedData
@@ -1409,7 +1410,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             f"{self.settings.zmq_broker_xpub}"
         )
         self._exchange_client = self._create_exchange_client()
-        await self._exchange_client.connect()
+        await connect_publisher_exchange(self._exchange_client)
         self._exchange_client.start_health_loop()
         logger.info(f"{process_name}: Exchange client connected (anonymous, public data)")
         self.running = True

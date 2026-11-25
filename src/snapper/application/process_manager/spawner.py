@@ -30,6 +30,7 @@ from snapper.application.process_manager.models import ProcessInstanceInfo
 from snapper.application.process_manager.models import SpawnerStatusSnapshot
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.core.json_types import JsonObject
+from snapper.core.process_exit import EX_TEMPFAIL
 from snapper.core.types import ProcessRoleEnum
 
 IS_WINDOWS = sys.platform == "win32"
@@ -326,7 +327,8 @@ class ProcessSpawnerService:
         """Spawn a new subprocess.
 
         Validates the class path, builds the command, and starts
-        the subprocess in a new process group.
+        the subprocess in a new process group. Register immediate
+        EX_TEMPFAIL exits so the watchdog owns their retry backoff.
 
         Args:
             name: Unique process identifier.
@@ -359,7 +361,7 @@ class ProcessSpawnerService:
             info = self._register_spawned_process(name, class_path, method, parameters, process)
             logger.info(f"Process '{name}' spawned with PID {info.pid}")
             return info
-        if status == 0:
+        if status in (0, EX_TEMPFAIL):
             logger.info("Process '{}' exited immediately after start", name)
             return self._register_spawned_process(
                 name, class_path, method, parameters, process, exit_code=status
