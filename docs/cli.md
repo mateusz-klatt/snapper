@@ -2255,7 +2255,8 @@ snapper polygon-load-csv --all --timespan day
 Long-running notification sidecar (domain events → alert history, web fanout,
 APNs HTTP/2 and optional Android FCM HTTP v1 FID delivery). It evaluates the registered notify rules,
 fans each resulting alert out through the outbox-backed `NotifySidecar`,
-and retries server/throttled failures on its own 30-second scheduler.
+retrying network-outage failures with 15-minute-capped backoff until `expires_at`
+(default 6 hours) and non-network failures up to 3 attempts on its 30-second scheduler.
 It also eagerly scans current open portfolio-drift episodes and repeats
 that recovery every `PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` (default
 60), restoring any `drift.<episode_public_id>` page whose real-time bus

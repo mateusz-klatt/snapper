@@ -1618,8 +1618,15 @@ plus `admin.scope_revoked`
 frame on `alerts.{user_public_id}.{alert_type}` for the web live-refresh
 bridge, and fans each delivery out to the target user's eligible APNs
 or configured Android FID registrations via the outbox-backed `NotifySidecar`
-(`application/notify/sidecar.py`), retrying server/throttled failures on
-its own 30s scheduler. The same process owns a guarded periodic recovery
+(`application/notify/sidecar.py`). On its 30s retry scheduler, permanent APNs
+rejects and HTTP 429/5xx responses keep the 3-attempt limit (`_RETRY_GIVE_UP_AFTER_ATTEMPTS`),
+while transient network-class outages (DNS, connect/proxy, timeouts, and
+aioapns `MaxAttemptsExceeded`) retry with exponential backoff capped at 15 min
+until the delivery's `expires_at` (default 6 h from creation) before marking
+`failed`. APNs sends enforce a 30s per-attempt timeout so a stalled transport
+call cannot wedge the sequential retry loop, and queued rows whose device
+registration or routing eligibility disappears transition to terminal
+`unregistered` or `cancelled_scope`. The same process owns a guarded periodic recovery
 scanner for sentinel-current open portfolio-drift episodes. An eager pass
 at startup and later
 `PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` ticks rebuild the exact Stage 1

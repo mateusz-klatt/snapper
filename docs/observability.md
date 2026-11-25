@@ -268,9 +268,9 @@ predecessor versions excluded) into per-status delivery totals —
 the `queued` backlog depth of the notify sidecar's retry loop.
 Counters aggregate APNs and Android rows without a provider breakdown.
 `unregistered` includes APNs 410 and explicit FCM UNREGISTERED outcomes; `sent`
-means provider acceptance, not device delivery. Android expiry and its bounded
-attempt budget can produce terminal `failed` rows. Statuses absent from the
-database report `0`. See [api.md](api.md)
+means provider acceptance, not device delivery. APNs deliveries expired after a
+prolonged network outage (default 6 h TTL) and Android expiry or bounded attempt
+budgets can produce terminal `failed` rows. Statuses absent from the database report `0`. See [api.md](api.md)
 for the `NotificationMetricsResponse` wire schema.
 
 Use container state, restart history and sidecar logs to investigate retry-worker
