@@ -110,7 +110,7 @@ def _record(directory: Path) -> JsonObject:
 
 @dataclass(frozen=True, slots=True)
 class _Run:
-    """One real SQLite B write and its standalone coordinator record."""
+    """One SQLite repair write and its standalone coordinator record."""
 
     root: Path
     repository: SQLAlchemyRepository
@@ -121,20 +121,20 @@ class _Run:
     def request(
         self, name: str, end: datetime = _END, verification: rebuild.VerificationFiles | None = None
     ) -> rebuild.RebuildRequest:
-        """Create a new B2 output directory beside the evidence."""
+        """Create a new rebuild output directory beside the evidence."""
         output = self.root / name
         output.mkdir()
         return rebuild.RebuildRequest((self.repair_dir,), self.records, end, output, verification)
 
     def evidence(self, directory: Path) -> rebuild.VerificationFiles:
-        """Bind a test B2 write to a machine-readable verification record."""
+        """Bind a test rebuild write to a machine-readable verification record."""
         record = _save(self.root / "verification.json", _binding(directory))
         return rebuild.VerificationFiles(directory, record)
 
 
 @pytest_asyncio.fixture
 async def recorded_repair(tmp_path: Path) -> AsyncIterator[_Run]:
-    """Run B against one zero and one absent minute, then bind its actual receipt."""
+    """Repair one zero and one absent minute, then bind its actual receipt."""
     url = f"sqlite+aiosqlite:///{tmp_path / 'scratch.db'}"
     repository = SQLAlchemyRepository(url)
     await repository.create_all()
@@ -177,7 +177,7 @@ async def recorded_repair(tmp_path: Path) -> AsyncIterator[_Run]:
 
 
 def _vote(directory: Path, digest: str, max_rows: int | None = None) -> repair.WriteOptions:
-    """Construct an approved B2 call without sleeps."""
+    """Construct an approved rebuild call without sleeps."""
     return repair.WriteOptions(directory, digest, max_rows, 0, 3)
 
 
@@ -261,7 +261,7 @@ async def test_actual_repair_vote_write_resume_and_coherent_verification(
 async def test_live_regression_is_observed_and_a_later_vote_restores_the_fold(
     recorded_repair: _Run,
 ) -> None:
-    """A stale live fold may supersede B2 and a new, separately voted write can restore it."""
+    """Restore the rebuilt candle with a fresh vote after a stale live fold supersedes it."""
     run = recorded_repair
     dry, write = run.request("dry"), run.request("write")
     voted = await rebuild.plan_rebuild(run.context, dry)
@@ -958,7 +958,7 @@ async def test_guard_refusal_appears_in_the_correct_artifact(
 async def test_enumeration_equals_the_receipt_exactly(
     recorded_repair: _Run, evidence_defect: str
 ) -> None:
-    """Refuse missing or unreferenced B versions instead of expanding or dropping scope."""
+    """Refuse missing or unreferenced repair versions instead of expanding or dropping scope."""
     run = recorded_repair
     receipt = _document(run.repair_dir / repair.RECEIPT_FILE)
     if evidence_defect == "missing":
@@ -999,7 +999,7 @@ async def _duplicate_repair_version(run: _Run, receipt: JsonObject) -> None:
 async def test_verification_accepts_only_supersession_of_the_same_original_resolution(
     recorded_repair: _Run,
 ) -> None:
-    """A B uncertain row superseded later is acceptable to verification but changes a vote."""
+    """Verify a superseded uncertain repair row and require a fresh write vote."""
     run = recorded_repair
     _mark_uncertain(run.repair_dir)
     _manifest(run, _record(run.repair_dir))
@@ -1061,7 +1061,7 @@ def test_postgres_chunk_observations_are_from_the_committing_attempt(
 async def test_verification_checks_artifact_and_committed_version_integrity(
     recorded_repair: _Run, binding_error: str
 ) -> None:
-    """Refuse a mismatched evidence file or a corrupted committed B2 identity or payload."""
+    """Refuse a mismatched evidence file or a corrupted committed rebuild identity or payload."""
     run = recorded_repair
     dry, write = run.request("dry"), run.request("write")
     plan = await rebuild.plan_rebuild(run.context, dry)
@@ -1241,7 +1241,7 @@ def _alter_receipt(receipt: JsonObject, defect: str) -> None:
 async def test_only_another_recorded_run_can_prove_an_already_applied_minute(
     recorded_repair: _Run,
 ) -> None:
-    """Reuse B's actual resume receipt, counting its no-op lines only against the earlier run."""
+    """Reuse the repair resume receipt, counting its no-op lines only against the earlier run."""
     run = recorded_repair
     old_vote = run.root / "repair-vote"
     digest = repair.sha256_hex((old_vote / repair.APPROVAL_FILE).read_bytes())
@@ -1439,7 +1439,7 @@ async def test_sqlite_verification_holds_a_snapshot_across_the_two_selects(
 
 
 @pytest.mark.asyncio
-async def test_cancellation_writes_the_b2_chunk_then_the_final_receipt(
+async def test_cancellation_writes_the_rebuild_chunk_then_the_final_receipt(
     recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Leave a fully durable uncertain chunk when a write await is cancelled."""
@@ -1518,7 +1518,7 @@ async def test_repair_refuses_semantically_inconsistent_evidence(
         instruments = cast(list[JsonObject], approval["instruments"])
         _save(path, {**approval, "instruments": [instruments[0], instruments[0]]})
     elif case in {"logical_repeat", "preview_symbol", "snapshot_time"}:
-        _alter_b_preview(run.repair_dir, case)
+        _alter_repair_preview(run.repair_dir, case)
     else:
         await _alter_db_evidence(run, case)
     _manifest(run, _record(run.repair_dir))
@@ -1526,8 +1526,8 @@ async def test_repair_refuses_semantically_inconsistent_evidence(
         await rebuild.plan_rebuild(run.context, request)
 
 
-def _alter_b_preview(directory: Path, case: str) -> None:
-    """Change one B preview fact and preserve its hash binding."""
+def _alter_repair_preview(directory: Path, case: str) -> None:
+    """Change one repair preview fact and preserve its hash binding."""
     lines = _preview(directory)
     first = next(line for line in lines if line["action"] == "correct")
     if case == "logical_repeat":
@@ -2286,7 +2286,7 @@ async def test_repair_selection_overlap_keeps_not_voted_independent(
     recorded_repair: _Run,
     list_name: str,
 ) -> None:
-    """Permit a B selection reference to appear in not_voted and one terminal selection list."""
+    """Permit a repair selection reference to appear in not_voted and one terminal selection list."""
     run = recorded_repair
     directory = run.repair_dir
     receipt = _document(directory / repair.RECEIPT_FILE)

@@ -246,7 +246,7 @@ class _Settlement(_Evidence):
 
 
 class _RunRecord(_FileBinding):
-    """Recorded B invocation and its independently collected evidence."""
+    """Recorded repair invocation and its independently collected evidence."""
 
     application_name: str | None
     observed_addresses: list[_Address]
@@ -255,7 +255,7 @@ class _RunRecord(_FileBinding):
 
 
 class _RunRecords(_Evidence):
-    """Input manifest of B invocations."""
+    """Manifest of recorded repair runs."""
 
     runs: Annotated[list[_RunRecord], Field(min_length=1)]
 
@@ -315,7 +315,7 @@ class _ChunkTimes(_Evidence):
 
 
 class _MinuteRef(_Evidence):
-    """The key of a referenced B minute."""
+    """The key of a referenced repair minute."""
 
     instrument_public_id: _Uuid
     minute_utc: _Instant
@@ -327,19 +327,19 @@ class _MinuteRef(_Evidence):
 
 
 class _RepairWritten(_MinuteRef):
-    """Reference to a B row scheduled to write."""
+    """Reference to a scheduled one-minute repair."""
 
     sequence_id: _Positive
 
 
 class _RepairSelected(_MinuteRef):
-    """Reference to a row reported by B's selection."""
+    """Reference to a row reported in the repair selection."""
 
     action: Literal["insert", "correct"]
 
 
 class _RepairChunk(_ChunkTimes):
-    """B's five disjoint row-outcome lists."""
+    """The repair chunk's five disjoint row-outcome lists."""
 
     action: Literal["insert", "correct"]
     applied: list[_RepairWritten]
@@ -350,7 +350,7 @@ class _RepairChunk(_ChunkTimes):
 
 
 class _RepairReceipt(_ReceiptIdentity):
-    """The immutable receipt written by one B invocation."""
+    """The immutable receipt written by one repair invocation."""
 
     not_voted: list[_RepairSelected]
     already_applied: list[_RepairSelected]
@@ -366,14 +366,14 @@ class _InstrumentEvidence(_Evidence):
 
 
 class _WindowEvidence(_Evidence):
-    """The approved B enumeration interval."""
+    """The approved interval for enumerating repaired minutes."""
 
     start: _Instant
     end: _Instant
 
 
 class _RepairApproval(_Evidence):
-    """B's approval fields needed to enumerate its actual writes."""
+    """Repair approval fields needed to enumerate committed writes."""
 
     model_config = ConfigDict(strict=True, extra="ignore")
 
@@ -388,7 +388,7 @@ class _RepairApproval(_Evidence):
 
 @dataclass(frozen=True, slots=True)
 class _RepairRun:
-    """Validated files and lookup tables of one recorded B invocation."""
+    """Validated files and lookup tables of one recorded repair run."""
 
     record: _RunRecord
     receipt: _RepairReceipt
@@ -401,7 +401,7 @@ class _RepairRun:
 
 @dataclass(frozen=True, slots=True)
 class _RecordedRuns:
-    """Immutable inputs of a B2 plan."""
+    """Immutable inputs of a synthesized rebuild plan."""
 
     digest: str
     records: JsonObject
@@ -411,7 +411,7 @@ class _RecordedRuns:
 
 @dataclass(frozen=True, slots=True)
 class VerificationFiles:
-    """Coordinator's record and the B2 write directory to verify."""
+    """Run record and rebuild write directory to verify."""
 
     directory: Path
     record: Path
@@ -429,7 +429,7 @@ class RebuildRequest:
 
 
 def code_revision(cli_module: ModuleType) -> JsonObject:
-    """Hash the installed source named by the B2 approval contract."""
+    """Hash the installed source bound by the rebuild approval."""
     modules = (
         repository_module,
         candle_aggregator,
@@ -680,7 +680,7 @@ def _repair_rows(
     instruments: Mapping[str, str],
     preview: Mapping[MinuteKey, candle_repair.PreviewLine],
 ) -> dict[MinuteKey, tuple[_RepairWritten, _RepairChunk, str]]:
-    """Index B's disjoint chunk references within the approved scope."""
+    """Index the repair chunk's disjoint references within the approved scope."""
     rows: dict[MinuteKey, tuple[_RepairWritten, _RepairChunk, str]] = {}
     sequences: set[int] = set()
     counts: Counter[str] = Counter()
@@ -791,7 +791,7 @@ def _load_runs(request: RebuildRequest, database: JsonObject) -> _RecordedRuns:
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedRun:
-    """Actual B writes and the frozen outcomes of originally uncertain rows."""
+    """Committed one-minute repairs and the frozen outcomes of originally uncertain rows."""
 
     run: _RepairRun
     found: Mapping[MinuteKey, CandleVersionRow]
@@ -888,7 +888,7 @@ async def _process_guard(repository: Repository, at: datetime) -> list[JsonObjec
 
 
 async def _enumerate_repair(repository: Repository, run: _RepairRun) -> list[CandleVersionRow]:
-    """Read the indexed approval scope for one B session in its own transaction."""
+    """Read the indexed approval scope for one repair session in its own transaction."""
     async with repository.session() as session:
         if repository.dialect_name == "postgresql":
             await session.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
@@ -926,7 +926,7 @@ def _business_numbers(values: Sequence[str]) -> tuple[float | int, ...]:
 def _check_repair_time(
     run: _RepairRun, version: CandleVersionRow, chunk: _RepairChunk, line: candle_repair.PreviewLine
 ) -> None:
-    """Check B's action-specific acquisition time and correction public identity."""
+    """Check the repair action's acquisition time and the correction's public ID."""
     authored = version["timestamp"]
     if chunk.action == "insert":
         if (
@@ -1478,7 +1478,7 @@ def _check_write_line(line: Mapping[str, str]) -> None:
 
 
 def _parse_preview(data: bytes) -> dict[CandleKey, dict[str, str]]:
-    """Load a B2 preview, validating its exact header and unique window keys."""
+    """Load a rebuild preview, validating its exact header and unique window keys."""
     try:
         rows = list(csv.reader(io.StringIO(data.decode(), newline=""), strict=True))
         if not rows or tuple(rows[0]) != _PREVIEW_COLUMNS:
@@ -1533,7 +1533,7 @@ class _RunBinding(_Evidence):
 
 
 class _Approval(_Evidence):
-    """The exact B2 approval document."""
+    """The exact rebuild approval document."""
 
     command: Literal["rebuild-synthesized-candles"]
     database: JsonObject
@@ -1695,7 +1695,7 @@ def _source_summary(scope: _Scope) -> list[JsonObject]:
 
 
 def _summary(windows: Collection[_Window], scope: _Scope) -> JsonObject:
-    """Summarize the whole derived window scope and the contributing B writes."""
+    """Summarize the whole derived window scope and the contributing repair writes."""
     by_timeframe: dict[str, list[_Window]] = defaultdict(list)
     by_day: dict[str, list[_Window]] = defaultdict(list)
     by_symbol_day: dict[tuple[str, str, str], list[_Window]] = defaultdict(list)
@@ -1785,7 +1785,7 @@ def _matches_vote(planned: Mapping[str, str], voted: Mapping[str, str]) -> bool:
 def _select(
     windows: Mapping[CandleKey, _Window], preview: Mapping[CandleKey, dict[str, str]]
 ) -> _Selection:
-    """Pick only still matching votes and retain B's selection-list semantics."""
+    """Pick only still matching votes and retain the repair command's selection outcomes."""
     votes = {key: line for key, line in preview.items() if line["action"] in _WRITE_ACTIONS}
     selection = _Selection([], [], [], [])
     for key, window in windows.items():
@@ -1827,7 +1827,7 @@ def _sample_json(sample: ClientSample | None) -> JsonObject | None:
 
 @dataclass(frozen=True, slots=True)
 class _RebuildAdapter:
-    """Connect B2's repository results and receipts to the shared writer."""
+    """Connect rebuild repository results and receipts to the shared writer."""
 
     context: RunContext
     actions: Mapping[CandleKey, str]
@@ -1849,7 +1849,7 @@ class _RebuildAdapter:
         return ChunkAcknowledgement(applied, skipped, result.sample)
 
     async def reconcile(self, rows: Sequence[CandleUpsertRow]) -> dict[CandleKey, str]:
-        """Reconcile B2's full natural keys and fixed timestamps in the shared plain read."""
+        """Reconcile rebuild rows by full natural key and fixed timestamp in a plain read."""
         return await reconcile_versions(
             self.context.repository,
             {candle_key(row): row for row in rows},
@@ -1893,7 +1893,7 @@ def _sole_client_write(
 
 @dataclass(frozen=True, slots=True)
 class _WriteRun:
-    """The fixed metadata of one B2 write and its selected windows."""
+    """The fixed metadata of one rebuild write and its selected windows."""
 
     run_id: str
     voted_digest: str
@@ -1973,7 +1973,7 @@ async def _apply(
 
 
 class _WindowRef(_Evidence):
-    """A higher-timeframe reference from a B2 receipt."""
+    """A higher-timeframe reference from a rebuild receipt."""
 
     instrument_public_id: _Uuid
     timeframe: str
@@ -1987,7 +1987,7 @@ class _WindowRef(_Evidence):
 
 
 class _WindowWritten(_WindowRef):
-    """A scheduled B2 row."""
+    """A scheduled rebuild row."""
 
     sequence_id: _Positive
 
@@ -2021,7 +2021,7 @@ class _Sample(_Evidence):
 
 
 class _RebuildReceiptChunk(_ChunkTimes):
-    """A numbered B2 guarded write call, including its sample when acknowledged."""
+    """A numbered guarded rebuild chunk, including its sample when acknowledged."""
 
     action: Literal["rebuild"]
     applied: list[_WindowWritten]
@@ -2034,7 +2034,7 @@ class _RebuildReceiptChunk(_ChunkTimes):
 
 
 class _RebuildReceipt(_ReceiptIdentity):
-    """B2 write evidence parsed by verification."""
+    """Rebuild write evidence parsed by verification."""
 
     not_voted: list[_WindowRef]
     already_applied: list[_WindowRef]
@@ -2046,7 +2046,7 @@ class _RebuildReceipt(_ReceiptIdentity):
 
 @dataclass(frozen=True, slots=True)
 class _VerificationEvidence:
-    """A B2 write authenticated before any verification query."""
+    """A rebuild write authenticated before any verification query."""
 
     binding: _FileBinding
     record_hash: str

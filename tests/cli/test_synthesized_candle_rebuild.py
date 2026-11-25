@@ -1,4 +1,4 @@
-"""Exercise B2's registration, argument guard and named one-connection invocation."""
+"""Exercise command registration, argument checks and the named single database connection."""
 
 import os
 from pathlib import Path

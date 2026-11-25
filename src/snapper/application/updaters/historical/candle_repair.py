@@ -1843,7 +1843,7 @@ class _WriteAdapter:
         return await self.repository.insert_missing_calculated_candles(rows)
 
     async def reconcile_chunk(self, rows: Sequence[CandleUpsertRow]) -> dict[CandleKey, str]:
-        """Call B's reconciliation seam and adapt its minute keys for the chunk writer."""
+        """Call the repair reconciler and adapt its minute keys for the chunk writer."""
         outcomes = await reconcile(self.repository, rows, self.run_id)
         return {
             (instrument, TIMEFRAME, minute): outcome

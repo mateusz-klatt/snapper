@@ -1,7 +1,7 @@
 """Witness guarded candle rebuilds against a migrated, disposable PostgreSQL 18 database.
 
 Opt in with TEST_DB_URL. Use a fresh PostgreSQL instance bound to loopback and
-a database named snapper_b2_witness. The repository locks public.candles by
+a database named snapper_rebuild_witness. The repository locks public.candles by
 design, so this module uses the real migrated table in an otherwise empty
 scratch database. It only inserts synthetic rows in fixture-owned partitions.
 """
@@ -76,7 +76,7 @@ from tests.helpers.candle_repair import kraken_row
 from tests.helpers.candle_repair import write_snapshot
 
 _LOG = logging.getLogger(__name__)
-_DB_NAME = "snapper_b2_witness"
+_DB_NAME = "snapper_rebuild_witness"
 _DAY = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=4)
 _AUTHOR = _DAY + timedelta(days=3)
 _WRITE = _AUTHOR + timedelta(hours=1)
@@ -181,7 +181,7 @@ async def database() -> AsyncIterator[_Database]:
     url = _opt_in()
     assert url is not None
     local_database = url.host in {"127.0.0.1", "localhost", "::1"} and url.database == _DB_NAME
-    assert local_database, "use the fresh loopback snapper_b2_witness database"
+    assert local_database, "use the fresh loopback snapper_rebuild_witness database"
     assert not url.query, "use a direct loopback test URL without routing options"
     admin = create_async_engine(url, poolclass=NullPool, hide_parameters=True)
     try:
@@ -402,7 +402,7 @@ class _Roles:
 async def roles(database: _Database) -> AsyncIterator[_Roles]:
     """Create real login roles so PostgreSQL masks another user's backend fields."""
     identity = uuid4().hex[:12]
-    names = (f"b2_reader_{identity}", f"b2_peer_{identity}")
+    names = (f"rebuild_reader_{identity}", f"rebuild_peer_{identity}")
     passwords = (token_hex(24), token_hex(24))
     async with database.admin.begin() as connection:
         for name, password in zip(names, passwords, strict=True):
@@ -832,7 +832,7 @@ async def catalog(
     repository: SQLAlchemyRepository, instrument: str
 ) -> AsyncIterator[tuple[str, str]]:
     """Create and remove just this invocation's PostgreSQL catalog identities."""
-    base = f"B2{instrument[:6].upper()}"
+    base = f"TEST{instrument[:6].upper()}"
     symbol, alias = f"{base}-EUR", f"Z{base}ZEUR"
     symbol_id, owner = str(uuid4()), str(uuid7())
     common = {"timestamp": _AUTHOR, "session_id": owner, "sequence_id": 1}

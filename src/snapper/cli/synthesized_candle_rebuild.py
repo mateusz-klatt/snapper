@@ -64,8 +64,8 @@ def _parser() -> argparse.ArgumentParser:
         "--end", required=True, help="UTC minute at least 180 minutes before the run"
     )
     parser.add_argument("--output-dir", type=Path, required=True, help="New or empty directory")
-    parser.add_argument("--verify-receipt", type=Path, help="B2 write directory to verify")
-    parser.add_argument("--verify-record", type=Path, help="Coordinator record of the B2 write")
+    parser.add_argument("--verify-receipt", type=Path, help="Rebuild write directory to verify")
+    parser.add_argument("--verify-record", type=Path, help="Run record for the rebuild write")
     add_write_arguments(parser)
     return parser
 
