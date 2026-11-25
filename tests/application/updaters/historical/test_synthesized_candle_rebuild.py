@@ -1518,9 +1518,12 @@ async def test_postgres_read_modes_use_one_session_and_required_statement_order(
         "SELECT process_runs.process_name, process_runs.public_id, process_runs.status, "
         "process_runs.started_at, process_runs.tags "
     )
-    assert "process_runs.process_name IN" in query.string
-    assert "CAST(process_runs.tags AS JSONB) @>" in query.string
-    assert ["market-data", "publisher"] in query.params.values()
+    assert query.string.partition("WHERE ")[2] == (
+        "process_runs.timestamp <= $1::TIMESTAMP WITH TIME ZONE "
+        "AND process_runs.known_to > $2::TIMESTAMP WITH TIME ZONE "
+        "ORDER BY process_runs.started_at DESC, process_runs.id DESC"
+    )
+    assert list(query.params.values()) == [now, now]
 
     session.execute.reset_mock()
     assert await rebuild._enumerate_repair(repository, record) == []
