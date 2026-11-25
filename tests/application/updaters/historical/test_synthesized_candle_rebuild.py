@@ -530,6 +530,15 @@ async def test_recorded_process_guard_uses_newest_starts(
         "sequence_id": 1,
     }
     async with run.repository.session() as session:
+        session.add(
+            ProcessRun(
+                process_name="unrelated_process",
+                tags=["publisher", "publisher", "other-market-data"],
+                status="running",
+                started_at=at,
+                **common,
+            )
+        )
         if latest != "no_publisher":
             session.add(
                 ProcessRun(
@@ -554,7 +563,9 @@ async def test_recorded_process_guard_uses_newest_starts(
             await rebuild.plan_rebuild(run.context, run.request("guarded"))
     else:
         result = await rebuild.plan_rebuild(run.context, run.request("guarded"))
-        assert len(cast(list[JsonObject], result.summary["process_runs"])) == 2
+        assert [
+            row["process_name"] for row in cast(list[JsonObject], result.summary["process_runs"])
+        ] == ["kraken_feed_publisher", "trade_candle_backfill"]
 
 
 def _capture(record: JsonObject, database: JsonObject, *, delay: int = 1) -> JsonObject:
@@ -1476,7 +1487,7 @@ async def test_postgres_read_modes_use_one_session_and_required_statement_order(
     """Check READ COMMITTED enumeration and repeatable read verification with a mock.
 
     Given: A mocked PostgreSQL session that records each issued statement.
-    When: Enumerate repair versions and read a verification snapshot.
+    When: Read the process guard, enumerate repair versions and read a verification snapshot.
     Then: Each operation uses one session and sets the required transaction mode before reading.
     """
     run = recorded_repair
@@ -1496,6 +1507,21 @@ async def test_postgres_read_modes_use_one_session_and_required_statement_order(
         yield session
 
     repository.session.side_effect = owned
+    session.execute.return_value.all.return_value = []
+    assert await rebuild._process_guard(repository, now) == []
+    guard_calls = session.execute.await_args_list
+    assert len(guard_calls) == 2
+    assert str(guard_calls[0].args[0]) == "SET LOCAL statement_timeout = '20s'"
+    query = guard_calls[1].args[0].compile(dialect=PGDialect_asyncpg())
+    assert query.string.partition(" FROM ")[0].splitlines()[0] == (
+        "SELECT process_runs.process_name, process_runs.public_id, process_runs.status, "
+        "process_runs.started_at, process_runs.tags "
+    )
+    assert "process_runs.process_name IN" in query.string
+    assert "CAST(process_runs.tags AS JSONB) @>" in query.string
+    assert ["market-data", "publisher"] in query.params.values()
+
+    session.execute.reset_mock()
     assert await rebuild._enumerate_repair(repository, record) == []
     commands = [str(call.args[0]) for call in session.execute.await_args_list]
     assert commands[:2] == [

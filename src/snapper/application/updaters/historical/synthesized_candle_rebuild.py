@@ -36,9 +36,14 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import StringConstraints
 from pydantic import ValidationError
+from sqlalchemy import Row
+from sqlalchemy import func
+from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from snapper.application.updaters.historical import candle_repair
 from snapper.application.updaters.historical import guarded_candle_write
@@ -112,6 +117,7 @@ _CANDLE_WRITERS = (
     "polygon_grouped_candle_load",
     "polygon_csv_load",
 )
+_PUBLISHER_TAGS = ("market-data", "publisher")
 _BUCKETS = ("applied", "skipped_by_guard", "applied_superseded", "uncertain", "not_applied")
 _SELECTIONS = ("not_voted", "already_applied", "changed")
 _VALUES = ("open", "high", "low", "close", "volume", "vwap", "trades")
@@ -861,24 +867,43 @@ async def _check_instruments(
                 raise RepairRefusedError("approved instrument is not the active Kraken spot symbol")
 
 
+def _market_data_publisher(dialect: str) -> ColumnElement[bool]:
+    """Match both publisher tags as exact JSON array elements."""
+    if dialect == "postgresql":
+        return cast(ColumnElement[bool], ProcessRun.tags.cast(JSONB).contains([*_PUBLISHER_TAGS]))
+    tags = func.json_each(ProcessRun.tags).table_valued("value")
+    matched = select(func.count(func.distinct(tags.c.value))).where(
+        tags.c.value.in_(_PUBLISHER_TAGS)
+    )
+    return matched.scalar_subquery() == len(_PUBLISHER_TAGS)
+
+
 async def _process_guard(repository: Repository, at: datetime) -> list[JsonObject]:
     """Read current process-run records and reject a running candle writer after the release."""
     async with repository.session() as session:
+        if repository.dialect_name == "postgresql":
+            await session.execute(text(_TIMEOUT))
         rows = (
-            (
-                await session.execute(
-                    select(ProcessRun)
-                    .where(*where_active(ProcessRun, at))
-                    .order_by(ProcessRun.started_at.desc(), ProcessRun.id.desc())
+            await session.execute(
+                select(
+                    ProcessRun.process_name,
+                    ProcessRun.public_id,
+                    ProcessRun.status,
+                    ProcessRun.started_at,
+                    ProcessRun.tags,
                 )
+                .where(
+                    *where_active(ProcessRun, at),
+                    or_(
+                        ProcessRun.process_name.in_(_CANDLE_WRITERS),
+                        _market_data_publisher(repository.dialect_name),
+                    ),
+                )
+                .order_by(ProcessRun.started_at.desc(), ProcessRun.id.desc())
             )
-            .scalars()
-            .all()
-        )
-    publisher = next(
-        (row for row in rows if {"market-data", "publisher"} <= set(row.tags or ())), None
-    )
-    writers: dict[str, ProcessRun] = {}
+        ).all()
+    publisher = next((row for row in rows if set(_PUBLISHER_TAGS) <= set(row.tags or ())), None)
+    writers: dict[str, Row[str, str, str, datetime, list[str] | None]] = {}
     for row in rows:
         if row.process_name in _CANDLE_WRITERS:
             writers.setdefault(row.process_name, row)
