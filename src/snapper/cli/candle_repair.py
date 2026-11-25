@@ -16,15 +16,12 @@ Neither output nor refusals ever print the database URL or an error's text.
 import argparse
 import asyncio
 import json
-import math
-import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Final
-from typing import NoReturn
 from typing import cast
 from uuid import uuid7
 
@@ -39,13 +36,18 @@ from snapper.application.updaters.historical.candle_repair import RunContext
 from snapper.application.updaters.historical.candle_repair import WriteOptions
 from snapper.application.updaters.historical.candle_repair import code_revision
 from snapper.application.updaters.historical.candle_repair import database_endpoint
-from snapper.application.updaters.historical.candle_repair import error_fields
 from snapper.application.updaters.historical.candle_repair import plan_repair
 from snapper.application.updaters.historical.candle_repair import prepare_output_dir
 from snapper.application.updaters.historical.candle_repair import write_repair
+from snapper.cli.operator_support import WRITE_OPTIONS
+from snapper.cli.operator_support import RefusingParser
+from snapper.cli.operator_support import UsageError
+from snapper.cli.operator_support import add_write_arguments
 from snapper.cli.operator_support import configured_repository
 from snapper.cli.operator_support import database_identity
+from snapper.cli.operator_support import failure_text
 from snapper.cli.operator_support import refuse
+from snapper.cli.operator_support import write_options
 from snapper.config.settings import get_bootstrap_settings
 from snapper.data.repository import dispose_repositories
 
@@ -56,40 +58,10 @@ REPAIR_CANDLES_CONTEXT: Final[dict[str, object]] = {
 }
 """Click settings that hand every argument, ``--help`` included, to the parser."""
 
-_DIGEST: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
-_DEFAULT_CHUNK_PAUSE_SECONDS: Final[float] = 1.0
-_DEFAULT_MAX_CONSECUTIVE_LOCK_TIMEOUTS: Final[int] = 3
-_WRITE_OPTIONS: Final[tuple[tuple[str, str], ...]] = (
-    ("voted_preview", "--voted-preview"),
-    ("expect_digest", "--expect-digest"),
-    ("max_rows", "--max-rows"),
-    ("chunk_pause_seconds", "--chunk-pause-seconds"),
-    ("max_consecutive_lock_timeouts", "--max-consecutive-lock-timeouts"),
-)
-
-
-class _UsageError(Exception):
-    """An argument the parser does not accept."""
-
-
-class _RefusingParser(argparse.ArgumentParser):
-    """Raise on a usage error instead of exiting, so the command can refuse."""
-
-    def error(self, message: str) -> NoReturn:
-        """Report a usage error to the caller.
-
-        Args:
-            message: Parser's description of the error.
-
-        Raises:
-            _UsageError: Always.
-        """
-        raise _UsageError(message)
-
 
 def _parser() -> argparse.ArgumentParser:
     """Declare the command's options."""
-    parser = _RefusingParser(
+    parser = RefusingParser(
         prog="snapper repair-candles",
         description=(
             "Repair absent and false-zero 1m candles from a saved Kraken OHLC snapshot or "
@@ -107,14 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--start", required=True, help="Inclusive UTC minute, ISO 8601")
     parser.add_argument("--end", required=True, help="Exclusive UTC minute, ISO 8601")
     parser.add_argument("--output-dir", required=True, type=Path, help="New or empty directory")
-    parser.add_argument("--confirm", action="store_true", help="Write the voted rows")
-    parser.add_argument("--voted-preview", type=Path, help="Output directory of the voted run")
-    parser.add_argument("--expect-digest", help="sha256 of the voted approval.json")
-    parser.add_argument("--max-rows", type=int, help="Most rows this write applies")
-    parser.add_argument("--chunk-pause-seconds", type=float, help="Pause between chunks (1.0)")
-    parser.add_argument(
-        "--max-consecutive-lock-timeouts", type=int, help="Lock timeouts that stop a write (3)"
-    )
+    add_write_arguments(parser)
     return parser
 
 
@@ -138,7 +103,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
     """Parse the argument tail; a usage error refuses."""
     try:
         namespace = _parser().parse_args(list(argv))
-    except _UsageError as error:
+    except UsageError as error:
         refuse(f"refused: {error}")
     values = cast(dict[str, object], vars(namespace))
     return _Arguments(
@@ -151,7 +116,7 @@ def _arguments(argv: Sequence[str]) -> _Arguments:
         end=cast(str, values["end"]),
         output_dir=cast(Path, values["output_dir"]),
         confirm=cast(bool, values["confirm"]),
-        writing={name: values[name] for name, _ in _WRITE_OPTIONS if values[name] is not None},
+        writing={name: values[name] for name, _ in WRITE_OPTIONS if values[name] is not None},
     )
 
 
@@ -210,43 +175,6 @@ def _request(arguments: _Arguments) -> RepairRequest:
         snapshot_dir=snapshot_dir,
         output_dir=arguments.output_dir,
     )
-
-
-def _write_options(arguments: _Arguments) -> WriteOptions | None:
-    """Return the write options of a confirmed run; refuse them without ``--confirm``."""
-    writing = arguments.writing
-    if not arguments.confirm:
-        if writing:
-            given = [option for name, option in _WRITE_OPTIONS if name in writing]
-            refuse(f"refused: {', '.join(given)} only apply with --confirm")
-        return None
-    digest = str(writing.get("expect_digest", "")).lower()
-    if "voted_preview" not in writing or _DIGEST.fullmatch(digest) is None:
-        refuse("refused: --confirm needs --voted-preview and a sha256 --expect-digest")
-    max_rows = cast(int | None, writing.get("max_rows"))
-    pause = cast(float, writing.get("chunk_pause_seconds", _DEFAULT_CHUNK_PAUSE_SECONDS))
-    lock_timeouts = cast(
-        int,
-        writing.get("max_consecutive_lock_timeouts", _DEFAULT_MAX_CONSECUTIVE_LOCK_TIMEOUTS),
-    )
-    if (max_rows is not None and max_rows < 1) or not math.isfinite(pause) or pause < 0:
-        refuse("refused: --max-rows must be positive and --chunk-pause-seconds finite and >= 0")
-    if lock_timeouts < 1:
-        refuse("refused: --max-consecutive-lock-timeouts must be at least 1")
-    return WriteOptions(
-        voted_preview=cast(Path, writing["voted_preview"]),
-        expect_digest=digest,
-        max_rows=max_rows,
-        chunk_pause_seconds=pause,
-        max_consecutive_lock_timeouts=lock_timeouts,
-    )
-
-
-def _failure_text(error: BaseException) -> str:
-    """Describe an unexpected failure by class and SQLSTATE only."""
-    fields = error_fields(error)
-    sqlstate = fields["sqlstate"]
-    return f"{fields['error']}" + (f" sqlstate={sqlstate}" if sqlstate else "")
 
 
 async def _execute(
@@ -323,12 +251,12 @@ def repair_candles(ctx: typer.Context) -> None:
     run_id = str(uuid7())
     arguments = _arguments(ctx.args)
     request = _request(arguments)
-    options = _write_options(arguments)
+    options = write_options(arguments.confirm, arguments.writing)
     db_url = get_bootstrap_settings().db_url
     try:
         code = _run(db_url, request, options, run_id)
     except RepairRefusedError as error:
         refuse(f"refused: {error}")
     except Exception as error:
-        refuse(f"failed: {_failure_text(error)}")
+        refuse(f"failed: {failure_text(error)}")
     raise typer.Exit(code=code)

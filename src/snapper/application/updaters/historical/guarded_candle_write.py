@@ -27,6 +27,7 @@ from snapper.core.json_types import JsonValue
 from snapper.data.repository import Repository
 from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CandleVersionRow
+from snapper.data.repository_types import ClientSample
 
 ATTEMPTS: Final[int] = 4
 """Most attempts a write chunk gets."""
@@ -88,12 +89,22 @@ class Chunk:
 
 
 @dataclass(frozen=True, slots=True)
+class ChunkAcknowledgement:
+    """Per-key results and the observation from an acknowledged attempt."""
+
+    applied: Sequence[CandleUpsertRow]
+    skipped: Mapping[CandleKey, JsonObject]
+    sample: ClientSample | None
+
+
+@dataclass(frozen=True, slots=True)
 class ChunkAdapter[ChunkT: Chunk]:
     """Persistence and receipt details supplied by the calling candle command."""
 
-    write: Callable[[ChunkT], Awaitable[Sequence[CandleUpsertRow]]]
+    write: Callable[[ChunkT], Awaitable[Sequence[CandleUpsertRow] | ChunkAcknowledgement]]
     reconcile: Callable[[Sequence[CandleUpsertRow]], Awaitable[dict[CandleKey, str]]]
     row_reference: Callable[[CandleUpsertRow], JsonObject]
+    receipt_fields: Callable[[ChunkAcknowledgement | None, str | None], JsonObject] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +308,7 @@ class _ChunkRecord:
     attempts: list[JsonObject] = field(default_factory=list)
     outcomes: dict[CandleKey, str] = field(default_factory=dict)
     reconciliation_error: JsonObject | None = None
+    acknowledgement: ChunkAcknowledgement | None = None
 
     def settle(self, outcome: str) -> None:
         """Give every row without an outcome the same one."""
@@ -308,8 +320,13 @@ class _ChunkRecord:
     ) -> JsonObject:
         """Render the chunk's receipt line."""
         listed: dict[str, list[JsonValue]] = {outcome: [] for outcome in _ROW_OUTCOMES}
+        skipped = {} if self.acknowledgement is None else self.acknowledgement.skipped
         for row in self.chunk.rows:
-            listed[self.outcomes.get(candle_key(row), "uncertain")].append(row_reference(row))
+            key = candle_key(row)
+            reference = row_reference(row)
+            if key in skipped:
+                reference["guard_outcome"] = skipped[key]
+            listed[self.outcomes.get(key, "uncertain")].append(reference)
         return {
             "chunk": self.chunk.number,
             "action": self.chunk.action,
@@ -374,11 +391,15 @@ class ChunkWriter[ChunkT: Chunk]:
     async def _apply_chunk(self, chunk: ChunkT) -> str | None:
         """Run one chunk's attempts and log its receipt as soon as it ends."""
         record = _ChunkRecord(chunk, self._clock())
+        stop: str | None = "cancelled"
         try:
-            return await self._attempts(chunk, record)
+            stop = await self._attempts(chunk, record)
+            return stop
         finally:
             record.settle("uncertain")
             line = record.to_json(self._clock(), self._adapter.row_reference)
+            if self._adapter.receipt_fields is not None:
+                line.update(self._adapter.receipt_fields(record.acknowledgement, stop))
             self.records.append(line)
             self._log.append(line)
 
@@ -400,6 +421,9 @@ class ChunkWriter[ChunkT: Chunk]:
                 )
                 raise
             record.attempts.append({"attempt": attempt, "outcome": "acknowledged"})
+            if isinstance(returned, ChunkAcknowledgement):
+                record.acknowledgement = returned
+                returned = returned.applied
             for row in returned:
                 record.outcomes[candle_key(row)] = "applied"
             record.settle("skipped_by_guard")
