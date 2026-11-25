@@ -1225,6 +1225,47 @@ class TestOutboxRetryBackoff:
         assert "offset" not in repo.get_undispatched_commands.await_args.kwargs
 
     @pytest.mark.asyncio
+    async def test_material_barrier_hold_does_not_block_later_rows_on_its_shard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A barrier-held create backs off alone while later same-shard rows dispatch.
+
+        Given: A create held by the durable material barrier followed by a
+            same-shard submit and cancel,
+        When: Batches run during the held create's backoff window,
+        Then: The held create stays unpublished and unchecked while deferred, and
+            both later same-shard rows dispatch without waiting behind it.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        held = _make_backoff_row("btc-held", command_type="create")
+        later_submit = _make_backoff_row("btc-submit", command_type="submit")
+        later_cancel = _make_backoff_row("btc-cancel", command_type="cancel")
+        queue: list[list[TradeCommandRow]] = [[held]]
+        repo = _make_queue_repo(queue)
+
+        async def _barrier(public_id: str) -> None:
+            if public_id == "btc-held":
+                raise TradeCommandMaterialChangedError("btc-held", ("price",))
+
+        repo.require_consistent_trade_command_material = AsyncMock(side_effect=_barrier)
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            published.append(cmd["public_id"])
+
+        dispatcher = OutboxDispatcher(
+            repository=repo, publish_fn=AsyncMock(side_effect=_publish), batch_size=2
+        )
+        await dispatcher._dispatch_batch()
+        assert published == []
+
+        clock.advance(0.10)
+        queue[0] = [held, later_submit, later_cancel]
+        await dispatcher._dispatch_batch()
+        assert published == ["btc-submit", "btc-cancel"]
+        assert repo.require_consistent_trade_command_material.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_ttl_expiry_during_backoff_expires_without_publishing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

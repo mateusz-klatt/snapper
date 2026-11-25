@@ -69,6 +69,7 @@ class _CommandRetryState:
         first_failed_at: Monotonic timestamp of the initial failure in the streak.
         last_error_logged_at: Monotonic timestamp of the most recent ERROR log.
         last_seen: Monotonic timestamp when the command last appeared in a fetch page.
+        blocks_shard: Whether later rows on the same shard wait behind this command.
     """
 
     failures: int
@@ -76,6 +77,7 @@ class _CommandRetryState:
     first_failed_at: float
     last_error_logged_at: float
     last_seen: float
+    blocks_shard: bool = True
 
 
 class OutboxDispatcher:
@@ -102,7 +104,11 @@ class OutboxDispatcher:
     later cancel or submit from overtaking a pending command on that
     shard while letting unrelated shards keep flowing. Its cost is that a
     stuck non-TTL command blocks only its own shard, capped at 60 s per
-    retry and re-logging an ERROR every 5 minutes.
+    retry and re-logging an ERROR every 5 minutes. A create held by the
+    durable material barrier backs off without blocking its shard: the
+    barrier runs before TTL expiry, so such a hold can persist
+    indefinitely, and later commands on the shard never depend on a
+    create that cannot be published.
 
     Args:
         repository: Database repository for reading/updating commands.
@@ -246,7 +252,8 @@ class OutboxDispatcher:
             return True
         entry = self._retry.get(cmd["public_id"])
         if entry is not None and entry.next_at > now_mono:
-            deferred_shards.add(shard_key)
+            if entry.blocks_shard:
+                deferred_shards.add(shard_key)
             return True
         return False
 
@@ -339,6 +346,7 @@ class OutboxDispatcher:
         error_message: str,
         reason: str,
         include_traceback: bool,
+        blocks_shard: bool = True,
     ) -> None:
         """Schedule exponential per-command backoff and emit cadence-bounded logs.
 
@@ -351,6 +359,7 @@ class OutboxDispatcher:
             error_message: Message used when emitting an ERROR log.
             reason: Short single-line summary used in WARNING logs.
             include_traceback: Whether ERROR logs attach the active traceback.
+            blocks_shard: Whether later rows on the same shard wait behind this command.
         """
         now_mono = time.monotonic()
         public_id = cmd["public_id"]
@@ -379,6 +388,7 @@ class OutboxDispatcher:
             first_failed_at=first_failed_at,
             last_error_logged_at=last_error_logged_at,
             last_seen=now_mono,
+            blocks_shard=blocks_shard,
         )
         if should_log_error:
             if include_traceback:
@@ -526,6 +536,7 @@ class OutboxDispatcher:
                 ),
                 reason="held by durable material barrier",
                 include_traceback=False,
+                blocks_shard=False,
             )
             return False
         return True
