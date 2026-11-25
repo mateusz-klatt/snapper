@@ -10319,12 +10319,12 @@ class TestRestartEscalation:
     async def test_native_outage_retries_beyond_budget_then_local_crash_escalates(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Retry every native upstream failure with capped jitter and one warning.
+        """Retry every native upstream failure with capped jitter and periodic alerts.
 
         Given: A CORE publisher with nearly exhausted ordinary restart budgets,
         When: It exits with EX_TEMPFAIL more times than either budget, then exits 1,
         Then: Outage runs finalize as FAILED and back off without spending budget,
-            and the eventual local failure still escalates to a feed restart.
+            attempts 4, 10, and 16 log at ERROR, and the local failure escalates.
         """
         factory = ProcessLauncherService(MagicMock())
         config = _watchdog_config(restart_policy=ProcessRestartPolicyEnum.ON_FAILURE)
@@ -10343,6 +10343,7 @@ class TestRestartEscalation:
         factory._restart_attempts[name] = attempts
         factory._total_failed_restarts[name] = total
         outage_count = launcher_module._MAX_TOTAL_FAILED_RESTARTS + 1
+        alert_attempts = (4, 10, 16)
         finalization = mock.call(
             name,
             ProcessRunStatusEnum.FAILED,
@@ -10359,16 +10360,25 @@ class TestRestartEscalation:
             delay = base + launcher_module._jitter(name, base)
             assert base <= delay < 300.0
             assert delayed_restart.await_args == mock.call(name, delay)
-            assert log.warning.call_args == mock.call(
-                "Native process '{}' upstream unavailable; retrying in {:.2f}s (attempt {})",
-                name,
-                delay,
-                attempt,
-            )
+            if attempt in alert_attempts:
+                assert log.error.call_args == mock.call(
+                    "Native process '{}' upstream unavailable (continuous outage); "
+                    "retrying in {:.2f}s (attempt {})",
+                    name,
+                    delay,
+                    attempt,
+                )
+            else:
+                assert log.warning.call_args == mock.call(
+                    "Native process '{}' upstream unavailable; retrying in {:.2f}s (attempt {})",
+                    name,
+                    delay,
+                    attempt,
+                )
 
         assert finalize.await_args_list == [finalization] * outage_count
-        assert log.warning.call_count == outage_count
-        log.error.assert_not_called()
+        assert log.warning.call_count == outage_count - len(alert_attempts)
+        assert log.error.call_count == len(alert_attempts)
         assert factory._restart_attempts[name] == attempts
         assert factory._total_failed_restarts[name] == total
         assert not factory._feed_failure_event.is_set()

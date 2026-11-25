@@ -1504,8 +1504,10 @@ being finalized FAILED and silently never restarted.
 If a native market-data publisher fails to connect to its venue or proxy
 at startup, the runner exits with code 75 and the watchdog records a
 FAILED run. For a process whose policy allows restarting, the watchdog
-logs one warning and retries with base delays of 30, 60, 120, and 240
-seconds plus per-process jitter, keeping each delay below 300 seconds.
+retries with base delays of 30, 60, 120, and 240 seconds plus per-process
+jitter, keeping each delay below 300 seconds. It logs an ERROR for
+operator alerting at attempt 4 and every six attempts thereafter (10,
+16, and so on). Other attempts log a WARNING.
 The outage backoff resets after more than 120 seconds of uptime. These
 failures consume neither restart budget, so an upstream outage keeps the
 feed container and its other publishers running while venue health halts

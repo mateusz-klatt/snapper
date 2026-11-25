@@ -117,6 +117,16 @@ _RESTART_JITTER_FRACTION: Final[float] = 0.25
 _UPSTREAM_RESTART_DELAYS_S: Final = (30.0, 60.0, 120.0, 240.0)
 """Exponential retry bases with room for jitter under a 300-second ceiling."""
 
+_UPSTREAM_OUTAGE_FIRST_ALERT_ATTEMPT: Final[int] = 4
+"""First retry logged at ERROR to trigger operator alerting during a continuous outage.
+
+The ERROR feeds operator alerting while the retry stays outside both restart
+budgets and never escalates to a container restart.
+"""
+
+_UPSTREAM_OUTAGE_ALERT_INTERVAL: Final[int] = 6
+"""Retry attempts between ERROR alerts after the first continuous outage alert."""
+
 _RESTART_HEALTHY_UPTIME_S: Final[float] = 120.0
 _TOTAL_RESET_UPTIME_S: Final[float] = 1200.0
 _MAX_RESTART_ATTEMPTS: Final[int] = 6
@@ -3045,12 +3055,22 @@ class ProcessLauncherService:
         self._upstream_restart_attempts[name] = attempt
         base = _UPSTREAM_RESTART_DELAYS_S[min(attempt - 1, len(_UPSTREAM_RESTART_DELAYS_S) - 1)]
         delay = base + _jitter(name, base)
-        logger.warning(
-            "Native process '{}' upstream unavailable; retrying in {:.2f}s (attempt {})",
-            name,
-            delay,
-            attempt,
-        )
+        since_first_alert = attempt - _UPSTREAM_OUTAGE_FIRST_ALERT_ATTEMPT
+        if since_first_alert >= 0 and since_first_alert % _UPSTREAM_OUTAGE_ALERT_INTERVAL == 0:
+            logger.error(
+                "Native process '{}' upstream unavailable (continuous outage); "
+                "retrying in {:.2f}s (attempt {})",
+                name,
+                delay,
+                attempt,
+            )
+        else:
+            logger.warning(
+                "Native process '{}' upstream unavailable; retrying in {:.2f}s (attempt {})",
+                name,
+                delay,
+                attempt,
+            )
         self._restart_tasks[name] = asyncio.create_task(self._delayed_restart(name, delay))
 
     def _restart_budget_exhausted(self, name: str) -> bool:
