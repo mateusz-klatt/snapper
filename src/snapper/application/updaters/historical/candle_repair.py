@@ -29,8 +29,6 @@ import hashlib
 import io
 import json
 import math
-import os
-import re
 import sys
 import zlib
 from collections import Counter
@@ -48,7 +46,6 @@ from datetime import date
 from datetime import datetime
 from datetime import timedelta
 from enum import StrEnum
-from io import BufferedWriter
 from itertools import batched
 from pathlib import Path
 from types import ModuleType
@@ -61,14 +58,23 @@ from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import DBAPIError
 
+from snapper.application.updaters.historical import guarded_candle_write
 from snapper.application.updaters.historical import trade_candle_rows
+from snapper.application.updaters.historical.guarded_candle_write import CandleKey
+from snapper.application.updaters.historical.guarded_candle_write import Chunk
+from snapper.application.updaters.historical.guarded_candle_write import ChunkAdapter
+from snapper.application.updaters.historical.guarded_candle_write import ChunkWriter
+from snapper.application.updaters.historical.guarded_candle_write import ReceiptLog
+from snapper.application.updaters.historical.guarded_candle_write import reached
+from snapper.application.updaters.historical.guarded_candle_write import reconcile_versions
+from snapper.application.updaters.historical.guarded_candle_write import totals
 from snapper.application.updaters.historical.trade_candle_rows import as_utc
 from snapper.application.updaters.historical.trade_candle_rows import calculated_row
 from snapper.application.updaters.historical.trade_candle_rows import trade_update
+from snapper.cli import operator_support
+from snapper.core.candle_identity import deterministic_candle_public_id
 from snapper.core.json_types import JsonObject
-from snapper.core.json_types import JsonValue
 from snapper.data import repository as repository_module
 from snapper.data.models import Candle
 from snapper.data.models import Instrument
@@ -85,6 +91,16 @@ from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBu
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
 from snapper.infrastructure.exchanges.kraken_closed_candles import ClosedCandleRequest
 from snapper.infrastructure.exchanges.kraken_closed_candles import parse_closed_candles
+
+ATTEMPTS = guarded_candle_write.ATTEMPTS
+BACKOFF_SECONDS = guarded_candle_write.BACKOFF_SECONDS
+NATURAL_KEY_INDEXES = guarded_candle_write.NATURAL_KEY_INDEXES
+WriteOptions = guarded_candle_write.WriteOptions
+canonical_json = guarded_candle_write.canonical_json
+classify_failure = guarded_candle_write.classify_failure
+error_fields = guarded_candle_write.error_fields
+is_natural_key_index = guarded_candle_write.is_natural_key_index
+write_exclusive = guarded_candle_write.write_exclusive
 
 TIMEFRAME: Final[str] = "1m"
 """The only timeframe this driver repairs."""
@@ -103,12 +119,6 @@ REQUEST_MINUTES: Final[int] = 719
 
 LIVE_EDGE: Final[timedelta] = timedelta(minutes=180)
 """No repaired minute may end later than this before the time of the run."""
-
-ATTEMPTS: Final[int] = 4
-"""Most attempts a write chunk gets."""
-
-BACKOFF_SECONDS: Final[tuple[float, ...]] = (0.25, 0.5, 1.0)
-"""Pause after a failed attempt, outside the transaction, before the next one."""
 
 PREVIEW_FILE: Final[str] = "preview.csv"
 APPROVAL_FILE: Final[str] = "approval.json"
@@ -139,28 +149,6 @@ PREVIEW_COLUMNS: Final[tuple[str, ...]] = (
 )
 """Header of ``preview.csv``, in column order."""
 
-NATURAL_KEY_INDEXES: Final[frozenset[str]] = frozenset(
-    {"uq_candle_itf_open", "candles_p_uq_itf_open"}
-)
-"""The ordinary and the partitioned parent index of the candle natural key."""
-
-_LEAF_NATURAL_KEY_INDEX: Final[re.Pattern[str]] = re.compile(
-    r"candles_(?:d\d{8}|default)_instrument_public_id_timeframe_open_at_idx"
-)
-"""Leaf index names that ``data/daily_partitions.py`` derives from the parent.
-
-A daily leaf is ``candles_dYYYYMMDD`` and the anomaly buffer ``candles_default``;
-each inherits the parent index as ``{leaf}_{columns joined by _}_idx``.
-"""
-
-_SQLITE_NATURAL_KEY_VIOLATION: Final[str] = (
-    "UNIQUE constraint failed: candles.instrument_public_id, candles.timeframe, candles.open_at"
-)
-"""SQLite names the columns, not the index, of a violated unique index."""
-
-_SQLITE_UNIQUE_VIOLATION: Final[int] = 2067
-"""SQLite extended result code of a unique-constraint violation."""
-
 POSTGRESQL_URL_OPTIONS: Final[frozenset[str]] = frozenset({"ssl"})
 """Query options a PostgreSQL target URL may carry.
 
@@ -168,17 +156,6 @@ SQLAlchemy's asyncpg dialect hands every query option to ``asyncpg.connect``
 in place of the URL's own fields. ``ssl`` only selects the TLS mode of the
 same connection; every other option is refused, routing or not.
 """
-
-_RETRYABLE_SQLSTATES: Final[Mapping[str, str]] = {
-    "55P03": "lock_timeout",
-    "40001": "serialization_failure",
-    "40P01": "deadlock",
-}
-"""PostgreSQL errors that prove the transaction committed nothing."""
-
-_RETRYABLE_OUTCOMES: Final[frozenset[str]] = frozenset(
-    {*_RETRYABLE_SQLSTATES.values(), "natural_key_conflict"}
-)
 
 _COMPLETE_STOPS: Final[frozenset[str]] = frozenset({"completed", "max_rows"})
 """Stop reasons of a write run that ended as planned."""
@@ -191,7 +168,6 @@ _VERSION_READ_INSTRUMENTS: Final[int] = 20
 _ALIAS_READ_PAIRS: Final[int] = 500
 _ERROR_TEXT_LIMIT: Final[int] = 200
 _STATEMENT_TIMEOUT: Final[str] = "SET LOCAL statement_timeout = '20s'"
-_READ_COMMITTED: Final[str] = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
 
 type MinuteKey = tuple[str, datetime]
 type _GuardKey = tuple[str, str, datetime]
@@ -300,25 +276,6 @@ class RepairRequest:
     output_dir: Path
 
 
-@dataclass(frozen=True, slots=True)
-class WriteOptions:
-    """Options that only a write run takes.
-
-    Attributes:
-        voted_preview: Directory holding the voted ``preview.csv`` and ``approval.json``.
-        expect_digest: sha256 of the voted ``approval.json``, in lower-case hex.
-        max_rows: Most selected rows this run applies, or None for all.
-        chunk_pause_seconds: Pause between two chunks.
-        max_consecutive_lock_timeouts: Consecutive lock timeouts that stop the run.
-    """
-
-    voted_preview: Path
-    expect_digest: str
-    max_rows: int | None
-    chunk_pause_seconds: float
-    max_consecutive_lock_timeouts: int
-
-
 def _utc_now() -> datetime:
     """Return the current UTC time.
 
@@ -338,6 +295,7 @@ class RunContext:
         code_revision: Hashes from :func:`code_revision`.
         clock: Current UTC time.
         sleep: Asynchronous pause, used for backoff and between chunks.
+        run_id: The UUIDv7 shared by this invocation's connections and write receipt.
     """
 
     repository: Repository
@@ -345,6 +303,7 @@ class RunContext:
     code_revision: JsonObject
     clock: Callable[[], datetime] = _utc_now
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    run_id: str = field(default_factory=lambda: str(uuid7()))
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -583,7 +542,7 @@ class Selection:
 
 
 @dataclass(frozen=True, slots=True)
-class WriteChunk:
+class WriteChunk(Chunk):
     """One batch for one guarded writer.
 
     Attributes:
@@ -593,9 +552,7 @@ class WriteChunk:
         predecessors: The voted zero of each correction, by natural key.
     """
 
-    number: int
     action: Action
-    rows: tuple[CandleUpsertRow, ...]
     predecessors: Mapping[_GuardKey, CandlePredecessor]
 
 
@@ -635,20 +592,6 @@ def sha256_hex(data: bytes) -> str:
         Lower-case hex sha256.
     """
     return hashlib.sha256(data).hexdigest()
-
-
-def canonical_json(document: JsonValue) -> bytes:
-    """Serialize JSON with sorted keys and no insignificant whitespace.
-
-    Args:
-        document: JSON value with finite numbers.
-
-    Returns:
-        UTF-8 bytes without a trailing newline.
-    """
-    return json.dumps(
-        document, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
-    ).encode()
 
 
 def database_endpoint(db_url: str) -> JsonObject:
@@ -733,6 +676,8 @@ def code_revision(extra_modules: Sequence[ModuleType]) -> JsonObject:
         kraken_closed_candles,
         _trade_candle_builder,
         trade_candle_rows,
+        guarded_candle_write,
+        operator_support,
         sys.modules[__name__],
         *extra_modules,
     )
@@ -760,24 +705,6 @@ def prepare_output_dir(directory: Path) -> None:
         raise RepairRefusedError("--output-dir is not a directory")
     if any(directory.iterdir()):
         raise RepairRefusedError("--output-dir must be empty")
-
-
-def _open_exclusive(path: Path) -> BufferedWriter:
-    """Create a new file readable and writable by its owner only."""
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    os.fchmod(descriptor, 0o600)
-    return os.fdopen(descriptor, "wb")
-
-
-def write_exclusive(path: Path, data: bytes) -> None:
-    """Write a new file with mode 0600, refusing to replace any existing path.
-
-    Args:
-        path: File to create.
-        data: Complete content.
-    """
-    with _open_exclusive(path) as handle:
-        handle.write(data)
 
 
 def refuse_live_edge(window: RepairWindow, run_time: datetime) -> None:
@@ -1803,106 +1730,6 @@ def select_voted(
     return Selection(tuple(selected), tuple(not_voted), tuple(already), tuple(changed))
 
 
-def _sqlstate(error: DBAPIError) -> str | None:
-    """Return the PostgreSQL SQLSTATE of a driver error, if it has one."""
-    value = getattr(error.orig, "sqlstate", None)
-    return value if isinstance(value, str) else None
-
-
-def _constraint_names(error: DBAPIError) -> set[str]:
-    """Collect the constraint names a driver error and its cause report."""
-    names: set[str] = set()
-    for layer in (error.orig, getattr(error.orig, "__cause__", None)):
-        for holder in (layer, getattr(layer, "diag", None)):
-            name = getattr(holder, "constraint_name", None)
-            if isinstance(name, str):
-                names.add(name)
-    return names
-
-
-def is_natural_key_index(name: str) -> bool:
-    """Recognize the candle natural-key index by name.
-
-    Args:
-        name: Index or constraint name a unique violation reports.
-
-    Returns:
-        True for ``uq_candle_itf_open``, ``candles_p_uq_itf_open`` and every leaf
-        index derived from the parent.
-    """
-    return name in NATURAL_KEY_INDEXES or _LEAF_NATURAL_KEY_INDEX.fullmatch(name) is not None
-
-
-def classify_failure(error: BaseException) -> str:
-    """Name a failed attempt's outcome for the retry policy.
-
-    Args:
-        error: What the attempt raised.
-
-    Returns:
-        ``lock_timeout``, ``serialization_failure``, ``deadlock`` or
-        ``natural_key_conflict``, which prove nothing was committed and allow a
-        retry; ``unique_violation`` for any other unique index, which stops the
-        run; otherwise ``uncertain``.
-    """
-    if not isinstance(error, DBAPIError):
-        return "uncertain"
-    sqlstate = _sqlstate(error)
-    retryable = _RETRYABLE_SQLSTATES.get(sqlstate or "")
-    if retryable is not None:
-        return retryable
-    sqlite_unique = getattr(error.orig, "sqlite_errorcode", None) == _SQLITE_UNIQUE_VIOLATION
-    if sqlstate != "23505" and not sqlite_unique:
-        return "uncertain"
-    natural = any(is_natural_key_index(name) for name in _constraint_names(error)) or (
-        sqlite_unique and str(error.orig) == _SQLITE_NATURAL_KEY_VIOLATION
-    )
-    return "natural_key_conflict" if natural else "unique_violation"
-
-
-def error_fields(error: BaseException) -> JsonObject:
-    """Describe an error without its text, which can carry connection details.
-
-    Args:
-        error: Any exception.
-
-    Returns:
-        Its class, its driver error's class and its SQLSTATE when known.
-    """
-    original = getattr(error, "orig", None)
-    return {
-        "error": type(error).__name__,
-        "driver_error": None if original is None else type(original).__name__,
-        "sqlstate": _sqlstate(error) if isinstance(error, DBAPIError) else None,
-    }
-
-
-_WRITTEN_FIELDS: Final[tuple[str, ...]] = (
-    "session_id",
-    "sequence_id",
-    "instrument_public_id",
-    "timeframe",
-    "open_at",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "vwap",
-    "trades",
-    "source",
-    "complete",
-)
-"""Fields that identify this run's version of a row: its writer ids and payload."""
-
-
-def _written_by(version: CandleVersionRow, row: CandleUpsertRow) -> bool:
-    """Recognize the version a write of ``row`` would have stored."""
-    stored = cast(Mapping[str, object], version)
-    written = cast(Mapping[str, object], row)
-    return all(stored[name] == written[name] for name in _WRITTEN_FIELDS)
-
-
 async def reconcile(
     repository: Repository, rows: Sequence[CandleUpsertRow], session_id: str
 ) -> dict[MinuteKey, str]:
@@ -1923,19 +1750,9 @@ async def reconcile(
         ``applied`` for a version the read found current, ``applied_superseded``
         for one it found superseded, else ``uncertain``, by key.
     """
-    keys = [(row["instrument_public_id"], TIMEFRAME, row["open_at"]) for row in rows]
-    async with repository.session() as session:
-        if repository.dialect_name == "postgresql":
-            await session.execute(text(_READ_COMMITTED))
-            await session.execute(text(_STATEMENT_TIMEOUT))
-        versions = await repository.get_session_candle_versions(session, keys, session_id)
-    outcomes: dict[MinuteKey, str] = {}
-    for row in rows:
-        current = [is_current for version, is_current in versions if _written_by(version, row)]
-        outcomes[_guard_key(row)] = (
-            "uncertain" if not current else "applied" if any(current) else "applied_superseded"
-        )
-    return outcomes
+    keyed = {(row["instrument_public_id"], TIMEFRAME, row["open_at"]): row for row in rows}
+    outcomes = await reconcile_versions(repository, keyed, session_id)
+    return {(instrument, minute): outcome for (instrument, _, minute), outcome in outcomes.items()}
 
 
 def write_chunks(
@@ -1956,12 +1773,14 @@ def write_chunks(
     Returns:
         Chunks of at most 100 rows, numbered from 1.
     """
-    rows = {
-        entry.source.key: repair_row(
-            entry, source, entry.source.known_at or write_time, run_id, sequence
-        )
-        for sequence, entry in enumerate(entries, start=1)
-    }
+    rows = {}
+    for sequence, entry in enumerate(entries, start=1):
+        row = repair_row(entry, source, entry.source.known_at or write_time, run_id, sequence)
+        if entry.action is Action.INSERT:
+            row["public_id"] = deterministic_candle_public_id(
+                row["instrument_public_id"], row["timeframe"], row["open_at"]
+            )
+        rows[entry.source.key] = row
     chunks: list[WriteChunk] = []
     for action in (Action.INSERT, Action.CORRECT):
         planned = [entry for entry in entries if entry.action is action]
@@ -2004,187 +1823,32 @@ def _entry_reference(entry: PlanEntry) -> JsonObject:
     }
 
 
-_ROW_OUTCOMES: Final[tuple[str, ...]] = (
-    "applied",
-    "skipped_by_guard",
-    "applied_superseded",
-    "uncertain",
-    "not_applied",
-)
-"""Outcomes a chunk receipt lists rows under."""
+@dataclass(frozen=True, slots=True)
+class _WriteAdapter:
+    """Bind the one-minute writers and reconciliation to the current run."""
 
+    repository: Repository
+    source: RepairSource
+    run_id: str
 
-@dataclass
-class _ChunkRecord:
-    """The receipt of one chunk, filled while it runs."""
-
-    chunk: WriteChunk
-    started_at: datetime
-    attempts: list[JsonObject] = field(default_factory=list)
-    outcomes: dict[MinuteKey, str] = field(default_factory=dict)
-    reconciliation_error: JsonObject | None = None
-
-    def settle(self, outcome: str) -> None:
-        """Give every row without an outcome the same one."""
-        for row in self.chunk.rows:
-            self.outcomes.setdefault(_guard_key(row), outcome)
-
-    def to_json(self, ended_at: datetime) -> JsonObject:
-        """Render the chunk's receipt line."""
-        listed: dict[str, list[JsonValue]] = {outcome: [] for outcome in _ROW_OUTCOMES}
-        for row in self.chunk.rows:
-            listed[self.outcomes.get(_guard_key(row), "uncertain")].append(_row_reference(row))
-        return {
-            "chunk": self.chunk.number,
-            "action": self.chunk.action.value,
-            "rows": len(self.chunk.rows),
-            "attempts": list(self.attempts),
-            "attempt_count": len(self.attempts),
-            "reconciliation_error": self.reconciliation_error,
-            "started_at": self.started_at.isoformat(),
-            "ended_at": ended_at.isoformat(),
-            **{outcome: cast(JsonValue, rows) for outcome, rows in listed.items()},
-        }
-
-
-class _ReceiptLog:
-    """Append one durable JSON line per finished chunk to ``receipt.jsonl``."""
-
-    def __init__(self, path: Path) -> None:
-        """Create the log exclusively with mode 0600."""
-        self._handle = _open_exclusive(path)
-
-    def append(self, record: JsonObject) -> None:
-        """Write, flush and sync one line."""
-        self._handle.write(canonical_json(record) + b"\n")
-        self._handle.flush()
-        os.fsync(self._handle.fileno())
-
-    def close(self) -> None:
-        """Close the log."""
-        self._handle.close()
-
-
-class _ChunkWriter:
-    """Apply chunks with the retry policy and keep their receipts."""
-
-    def __init__(
-        self,
-        context: RunContext,
-        source: RepairSource,
-        options: WriteOptions,
-        log: _ReceiptLog,
-        run_id: str,
-    ) -> None:
-        """Bind the writer to its run."""
-        self._context = context
-        self._source = source
-        self._options = options
-        self._log = log
-        self._run_id = run_id
-        self._lock_streak = 0
-        self.records: list[JsonObject] = []
-
-    async def apply(self, chunks: Sequence[WriteChunk]) -> str:
-        """Apply chunks in order, pausing between them, until one stops the run."""
-        for index, chunk in enumerate(chunks):
-            if index:
-                await self._context.sleep(self._options.chunk_pause_seconds)
-            stop = await self._apply_chunk(chunk)
-            if stop is not None:
-                return stop
-        return "completed"
-
-    async def _apply_chunk(self, chunk: WriteChunk) -> str | None:
-        """Run one chunk's attempts and log its receipt as soon as it ends."""
-        record = _ChunkRecord(chunk, self._context.clock())
-        try:
-            return await self._attempts(chunk, record)
-        finally:
-            record.settle("uncertain")
-            line = record.to_json(self._context.clock())
-            self.records.append(line)
-            self._log.append(line)
-
-    async def _attempts(self, chunk: WriteChunk, record: _ChunkRecord) -> str | None:
-        """Attempt a chunk until it is acknowledged or the policy stops the run."""
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                returned = await self._call(chunk)
-            except Exception as error:
-                stop = await self._failed(chunk, record, attempt, error)
-                if stop is not None:
-                    return stop
-                continue
-            except BaseException as error:
-                record.attempts.append(
-                    {"attempt": attempt, "outcome": "cancelled", **error_fields(error)}
-                )
-                raise
-            record.attempts.append({"attempt": attempt, "outcome": "acknowledged"})
-            for row in returned:
-                record.outcomes[_guard_key(row)] = "applied"
-            record.settle("skipped_by_guard")
-            self._lock_streak = 0
-            return None
-
-    async def _call(self, chunk: WriteChunk) -> list[CandleUpsertRow]:
-        """Hand one chunk to its guarded writer in an owned transaction."""
-        repository = self._context.repository
+    async def write(self, chunk: WriteChunk) -> list[CandleUpsertRow]:
+        """Look up the appropriate guarded writer for this attempt."""
         rows = list(chunk.rows)
         if chunk.action is Action.CORRECT:
-            return await repository.correct_false_zero_candles(
-                rows, source=self._source.row_source, expected_predecessors=chunk.predecessors
+            return await self.repository.correct_false_zero_candles(
+                rows, source=self.source.row_source, expected_predecessors=chunk.predecessors
             )
-        if self._source is RepairSource.SNAPSHOT:
-            return await repository.insert_missing_native_candles(rows)
-        return await repository.insert_missing_calculated_candles(rows)
+        if self.source is RepairSource.SNAPSHOT:
+            return await self.repository.insert_missing_native_candles(rows)
+        return await self.repository.insert_missing_calculated_candles(rows)
 
-    async def _failed(
-        self, chunk: WriteChunk, record: _ChunkRecord, attempt: int, error: Exception
-    ) -> str | None:
-        """Apply the retry policy to a failed attempt; return a stop reason or None to retry."""
-        outcome = classify_failure(error)
-        record.attempts.append({"attempt": attempt, "outcome": outcome, **error_fields(error)})
-        if outcome not in _RETRYABLE_OUTCOMES:
-            if outcome == "uncertain":
-                await self._reconcile(chunk, record)
-                return "uncertain_acknowledgement"
-            record.settle("not_applied")
-            return outcome
-        self._lock_streak = self._lock_streak + 1 if outcome == "lock_timeout" else 0
-        if self._lock_streak >= self._options.max_consecutive_lock_timeouts:
-            record.settle("not_applied")
-            return "lock_timeouts"
-        if attempt == ATTEMPTS:
-            record.settle("not_applied")
-            return "attempts_exhausted"
-        await self._context.sleep(BACKOFF_SECONDS[attempt - 1])
-        return None
-
-    async def _reconcile(self, chunk: WriteChunk, record: _ChunkRecord) -> None:
-        """Record what a plain read finds of an uncertain chunk; a failed read leaves it uncertain."""
-        try:
-            record.outcomes.update(
-                await reconcile(self._context.repository, chunk.rows, self._run_id)
-            )
-        except Exception as error:
-            record.reconciliation_error = error_fields(error)
-
-
-def _reached(records: Sequence[JsonObject]) -> int:
-    """Count the rows of every chunk the run submitted."""
-    return sum(cast(int, record["rows"]) for record in records)
-
-
-def _totals(records: Sequence[JsonObject]) -> JsonObject:
-    """Count rows per outcome over all chunk receipts."""
-    return {
-        outcome: sum(len(cast(list[JsonValue], record[outcome])) for record in records)
-        for outcome in _ROW_OUTCOMES
-    }
+    async def reconcile_chunk(self, rows: Sequence[CandleUpsertRow]) -> dict[CandleKey, str]:
+        """Call the repair reconciler and adapt its minute keys for the chunk writer."""
+        outcomes = await reconcile(self.repository, rows, self.run_id)
+        return {
+            (instrument, TIMEFRAME, minute): outcome
+            for (instrument, minute), outcome in outcomes.items()
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -2216,12 +1880,12 @@ class _WriteRun:
             "stop_reason": stop_reason,
             "selected": len(self.selection.selected),
             "scheduled": self.scheduled,
-            "reached": _reached(records),
+            "reached": reached(records),
             "not_voted": [_entry_reference(entry) for entry in self.selection.not_voted],
             "already_applied": [_line_reference(line) for line in self.selection.already_applied],
             "changed": [_line_reference(line) for line in self.selection.changed],
             "chunks": list(records),
-            "totals": _totals(records),
+            "totals": totals(records),
         }
 
 
@@ -2246,9 +1910,16 @@ async def apply_selection(
     """
     write_time = context.clock()
     batch = selection.selected[: options.max_rows]
-    run = _WriteRun(voted_digest, str(uuid7()), write_time, write_time, selection, len(batch))
-    log = _ReceiptLog(request.output_dir / RECEIPT_LINES_FILE)
-    writer = _ChunkWriter(context, request.source, options, log, run.run_id)
+    run = _WriteRun(voted_digest, context.run_id, write_time, write_time, selection, len(batch))
+    log = ReceiptLog(request.output_dir / RECEIPT_LINES_FILE)
+    adapter = _WriteAdapter(context.repository, request.source, run.run_id)
+    writer = ChunkWriter(
+        options,
+        log,
+        ChunkAdapter(adapter.write, adapter.reconcile_chunk, _row_reference),
+        context.clock,
+        context.sleep,
+    )
     stop_reason = "error"
     try:
         stop_reason = await writer.apply(
@@ -2256,7 +1927,7 @@ async def apply_selection(
         )
         if stop_reason == "completed" and run.scheduled < len(selection.selected):
             stop_reason = "max_rows"
-    except (asyncio.CancelledError, KeyboardInterrupt):
+    except asyncio.CancelledError, KeyboardInterrupt:
         stop_reason = "cancelled"
         raise
     finally:
@@ -2268,7 +1939,7 @@ async def apply_selection(
             ).encode()
             + b"\n",
         )
-    return stop_reason, _totals(writer.records)
+    return stop_reason, totals(writer.records)
 
 
 async def plan_repair(context: RunContext, request: RepairRequest) -> PlanArtifacts:

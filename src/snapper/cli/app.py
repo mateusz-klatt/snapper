@@ -44,6 +44,7 @@ Data Updates:
     - ``backfill-candles-from-trades``: Backfill calculated 1m candles from trades
     - ``backfill-synthesized-candles``: Backfill synthesized higher-timeframe candles
     - ``repair-candles``: Repair absent and false-zero 1m candles through guarded writers
+    - ``rebuild-synthesized-candles``: Rebuild and verify higher candles from recorded repairs
     - ``void-candles``: Void the active candles of retired Kraken instruments under the candle fence
     - ``check-candle-identities``: Check read-only that stored candle ids are deterministic
     - ``update-kraken-futures-funding-rates``: Backfill funding rates
@@ -160,6 +161,7 @@ from snapper.cli.execution_annulment import annulment_app
 from snapper.cli.fx_proofs import fx_proofs_app
 from snapper.cli.mcp_oauth import mcp_oauth_app
 from snapper.cli.pnl_minimum_activation_gate import pnl_minimum_gate_app
+from snapper.cli.synthesized_candle_rebuild import rebuild_synthesized_candles
 from snapper.cli.token_preflight import token_app
 from snapper.cli.trade_projection_checkpoints import retire_trade_projection_checkpoints
 from snapper.config.android_push import CONFIG_FILE_ENV as ANDROID_PUSH_CONFIG_FILE_ENV
@@ -3101,6 +3103,9 @@ def notify() -> None:
 app.command(name="android-push-state")(android_push_state)
 app.command(name="dev-mint-pat")(dev_mint_pat)
 app.command(name="repair-candles", context_settings=REPAIR_CANDLES_CONTEXT)(repair_candles)
+app.command(name="rebuild-synthesized-candles", context_settings=REPAIR_CANDLES_CONTEXT)(
+    rebuild_synthesized_candles
+)
 app.command(name="void-candles", context_settings=VOID_CANDLES_CONTEXT)(void_candles)
 app.command(name="check-candle-identities")(check_candle_identities)
 app.command(name="retire-accruals")(retire_accruals)

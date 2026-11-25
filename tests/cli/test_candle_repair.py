@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 
 import asyncpg
 import pytest
@@ -358,7 +359,7 @@ def test_used_output_directory_refuses_before_a_repository_is_built(
 
 
 def test_dry_run_then_confirmed_write_then_equal_rerun(
-    database: str, snapshot: Path, tmp_path: Path
+    database: str, snapshot: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The operator flow previews, writes the voted rows and previews equal minutes.
 
@@ -367,7 +368,17 @@ def test_dry_run_then_confirmed_write_then_equal_rerun(
         runs again.
     Then: The dry run writes its three files and prints the digest; the write applies
         the three rows; the second dry run plans nothing but equal minutes.
+        All three connections are named with the invocation's UUIDv7.
     """
+    names: list[str] = []
+
+    def named_repository(db_url: str, *, application_name: str) -> SQLAlchemyRepository:
+        """Record the connection name passed before any database access."""
+        assert db_url == database
+        names.append(application_name)
+        return configured_repository(db_url, application_name=application_name)
+
+    monkeypatch.setattr(candle_repair_cli, "configured_repository", named_repository)
     dry = _invoke(*_snapshot_arguments(snapshot, tmp_path / "dry"))
     assert dry.exit_code == 0, dry.stderr
     assert "target database: dialect=sqlite" in dry.stdout
@@ -395,6 +406,10 @@ def test_dry_run_then_confirmed_write_then_equal_rerun(
     rerun = _invoke(*_snapshot_arguments(snapshot, tmp_path / "rerun"))
     assert rerun.exit_code == 0, rerun.stderr
     assert json.loads((tmp_path / "rerun" / "summary.json").read_text())["actions"]["equal"] == 3
+    assert len(set(names)) == len(names) == 3
+    assert names[1] == f"snapper:repair-candles:{receipt['run_id']}"
+    assert all(name.startswith("snapper:repair-candles:") for name in names)
+    assert all(UUID(name.split(":")[-1]).version == 7 for name in names)
 
 
 def test_stopped_write_exits_with_one_and_points_at_the_receipt(
@@ -501,7 +516,11 @@ def test_no_credential_reaches_output_files_or_logs(
         lambda: SimpleNamespace(db_url=_SENTINEL_URL + "?ssl=require"),
     )
     monkeypatch.setattr(
-        candle_repair_cli, "configured_repository", lambda db_url: configured_repository(database)
+        candle_repair_cli,
+        "configured_repository",
+        lambda db_url, *, application_name: configured_repository(
+            database, application_name=application_name
+        ),
     )
     result = _invoke(*_snapshot_arguments(snapshot, tmp_path / "out"))
     assert result.exit_code == 0, result.stderr

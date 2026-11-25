@@ -269,6 +269,29 @@ Message types (in `messaging.schemas.data`):
 
 Every Data class carries `public_id: str` (UUID7), `type: Literal[...]`, and `timestamp: datetime`.
 
+#### Guarded historical candle repair
+
+`repair-candles` writes missing or corrected Kraken one-minute candles with an
+invocation UUID as their writer session. `rebuild-synthesized-candles` binds
+recorded repair receipts to the database versions they describe and derives
+the containing 5m, 15m, 30m, 1h, 4h, and 1d windows. It feeds valid current
+minutes through the same aggregator and row projection as live repair.
+
+A voted rebuild binds the output predecessor and a fingerprint of the current
+input versions. A lock-free preflight screens candidates before the repository
+acquires `SHARE ROW EXCLUSIVE` on PostgreSQL or starts `BEGIN IMMEDIATE` on
+SQLite. Under that fence it rechecks both bindings and writes up to 100 rows
+whose full grids total at most 1,440 minutes. A native or calculated output,
+closed-only history, or a decrease in observed volume or trade count blocks
+that window. Successful replacements retain the predecessor's public ID and
+close its knowledge interval at the invocation's fixed write time.
+
+Both commands share the retry and receipt machinery. Verification authenticates
+the write's artifacts and observes the higher-timeframe output and its current
+inputs in one snapshot per read unit. It reports regressions, uncertain rows,
+untouched windows, and exclusions across the derived scope. See the operator
+workflow in [CLI reference](cli.md#rebuild-synthesized-candles).
+
 ### Account truth invalidation (executors)
 
 Each per-wallet executor observes venue balances and positions independently

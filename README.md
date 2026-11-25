@@ -423,6 +423,7 @@ snapper retire-trade-projection-checkpoints --all  # Dry-run checkpoint retireme
 snapper retire-accruals --wallet W --instrument I --accrual A  # Dry-run accrual retirement
 snapper repair-cancel-targets --cancel C --output-dir D  # Dry-run stale cancel evidence repair
 snapper repair-candles --source trades --exchange kraken --symbol S --start T --end T --output-dir D  # Dry-run 1m candle repair
+snapper rebuild-synthesized-candles --repair-run R --run-records records.json --end T --output-dir D  # Dry-run higher-timeframe rebuild
 ```
 
 ### Configuration and Maintenance

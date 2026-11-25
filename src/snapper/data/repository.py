@@ -73,6 +73,7 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
@@ -398,6 +399,7 @@ from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CandleVersionRow
 from snapper.data.repository_types import CandleWindowQuery
 from snapper.data.repository_types import CheckpointUpsertRow
+from snapper.data.repository_types import ClientSample
 from snapper.data.repository_types import CreateScopeGrantRequest
 from snapper.data.repository_types import CreateWalletUserReadGrantRequest
 from snapper.data.repository_types import DerivedProjectionPlane
@@ -532,6 +534,9 @@ from snapper.data.repository_types import SpotReconciliationAnchorRow
 from snapper.data.repository_types import SpotReconciliationBundle
 from snapper.data.repository_types import SpotReplayExecutionSourceRow
 from snapper.data.repository_types import SpotSubmitCommandRead
+from snapper.data.repository_types import SynthesizedRebuildExpectation
+from snapper.data.repository_types import SynthesizedRebuildOutcome
+from snapper.data.repository_types import SynthesizedRebuildResult
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
 from snapper.data.repository_types import TradeCommandDispatchUpdate
@@ -614,6 +619,9 @@ __all__ = [
     "IMMUTABLE_LEDGER_TABLE_NAMES",
     "get_repository",
     "dispose_repositories",
+    "sample_other_client_backends",
+    "synthesis_inputs_sha256",
+    "synthesized_observation_loss",
     "where_active",
     "where_active_now",
     "ENV_VARS",
@@ -1644,11 +1652,78 @@ a legal retry would race the retry's own lifecycle).
 _LIFECYCLE_FOLD_COMMAND_TYPES: tuple[str, ...] = ("create", "submit")
 _CandleNaturalKey = tuple[str, str, datetime]
 _ReconciledCandleSource = Literal["native", "calculated", "synthesized"]
+_SYNTHESIZED_REBUILD_MAX_ROWS: Final[int] = 100
+_SYNTHESIZED_REBUILD_MAX_MINUTES: Final[int] = 1440
 _CANDLE_LOOKUP_CHUNK_SIZE = 300
 _KRAKEN_EQUITIES_EXCHANGE: Final[str] = "kraken_equities"
 _PORTFOLIO_REAL_RECONCILIATION_METHODS: Final[frozenset[str]] = frozenset(
     {"futures_position", "spot_execution_replay", "margin_ledger_replay"}
 )
+
+
+def synthesis_inputs_sha256(versions: Sequence[CandleVersionRow]) -> str:
+    """Fingerprint current input identities and payloads in UTC minute order."""
+    document = [
+        [
+            version["open_at"].astimezone(UTC).isoformat(),
+            version["id"],
+            version["public_id"],
+            version["timestamp"].astimezone(UTC).isoformat(),
+            version["source"],
+            version["complete"],
+            *[
+                repr(value) if isinstance(value, float) else value
+                for value in (
+                    version["open"],
+                    version["high"],
+                    version["low"],
+                    version["close"],
+                    version["volume"],
+                    version["vwap"],
+                    version["trades"],
+                )
+            ],
+        ]
+        for version in sorted(versions, key=lambda version: version["open_at"])
+    ]
+    return sha256(
+        json.dumps(
+            document, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        ).encode()
+    ).hexdigest()
+
+
+def synthesized_observation_loss(current: CandleVersionRow, row: CandleUpsertRow) -> str | None:
+    """Return the reasons a rebuild cannot preserve the current observations."""
+    volume_known = math.isfinite(current["volume"])
+    current_trades = current["trades"]
+    if current_trades is not None and not math.isfinite(current_trades):
+        current_trades = None
+    reasons = []
+    if volume_known and row["volume"] < current["volume"]:
+        reasons.append("lower_volume")
+    trades = row["trades"]
+    if current_trades is not None and trades is not None and trades < current_trades:
+        reasons.append("lower_trades")
+    if not volume_known or current_trades is None:
+        reasons.append("unknown_current")
+    return "+".join(reasons) or None
+
+
+async def sample_other_client_backends(session: AsyncSession) -> ClientSample | None:
+    """Sample other PostgreSQL client backends and the clock in one statement."""
+    if session.get_bind().dialect.name == "sqlite":
+        return None
+    result = await session.execute(
+        text(
+            "SELECT count(*), clock_timestamp() FROM pg_stat_activity "
+            "WHERE pid <> pg_backend_pid() AND "
+            "(backend_type = 'client backend' OR "
+            "(backend_type IS NULL AND usename IS NOT NULL AND datname IS NOT NULL))"
+        )
+    )
+    count, observed_at = result.one()
+    return ClientSample(count, observed_at)
 
 
 def _require_command_wallet(row: TradeCommandInsertRow) -> None:
@@ -5277,6 +5352,31 @@ class Repository(ABC):
 
         Returns:
             Absent candidates or acknowledged inserted rows.
+        """
+        ...
+
+    @abstractmethod
+    async def rebuild_synthesized_candles(
+        self,
+        rows: list[CandleUpsertRow],
+        *,
+        expected: Mapping[_CandleNaturalKey, SynthesizedRebuildExpectation],
+        dry_run: bool = False,
+    ) -> SynthesizedRebuildResult:
+        """Insert absent windows or replace voted synthesized versions under the writer fence.
+
+        Compare the voted predecessor and minute fingerprint before writing,
+        first in a read-only preflight and again under the fence. The write
+        never lowers known observations and never replaces another source.
+
+        Args:
+            rows: Up to 100 complete synthesized windows totaling 1,440 grid minutes.
+            expected: One predecessor and input fingerprint per natural key.
+            dry_run: Return eligibility without taking the fence or writing.
+
+        Returns:
+            Per-key outcomes and, for an acknowledged PostgreSQL write, a sample
+            of other client backends observed just before commit.
         """
         ...
 
@@ -11704,8 +11804,11 @@ class SQLAlchemyRepository(Repository):
         session_factory: Async session factory.
     """
 
-    def __init__(self, db_url: str) -> None:
+    def __init__(self, db_url: str, *, application_name: str | None = None) -> None:
         """Initialize repository with database URL.
+
+        Named connections select startup settings from the URL's scheme, so
+        keywords in the database name cannot affect the selected dialect.
 
         Pool selection:
 
@@ -11744,7 +11847,15 @@ class SQLAlchemyRepository(Repository):
         Args:
             db_url: SQLAlchemy async database URL
                 (e.g., 'sqlite+aiosqlite:///./data/db.sqlite').
+            application_name: Optional printable ASCII name of at most 63 bytes
+                sent when opening each PostgreSQL connection.
         """
+        if application_name is not None and (
+            len(application_name) > 63
+            or not application_name.isascii()
+            or not application_name.isprintable()
+        ):
+            raise ValueError("application name must be at most 63 bytes of printable ASCII")
         self.db_url = db_url
         connect_args: dict[str, Any] = {}
         engine_kwargs: dict[str, Any] = {
@@ -11752,15 +11863,20 @@ class SQLAlchemyRepository(Repository):
             "pool_pre_ping": True,
             "pool_recycle": 3600,
         }
-        if "sqlite" in db_url:
+        dialect_source = db_url if application_name is None else db_url.partition(":")[0]
+        is_sqlite = "sqlite" in dialect_source
+        if is_sqlite:
             connect_args = {
                 "timeout": 30,
                 "check_same_thread": False,
             }
             if ":memory:" in db_url:
                 engine_kwargs["poolclass"] = StaticPool
-        elif "postgresql" in db_url:
-            connect_args["server_settings"] = {"timezone": "UTC"}
+        elif "postgresql" in dialect_source:
+            server_settings = {"timezone": "UTC"}
+            if application_name is not None:
+                server_settings["application_name"] = application_name
+            connect_args["server_settings"] = server_settings
             pool_size = os.getenv(_DB_POOL_SIZE_ENV)
             if pool_size is not None:
                 engine_kwargs["pool_size"] = int(pool_size)
@@ -11770,7 +11886,7 @@ class SQLAlchemyRepository(Repository):
         self.engine: AsyncEngine = create_async_engine(
             db_url, connect_args=connect_args, **engine_kwargs
         )
-        if "sqlite" in db_url:
+        if is_sqlite:
             _register_sqlite_fk_pragma(self.engine.sync_engine)
         self.session_factory = async_sessionmaker(
             self.engine, expire_on_commit=False, class_=AsyncSession
@@ -14391,6 +14507,197 @@ class SQLAlchemyRepository(Repository):
             *(literal(values[name], type_=Candle.__table__.c[name].type) for name in columns)
         ).where(absent)
         return insert(Candle).from_select(columns, source).returning(Candle.public_id)
+
+    async def rebuild_synthesized_candles(
+        self,
+        rows: list[CandleUpsertRow],
+        *,
+        expected: Mapping[_CandleNaturalKey, SynthesizedRebuildExpectation],
+        dry_run: bool = False,
+    ) -> SynthesizedRebuildResult:
+        """Run one validated rebuild batch using the same guard before and under the fence."""
+        if len(rows) > _SYNTHESIZED_REBUILD_MAX_ROWS:
+            raise ValueError("synthesized rebuild batch exceeds 100 rows")
+        normalized = self._normalize_reconciled_candle_rows(rows, "synthesized")
+        candidates = {self._candle_natural_key(row): row for row in normalized}
+        if candidates.keys() != expected.keys():
+            raise ValueError("synthesized rebuild expectations must match the batch keys")
+        minutes = sum(
+            self._reconciled_candle_seconds(key[1], "synthesized") // 60 for key in candidates
+        )
+        if minutes > _SYNTHESIZED_REBUILD_MAX_MINUTES:
+            raise ValueError("synthesized rebuild batch exceeds 1,440 grid minutes")
+        if not candidates:
+            return SynthesizedRebuildResult({})
+        async with self.session() as preflight:
+            outcomes, _ = await self._synthesized_rebuild_targets(preflight, candidates, expected)
+        eligible = {
+            key: row
+            for key, row in candidates.items()
+            if outcomes[key].status in {"insert", "replace"}
+        }
+        if dry_run or not eligible:
+            return SynthesizedRebuildResult(outcomes)
+        async with self.session() as owned:
+            await self._begin_candle_reconciliation_write(owned, sqlite_write_lock=True)
+            locked, current = await self._synthesized_rebuild_targets(owned, eligible, expected)
+            committed = await self._write_synthesized_rebuild_targets(
+                owned, eligible, locked, current
+            )
+            sample = await sample_other_client_backends(owned) if committed else None
+            await owned.commit()
+        return SynthesizedRebuildResult(outcomes | locked | committed, sample)
+
+    @classmethod
+    async def _synthesized_rebuild_targets(
+        cls,
+        session: AsyncSession,
+        rows: Mapping[_CandleNaturalKey, CandleUpsertRow],
+        expected: Mapping[_CandleNaturalKey, SynthesizedRebuildExpectation],
+    ) -> tuple[
+        dict[_CandleNaturalKey, SynthesizedRebuildOutcome],
+        dict[_CandleNaturalKey, CandleVersionRow | None],
+    ]:
+        """Read output ownership and current input versions, then classify each proposed row."""
+        result = await session.execute(
+            select(Candle.__table__, (Candle.known_to == KNOWN_TO_MAX).label("is_current")).where(
+                tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(
+                    list(rows)
+                )
+            )
+        )
+        current: dict[_CandleNaturalKey, CandleVersionRow | None] = {}
+        for stored in result.mappings().all():
+            version = dict(stored)
+            is_current = version.pop("is_current")
+            candle = cast(CandleVersionRow, version)
+            key = cls._candle_natural_key(candle)
+            if is_current:
+                current[key] = candle
+            else:
+                current.setdefault(key, None)
+        inputs = await cls._synthesized_rebuild_inputs(session, rows.keys())
+        outcomes = {
+            key: cls._synthesized_rebuild_outcome(
+                row, expected[key], current.get(key), key in current, inputs[key]
+            )
+            for key, row in rows.items()
+        }
+        return outcomes, current
+
+    @classmethod
+    async def _synthesized_rebuild_inputs(
+        cls, session: AsyncSession, keys: Collection[_CandleNaturalKey]
+    ) -> dict[_CandleNaturalKey, list[CandleVersionRow]]:
+        """Select the covered minute grids in one bounded query per instrument and UTC day."""
+        groups: dict[tuple[str, datetime], dict[_CandleNaturalKey, datetime]] = {}
+        for key in keys:
+            instrument, timeframe, start = key
+            day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = start + timedelta(
+                seconds=cls._reconciled_candle_seconds(timeframe, "synthesized")
+            )
+            groups.setdefault((instrument, day), {})[key] = end
+        inputs = {}
+        for (instrument, _), windows in groups.items():
+            result = await session.execute(
+                select(Candle.__table__).where(
+                    Candle.instrument_public_id == instrument,
+                    Candle.timeframe == "1m",
+                    Candle.known_to == KNOWN_TO_MAX,
+                    Candle.open_at >= min(key[2] for key in windows),
+                    Candle.open_at < max(windows.values()),
+                    or_(
+                        *(
+                            and_(Candle.open_at >= key[2], Candle.open_at < end)
+                            for key, end in windows.items()
+                        )
+                    ),
+                )
+            )
+            versions = [cast(CandleVersionRow, dict(stored)) for stored in result.mappings().all()]
+            for key, end in windows.items():
+                inputs[key] = [
+                    version for version in versions if key[2] <= version["open_at"] < end
+                ]
+        return inputs
+
+    @staticmethod
+    def _synthesized_rebuild_outcome(
+        row: CandleUpsertRow,
+        expected: SynthesizedRebuildExpectation,
+        current: CandleVersionRow | None,
+        has_history: bool,
+        inputs: Sequence[CandleVersionRow],
+    ) -> SynthesizedRebuildOutcome:
+        """Apply the ordered guards to one proposed output and its minute grid."""
+        predecessor = expected["predecessor"]
+        if current is None:
+            if has_history:
+                return SynthesizedRebuildOutcome("history_without_current")
+            if predecessor is not None:
+                return SynthesizedRebuildOutcome("predecessor_changed")
+        else:
+            if predecessor != CandlePredecessor(
+                id=current["id"], public_id=current["public_id"], timestamp=current["timestamp"]
+            ):
+                return SynthesizedRebuildOutcome("predecessor_changed")
+            refused = SQLAlchemyRepository._synthesized_rebuild_replacement_outcome(current, row)
+            if refused is not None:
+                return refused
+        if synthesis_inputs_sha256(inputs) != expected["inputs_sha256"]:
+            return SynthesizedRebuildOutcome("inputs_changed")
+        return SynthesizedRebuildOutcome("insert" if current is None else "replace")
+
+    @staticmethod
+    def _synthesized_rebuild_replacement_outcome(
+        current: CandleVersionRow, row: CandleUpsertRow
+    ) -> SynthesizedRebuildOutcome | None:
+        """Return the first refusal specific to replacing an exact predecessor."""
+        if current["source"] != "synthesized":
+            return SynthesizedRebuildOutcome("protected_source")
+        if current["timestamp"] >= row["timestamp"]:
+            return SynthesizedRebuildOutcome("not_newer")
+        before: Mapping[str, object] = current
+        after: Mapping[str, object] = row
+        business = (
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "vwap",
+            "trades",
+            "source",
+            "complete",
+            "price_basis",
+        )
+        if all(before[field] == after[field] for field in business):
+            return SynthesizedRebuildOutcome("unchanged")
+        loss = synthesized_observation_loss(current, row)
+        return None if loss is None else SynthesizedRebuildOutcome("would_lose_observations", loss)
+
+    @classmethod
+    async def _write_synthesized_rebuild_targets(
+        cls,
+        session: AsyncSession,
+        rows: Mapping[_CandleNaturalKey, CandleUpsertRow],
+        outcomes: Mapping[_CandleNaturalKey, SynthesizedRebuildOutcome],
+        current: Mapping[_CandleNaturalKey, CandleVersionRow | None],
+    ) -> dict[_CandleNaturalKey, SynthesizedRebuildOutcome]:
+        """Stage only locked candidates, preserving the input rows for retries."""
+        written = {}
+        for key, row in rows.items():
+            outcome = outcomes[key].status
+            if outcome == "insert":
+                result = await session.execute(cls._missing_candle_insert_statement(row))
+                result.scalar_one()
+                written[key] = SynthesizedRebuildOutcome("inserted")
+            elif outcome == "replace":
+                existing = cast(CandleVersionRow, current[key])
+                await cls._replace_synthesized_candle_version(session, row.copy(), existing)
+                written[key] = SynthesizedRebuildOutcome("replaced")
+        return written
 
     async def upsert_historical_synthesized_candles(self, rows: list[CandleUpsertRow]) -> int:
         """Commit insert-or-synthesized-only revisions under the bounded candle writer fence.

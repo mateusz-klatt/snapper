@@ -414,7 +414,8 @@ synthesized candle with volume 0 and no trades for a minute that had trades
 from stored trades. Rows are written only through the guarded repository writers
 `insert_missing_native_candles`, `insert_missing_calculated_candles` and
 `correct_false_zero_candles`, which never close, update or replace a native or
-calculated row. Higher timeframes are not repaired.
+calculated row. Use [the higher-timeframe rebuild](#rebuild-synthesized-candles)
+to repair the synthesized windows that contain those minutes.
 
 ```bash
 snapper repair-candles --source snapshot --snapshot-dir <snapshot-root> --all-mapped \
@@ -505,8 +506,158 @@ chunk ends. `receipt.json` counts the rows the vote selected, the rows this run
 attempt and row outcome, and is written even when the write fails or is
 cancelled. A write that stops before its end exits `1`.
 
-Each correction chunk takes `SHARE ROW EXCLUSIVE` on `candles`, so live candle
-writers wait up to one second per chunk: run writes in quiet hours.
+At startup each invocation assigns a UUIDv7. Its PostgreSQL connections use
+`snapper:repair-candles:<run_id>` as their application name. A confirmed write
+uses the same ID for its receipt and the candle rows' writer session. Retain the
+write directory and capture the [run record](#recording-a-repair-run) if the
+write will feed a higher-timeframe rebuild.
+
+Each correction chunk acquires `SHARE ROW EXCLUSIVE` on `candles`. The lock
+wait is capped at one second. Run writes in quiet hours.
+
+### `rebuild-synthesized-candles`
+
+Rebuild the Kraken spot 5m, 15m, 30m, 1h, 4h, and 1d windows that contain a
+minute written by a recorded `repair-candles` invocation. The command checks
+the receipt against the committed one-minute versions and folds each
+window's valid current minutes through the live candle aggregator.
+
+```bash
+snapper rebuild-synthesized-candles --repair-run ./repair-write \
+    --run-records ./repair-records.json --end 2026-11-11T00:00:00Z \
+    --output-dir ./rebuild-preview
+```
+
+| Option | Meaning |
+| ------ | ------- |
+| `--repair-run` | Write directory from `repair-candles`. Required and repeatable. |
+| `--run-records` | JSON record for every supplied repair directory. Required. |
+| `--end` | UTC minute at least 180 minutes before the run. A window qualifies when it ends at or before this bound. Required. |
+| `--output-dir` | New or empty directory. Required. |
+| `--confirm` | Write the voted subset. Requires `--voted-preview` and `--expect-digest`. |
+| `--voted-preview`, `--expect-digest` | Voted dry-run directory and sha256 of its `approval.json`. |
+| `--max-rows` | Most selected rows to write in this invocation. |
+| `--chunk-pause-seconds` | Pause between chunks. Default `1.0`. |
+| `--max-consecutive-lock-timeouts` | Consecutive lock timeouts before stopping. Default `3`. |
+| `--verify-receipt`, `--verify-record` | Higher-timeframe write directory and its coordinator record. Supply together in a dry run. |
+
+The 180-minute live edge is enforced in previews and writes. For recent data,
+choose an `--end` at or before the 1d floor of (start − 719 min), using UTC and
+the run's start time, to keep the selected windows clear of Kraken catchup.
+
+A dry run writes owner-only `preview.csv`, `approval.json`, and
+`summary.json`. The preview includes input coverage, the current version, the
+rebuilt values, and the reason for withholding an ineligible window. Native
+and calculated outputs, closed-only history, invalid or missing input, and
+output that would lose observed volume or trades are withheld. The approval
+binds the endpoint, requested end, records and their resolved writes, and the
+installed source. Review the preview and vote on the sha256 of `approval.json`.
+
+For a confirmed write, repeat the selection options with a fresh
+`--output-dir` and add
+`--confirm --voted-preview ./rebuild-preview --expect-digest <digest>`.
+The repository rechecks the voted predecessor and current-minute fingerprint
+under the write lock. Each chunk has at most 100 rows and at most 1,440 grid
+minutes. The writer records chunk attempts and outcomes in `receipt.jsonl`
+and `receipt.json`. On PostgreSQL it uses one connection named
+`snapper:rebuild-synth:<run_id>` and records samples of the other client
+backends at write start and immediately before acknowledged writes commit.
+The client count is informational. Resume a partial write with the original
+vote and a new output directory.
+
+#### Recording a repair run
+
+For each confirmed one-minute repair, keep the exact `preview.csv`,
+`approval.json`, `receipt.json`, and `receipt.jsonl`. Run it as a named
+one-off container that remains inspectable after exit. Record its full image
+ID, start and finish times, and the addresses Docker reported while it ran.
+Record the addresses and application name observed in PostgreSQL for its
+connections. After it exits, read the receipt for its run ID, voted digest,
+and stop reason, and compute the sha256 of the three indicated files from their
+original bytes. Remove the container after collecting this evidence.
+
+For example, `docker inspect <container>` supplies `Image`,
+`State.StartedAt`, `State.FinishedAt`, and the network data under
+`NetworkSettings.Networks`. In the write directory, run
+`sha256sum approval.json receipt.json receipt.jsonl` to obtain the file
+hashes.
+
+Write a JSON object with one key, `runs`, whose value is an array. Include
+exactly one entry per supplied repair directory. Every entry has these keys.
+
+| Key | Value |
+| --- | ----- |
+| `run_id` | UUIDv7 from the repair write receipt. |
+| `voted_digest` | 64 hexadecimal digits from the receipt. |
+| `stop_reason` | The receipt's terminal stop reason. |
+| `approval_sha256` | Full 64-digit sha256 of the **write directory's** `approval.json`. |
+| `receipt_sha256` | Full 64-digit sha256 of `receipt.json`. |
+| `receipt_lines_sha256` | Full 64-digit sha256 of `receipt.jsonl`. |
+| `application_name` | `snapper:repair-candles:<run_id>`, or JSON `null` for a legacy invocation without the name. |
+| `observed_addresses` | Array of PostgreSQL `client_addr` strings observed for the repair, possibly empty. |
+| `container` | Object with `name`, full `image_id` (prefix `sha256:` plus 64 hexadecimal digits), `started_at`, `finished_at`, and Docker `addresses` (an array of address strings). |
+| `settlements` | Array of settlement captures in observation order. It may be empty when there are no uncertain outcomes to settle. |
+
+Use RFC 3339 timestamps with an explicit offset. Preserve PostgreSQL nulls as
+JSON `null`. An abbreviated digest or image ID cannot bind a run.
+
+To collect a settlement, connect to the repair's approved PostgreSQL endpoint
+as the same application role after the container exits. Use a fresh connection
+and run the following two reads in the same transaction. Preserve each result
+column under its alias.
+
+```sql
+BEGIN;
+SELECT pg_backend_pid() AS pid, current_user AS current_user,
+       session_user AS session_user, now() AS now,
+       clock_timestamp() AS clock_timestamp, inet_server_addr() AS server_addr,
+       inet_server_port() AS server_port, current_database() AS database,
+       pg_postmaster_start_time() AS postmaster_start;
+SELECT pid AS pid, usename AS usename, datname AS datname, client_addr AS client_addr,
+       client_port AS client_port, application_name AS application_name,
+       backend_type AS backend_type, backend_start AS backend_start,
+       xact_start AS xact_start, state AS state
+FROM pg_stat_activity
+ORDER BY pid;
+COMMIT;
+```
+
+Each settlement object has exactly four keys.
+
+- `endpoint` holds the collector's configured `dialect` (`postgresql`),
+    `host`, numeric `port`, and `database`. Copy their values from the
+    connection configuration used for the collection. Omit credentials and
+    connection options.
+- `role` is the repair's PostgreSQL application role.
+- `observer` is the first query's single result object.
+- `backends` is the second query's complete result array.
+
+An uncertain minute counts when enumeration finds its exact expected version.
+For an absent uncertain minute, the newest capture must rule out a remaining
+repair backend. The collector's endpoint, role and own active backend must
+match. Named runs use their exact application name. Legacy runs use the
+observed addresses and container time window, with hidden backend details
+treated conservatively. Earlier captures still have to be structurally valid.
+Keep the collector on a route where the server's backend belongs to one client
+connection for its lifetime.
+
+#### Verifying a rebuild
+
+After a confirmed rebuild, retain its artifacts and make a separate JSON
+object with exactly `run_id`, `voted_digest`, `stop_reason`,
+`approval_sha256`, `receipt_sha256`, and `receipt_lines_sha256`. Take the
+first three fields from the rebuild's receipt and hash the rebuild's three
+files in full. Use the same repair inputs and `--end`, a new output directory,
+and pass `--verify-receipt <rebuild-write-dir> --verify-record <record.json>`
+without `--confirm`.
+
+Verification compares each committed output with its current inputs from the
+same read snapshot. The summary records observations per scope window,
+including regressions, uncertainty, outstanding work, unchanged windows, and
+exclusions. Zero regressions describes the observed targets at those snapshots.
+Check the other classes for unfinished scope. A live writer can change a
+window after an observation, so schedule subsequent verification and take a
+fresh vote for any rebuild that needs to be repeated.
 
 ### `check-candle-identities`
 
