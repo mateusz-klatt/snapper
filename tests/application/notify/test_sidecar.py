@@ -11,6 +11,7 @@ are mocked or swapped in per test.
 """
 
 import asyncio
+import socket
 from collections.abc import AsyncGenerator
 from datetime import UTC
 from datetime import datetime
@@ -20,19 +21,27 @@ from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from aioapns.common import NotificationResult
+from aioapns.exceptions import MaxAttemptsExceeded
 from loguru import logger
 from sqlalchemy import select
 
 from snapper.application.notify.apns_client import ApnsSendResult
 from snapper.application.notify.apns_client import _map_result
 from snapper.application.notify.portfolio_drift_recovery import PortfolioDriftRecoveryScanner
+from snapper.application.notify.push_beta import PushBetaConfig
 from snapper.application.notify.rules.base import AlertRule
 from snapper.application.notify.rules.base import RuleRegistry
+from snapper.application.notify.sidecar import _NETWORK_BACKOFF_CAP_S
 from snapper.application.notify.sidecar import NotifySidecar
 from snapper.application.notify.sidecar import _backoff_seconds
 from snapper.application.notify.sidecar import _build_apns_payload
+from snapper.application.notify.sidecar import _DeliveryTarget
+from snapper.application.notify.sidecar import _expired_error_reason
+from snapper.application.notify.sidecar import _format_exception_reason
+from snapper.application.notify.sidecar import _PrefetchedBatchCaches
 from snapper.application.notify.sidecar import _priority_to_apns
 from snapper.core.json_types import JsonObject
 from snapper.data.models import KNOWN_TO_MAX
@@ -42,8 +51,10 @@ from snapper.data.models import User
 from snapper.data.repository import Repository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import AlertDeliveryInsertRow
+from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
+from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import NotificationDeviceUpsertRow
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -331,6 +342,18 @@ class TestBackoff:
         """Covered by test body."""
         assert _backoff_seconds(0) == 30.0
         assert _backoff_seconds(-5) == 30.0
+
+    def test_network_cap_extends_to_fifteen_minutes(self) -> None:
+        """Network backoff honours the higher 15-minute cap.
+
+        Given: High retry attempt counts under a network outage cap.
+        When: ``_backoff_seconds`` is called with ``cap_s=_NETWORK_BACKOFF_CAP_S``.
+        Then: Delays scale 240s, 480s, and cap at 900s (15 min).
+        """
+        assert _backoff_seconds(4, cap_s=_NETWORK_BACKOFF_CAP_S) == 240.0
+        assert _backoff_seconds(5, cap_s=_NETWORK_BACKOFF_CAP_S) == 480.0
+        assert _backoff_seconds(6, cap_s=_NETWORK_BACKOFF_CAP_S) == 900.0
+        assert _backoff_seconds(20, cap_s=_NETWORK_BACKOFF_CAP_S) == 900.0
 
 
 class TestPriorityMapping:
@@ -1842,3 +1865,544 @@ async def test_bump_uses_repository_committed_number_without_snapshot_read(
     assert len(rows) == 1
     assert rows[0]["attempt_count"] == 3
     assert rows[0]["last_attempt_at"] == _ts(3)
+
+
+class TestNetworkOutageRetryAndExpiry:
+    """Network-class errors retry with 15 min cap until TTL; rejects stop at 3."""
+
+    @pytest.mark.asyncio
+    async def test_dispatch_writes_default_six_hour_expires_at(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """New queued APNs rows record a 6 h ``expires_at`` at creation time.
+
+        Given: A user with an active device and a sidecar failing with ``MaxAttemptsExceeded``.
+        When: ``_dispatch`` creates and attempts the delivery at ``_ts()``.
+        Then: The queued ``alert_deliveries`` row stores ``expires_at == _ts() + 6h``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        await _seed_device(repo, user)
+        reg = RuleRegistry()
+        reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
+        sidecar, _ = _make_sidecar(repo, registry=reg, send_result=MaxAttemptsExceeded())
+
+        await sidecar._dispatch("test.outage", b"{}", _ts())
+
+        queued = await repo.list_queued_deliveries_all()
+        assert len(queued) == 1
+        assert queued[0]["expires_at"] == _ts() + timedelta(hours=6)
+        assert queued[0]["error_reason"] == "exception: MaxAttemptsExceeded"
+
+    @pytest.mark.asyncio
+    async def test_network_outage_retries_past_three_attempts_until_recovery(
+        self,
+        repo: SQLAlchemyRepository,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Network failures survive past attempt 3 and log one recovery warning.
+
+        Given: A delivery queued during an outage failing with DNS, proxy,
+            timeout, and ``MaxAttemptsExceeded`` errors across 5 attempts.
+        When: The outage ends on attempt 6 and a second delivery also succeeds.
+        Then: The delivery succeeds on attempt 6 with backoff reaching >300s,
+            and exactly one recovery WARNING summarizes ``1 deliveries delayed``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, apns = _make_sidecar(repo)
+        apns.send = AsyncMock(
+            side_effect=[
+                socket.gaierror(-3, "temporary DNS failure"),
+                httpx.ProxyError("proxy unreachable"),
+                TimeoutError("connect timed out"),
+                MaxAttemptsExceeded(),
+                OSError("network down"),
+                ApnsSendResult(
+                    status_code=200, status="success", apns_id="apns-rec", description=""
+                ),
+                ApnsSendResult(
+                    status_code=200, status="success", apns_id="apns-next", description=""
+                ),
+            ]
+        )
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            for idx, minute in enumerate((0, 1, 2, 4, 8), start=1):
+                await sidecar._attempt_once(delivery_pid, device, event, _ts(minute))
+                queued = await repo.list_queued_deliveries_all()
+                assert len(queued) == 1
+                assert queued[0]["attempt_count"] == idx
+            await sidecar._attempt_once(delivery_pid, device, event, _ts(23))
+            second_pid = await _seed_queued_delivery(
+                repo,
+                event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+            )
+            await sidecar._attempt_once(second_pid, device, event, _ts(24))
+        finally:
+            logger.remove(handler_id)
+
+        assert await repo.list_queued_deliveries_all() == []
+        assert await repo.count_deliveries_by_status() == {"sent": 2}
+        recovery_logs = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING" and "delayed by an outage" in r.getMessage()
+        ]
+        assert len(recovery_logs) == 1
+        assert "1 deliveries delayed by an outage between" in recovery_logs[0]
+
+    @pytest.mark.asyncio
+    async def test_custom_expires_at_honored_and_clamped_before_expiry(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Explicit ``expires_at`` clamps retry schedules and expires to ``failed``.
+
+        Given: A queued row with ``expires_at = _ts(3)`` (3 minutes from creation).
+        When: Attempt 1 fails with ``MaxAttemptsExceeded`` at ``_ts(2)`` (backoff 30s
+            fits) and attempt 2 fails at ``_ts(2) + 45s`` (backoff 60s overshoots),
+            then the retry loop checks at ``_ts(3)``.
+        Then: ``next_attempt_at`` clamps to ``expires_at``, and at ``_ts(3)`` the row
+            transitions to ``failed`` with reason starting ``expired during outage``
+            without issuing a post-expiry APNs call.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        expiry = _ts(3)
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=10,
+                timestamp=_ts(),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                expires_at=expiry,
+                created_at=_ts(),
+            )
+        )
+        sidecar, apns = _make_sidecar(repo, send_result=MaxAttemptsExceeded())
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+
+        await sidecar._attempt_on_queued_row(row, _ts(2))
+        row_after_one = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row_after_one is not None
+        assert row_after_one["next_attempt_at"] == _ts(2) + timedelta(seconds=30)
+
+        await sidecar._attempt_on_queued_row(row_after_one, _ts(2) + timedelta(seconds=45))
+        row_after_two = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row_after_two is not None
+        assert row_after_two["next_attempt_at"] == expiry
+
+        calls_before_expiry = apns.send.await_count
+        await sidecar._attempt_on_queued_row(row_after_two, expiry)
+        assert apns.send.await_count == calls_before_expiry
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "failed"
+        assert final_row["error_reason"] is not None
+        assert final_row["error_reason"].startswith("expired during outage")
+
+    @pytest.mark.asyncio
+    async def test_network_failure_past_ttl_marks_failed_expired_during_outage(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A legacy row without ``expires_at`` expires 6 h after ``created_at``.
+
+        Given: A queued row with ``expires_at=None`` created at ``_ts()``.
+        When: A network failure happens at ``_ts() + 6h`` via ``_attempt_once``
+            and when ``expires_at`` is explicit on the DB row or the row vanishes.
+        Then: Past TTL transitions to ``failed`` with ``expired during outage``;
+            a missing DB row falls back cleanly without crashing.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, _ = _make_sidecar(repo, send_result=MaxAttemptsExceeded())
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        await sidecar._attempt_once(delivery_pid, device, event, _ts(360))
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+        assert row["status"] == "failed"
+        assert row["error_reason"] == "expired during outage: exception: MaxAttemptsExceeded"
+
+        explicit_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=11,
+                timestamp=_ts(),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                expires_at=_ts(5),
+                created_at=_ts(),
+            )
+        )
+        await sidecar._attempt_once(explicit_pid, device, event, _ts(10))
+        explicit_row = await repo.get_delivery_by_public_id(explicit_pid)
+        assert explicit_row is not None
+        assert explicit_row["status"] == "failed"
+
+        legacy_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        legacy_row = await repo.get_delivery_by_public_id(legacy_pid)
+        assert legacy_row is not None
+        assert legacy_row.get("expires_at") is None
+        await sidecar._attempt_on_queued_row(legacy_row, _ts(360))
+        legacy_after = await repo.get_delivery_by_public_id(legacy_pid)
+        assert legacy_after is not None
+        assert legacy_after["status"] == "failed"
+        assert (
+            legacy_after["error_reason"] == "expired during outage: exception: MaxAttemptsExceeded"
+        )
+
+        missing_target = _DeliveryTarget(
+            delivery_public_id="nonexistent-delivery",
+            device=device,
+            event=event,
+        )
+        assert await sidecar._resolve_delivery_deadline(missing_target, _ts(1)) == _ts(1)
+        assert _expired_error_reason(None) == "expired during outage"
+        assert _format_exception_reason(MaxAttemptsExceeded()) == "exception: MaxAttemptsExceeded"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            ApnsSendResult(
+                status_code=413, status="other", apns_id="", description="PayloadTooLarge"
+            ),
+            RuntimeError("non-network explosion"),
+        ],
+        ids=["http-413-reject", "non-network-exception"],
+    )
+    async def test_rejects_and_non_network_errors_give_up_after_three_attempts(
+        self,
+        repo: SQLAlchemyRepository,
+        outcome: ApnsSendResult | Exception,
+    ) -> None:
+        """HTTP 4xx rejects and non-network exceptions keep the 3-attempt limit.
+
+        Given: A queued delivery encountering HTTP 413 ``PayloadTooLarge`` or a
+            non-network ``RuntimeError``.
+        When: Three consecutive attempts fail even within the 6 h TTL.
+        Then: The delivery transitions to terminal ``failed`` on attempt 3.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, _ = _make_sidecar(repo, send_result=outcome)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        for minute in (0, 1, 2):
+            await sidecar._attempt_once(delivery_pid, device, event, _ts(minute))
+
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "failed"
+        assert final_row["attempt_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_send_timeout_recovers_retry_loop_without_stalling_next_row(
+        self,
+        repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A stalled ``apns.send`` times out as network-class and yields to the next row.
+
+        Given: Two queued deliveries with ``next_attempt_at`` in the past where the
+            first call hangs past ``_APNS_SEND_TIMEOUT_S`` and the second succeeds.
+        When: ``_process_retry_queue_loop`` ticks once.
+        Then: Row 1 is rescheduled as a network retry (``TimeoutError``) instead of
+            wedging the loop, and row 2 is delivered in the same tick.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        past = datetime(2020, 1, 1, tzinfo=UTC)
+        hanging_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=1,
+                timestamp=_ts(),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                attempt_count=3,
+                next_attempt_at=past,
+                expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+                created_at=_ts(),
+            )
+        )
+        healthy_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=2,
+                timestamp=_ts(),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                next_attempt_at=past + timedelta(seconds=5),
+                expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+                created_at=_ts(),
+            )
+        )
+        sidecar, apns = _make_sidecar(repo)
+        call_count = 0
+
+        async def _hang_then_succeed(**_kwargs: object) -> ApnsSendResult:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                await asyncio.sleep(5.0)
+            return ApnsSendResult(
+                status_code=200, status="success", apns_id="apns-ok", description=""
+            )
+
+        apns.send = AsyncMock(side_effect=_hang_then_succeed)
+        monkeypatch.setattr("snapper.application.notify.sidecar._APNS_SEND_TIMEOUT_S", 0.02)
+        monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 0.03)
+
+        task = asyncio.create_task(sidecar._process_retry_queue_loop())
+        await asyncio.sleep(0.12)
+        await sidecar.stop()
+        await asyncio.wait_for(task, timeout=2.0)
+
+        row_one = await repo.get_delivery_by_public_id(hanging_pid)
+        row_two = await repo.get_delivery_by_public_id(healthy_pid)
+        assert row_one is not None
+        assert row_one["status"] == "queued"
+        assert row_one["attempt_count"] >= 4
+        assert row_one["error_reason"] == "exception: TimeoutError"
+        assert row_two is not None
+        assert row_two["status"] == "sent"
+
+
+class TestTerminalSuppressionAndIsolation:
+    """Suppressions leave no queued rows and per-row exceptions do not stop drain."""
+
+    @pytest.mark.asyncio
+    async def test_routing_cascade_suppression_at_dispatch_queues_zero_rows(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Routing suppression during live fanout inserts zero delivery rows.
+
+        Given: A user with an active device whose pref disables ``order_fill_full``.
+        When: ``_dispatch`` evaluates the alert.
+        Then: The ``alert_event`` persists, zero ``alert_deliveries`` are queued,
+            and ``apns.send`` is not called.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                session_id="seed",
+                sequence_id=2,
+                timestamp=_ts(),
+                device_public_id=device_pid,
+                alert_type="order_fill_full",
+                enabled=False,
+            )
+        )
+        reg = RuleRegistry()
+        reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
+        sidecar, apns = _make_sidecar(repo, registry=reg)
+
+        await sidecar._dispatch("test.suppressed", b"{}", _ts())
+
+        assert await repo.count_deliveries_by_status() == {}
+        apns.send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_queued_delivery_suppressed_by_prefs_transitions_cancelled_scope(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Queued rows suppressed by later preference changes become ``cancelled_scope``.
+
+        Given: Two queued APNs deliveries: one evaluated through ``_drain_outbox``
+            after the user disabled the alert type, and one evaluated directly via
+            ``_attempt_on_queued_row`` after ``push_beta`` excluded the user.
+        When: Drain and per-row retry check routing admission.
+        Then: Both transition to terminal ``cancelled_scope`` with reason
+            ``routing_suppressed`` and zero APNs sends occur.
+        """
+        user_pref = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        user_beta = "019dbb34-f439-77bd-afa8-ee5321d60308"
+        await _seed_user(repo, user_pref)
+        await _seed_user(repo, user_beta)
+        dev_pref = await _seed_device(repo, user_pref, device_token="a" * 64)
+        dev_beta = await _seed_device(repo, user_beta, device_token="b" * 64)
+        evt_pref = await _seed_alert_event(repo, user_pref)
+        evt_beta = await _seed_alert_event(repo, user_beta)
+        pid_pref = await _seed_queued_delivery(
+            repo,
+            event_public_id=evt_pref["public_id"],
+            device_public_id=dev_pref,
+            user_public_id=user_pref,
+        )
+        pid_beta = await _seed_queued_delivery(
+            repo,
+            event_public_id=evt_beta["public_id"],
+            device_public_id=dev_beta,
+            user_public_id=user_beta,
+        )
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                session_id="seed",
+                sequence_id=3,
+                timestamp=_ts(),
+                device_public_id=dev_pref,
+                alert_type="order_fill_full",
+                enabled=False,
+            )
+        )
+        sidecar, apns = _make_sidecar(repo)
+        sidecar._push_beta_provider = lambda: PushBetaConfig(
+            enabled=True, user_public_ids=(user_pref,)
+        )
+
+        row_beta = await repo.get_delivery_by_public_id(pid_beta)
+        assert row_beta is not None
+        await sidecar._attempt_on_queued_row(row_beta, _ts(1))
+
+        await sidecar._drain_outbox(_ts(2))
+
+        apns.send.assert_not_awaited()
+        for pid in (pid_pref, pid_beta):
+            final_row = await repo.get_delivery_by_public_id(pid)
+            assert final_row is not None
+            assert final_row["status"] == "cancelled_scope"
+            assert final_row["error_reason"] == "routing_suppressed"
+
+    @pytest.mark.asyncio
+    async def test_drain_isolates_unexpected_per_row_exception(
+        self,
+        repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An unexpected per-row error during drain logs a warning and processes remaining rows.
+
+        Given: Two queued deliveries where the first raises ``RuntimeError`` inside
+            ``_attempt_on_queued_row`` and the second is healthy.
+        When: ``_drain_outbox`` runs.
+        Then: The error is logged as a warning and the second delivery still succeeds.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        bad_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        good_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, apns = _make_sidecar(repo)
+        original = sidecar._attempt_on_queued_row
+
+        async def _boom_on_first(
+            row: AlertDeliveryRow,
+            now: datetime,
+            *,
+            caches: _PrefetchedBatchCaches | None = None,
+        ) -> None:
+            if row["public_id"] == bad_pid:
+                raise RuntimeError("transient db glitch")
+            await original(row, now, caches=caches)
+
+        monkeypatch.setattr(sidecar, "_attempt_on_queued_row", _boom_on_first)
+        handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            await sidecar._drain_outbox(_ts(1))
+        finally:
+            logger.remove(handler_id)
+
+        good_row = await repo.get_delivery_by_public_id(good_pid)
+        assert good_row is not None
+        assert good_row["status"] == "sent"
+        apns.send.assert_awaited_once()
+        assert any("unexpectedly" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_attempt_on_queued_row_noop_when_apns_disabled(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """An APNs-disabled sidecar leaves queued APNs rows untouched.
+
+        Given: A queued APNs delivery and a ``NotifySidecar`` constructed with ``apns=None``.
+        When: ``_attempt_on_queued_row`` runs.
+        Then: The delivery remains ``queued``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        row = await repo.get_delivery_by_public_id(pid)
+        assert row is not None
+        sidecar = NotifySidecar(
+            MagicMock(),
+            repo,
+            None,
+            "",
+            SequenceTracker(),
+            cast(MessagePublisher, _FakeMessagePublisher()),
+        )
+
+        await sidecar._attempt_on_queued_row(row, _ts(1))
+
+        after = await repo.get_delivery_by_public_id(pid)
+        assert after is not None
+        assert after["status"] == "queued"

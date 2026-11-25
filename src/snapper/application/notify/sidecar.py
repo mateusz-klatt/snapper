@@ -33,6 +33,8 @@ transitions do not provide exclusive or exactly-once APNs delivery.
 import asyncio
 import contextlib
 from collections.abc import Callable
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -42,11 +44,13 @@ from loguru import logger
 
 from snapper.application.notify.apns_client import ApnsClientPool
 from snapper.application.notify.apns_client import ApnsSendResult
+from snapper.application.notify.apns_client import is_network_delivery_error
 from snapper.application.notify.fcm_client import FcmClient
 from snapper.application.notify.fcm_delivery import FcmDeliveryService
 from snapper.application.notify.portfolio_drift_paging import PORTFOLIO_DRIFT_ALERT_TYPE
 from snapper.application.notify.portfolio_drift_recovery import PortfolioDriftRecoveryScanner
 from snapper.application.notify.push_beta import PushBetaConfig
+from snapper.application.notify.routing import allows_device_alert
 from snapper.application.notify.routing import route_alert_to_devices
 from snapper.application.notify.rules.base import RuleRegistry
 from snapper.application.notify.rules.registry_factory import load_default_registry
@@ -58,7 +62,9 @@ from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
+from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import NotificationDeviceRow
+from snapper.data.repository_types import UserAlertDefaultRow
 from snapper.i18n import catalog
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -69,26 +75,88 @@ _RETRY_LOOP_INTERVAL_S = 30.0
 _RETRY_GIVE_UP_AFTER_ATTEMPTS = 3
 _BACKOFF_BASE_S = 30.0
 _BACKOFF_CAP_S = 300.0
+_NETWORK_BACKOFF_CAP_S = 900.0
+_DEFAULT_DELIVERY_TTL = timedelta(hours=6)
+_APNS_SEND_TIMEOUT_S = 30.0
+_MAX_ERROR_REASON_LEN = 200
 _THROTTLED_RETRY_DEFAULT_S = 60.0
 _ZMQ_STREAM = "sidecar.notify"
 
 
-def _backoff_seconds(attempt_number: int) -> float:
+@dataclass(frozen=True, slots=True)
+class _DeliveryTarget:
+    """Immutable context for one APNs delivery attempt."""
+
+    delivery_public_id: str
+    device: NotificationDeviceRow
+    event: AlertEventRow
+    user_language: str | None = None
+    expires_at: datetime | None = None
+    created_at: datetime | None = None
+    prior_error_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PrefetchedBatchCaches:
+    """Bulk-loaded lookup tables for one drain or retry batch."""
+
+    events: dict[str, AlertEventRow]
+    devices: dict[str, list[NotificationDeviceRow]]
+    languages: dict[str, str | None]
+    prefs: dict[str, list[DeviceAlertPrefRow]] = field(default_factory=dict)
+    defaults: dict[str, list[UserAlertDefaultRow]] = field(default_factory=dict)
+
+
+def _format_exception_reason(exc: BaseException) -> str:
+    """Format a bounded persistence reason from a raised send exception.
+
+    Args:
+        exc: Exception caught around ``ApnsClientPool.send``.
+
+    Returns:
+        Truncated ``exception: <Type>[: <msg>]`` string fitting ``VARCHAR(200)``.
+    """
+    detail = str(exc)
+    raw = (
+        f"exception: {type(exc).__name__}: {detail}"
+        if detail
+        else f"exception: {type(exc).__name__}"
+    )
+    return raw[:_MAX_ERROR_REASON_LEN]
+
+
+def _expired_error_reason(prior_reason: str | None) -> str:
+    """Build a bounded terminal reason when a delivery exceeds its outage TTL.
+
+    Args:
+        prior_reason: Last recorded error reason before expiry, if any.
+
+    Returns:
+        Clear expiry reason fitting ``AlertDelivery.error_reason`` (200 chars).
+    """
+    if prior_reason:
+        return f"expired during outage: {prior_reason}"[:_MAX_ERROR_REASON_LEN]
+    return "expired during outage"
+
+
+def _backoff_seconds(attempt_number: int, *, cap_s: float = _BACKOFF_CAP_S) -> float:
     """Compute the exponential backoff for the N-th attempt.
 
-    Schedule: ``min(30s * 2^(N-1), 5min)``.
-    N=1 -> 30s, N=2 -> 60s, N=3 -> 120s; capped at 300s.
+    Schedule: ``min(30s * 2^(N-1), cap_s)``.
+    With default ``cap_s=300s``: N=1 -> 30s, N=2 -> 60s, N=3 -> 120s, capped
+    at 300s. Network-outage retries pass ``cap_s=900s`` (15 min).
 
     Args:
         attempt_number: 1-based attempt number that just returned a
-            non-terminal error (retryable server_error / throttled).
+            non-terminal error (retryable server_error / throttled / network).
+        cap_s: Maximum backoff delay in seconds.
 
     Returns:
         Backoff duration in seconds (float).
     """
     exp = max(attempt_number - 1, 0)
     scaled: float = _BACKOFF_BASE_S * (2**exp)
-    return min(scaled, _BACKOFF_CAP_S)
+    return min(scaled, cap_s)
 
 
 class NotifySidecar(RegisterableProcess):
@@ -181,6 +249,8 @@ class NotifySidecar(RegisterableProcess):
         self._registry = registry or load_default_registry()
         self._scope_revalidator = scope_revalidator or ScopeRevalidator(tracker=tracker)
         self._push_beta_provider = push_beta_provider
+        self._outage_started_at: datetime | None = None
+        self._outage_delayed_delivery_ids: set[str] = set()
         self._portfolio_drift_recovery_scanner = (
             portfolio_drift_recovery_scanner
             if portfolio_drift_recovery_scanner is not None
@@ -405,6 +475,11 @@ class NotifySidecar(RegisterableProcess):
     ) -> None:
         """Insert the alert row + fan out via policy routing.
 
+        ``route_alert_to_devices`` runs before any ``alert_deliveries`` insert,
+        and ``AlertDelivery.device_public_id`` is non-null. When routing
+        returns no eligible devices, no delivery row is inserted and nothing
+        is left ``queued``.
+
         Args:
             alert_row: Row minted by an ``AlertRule.evaluate`` call.
             now: Entry-boundary timestamp (threaded from ``_dispatch``).
@@ -444,11 +519,20 @@ class NotifySidecar(RegisterableProcess):
         recipient_user_pid = event["user_public_id"]
         languages = await self._repo.get_default_languages_for_users([recipient_user_pid])
         user_language = languages.get(recipient_user_pid)
+        expires_at = now + _DEFAULT_DELIVERY_TTL
         for device in recipients:
             delivery_pid = await self._insert_delivery_for_event(
                 event=event, device=device, now=now
             )
-            await self._attempt_once(delivery_pid, device, event, now, user_language=user_language)
+            target = _DeliveryTarget(
+                delivery_public_id=delivery_pid,
+                device=device,
+                event=event,
+                user_language=user_language,
+                expires_at=expires_at,
+                created_at=now,
+            )
+            await self._attempt_delivery(target, now)
 
     async def _publish_alert_event_frame(self, event: AlertEventRow, now: datetime) -> None:
         """Emit an ``AlertEventData`` frame onto the ZMQ bus.
@@ -530,7 +614,7 @@ class NotifySidecar(RegisterableProcess):
         device: NotificationDeviceRow,
         now: datetime,
     ) -> str:
-        """Insert one queued ``alert_deliveries`` row with denormalised scope."""
+        """Insert one queued ``alert_deliveries`` row with denormalised scope and 6 h TTL."""
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         return await self._repo.insert_alert_delivery(
@@ -548,6 +632,7 @@ class NotifySidecar(RegisterableProcess):
                 attempt_count=0,
                 last_attempt_at=None,
                 next_attempt_at=None,
+                expires_at=now + _DEFAULT_DELIVERY_TTL,
                 apns_id=None,
                 error_reason=None,
                 created_at=now,
@@ -563,6 +648,16 @@ class NotifySidecar(RegisterableProcess):
         *,
         user_language: str | None = None,
     ) -> None:
+        """Run one APNs send attempt from raw identifiers (test and fanout helper)."""
+        target = _DeliveryTarget(
+            delivery_public_id=delivery_public_id,
+            device=device,
+            event=event,
+            user_language=user_language,
+        )
+        await self._attempt_delivery(target, now)
+
+    async def _attempt_delivery(self, target: _DeliveryTarget, now: datetime) -> None:
         """Run exactly one APNs send attempt on a queued delivery row.
 
         Before reserving an attempt and again immediately before the APNs
@@ -572,56 +667,75 @@ class NotifySidecar(RegisterableProcess):
         is bumped prevents the network call from starting. Scope-stale
         deliveries transition to ``cancelled_scope`` in the outbox.
 
-        Otherwise, bumps ``attempt_count`` first (attempt-number-before-
-        attempt rule), builds the APNs payload, calls through the
-        pool, and maps the result to the SCD2 terminal / retry schedule.
-
-        ``user_language`` is the recipient's ``User.default_language``
-        preference (or ``None`` when never set). When non-null AND the
-        event payload carries ``title_loc_key``/``body_loc_key``, the
-        APNs ``aps.alert.title``/``body`` fields are resolved through
-        the backend catalog so the push notification renders in the
-        user's chosen language. Falls back to the EN ``event.title``/
-        ``event.body`` otherwise.
+        Deliveries with an explicit ``expires_at`` already reached (``now >=
+        expires_at``) transition to ``failed`` without sending. Otherwise,
+        bumps ``attempt_count`` first, bounds ``ApnsClientPool.send`` with
+        ``_APNS_SEND_TIMEOUT_S``, and routes results or exceptions to the
+        outage-retry or 3-attempt-limit policy.
         """
         if self._apns is None:
             return
-        if await self._cancel_if_scope_revoked(delivery_public_id, event, now):
+        if await self._cancel_if_scope_revoked(target.delivery_public_id, target.event, now):
             return
-        current_attempt = await self._bump_attempt(delivery_public_id, now)
+        if target.expires_at is not None and now >= target.expires_at:
+            await self._fail_expired_delivery(
+                target.delivery_public_id,
+                target.prior_error_reason,
+                now,
+            )
+            return
+        current_attempt = await self._bump_attempt(target.delivery_public_id, now)
         if current_attempt is None:
             logger.info(
                 "sidecar: delivery {pid} no longer queued at bump time —"
                 " concurrent cancel / terminal transition wins",
-                pid=delivery_public_id,
+                pid=target.delivery_public_id,
             )
             return
-        if await self._cancel_if_scope_revoked(delivery_public_id, event, now):
+        if await self._cancel_if_scope_revoked(target.delivery_public_id, target.event, now):
             return
-        payload = _build_apns_payload(event, user_language=user_language)
+        payload = _build_apns_payload(target.event, user_language=target.user_language)
         try:
-            result = await self._apns.send(
-                env=device["env"],
-                device_token=device["device_token"],
-                payload=payload,
-                apns_topic=self._apns_topic,
-                priority=_priority_to_apns(event["priority"]),
-                push_type="alert",
-                collapse_id=event.get("thread_key"),
+            result = await asyncio.wait_for(
+                self._apns.send(
+                    env=target.device["env"],
+                    device_token=target.device["device_token"],
+                    payload=payload,
+                    apns_topic=self._apns_topic,
+                    priority=_priority_to_apns(target.event["priority"]),
+                    push_type="alert",
+                    collapse_id=target.event.get("thread_key"),
+                ),
+                timeout=_APNS_SEND_TIMEOUT_S,
             )
         except Exception as exc:
-            logger.warning(
-                "sidecar: APNs send raised — scheduling retry"
-                " delivery={pid}, attempt={n}, err={err}",
-                pid=delivery_public_id,
-                n=current_attempt,
-                err=exc,
-            )
-            await self._schedule_retry_or_fail(
-                delivery_public_id, current_attempt, f"exception: {exc}", now
-            )
+            await self._handle_send_exception(target, current_attempt, exc, now)
             return
-        await self._apply_result(delivery_public_id, current_attempt, result, device, now)
+        await self._apply_result(target, current_attempt, result, now)
+
+    async def _handle_send_exception(
+        self,
+        target: _DeliveryTarget,
+        attempt_number: int,
+        exc: Exception,
+        now: datetime,
+    ) -> None:
+        """Classify a raised APNs send exception and schedule retry or failure."""
+        is_network = is_network_delivery_error(exc)
+        error_reason = _format_exception_reason(exc)
+        logger.warning(
+            "sidecar: APNs send raised — scheduling retry"
+            " delivery={pid}, attempt={n}, network_error={net}, err={err}",
+            pid=target.delivery_public_id,
+            n=attempt_number,
+            net=is_network,
+            err=error_reason,
+        )
+        if is_network:
+            self._record_outage_delay(target.delivery_public_id, now)
+            await self._schedule_network_retry_or_fail(target, attempt_number, error_reason, now)
+            return
+        await self._schedule_retry_or_fail(target, attempt_number, error_reason, now)
 
     async def _cancel_if_scope_revoked(
         self,
@@ -641,15 +755,7 @@ class NotifySidecar(RegisterableProcess):
         """
         if not await self._scope_revalidator.should_skip_send(event, self._repo, now):
             return False
-        sid = self._tracker.session_id
-        seq = self._tracker.next_sequence(_ZMQ_STREAM)
-        await self._repo.mark_delivery_cancelled(
-            delivery_public_id,
-            reason="scope_revoked",
-            transition_at=now,
-            session_id=sid,
-            sequence_id=seq,
-        )
+        await self._mark_cancelled(delivery_public_id, "scope_revoked", now)
         logger.info(
             "sidecar: scope revoked mid-send — cancelled delivery={pid}"
             " user={user} operator={op} wallet={wal}",
@@ -676,10 +782,9 @@ class NotifySidecar(RegisterableProcess):
 
     async def _apply_result(
         self,
-        delivery_public_id: str,
+        target: _DeliveryTarget,
         attempt_number: int,
         result: ApnsSendResult,
-        device: NotificationDeviceRow,
         now: datetime,
     ) -> None:
         """Route an APNs result to the correct SCD2 terminal / retry transition."""
@@ -687,16 +792,17 @@ class NotifySidecar(RegisterableProcess):
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         if result.status == "success":
             await self._repo.mark_delivery_sent(
-                delivery_public_id,
+                target.delivery_public_id,
                 apns_id=result.apns_id,
                 transition_at=now,
                 session_id=sid,
                 sequence_id=seq,
             )
+            self._maybe_log_outage_recovery(now)
             return
         if result.status == "unregistered":
             await self._repo.mark_delivery_unregistered(
-                delivery_public_id,
+                target.delivery_public_id,
                 transition_at=now,
                 session_id=sid,
                 sequence_id=seq,
@@ -704,7 +810,7 @@ class NotifySidecar(RegisterableProcess):
             device_sid = self._tracker.session_id
             device_seq = self._tracker.next_sequence(_ZMQ_STREAM)
             await self._repo.deactivate_notification_device_scd2(
-                device["public_id"],
+                target.device["public_id"],
                 reason="unregistered",
                 timestamp=now,
                 session_id=device_sid,
@@ -712,20 +818,20 @@ class NotifySidecar(RegisterableProcess):
             )
             return
         if result.status == "config_error":
-            error_reason = f"config_error:{result.description}"
+            error_reason = f"config_error:{result.description}"[:_MAX_ERROR_REASON_LEN]
             logger.error(
                 "sidecar: APNs configuration error — leaving device active"
                 " delivery_public_id={pid}, device_public_id={dev}, env={env},"
                 " apns_topic={topic}, status_code={code}, reason={reason}",
-                pid=delivery_public_id,
-                dev=device["public_id"],
-                env=device["env"],
+                pid=target.delivery_public_id,
+                dev=target.device["public_id"],
+                env=target.device["env"],
                 topic=self._apns_topic,
                 code=result.status_code,
                 reason=result.description,
             )
             await self._repo.mark_delivery_failed(
-                delivery_public_id,
+                target.delivery_public_id,
                 error_reason=error_reason,
                 transition_at=now,
                 session_id=sid,
@@ -733,57 +839,131 @@ class NotifySidecar(RegisterableProcess):
             )
             return
         await self._schedule_retry_or_fail(
-            delivery_public_id,
+            target,
             attempt_number,
-            result.description or result.status,
+            (result.description or result.status)[:_MAX_ERROR_REASON_LEN],
             now,
         )
 
     async def _schedule_retry_or_fail(
         self,
-        delivery_public_id: str,
+        target: _DeliveryTarget,
         attempt_number: int,
         error_reason: str,
         now: datetime,
     ) -> None:
-        """Either give up (attempt >= 3) or schedule the next retry.
-
-        Throttled responses use a conservative 60s delay (aioapns 4.0
-        does not expose Retry-After); all other server/network errors
-        use the exponential backoff. Retry exhaustion
-        emits a ``logger.warning`` before the terminal ``failed``
-        transition so ops alerting has a single log record to pivot
-        on.
-        """
-        sid = self._tracker.session_id
-        seq = self._tracker.next_sequence(_ZMQ_STREAM)
+        """Give up at 3 attempts for rejects/HTTP errors or schedule next retry."""
         if attempt_number >= _RETRY_GIVE_UP_AFTER_ATTEMPTS:
             logger.warning(
                 "sidecar: alert delivery failed after retries"
                 " — delivery_public_id={pid}, attempts={n}, error_reason={err}",
-                pid=delivery_public_id,
+                pid=target.delivery_public_id,
                 n=attempt_number,
                 err=error_reason,
             )
-            await self._repo.mark_delivery_failed(
-                delivery_public_id,
-                error_reason=error_reason,
-                transition_at=now,
-                session_id=sid,
-                sequence_id=seq,
-            )
+            await self._mark_failed(target.delivery_public_id, error_reason, now)
             return
         backoff_s = _backoff_seconds(attempt_number)
         next_attempt_at = now + timedelta(seconds=backoff_s)
+        await self._persist_retry_schedule(
+            target.delivery_public_id,
+            attempt_number,
+            next_attempt_at,
+            error_reason,
+            now,
+        )
+
+    async def _schedule_network_retry_or_fail(
+        self,
+        target: _DeliveryTarget,
+        attempt_number: int,
+        error_reason: str,
+        now: datetime,
+    ) -> None:
+        """Retry a network-class outage failure with 15 min cap until TTL expires."""
+        deadline = await self._resolve_delivery_deadline(target, now)
+        if now >= deadline:
+            await self._fail_expired_delivery(target.delivery_public_id, error_reason, now)
+            return
+        backoff_s = _backoff_seconds(attempt_number, cap_s=_NETWORK_BACKOFF_CAP_S)
+        next_attempt_at = min(now + timedelta(seconds=backoff_s), deadline)
+        await self._persist_retry_schedule(
+            target.delivery_public_id,
+            attempt_number,
+            next_attempt_at,
+            error_reason,
+            now,
+        )
+
+    async def _resolve_delivery_deadline(self, target: _DeliveryTarget, now: datetime) -> datetime:
+        """Return the outage-retry expiration deadline for ``target``.
+
+        Uses ``target.expires_at`` when set, otherwise ``created_at + 6 h``.
+        Falls back to reading the active delivery row when ``_attempt_once`` was
+        invoked directly without pre-loaded row timestamps.
+        """
+        if target.expires_at is not None:
+            return target.expires_at
+        if target.created_at is not None:
+            return target.created_at + _DEFAULT_DELIVERY_TTL
+        row = await self._repo.get_delivery_by_public_id(target.delivery_public_id)
+        if row is not None:
+            row_expiry = row.get("expires_at")
+            if row_expiry is not None:
+                return row_expiry
+            return row["created_at"] + _DEFAULT_DELIVERY_TTL
+        return now
+
+    async def _fail_expired_delivery(
+        self, delivery_public_id: str, prior_reason: str | None, now: datetime
+    ) -> None:
+        """Transition a delivery whose outage TTL elapsed to terminal ``failed``."""
+        reason = _expired_error_reason(prior_reason)
+        logger.warning(
+            "sidecar: alert delivery expired during outage"
+            " — delivery_public_id={pid}, error_reason={err}",
+            pid=delivery_public_id,
+            err=reason,
+        )
+        await self._mark_failed(delivery_public_id, reason, now)
+
+    async def _persist_retry_schedule(
+        self,
+        delivery_public_id: str,
+        attempt_number: int,
+        next_attempt_at: datetime,
+        error_reason: str,
+        now: datetime,
+    ) -> None:
+        """Commit an updated ``next_attempt_at`` on the queued delivery row."""
         await self._repo.update_delivery_retry_schedule(
             delivery_public_id,
             attempt_count=attempt_number,
             next_attempt_at=next_attempt_at,
-            error_reason=error_reason,
+            error_reason=error_reason[:_MAX_ERROR_REASON_LEN],
             transition_at=now,
-            session_id=sid,
-            sequence_id=seq,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(_ZMQ_STREAM),
         )
+
+    def _record_outage_delay(self, delivery_public_id: str, now: datetime) -> None:
+        """Record one delivery delayed by an active network outage."""
+        if self._outage_started_at is None:
+            self._outage_started_at = now
+        self._outage_delayed_delivery_ids.add(delivery_public_id)
+
+    def _maybe_log_outage_recovery(self, now: datetime) -> None:
+        """Log one recovery summary after deliveries delayed by an outage recover."""
+        if self._outage_started_at is None:
+            return
+        logger.warning(
+            "sidecar: {count} deliveries delayed by an outage between {t1} and {t2}",
+            count=len(self._outage_delayed_delivery_ids),
+            t1=self._outage_started_at.isoformat(),
+            t2=now.isoformat(),
+        )
+        self._outage_started_at = None
+        self._outage_delayed_delivery_ids.clear()
 
     async def _drain_outbox(self, now: datetime) -> None:
         """Process every ``status='queued'`` row on startup (crash recovery).
@@ -793,10 +973,10 @@ class NotifySidecar(RegisterableProcess):
         row gets one fresh attempt; a second-or-later failure stays
         inside the retry loop's normal scheduling.
 
-        Bulk-prefetches the alert_event + device-list for every row in
-        the batch with two ``IN (...)`` SELECTs — replaces the per-row
-        N+1 fetches that previously dominated drain/retry latency at
-        large backlogs.
+        Bulk-prefetches the alert_event, active devices, user languages,
+        and routing preferences for every row in the batch so drain/retry
+        avoids N+1 reads and isolates per-row failures without aborting
+        the drain.
         """
         queued = await self._repo.list_queued_deliveries_all()
         queued.sort(
@@ -805,82 +985,148 @@ class NotifySidecar(RegisterableProcess):
                 r["created_at"],
             )
         )
-        events_cache, devices_cache, languages_cache = await self._prefetch_caches_for_rows(queued)
+        caches = await self._prefetch_caches_for_rows(queued)
         for row in queued:
-            await self._attempt_on_queued_row(
-                row,
-                now,
-                events_cache=events_cache,
-                devices_cache=devices_cache,
-                languages_cache=languages_cache,
-            )
+            await self._safe_attempt_on_queued_row(row, now, caches=caches)
 
-    async def _prefetch_caches_for_rows(self, rows: list[AlertDeliveryRow]) -> tuple[
-        dict[str, AlertEventRow],
-        dict[str, list[NotificationDeviceRow]],
-        dict[str, str | None],
-    ]:
-        """Bulk-load alert_event + device-list + default_language maps.
+    async def _prefetch_caches_for_rows(
+        self, rows: list[AlertDeliveryRow]
+    ) -> _PrefetchedBatchCaches:
+        """Bulk-load alert_event, device, language, and routing pref maps.
 
-        Returns one ``{event_public_id: AlertEventRow}``, one
-        ``{user_public_id: list[NotificationDeviceRow]}`` and one
-        ``{user_public_id: default_language | None}`` cache,
-        deduplicating IDs so the underlying SELECTs touch each row
-        at most once even when many deliveries share an alert_event
-        or user. The third cache feeds the APNs sidecar's
-        catalog-resolution path so push titles/bodies render in the
-        recipient's preferred language.
+        Returns a :class:`_PrefetchedBatchCaches` bundle, deduplicating IDs
+        so underlying SELECTs touch each event or user at most once per batch.
         """
         if not rows:
-            return {}, {}, {}
+            return _PrefetchedBatchCaches(events={}, devices={}, languages={})
         event_pids = [row["alert_event_public_id"] for row in rows]
-        user_pids = [row["user_public_id"] for row in rows]
+        user_pids = list(dict.fromkeys(row["user_public_id"] for row in rows))
         events_cache = await self._repo.get_alert_events_by_public_ids(event_pids)
         devices_cache = await self._repo.list_active_notification_devices_for_users(user_pids)
         languages_cache = await self._repo.get_default_languages_for_users(user_pids)
-        return events_cache, devices_cache, languages_cache
+        prefs_cache = {
+            uid: await self._repo.list_device_alert_prefs_for_user(uid) for uid in user_pids
+        }
+        defaults_cache = {uid: await self._repo.list_user_alert_defaults(uid) for uid in user_pids}
+        return _PrefetchedBatchCaches(
+            events=events_cache,
+            devices=devices_cache,
+            languages=languages_cache,
+            prefs=prefs_cache,
+            defaults=defaults_cache,
+        )
+
+    async def _safe_attempt_on_queued_row(
+        self,
+        row: AlertDeliveryRow,
+        now: datetime,
+        *,
+        caches: _PrefetchedBatchCaches | None = None,
+    ) -> None:
+        """Execute ``_attempt_on_queued_row`` isolating per-row errors from the batch."""
+        try:
+            await self._attempt_on_queued_row(row, now, caches=caches)
+        except Exception as exc:
+            logger.warning(
+                "sidecar: retry attempt failed unexpectedly for delivery={pid}: {err}",
+                pid=row["public_id"],
+                err=exc,
+            )
+
+    async def _resolve_queued_event(
+        self, event_pid: str, caches: _PrefetchedBatchCaches | None
+    ) -> AlertEventRow | None:
+        """Resolve an alert event from batch prefetch caches or fall back to DB."""
+        if caches is not None and event_pid in caches.events:
+            return caches.events[event_pid]
+        return await self._repo.get_alert_event_by_public_id(event_pid)
+
+    async def _resolve_queued_device(
+        self,
+        user_pid: str,
+        device_pid: str,
+        caches: _PrefetchedBatchCaches | None,
+    ) -> NotificationDeviceRow | None:
+        """Resolve an active APNs device from batch prefetch caches or DB."""
+        devices = (
+            caches.devices[user_pid]
+            if caches is not None and user_pid in caches.devices
+            else await self._repo.list_active_notification_devices_for_user(user_pid)
+        )
+        return next((d for d in devices if d["public_id"] == device_pid), None)
+
+    async def _resolve_user_language(
+        self, user_pid: str, caches: _PrefetchedBatchCaches | None
+    ) -> str | None:
+        """Resolve recipient language preference from batch prefetch caches or DB."""
+        if caches is not None and user_pid in caches.languages:
+            return caches.languages[user_pid]
+        language_map = await self._repo.get_default_languages_for_users([user_pid])
+        return language_map.get(user_pid)
+
+    async def _cancel_if_routing_suppressed(
+        self,
+        row: AlertDeliveryRow,
+        event: AlertEventRow,
+        now: datetime,
+        *,
+        caches: _PrefetchedBatchCaches | None = None,
+    ) -> bool:
+        """Cancel a queued APNs row if rollout gate or alert prefs now suppress it."""
+        user_pid = row["user_public_id"]
+        if self._push_beta_provider is not None and not self._push_beta_provider().includes(
+            user_pid
+        ):
+            await self._mark_cancelled(row["public_id"], "routing_suppressed", now)
+            return True
+        prefs = (
+            caches.prefs[user_pid]
+            if caches is not None and user_pid in caches.prefs
+            else await self._repo.list_device_alert_prefs_for_user(user_pid)
+        )
+        defaults = (
+            caches.defaults[user_pid]
+            if caches is not None and user_pid in caches.defaults
+            else await self._repo.list_user_alert_defaults(user_pid)
+        )
+        if not allows_device_alert(row["device_public_id"], event, prefs, defaults, now):
+            await self._mark_cancelled(row["public_id"], "routing_suppressed", now)
+            return True
+        return False
 
     async def _attempt_on_queued_row(
         self,
         row: AlertDeliveryRow,
         now: datetime,
         *,
-        events_cache: dict[str, AlertEventRow] | None = None,
-        devices_cache: dict[str, list[NotificationDeviceRow]] | None = None,
-        languages_cache: dict[str, str | None] | None = None,
+        caches: _PrefetchedBatchCaches | None = None,
     ) -> None:
         """Load the source alert_event + device for one queued row and send.
 
-        ``events_cache`` and ``devices_cache`` are optional pre-loaded
-        bulk results produced by :meth:`_prefetch_caches_for_rows`. When
-        a cache miss falls through (e.g. row referenced outside any
-        prefetched batch), the per-row repository fetch is reused —
-        keeping the path correct for cancellation-event handlers that
-        process a single delivery without a surrounding batch.
+        ``caches`` is an optional pre-loaded bundle produced by
+        :meth:`_prefetch_caches_for_rows`. Cache misses fall through to per-row
+        repository fetches. Missing events, inactive devices, and rows suppressed
+        by the routing cascade transition to terminal ``failed``,
+        ``unregistered``, or ``cancelled_scope`` instead of remaining ``queued``.
         """
         if row.get("provider", "apns") == "fcm":
             if self._android is not None:
                 await self._android.attempt(row, now)
             return
-        event_pid = row["alert_event_public_id"]
-        if events_cache is not None and event_pid in events_cache:
-            event: AlertEventRow | None = events_cache[event_pid]
-        else:
-            event = await self._repo.get_alert_event_by_public_id(event_pid)
+        if self._apns is None:
+            return
+        event = await self._resolve_queued_event(row["alert_event_public_id"], caches)
         if event is None:
             logger.warning(
                 "sidecar: delivery={pid} references missing alert_event {evt} — marking failed",
                 pid=row["public_id"],
-                evt=event_pid,
+                evt=row["alert_event_public_id"],
             )
             await self._mark_failed(row["public_id"], "alert_event missing", now)
             return
-        user_pid = row["user_public_id"]
-        if devices_cache is not None and user_pid in devices_cache:
-            devices = devices_cache[user_pid]
-        else:
-            devices = await self._repo.list_active_notification_devices_for_user(user_pid)
-        device = next((d for d in devices if d["public_id"] == row["device_public_id"]), None)
+        device = await self._resolve_queued_device(
+            row["user_public_id"], row["device_public_id"], caches
+        )
         if device is None:
             logger.info(
                 "sidecar: delivery={pid} target device inactive —"
@@ -889,18 +1135,19 @@ class NotifySidecar(RegisterableProcess):
             )
             await self._mark_unregistered_no_device(row["public_id"], now)
             return
-        if languages_cache is not None and user_pid in languages_cache:
-            user_language: str | None = languages_cache[user_pid]
-        else:
-            language_map = await self._repo.get_default_languages_for_users([user_pid])
-            user_language = language_map.get(user_pid)
-        await self._attempt_once(
-            row["public_id"],
-            device,
-            event,
-            now,
+        if await self._cancel_if_routing_suppressed(row, event, now, caches=caches):
+            return
+        user_language = await self._resolve_user_language(row["user_public_id"], caches)
+        target = _DeliveryTarget(
+            delivery_public_id=row["public_id"],
+            device=device,
+            event=event,
             user_language=user_language,
+            expires_at=row.get("expires_at"),
+            created_at=row["created_at"],
+            prior_error_reason=row.get("error_reason"),
         )
+        await self._attempt_delivery(target, now)
 
     async def _mark_failed(self, delivery_public_id: str, error_reason: str, now: datetime) -> None:
         """Terminal failure with provenance stamped from this sidecar."""
@@ -908,7 +1155,7 @@ class NotifySidecar(RegisterableProcess):
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         await self._repo.mark_delivery_failed(
             delivery_public_id,
-            error_reason=error_reason,
+            error_reason=error_reason[:_MAX_ERROR_REASON_LEN],
             transition_at=now,
             session_id=sid,
             sequence_id=seq,
@@ -925,16 +1172,46 @@ class NotifySidecar(RegisterableProcess):
             sequence_id=seq,
         )
 
+    async def _mark_cancelled(self, delivery_public_id: str, reason: str, now: datetime) -> None:
+        """Terminal scope/routing cancellation with provenance from this sidecar."""
+        await self._repo.mark_delivery_cancelled(
+            delivery_public_id,
+            reason=reason[:_MAX_ERROR_REASON_LEN],
+            transition_at=now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(_ZMQ_STREAM),
+        )
+
     async def _process_retry_queue_loop(self) -> None:
         """Wake every 30s and retry deliveries whose ``next_attempt_at`` arrived.
 
         Background task spawned in ``start()``; tears down when
-        ``stop()`` sets the stop event. A cancelled retry is just an
-        interrupted sleep — the next startup drains any rows left
-        behind. Each tick mints one ``now`` at the entry boundary
-        (single timestamp per tick) that drives both
-        the retry-eligibility SELECT and every SCD2 write performed
-        while processing the batch returned by that query.
+        ``stop()`` sets the stop event. Each tick mints one ``now`` at
+        the entry boundary that drives both the retry-eligibility SELECT
+        and every SCD2 write performed while processing that batch.
+
+        Root-cause diagnosis for issue #184 (121 rows stuck ``queued`` with
+        ``next_attempt_at`` in the past between 01:30Z and 02:03Z, plus 48
+        from 11-24):
+            ``SQLAlchemyRepository.list_deliveries_ready_for_retry(now)``
+            (``repository.py``) queries ``status == 'queued' AND known_to ==
+            KNOWN_TO_MAX AND (next_attempt_at IS NULL OR next_attempt_at <=
+            now)``, and ``list_queued_deliveries_all()`` selects all active
+            ``status == 'queued'`` rows — so neither SQL selection predicate
+            excludes rows whose ``next_attempt_at`` is in the past. Instead,
+            this loop processed rows sequentially and awaited
+            ``self._apns.send(...)`` with no ``asyncio.wait_for`` timeout,
+            while ``aioapns`` (``APNsBaseConnectionPool.acquire`` /
+            ``APNsBaseClientProtocol.send_notification``) can block
+            indefinitely on stalled sockets, busy pool spin loops, or
+            unresolved response futures during an outage. One hung send
+            permanently stalled this task without exiting or raising to
+            ``_run_workers``, leaving subsequent 30s ticks unexecuted and
+            queued rows stranded past ``next_attempt_at`` even after network
+            recovery (while ``_attempt_on_queued_row`` also intentionally
+            leaves ``fcm`` rows untouched when ``_android is None``).
+            Bounding ``self._apns.send`` with ``_APNS_SEND_TIMEOUT_S`` and
+            isolating per-row errors keeps the retry scheduler advancing.
         """
         while not self._stop_event.is_set():
             with contextlib.suppress(TimeoutError):
@@ -943,17 +1220,9 @@ class NotifySidecar(RegisterableProcess):
                 return
             now = datetime.now(UTC)
             rows = await self._repo.list_deliveries_ready_for_retry(now)
-            events_cache, devices_cache, languages_cache = await self._prefetch_caches_for_rows(
-                rows
-            )
+            caches = await self._prefetch_caches_for_rows(rows)
             for row in rows:
-                await self._attempt_on_queued_row(
-                    row,
-                    now,
-                    events_cache=events_cache,
-                    devices_cache=devices_cache,
-                    languages_cache=languages_cache,
-                )
+                await self._safe_attempt_on_queued_row(row, now, caches=caches)
 
 
 def _priority_to_apns(priority: str) -> int:

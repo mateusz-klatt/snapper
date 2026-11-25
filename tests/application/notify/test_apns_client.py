@@ -8,17 +8,23 @@ always mocked — the tests assert our routing semantics, not
 Apple's HTTP/2 stack.
 """
 
+import socket
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from aioapns.common import NotificationResult
+from aioapns.exceptions import ConnectionClosed as ApnsConnectionClosed
+from aioapns.exceptions import ConnectionError as ApnsConnectionError
+from aioapns.exceptions import MaxAttemptsExceeded as ApnsMaxAttemptsExceeded
 
 from snapper.application.notify.apns_client import ApnsClientPool
 from snapper.application.notify.apns_client import _coarse_status
 from snapper.application.notify.apns_client import _map_result
 from snapper.application.notify.apns_client import _status_code_from
 from snapper.application.notify.apns_client import build_apns_client_pool
+from snapper.application.notify.apns_client import is_network_delivery_error
 from snapper.application.notify.apns_config import ApnsConfig
 
 
@@ -315,3 +321,71 @@ class TestBuildApnsClientPool:
         assert sandbox_kwargs["use_sandbox"] is True
         assert prod_kwargs["use_sandbox"] is False
         assert sandbox_kwargs["key"] == prod_kwargs["key"]
+
+
+class TestNetworkDeliveryErrorClassification:
+    """``is_network_delivery_error`` separates network outages from other errors."""
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            ApnsMaxAttemptsExceeded(),
+            ApnsConnectionError(),
+            ApnsConnectionClosed("eof"),
+            TimeoutError("timed out"),
+            socket.gaierror(-2, "Name or service not known"),
+            ConnectionRefusedError("refused"),
+            OSError("network unreachable"),
+            httpx.ConnectError("connect failed"),
+            httpx.ProxyError("proxy down"),
+            httpx.ReadTimeout("read timed out"),
+        ],
+    )
+    def test_network_exceptions_classified_as_network(self, exc: BaseException) -> None:
+        """Transient network/transport exception types return True.
+
+        Given: An exception instance representing DNS, connect, proxy, timeout,
+            or aioapns ``MaxAttemptsExceeded`` transport failure.
+        When: ``is_network_delivery_error`` inspects the exception.
+        Then: It returns ``True`` so the sidecar retries until TTL expiry.
+        """
+        assert is_network_delivery_error(exc) is True
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            RuntimeError("unexpected"),
+            ValueError("Unknown APNs env"),
+        ],
+    )
+    def test_non_network_exceptions_classified_false(self, exc: BaseException) -> None:
+        """Non-network exceptions keep the bounded retry path.
+
+        Given: A non-network exception with no network cause/context.
+        When: ``is_network_delivery_error`` inspects the exception.
+        Then: It returns ``False``.
+        """
+        assert is_network_delivery_error(exc) is False
+
+    def test_wrapped_cause_and_context_follow_chain(self) -> None:
+        """Wrapped network causes and contexts are recognized across the chain.
+
+        Given: Non-network wrapper exceptions linked via ``__cause__`` and
+            ``__context__`` to a network error, plus a non-network cycle.
+        When: ``is_network_delivery_error`` walks the exception chain.
+        Then: Wrapped network chains return ``True`` and cyclic non-network
+            chains terminate safely with ``False``.
+        """
+        caused = RuntimeError("wrapper")
+        caused.__cause__ = ApnsMaxAttemptsExceeded()
+        assert is_network_delivery_error(caused) is True
+
+        contextual = RuntimeError("secondary")
+        contextual.__context__ = socket.gaierror(-3, "temporary failure")
+        assert is_network_delivery_error(contextual) is True
+
+        cycle_a = RuntimeError("a")
+        cycle_b = RuntimeError("b")
+        cycle_a.__cause__ = cycle_b
+        cycle_b.__cause__ = cycle_a
+        assert is_network_delivery_error(cycle_a) is False

@@ -14,13 +14,53 @@ tests can fake out both ends without needing an event loop.
 from dataclasses import dataclass
 from typing import Final
 
+import httpx
 from aioapns import APNs as _AioApns
 from aioapns import NotificationRequest
 from aioapns.common import NotificationResult
 from aioapns.common import PushType
+from aioapns.exceptions import ConnectionClosed as ApnsConnectionClosed
+from aioapns.exceptions import ConnectionError as ApnsConnectionError
+from aioapns.exceptions import MaxAttemptsExceeded as ApnsMaxAttemptsExceeded
 
 from snapper.application.notify.apns_config import ApnsConfig
 from snapper.core.json_types import JsonObject
+
+_NETWORK_ERROR_TYPES: Final[tuple[type[BaseException], ...]] = (
+    ApnsMaxAttemptsExceeded,
+    ApnsConnectionError,
+    ApnsConnectionClosed,
+    TimeoutError,
+    OSError,
+    httpx.TransportError,
+)
+
+
+def is_network_delivery_error(exc: BaseException) -> bool:
+    """Classify whether a delivery exception belongs to the network outage class.
+
+    Inspects ``exc`` and its ``__cause__`` / ``__context__`` chain purely by
+    exception type. Matches DNS and socket errors (``OSError`` including
+    ``socket.gaierror``), connect/proxy/transport errors (``httpx.TransportError``,
+    ``aioapns.exceptions.ConnectionError``, ``ConnectionClosed``), timeouts
+    (``TimeoutError``), and aioapns's transport exhaustion error
+    (``MaxAttemptsExceeded``, raised after ``"Failed to send after N attempts"``).
+
+    Args:
+        exc: Exception raised while sending an APNs notification.
+
+    Returns:
+        ``True`` for transient network/transport outage errors that should retry
+        until expiry; ``False`` for non-network exceptions.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, _NETWORK_ERROR_TYPES):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ if current.__cause__ is not None else current.__context__
+    return False
 
 
 @dataclass(frozen=True, slots=True)
