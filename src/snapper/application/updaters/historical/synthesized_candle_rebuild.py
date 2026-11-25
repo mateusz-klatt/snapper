@@ -38,7 +38,6 @@ from pydantic import StringConstraints
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy import text
-from sqlalchemy import tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.updaters.historical import candle_repair
@@ -1107,19 +1106,29 @@ def _units(keys: Collection[CandleKey]) -> list[_ReadUnit]:
 async def _read_output_versions(
     session: AsyncSession, unit: _ReadUnit
 ) -> dict[CandleKey, list[CandleVersionRow]]:
-    """Read all higher-timeframe versions of a bounded batch without ORM identity collapse."""
+    """Read all higher-timeframe versions of a bounded batch without ORM identity collapse.
+
+    The statement filters by instrument list, UTC day and the six timeframes,
+    with a bind count independent of the number of windows, and the unit's
+    window keys select the rows in memory. A tuple list of every window would
+    bind three values per window, close to the driver's parameter limit on a
+    dense day.
+    """
+    wanted = set(unit.keys)
     result = await session.execute(
         select(Candle.__table__).where(
             Candle.instrument_public_id.in_(unit.instruments),
             Candle.open_at >= unit.day,
             Candle.open_at < unit.day + _DAY,
-            tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(unit.keys),
+            Candle.timeframe.in_(TIMEFRAMES),
         )
     )
     versions: dict[CandleKey, list[CandleVersionRow]] = defaultdict(list)
     for raw in result.mappings():
         row = cast(CandleVersionRow, dict(raw))
-        versions[candle_key(row)].append(row)
+        key = candle_key(row)
+        if key in wanted:
+            versions[key].append(row)
     return versions
 
 

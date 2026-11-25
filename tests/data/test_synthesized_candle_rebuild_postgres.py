@@ -681,6 +681,57 @@ async def test_verification_reads_one_repeatable_read_only_snapshot(
     assert current["volume"] == later.inputs[instrument][0]["volume"] == 9.0
 
 
+async def test_full_read_unit_stays_well_within_statement_timeout(
+    repository: SQLAlchemyRepository,
+) -> None:
+    """Time both production reads of a dense PostgreSQL unit.
+
+    Given: A committed day with 20 instruments, every higher-timeframe window and minute inputs.
+    When: Read one full unit in a verification-style PostgreSQL transaction.
+    Then: Both reads return all expected rows and each takes less than five seconds.
+    """
+    instruments = tuple(str(uuid4()) for _ in range(20))
+    minutes = [
+        (instrument, _DAY + timedelta(minutes=offset))
+        for instrument in instruments
+        for offset in range(0, 1440, 5)
+    ]
+    (unit,) = rebuild._units(rebuild._count_windows(minutes))
+    assert len(unit.keys) == 20 * 463
+    await _store(
+        repository,
+        [_row(instrument, opening, timeframe) for instrument, timeframe, opening in unit.keys],
+    )
+    await _store(
+        repository,
+        [_row(instrument, opening, "1m", source="native") for instrument, opening in minutes],
+    )
+
+    async with repository.session() as session:
+        await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        await session.execute(text(rebuild._TIMEOUT))
+        started = monotonic()
+        outputs = await rebuild._read_output_versions(session, unit)
+        output_seconds = monotonic() - started
+        started = monotonic()
+        inputs = await rebuild._read_input_versions(session, unit, _WRITE)
+        input_seconds = monotonic() - started
+
+    _LOG.info(
+        "Full rebuild unit: %d output windows in %.3f s and %d minute inputs in %.3f s",
+        len(unit.keys),
+        output_seconds,
+        len(minutes),
+        input_seconds,
+    )
+    assert sum(map(len, outputs.values())) == len(unit.keys)
+    assert set(outputs) == set(unit.keys)
+    assert set(inputs) == set(instruments)
+    assert all(len(rows) == 288 for rows in inputs.values())
+    assert output_seconds < 5.0
+    assert input_seconds < 5.0
+
+
 async def test_reconciliation_reads_both_outcomes_while_another_writer_holds_a_lock(
     repository: SQLAlchemyRepository, database: _Database, instrument: str
 ) -> None:

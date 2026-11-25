@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from uuid import uuid4
 from uuid import uuid7
 
 import pytest
@@ -29,8 +30,10 @@ from sqlalchemy import insert
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy import update
+from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import Select
 
 from snapper.application.updaters.historical import candle_repair as repair
 from snapper.application.updaters.historical import synthesized_candle_rebuild as rebuild
@@ -2691,3 +2694,69 @@ def test_read_units_use_at_most_twenty_instruments_and_never_cross_a_utc_day() -
     assert [len(unit.instruments) for unit in units] == [20, 20, 1, 1]
     assert all(key[2].date() == unit.day.date() for unit in units for key in unit.keys)
     assert {key for unit in units for key in unit.keys} == set(keys)
+
+
+@pytest.mark.asyncio
+async def test_output_read_ignores_a_window_outside_the_unit(recorded_repair: _Run) -> None:
+    """Return only the requested window from the same instrument and day.
+
+    Given: Two higher-timeframe rows of the same instrument and UTC day.
+    When: Read a unit containing only the first window from SQLite.
+    Then: Only the first window appears in the result.
+    """
+    requested = (XRP, "5m", OPEN)
+    (unit,) = rebuild._units([requested])
+    async with recorded_repair.repository.session() as session:
+        await session.execute(
+            insert(Candle),
+            [
+                candle(XRP, OPEN, timeframe="5m", close=2.0),
+                candle(XRP, OPEN + timedelta(minutes=5), timeframe="5m", close=3.0),
+            ],
+        )
+        outputs = await rebuild._read_output_versions(session, unit)
+
+    assert set(outputs) == {requested}
+    (version,) = outputs[requested]
+    assert version["close"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_output_read_bind_count_stays_fixed_for_a_full_unit() -> None:
+    """Count expanded PostgreSQL binds for sparse and full reads.
+
+    Given: One UTC day and the same 20 instruments in a sparse and a full unit.
+    When: Compile the issued queries with the asyncpg dialect and expand list binds.
+    Then: Both queries bind 20 instruments, two time bounds and six timeframes.
+    """
+    instruments = tuple(str(uuid4()) for _ in range(20))
+    day = OPEN.replace(hour=0)
+    windows = rebuild._count_windows(
+        [
+            (instrument, day + timedelta(minutes=offset))
+            for instrument in instruments
+            for offset in range(0, 1440, 5)
+        ]
+    )
+    (full,) = rebuild._units(windows)
+    sparse = replace(full, keys=tuple((name, "5m", day) for name in full.instruments))
+    assert len(full.keys) == 20 * 463
+    assert len(sparse.keys) == 20
+
+    execute = AsyncMock(return_value=MagicMock(mappings=MagicMock(return_value=[])))
+    session = MagicMock(spec=AsyncSession, execute=execute)
+    for unit in (sparse, full):
+        await rebuild._read_output_versions(session, unit)
+
+    bind_counts: list[int] = []
+    for call in execute.await_args_list:
+        (statement,) = call.args
+        assert isinstance(statement, Select)
+        compiled = statement.compile(
+            dialect=PGDialect_asyncpg(), compile_kwargs={"render_postcompile": True}
+        )
+        assert compiled.params is not None
+        assert compiled.positiontup is not None
+        assert len(compiled.params) == len(compiled.positiontup)
+        bind_counts.append(len(compiled.positiontup))
+    assert bind_counts == [28, 28]
