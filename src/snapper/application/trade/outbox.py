@@ -168,6 +168,7 @@ class OutboxDispatcher:
         self._wake = asyncio.Event()
         self._running = False
         self._retry: dict[str, _CommandRetryState] = {}
+        self._tick_blocked_shards: set[str] = set()
 
     def notify(self) -> None:
         """Signal the dispatcher that a new command was written.
@@ -382,6 +383,8 @@ class OutboxDispatcher:
             else _RETRY_BACKOFF_CAP_S
         )
         delay = min(_RETRY_BACKOFF_BASE_S * (_RETRY_BACKOFF_FACTOR ** min(failures - 1, 30)), cap)
+        if blocks_shard:
+            self._tick_blocked_shards.add(cmd["shard_key"])
         self._retry[public_id] = _CommandRetryState(
             failures=failures,
             next_at=now_mono + delay,
@@ -610,13 +613,23 @@ class OutboxDispatcher:
         )
 
     async def _dispatch_batch(self) -> None:
-        """Fetch one batch of undispatched commands, publish, and bulk-dispatch."""
+        """Fetch one batch of undispatched commands, publish, and bulk-dispatch.
+
+        Per-shard FIFO also holds inside the batch: once a command fails in a
+        way that blocks its shard, later commands on that shard are skipped for
+        the rest of this tick. They return on the next fetch, where the fetch
+        filter defers them behind the failing command. Material-barrier holds
+        and unresolved-cancel holds do not block the shard.
+        """
         now = datetime.now(UTC)
         commands = await self._fetch_owned_batch(now)
         if not commands:
             return
+        self._tick_blocked_shards.clear()
         success_updates: list[TradeCommandDispatchUpdate] = []
         for cmd in commands:
+            if cmd["shard_key"] in self._tick_blocked_shards:
+                continue
             update = await self._dispatch_command(cmd)
             if update is not None:
                 success_updates.append(update)

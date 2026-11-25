@@ -1266,6 +1266,77 @@ class TestOutboxRetryBackoff:
         assert repo.require_consistent_trade_command_material.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_failure_in_batch_skips_later_same_shard_rows_in_that_tick(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failing command stops later same-shard rows within the same batch.
+
+        Given: One batch holding a failing BTC submit, a later BTC submit and an
+            ETH submit,
+        When: The batch runs, then runs again after the failing submit's backoff
+            once it succeeds,
+        Then: The first tick publishes only ETH, and the later BTC submit is
+            published only after the earlier one, preserving shard order.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        first = _make_backoff_row("btc-a", command_type="submit")
+        second = _make_backoff_row("btc-b", command_type="submit")
+        other = _make_backoff_row("eth-a", command_type="submit", shard_key="kraken.ETH-USD.live")
+        queue: list[list[TradeCommandRow]] = [[first, second, other]]
+        repo = _make_queue_repo(queue)
+        published: list[str] = []
+        fail_first = True
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if fail_first and cmd["public_id"] == "btc-a":
+                raise RuntimeError("ZMQ down")
+            published.append(cmd["public_id"])
+
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=AsyncMock(side_effect=_publish))
+        await dispatcher._dispatch_batch()
+        assert published == ["eth-a"]
+
+        clock.advance(0.10)
+        queue[0] = [first, second]
+        await dispatcher._dispatch_batch()
+        assert published == ["eth-a"]
+
+        clock.advance(0.20)
+        fail_first = False
+        await dispatcher._dispatch_batch()
+        assert published == ["eth-a", "btc-a", "btc-b"]
+
+    @pytest.mark.asyncio
+    async def test_repeat_failure_after_backoff_still_holds_later_same_shard_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A command failing again once due keeps its later shard peers waiting.
+
+        Given: A BTC submit already backing off and a later BTC cancel,
+        When: The submit comes due together with the cancel and fails again,
+        Then: The cancel is not published in that tick.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        first = _make_backoff_row("btc-a", command_type="submit")
+        later = _make_backoff_row("btc-cancel", command_type="cancel")
+        queue: list[list[TradeCommandRow]] = [[first]]
+        repo = _make_queue_repo(queue)
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if cmd["public_id"] == "btc-a":
+                raise RuntimeError("ZMQ down")
+            published.append(cmd["public_id"])
+
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=AsyncMock(side_effect=_publish))
+        await dispatcher._dispatch_batch()
+
+        clock.advance(0.30)
+        queue[0] = [first, later]
+        await dispatcher._dispatch_batch()
+        assert published == []
+
+    @pytest.mark.asyncio
     async def test_ttl_expiry_during_backoff_expires_without_publishing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1385,15 +1456,17 @@ class TestOutboxRetryBackoff:
     ) -> None:
         """Appearing in a fetched page refreshes last_seen and unseen entries prune at 300 s.
 
-        Given: Two failing commands where one vanishes immediately and the other
-            stays visible in a fetched page at 200 s before later vanishing,
+        Given: Two failing commands on different shards where one vanishes
+            immediately and the other stays visible in a fetched page at 200 s before later vanishing,
         When: Batches run at 200 s, 300.1 s, and 600.2 s,
         Then: The absent command is pruned after 300 s while the refreshed one
             survives until it is absent for more than 300 s.
         """
         clock = _install_clock(monkeypatch, initial=0.0)
         cmd_keep = _make_backoff_row("cmd-keep", command_type="cancel")
-        cmd_drop = _make_backoff_row("cmd-drop", command_type="cancel")
+        cmd_drop = _make_backoff_row(
+            "cmd-drop", command_type="cancel", shard_key="kraken.ETH-USD.live"
+        )
         queue: list[list[TradeCommandRow]] = [[cmd_keep, cmd_drop]]
         repo = _make_queue_repo(queue)
         publish_fn = AsyncMock(
