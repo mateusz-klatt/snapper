@@ -10179,18 +10179,21 @@ async def test_native_finalize_flush_loop_propagates_cancellation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_deferred_work", [False, True])
 async def test_candle_repair_loop_runs_due_repairs(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, with_deferred_work: bool
 ) -> None:
     """The repair loop waits for a signal, debounces, and runs due repairs.
 
-    Given: a running repair loop with its event already set,
+    Given: a running repair loop with its event already set and an optional future deadline,
     When: the debounce sleep completes,
     Then: due repairs run once and the loop exits when running is cleared.
     """
     pub = DummyPublisher(symbols=["BTC-USD"])
     pub.running = True
     pub._candle_repair_event.set()
+    if with_deferred_work:
+        pub._next_candle_repair_at = monotonic() + 30
 
     async def _run_due(_exchange: object) -> None:
         pub.running = False
@@ -12013,12 +12016,18 @@ async def test_new_seeded_source_gate_invalidates_an_older_queued_output() -> No
 
 
 @pytest.mark.asyncio
-async def test_failed_old_source_read_does_not_spend_a_new_generation_retry() -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("source read failed"), DBAPIError("SELECT", {}, _FakeTradePgError("55P03"))],
+)
+async def test_failed_old_source_read_does_not_spend_a_new_generation_retry(
+    failure: Exception,
+) -> None:
     """A failed derivation cannot consume the retry budget of expanded source evidence.
 
     Given: a repair starts reading its current required source set,
     When: that set expands before the old read fails and its result is collected,
-    Then: the new source generation retains its untouched retry budget.
+    Then: the new source generation retains its untouched retry and deferral budgets.
     """
     pub, key = await _enqueued_ack_repair()
     pub._forget_candle_write_sequence(pub._candle_write_queue.get_nowait())
@@ -12027,11 +12036,12 @@ async def test_failed_old_source_read_does_not_spend_a_new_generation_retry() ->
 
     async def _expand_then_fail(*_args: object, **_kwargs: object) -> None:
         pub._schedule_seeded_incomplete_candle_repair_key(key, frozenset({_candle_minute(10, 1)}))
-        raise RuntimeError("source read failed")
+        raise failure
 
     with patch.object(pub.repository, "get_candles", new=AsyncMock(side_effect=_expand_then_fail)):
         await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
-    assert pub._pending_candle_repairs[key].attempts == 0
+    pending = pub._pending_candle_repairs[key]
+    assert (pending.attempts, pending.lock_deferrals) == (0, 0)
 
 
 @pytest.mark.asyncio
@@ -12112,6 +12122,253 @@ async def test_repair_candle_key_publishes_and_handles_failures() -> None:
     assert await pub._repair_candle_key(key, ExchangeEnum.KRAKEN) is False
     pub._derive_repaired_synthesized_candle = AsyncMock(side_effect=RuntimeError("db"))
     assert await pub._repair_candle_key(key, ExchangeEnum.KRAKEN) is False
+
+
+def _publisher_with_due_candle_repair() -> tuple[DummyPublisher, _CandleRepairKey]:
+    """Set up a closed window whose exact correction has already committed.
+
+    Returns:
+        The publisher and its due repair key.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    window = _candle_minute(10, 0)
+    key = _CandleRepairKey("BTC-USD", "5m", window)
+    pub._candle_aggregator = CandleAggregator(["5m"])
+    pub._candle_aggregator._closed_window[(key.symbol, key.timeframe)] = int(window.timestamp())
+    pub._set_pending_candle_repair(key, _PendingCandleRepair(required_sequence=1))
+    pub._committed_candle_write_sequences.add(1)
+    return pub, key
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sqlstate", ["55P03", "40001", "40P01"])
+async def test_candle_repair_lock_deferrals_back_off_without_spending_attempts(
+    sqlstate: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rolled-back repairs defer with capped per-key backoff.
+
+    Given: a due repair already charged one attempt and a transient PostgreSQL error,
+    When: the same error recurs at each eligible retry,
+    Then: the delays double up to 30 seconds and the ordinary attempt count stays fixed.
+    """
+    pub, key = _publisher_with_due_candle_repair()
+    pending = pub._pending_candle_repairs[key]
+    pending.attempts = 1
+    clock = Mock(return_value=100.0)
+    warning = Mock()
+    error = Mock()
+    monkeypatch.setattr(base_module, "monotonic", clock)
+    monkeypatch.setattr(base_module.logger, "warning", warning)
+    monkeypatch.setattr(base_module.logger, "error", error)
+    derive = AsyncMock(side_effect=DBAPIError("SELECT", {}, _FakeTradePgError(sqlstate)))
+    pub._derive_repaired_synthesized_candle = derive
+
+    for count, delay in enumerate((2, 4, 8, 16, 30, 30), start=1):
+        now = clock.return_value
+        await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+        assert derive.await_count == count
+        assert pending.lock_deferrals == count
+        assert pending.attempts == 1
+        assert pending.retry_at == now + delay
+        assert not pub._candle_repair_event.is_set()
+
+        clock.return_value = pending.retry_at - 0.01
+        await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+        assert derive.await_count == count
+        clock.return_value = pending.retry_at
+        assert pub._due_candle_repair_groups() == {(key.symbol, key.window_begin): [(key, 1, None)]}
+
+    message = (
+        "candle repair deferred by database lock contention: "
+        f"symbol=BTC-USD timeframe=5m window={key.window_begin.isoformat()} sqlstate={sqlstate}"
+    )
+    assert [logged.args for logged in warning.call_args_list] == [(message,)] * 6
+    error.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_candle_repair_loop_wakes_at_earliest_lock_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired backoff wakes the repair loop without a writer signal.
+
+    Given: two closed repairs with different future eligibility times and an unset event,
+    When: the earlier deadline expires,
+    Then: the loop attempts just that repair and retains the other deadline.
+    """
+    pub, key = _publisher_with_due_candle_repair()
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(base_module, "monotonic", clock)
+    later_window = key.window_begin - timedelta(minutes=5)
+    later = _CandleRepairKey(key.symbol, key.timeframe, later_window)
+    pub._pending_candle_repairs[key].retry_at = 102.0
+    pub._set_pending_candle_repair(later, _PendingCandleRepair(required_sequence=1, retry_at=104.0))
+    assert pub._due_candle_repair_groups() == {}
+    assert not pub._candle_repair_event.is_set()
+
+    async def _derive(
+        repair_key: _CandleRepairKey, _source: frozenset[datetime] | None
+    ) -> CandleUpdate:
+        """Stop after the timed wake and return the derived candle."""
+        pub.running = False
+        return _candle_update(begin=repair_key.window_begin)
+
+    derive = AsyncMock(side_effect=_derive)
+    pub._derive_repaired_synthesized_candle = derive
+    pub._publish_synthesized_candle = AsyncMock(return_value=100)
+    pub.running = True
+    clock.return_value = 102.0
+    await asyncio.wait_for(pub._candle_repair_loop(ExchangeEnum.KRAKEN), timeout=1)
+
+    derive.assert_awaited_once_with(key, None)
+    assert pub._pending_candle_repairs[key].output_sequence == 100
+    assert pub._pending_candle_repairs[later].attempts == 0
+    assert pub._next_candle_repair_at == 104.0
+    assert not pub._candle_repair_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_candle_repair_lock_deferral_ceiling_uses_existing_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permanently locked repair eventually reaches the ordinary abandonment limit.
+
+    Given: a repair about to use its 40th deferral,
+    When: its database lock error persists,
+    Then: it gets one final deferral and subsequent failures use its three ordinary attempts.
+    """
+    pub, key = _publisher_with_due_candle_repair()
+    pending = pub._pending_candle_repairs[key]
+    pending.lock_deferrals = 39
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(base_module, "monotonic", clock)
+    pub._derive_repaired_synthesized_candle = AsyncMock(
+        side_effect=DBAPIError("SELECT", {}, _FakeTradePgError("55P03"))
+    )
+
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert (pending.lock_deferrals, pending.attempts, pending.retry_at) == (40, 0, 130.0)
+    assert not pub._candle_repair_event.is_set()
+
+    clock.return_value = 130.0
+    for attempts in (1, 2):
+        await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+        assert (pending.lock_deferrals, pending.attempts, pending.retry_at) == (40, attempts, 130.0)
+        assert pub._candle_repair_event.is_set()
+        pub._candle_repair_event.clear()
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert key not in pub._pending_candle_repairs
+    assert not pub._candle_repair_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_candle_repair_nontransient_database_error_keeps_existing_retry_and_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unclassified database error follows the ordinary repair failure path.
+
+    Given: a due repair that raises a database error with a non-transient SQLSTATE,
+    When: the original three attempts fail,
+    Then: the runner signals each retry and emits the exact failure and abandonment logs.
+    """
+    pub, key = _publisher_with_due_candle_repair()
+    pending = pub._pending_candle_repairs[key]
+    exc = DBAPIError("SELECT", {}, _FakeTradePgError("57014"))
+    pub._derive_repaired_synthesized_candle = AsyncMock(side_effect=exc)
+    error = Mock()
+    warning = Mock()
+    monkeypatch.setattr(base_module.logger, "error", error)
+    monkeypatch.setattr(base_module.logger, "warning", warning)
+
+    window = key.window_begin.isoformat()
+    for attempts in (1, 2):
+        await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+        assert pending.attempts == attempts
+        assert pending.lock_deferrals == 0
+        assert pub._candle_repair_event.is_set()
+        pub._candle_repair_event.clear()
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+
+    assert key not in pub._pending_candle_repairs
+    assert not pub._candle_repair_event.is_set()
+    message = f"candle repair failed: symbol=BTC-USD timeframe=5m window={window} error={exc}"
+    assert [logged.args for logged in error.call_args_list] == [(message,)] * 3
+    warning.assert_called_once_with(
+        f"abandoned candle repair after retry limit: symbol=BTC-USD timeframe=5m window={window} "
+        "attempts=3; source 1m or synthesized persistence unavailable; "
+        "manual backfill resyncs the synthesized window"
+    )
+
+
+@pytest.mark.asyncio
+async def test_committed_candle_repair_resets_lock_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An exact durable success resets backoff for the next repair of the same window.
+
+    Given: one key is deferred twice before successfully queuing its replacement,
+    When: the writer acknowledges that exact replacement and a new correction needs repair,
+    Then: the new request starts over at the two-second deferral.
+    """
+    pub, key = _publisher_with_due_candle_repair()
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(base_module, "monotonic", clock)
+    locked = DBAPIError("SELECT", {}, _FakeTradePgError("55P03"))
+    pub._derive_repaired_synthesized_candle = AsyncMock(
+        side_effect=[locked, locked, _candle_update(begin=key.window_begin), locked]
+    )
+    pub._publish_synthesized_candle = AsyncMock(return_value=100)
+
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    clock.return_value = 102.0
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert pub._pending_candle_repairs[key].retry_at == 106.0
+    clock.return_value = 106.0
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert pub._pending_candle_repairs[key].output_sequence == 100
+    pub._resolve_candle_repair_output(100, committed=True)
+    assert key not in pub._pending_candle_repairs
+
+    late = _LateCandleDropKey(key.symbol, key.window_begin)
+    pub._schedule_candle_repair_key(key, 2, late)
+    pub._committed_candle_write_sequences.add(2)
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    pending = pub._pending_candle_repairs[key]
+    assert (pending.lock_deferrals, pending.attempts, pending.retry_at) == (1, 0, 108.0)
+
+
+@pytest.mark.asyncio
+async def test_historical_candle_repair_defers_a_rolled_back_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A historical-only repair retries a lock-aborted guarded commit.
+
+    Given: a settled repair with its full source grid and a transient write failure,
+    When: its guarded commit fails and is retried at the deadline,
+    Then: the repair clears on commit without spending an attempt or publishing live.
+    """
+    pub, key = _publisher_with_due_candle_repair()
+    pending = pub._pending_candle_repairs[key]
+    pending.historical_only = True
+    pending.expected_source_minutes = frozenset(
+        key.window_begin + timedelta(minutes=i) for i in range(5)
+    )
+    clock = Mock(return_value=100.0)
+    monkeypatch.setattr(base_module, "monotonic", clock)
+    pub._derive_repaired_synthesized_candle = AsyncMock(
+        return_value=_candle_update(begin=key.window_begin)
+    )
+    pub._ensure_instrument = AsyncMock(return_value="instrument-id")
+    persist = AsyncMock(side_effect=[DBAPIError("INSERT", {}, _FakeTradePgError("40P01")), None])
+    pub._persist_historical_candle_rows = persist
+    publish = AsyncMock()
+    pub._publish_synthesized_candle = publish
+
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert (pending.lock_deferrals, pending.attempts, pending.retry_at) == (1, 0, 102.0)
+    clock.return_value = 102.0
+    await pub._run_due_candle_repairs(ExchangeEnum.KRAKEN)
+    assert persist.await_count == 2
+    assert key not in pub._pending_candle_repairs
+    publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio
