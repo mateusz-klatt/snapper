@@ -54,7 +54,7 @@ def _parser() -> argparse.ArgumentParser:
         description="Rebuild higher-timeframe Kraken spot candles from recorded repairs.",
         epilog=(
             "For recent data, choose an --end at or before the UTC day floor "
-            "of (run start minus 719 minutes) to stay clear of Kraken catchup (DEC-15)."
+            "of (run start minus 719 minutes) to stay clear of Kraken catchup."
         ),
         allow_abbrev=False,
     )
