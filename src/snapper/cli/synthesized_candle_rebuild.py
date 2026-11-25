@@ -184,7 +184,14 @@ def _run(db_url: str, invocation: _Invocation) -> int:
 
 
 def rebuild_synthesized_candles(ctx: typer.Context) -> None:
-    """Preview, apply or verify guarded higher-timeframe candle rebuilds."""
+    """Preview, apply or verify guarded higher-timeframe candle rebuilds.
+
+    Args:
+        ctx: Typer context carrying the rebuild command arguments.
+
+    Raises:
+        typer.Exit: Carries the command's exit status.
+    """
     run_id = str(uuid7())
     try:
         invocation = _arguments(ctx.args, run_id)

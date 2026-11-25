@@ -75,7 +75,14 @@ type CandleKey = tuple[str, str, datetime]
 
 
 def candle_key(row: CandleUpsertRow) -> CandleKey:
-    """Identify a candle by instrument, timeframe and opening time."""
+    """Identify a candle by instrument, timeframe and opening time.
+
+    Args:
+        row: Candle write payload.
+
+    Returns:
+        The candle's natural key.
+    """
     return row["instrument_public_id"], row["timeframe"], row["open_at"]
 
 
@@ -141,7 +148,18 @@ def canonical_json(document: JsonValue) -> bytes:
 
 
 def open_exclusive(path: Path) -> BufferedWriter:
-    """Create a new file readable and writable by its owner only."""
+    """Create a new file readable and writable by its owner only.
+
+    Args:
+        path: File to create.
+
+    Returns:
+        The open binary writer.
+
+    Raises:
+        FileExistsError: The path already exists.
+        OSError: The file cannot be created or its mode cannot be set.
+    """
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     os.fchmod(descriptor, 0o600)
     return os.fdopen(descriptor, "wb")
@@ -269,6 +287,15 @@ async def reconcile_versions(
 
     Read currentness in the same query as the payload. Callers may require
     additional fields when their writer preserves those values exactly.
+
+    Args:
+        repository: Repository used for the reconciliation read.
+        rows: Submitted payloads by candle key.
+        session_id: Write run identifier used to find committed versions.
+        extra_fields: Additional payload fields that must match exactly.
+
+    Returns:
+        Each key's applied, superseded or uncertain outcome.
     """
     async with repository.session() as session:
         if repository.dialect_name == "postgresql":
@@ -348,7 +375,14 @@ class ReceiptLog:
         self._handle = open_exclusive(path)
 
     def append(self, record: JsonObject) -> None:
-        """Write, flush and sync one line."""
+        """Write, flush and sync one line.
+
+        Args:
+            record: Chunk receipt to serialize on the line.
+
+        Raises:
+            OSError: The line cannot be written or synced.
+        """
         self._handle.write(canonical_json(record) + b"\n")
         self._handle.flush()
         os.fsync(self._handle.fileno())
@@ -379,7 +413,14 @@ class ChunkWriter[ChunkT: Chunk]:
         self.records: list[JsonObject] = []
 
     async def apply(self, chunks: Sequence[ChunkT]) -> str:
-        """Apply chunks in order, pausing between them, until one stops the run."""
+        """Apply chunks in order, pausing between them, until one stops the run.
+
+        Args:
+            chunks: Numbered chunks in application order.
+
+        Returns:
+            The terminal stop reason, or ``completed`` after the last chunk.
+        """
         for index, chunk in enumerate(chunks):
             if index:
                 await self._sleep(self._options.chunk_pause_seconds)
@@ -461,12 +502,26 @@ class ChunkWriter[ChunkT: Chunk]:
 
 
 def reached(records: Sequence[JsonObject]) -> int:
-    """Count the rows of every chunk the run submitted."""
+    """Count the rows of every chunk the run submitted.
+
+    Args:
+        records: Receipts for submitted chunks.
+
+    Returns:
+        The total number of rows submitted across the chunks.
+    """
     return sum(cast(int, record["rows"]) for record in records)
 
 
 def totals(records: Sequence[JsonObject]) -> JsonObject:
-    """Count rows per outcome over all chunk receipts."""
+    """Count rows per outcome over all chunk receipts.
+
+    Args:
+        records: Receipts for submitted chunks.
+
+    Returns:
+        A count for each row outcome, including zero counts.
+    """
     return {
         outcome: sum(len(cast(list[JsonValue], record[outcome])) for record in records)
         for outcome in _ROW_OUTCOMES

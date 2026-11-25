@@ -204,7 +204,12 @@ async def _higher_rows(repository: SQLAlchemyRepository) -> list[CandleVersionRo
 async def test_actual_repair_vote_write_resume_and_coherent_verification(
     recorded_repair: _Run,
 ) -> None:
-    """Rebuild all six sparse windows in plan order and verify the first write's full scope."""
+    """Rebuild all six sparse windows in plan order and verify the first write's full scope.
+
+    Given: An actual one-minute repair and six sparse higher-timeframe windows.
+    When: Approve a rebuild, apply part of it, verify the receipt and then resume.
+    Then: Verification covers the scope and the resumed write applies the remaining windows.
+    """
     run = recorded_repair
     dry = run.request("voted")
     voted = await rebuild.plan_rebuild(run.context, dry)
@@ -261,7 +266,12 @@ async def test_actual_repair_vote_write_resume_and_coherent_verification(
 async def test_live_regression_is_observed_and_a_later_vote_restores_the_fold(
     recorded_repair: _Run,
 ) -> None:
-    """Restore the rebuilt candle with a fresh vote after a stale live fold supersedes it."""
+    """Restore the rebuilt candle with a fresh vote after a stale live fold supersedes it.
+
+    Given: A live candle that supersedes the rebuilt value with a stale fold.
+    When: Verify the original write, then preview, approve and apply a fresh rebuild.
+    Then: Verification reports the regression and a later check confirms the repaired fold.
+    """
     run = recorded_repair
     dry, write = run.request("dry"), run.request("write")
     voted = await rebuild.plan_rebuild(run.context, dry)
@@ -312,7 +322,12 @@ async def test_live_regression_is_observed_and_a_later_vote_restores_the_fold(
 async def test_window_end_is_inclusive_and_later_windows_remain_in_scope(
     recorded_repair: _Run,
 ) -> None:
-    """Read the 5m window ending exactly at the bound and report the rest as after_end."""
+    """Read the 5m window ending exactly at the bound and report the rest as after_end.
+
+    Given: A rebuild ending exactly at the close of the shortest window.
+    When: Plan, apply and verify the bounded rebuild.
+    Then: The 5m window is included and later windows remain visible as exclusions.
+    """
     run = recorded_repair
     request = run.request("short", OPEN + timedelta(minutes=5))
     plan = await rebuild.plan_rebuild(run.context, request)
@@ -348,7 +363,12 @@ async def test_window_end_is_inclusive_and_later_windows_remain_in_scope(
 async def test_bad_repair_evidence_never_reaches_a_session(
     recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch, mutated: str
 ) -> None:
-    """Refuse records, mismatched bytes and missing directory bindings before DB access."""
+    """Refuse records, mismatched bytes and missing directory bindings before DB access.
+
+    Given: Missing, altered or mismatched recorded repair evidence.
+    When: Plan the rebuild with that evidence.
+    Then: The command refuses before opening a repository session.
+    """
     run = recorded_repair
     request = run.request("bad")
     manifest = _document(run.records)
@@ -387,7 +407,12 @@ async def test_bad_repair_evidence_never_reaches_a_session(
 async def test_write_refuses_wrong_vote_before_session(
     recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch, case: str
 ) -> None:
-    """Verify preflight refusals before catalog or candle reads."""
+    """Verify preflight refusals before catalog or candle reads.
+
+    Given: An otherwise valid rebuild vote with a mismatched binding or invalid mode.
+    When: Attempt the confirmed write.
+    Then: The command refuses before opening a repository session.
+    """
     run = recorded_repair
     dry = run.request("voted")
     vote = await rebuild.plan_rebuild(run.context, dry)
@@ -414,7 +439,12 @@ async def test_write_refuses_wrong_vote_before_session(
 async def test_retry_reuses_rows_and_lost_acknowledgement_is_reconciled(
     recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Use the shared retry loop, then find committed rows despite an acknowledgement failure."""
+    """Use the shared retry loop, then find committed rows despite an acknowledgement failure.
+
+    Given: A guarded chunk that rolls back, then commits without acknowledging the retry.
+    When: Write the approved rebuild and reconcile the ambiguous attempt.
+    Then: The retry uses identical rows and the receipt records the versions found.
+    """
     run = recorded_repair
     dry = run.request("dry")
     plan = await rebuild.plan_rebuild(run.context, dry)
@@ -464,7 +494,12 @@ async def test_retry_reuses_rows_and_lost_acknowledgement_is_reconciled(
 def test_run_samples_report_only_observed_sole_client_status(
     start: int | None, chunks: list[bool | str], expected: bool | str
 ) -> None:
-    """Match decision 16 for committed, uncertain and no-write runs."""
+    """Report sole-client status from observed chunk outcomes.
+
+    Given: Run receipts with acknowledged, uncertain and no-write outcomes.
+    When: Summarize the sole-client observations for the run.
+    Then: The reported status reflects only the observations and outcomes in the receipt.
+    """
     sample = ClientSample(start, _END) if start is not None else None
     records: list[JsonObject] = [{"sole_client": value} for value in chunks]
     assert rebuild._sole_client_write("postgresql", sample, records) == expected
@@ -475,7 +510,13 @@ def test_run_samples_report_only_observed_sole_client_status(
 async def test_recorded_process_guard_uses_newest_starts(
     recorded_repair: _Run, latest: str
 ) -> None:
-    """Refuse a newer running writer and accept records of older or stopped writers."""
+    """Refuse a newer running writer and accept records of older or stopped writers.
+
+    Given: Recorded publisher and candle writer start times.
+    When: Plan the rebuild with each writer status and start time.
+    Then: An active writer without a qualifying publisher start is refused and older or stopped
+        writers are allowed.
+    """
     run = recorded_repair
     at = datetime.now(UTC)
     common = {
@@ -571,7 +612,12 @@ def _capture_target(run: _Run, url: str = "postgresql+asyncpg://localhost:5432/s
 async def test_rebuild_artifacts_and_logs_exclude_connection_credentials(
     recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Bind the public endpoint and retain only sanitized failure details in private files."""
+    """Bind the public endpoint and retain only sanitized failure details in private files.
+
+    Given: A configured endpoint and driver error containing test credentials.
+    When: Preview and attempt the rebuild while collecting files and log messages.
+    Then: Owner-only artifacts and logs retain safe details without the credentials.
+    """
     url = "postgresql+asyncpg://TEST_LOGIN:TEST_PASSWORD@localhost:5432/scratch"
     run = _capture_target(recorded_repair, url)
     _manifest(run, _record(run.repair_dir))
@@ -636,7 +682,12 @@ async def test_rebuild_artifacts_and_logs_exclude_connection_credentials(
 def test_settlement_matches_only_possible_repair_backends(
     recorded_repair: _Run, mode: str, matching: bool
 ) -> None:
-    """Respect client visibility, canonical address identity and both legacy match paths."""
+    """Respect client visibility, canonical address identity and both legacy match paths.
+
+    Given: Settlement captures with visible and hidden clients, names and addresses.
+    When: Check whether each capture can settle the recorded repair.
+    Then: Only backends that could belong to the repair prevent settlement.
+    """
     run = _capture_target(recorded_repair)
     record = _record(run.repair_dir)
     record["observed_addresses"] = ["172.18.0.50/32"]
@@ -695,7 +746,12 @@ def test_settlement_matches_only_possible_repair_backends(
 async def test_structural_settlement_mismatch_refuses_before_database_access(
     recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch, defect: str
 ) -> None:
-    """An invalid earlier capture refuses the record even without an uncertain row."""
+    """An invalid earlier capture refuses the record even without an uncertain row.
+
+    Given: A malformed earlier settlement capture followed by a later capture.
+    When: Plan a rebuild from the recorded repair.
+    Then: The command refuses the invalid evidence before opening a session.
+    """
     run = _capture_target(recorded_repair)
     record = _record(run.repair_dir)
     first, last = (_capture(record, run.context.database, delay=delay) for delay in (1, 2))
@@ -787,7 +843,13 @@ async def _hide_repair_minute(run: _Run, receipt: JsonObject, ref: JsonObject) -
 async def test_uncertain_absence_requires_newest_capture_and_presence_uses_db(
     recorded_repair: _Run, capture_order: str
 ) -> None:
-    """Only an absent row needs clearance, and older inconclusive captures cannot veto it."""
+    """Only an absent row needs clearance, and older inconclusive captures cannot veto it.
+
+    Given: A repair receipt with an uncertain row and varying storage and capture evidence.
+    When: Plan the rebuild and resolve the original outcome.
+    Then: A matching version proves application and an absent row requires the newest capture to
+        settle.
+    """
     run = _capture_target(recorded_repair)
     receipt, ref = _mark_uncertain(run.repair_dir)
     if capture_order != "present":
@@ -834,7 +896,12 @@ async def test_uncertain_absence_requires_newest_capture_and_presence_uses_db(
 async def test_enumerated_correction_requires_the_exact_intended_payload(
     recorded_repair: _Run, field: str, value: object
 ) -> None:
-    """Refuse a committed version whose identity, time or any voted value differs."""
+    """Refuse a committed version whose identity, time or any voted value differs.
+
+    Given: A recorded correction with one altered stored identity, timestamp or payload field.
+    When: Enumerate the repair's committed versions.
+    Then: The rebuild refuses a version that differs from the approved correction.
+    """
     run = recorded_repair
     receipt = _document(run.repair_dir / repair.RECEIPT_FILE)
     async with run.repository.session() as session:
@@ -865,7 +932,12 @@ async def test_enumerated_correction_requires_the_exact_intended_payload(
 async def test_planning_reports_each_exclusion(
     recorded_repair: _Run, case: str, expected: str
 ) -> None:
-    """Expose source ownership, observation loss, history or missing inputs in the preview."""
+    """Expose source ownership, observation loss, history or missing inputs in the preview.
+
+    Given: Current candles with missing inputs, source protections, history or observation loss.
+    When: Plan the rebuild and inspect the preview.
+    Then: Each withheld window shows its exclusion reason.
+    """
     run = recorded_repair
     async with run.repository.session() as session:
         if case in {"protected", "loss", "history"}:
@@ -913,7 +985,12 @@ async def test_planning_reports_each_exclusion(
 async def test_guard_refusal_appears_in_the_correct_artifact(
     recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch, phase: str
 ) -> None:
-    """Keep rejected input fingerprints visible in the plan or guarded row receipt."""
+    """Keep rejected input fingerprints visible in the plan or guarded row receipt.
+
+    Given: A changed input fingerprint before planning or inside the guarded write.
+    When: Apply the voted rebuild and read its artifacts.
+    Then: The refusal appears in the preview or the guarded receipt at the relevant stage.
+    """
     run = recorded_repair
     original = run.repository.rebuild_synthesized_candles
 
@@ -958,7 +1035,12 @@ async def test_guard_refusal_appears_in_the_correct_artifact(
 async def test_enumeration_equals_the_receipt_exactly(
     recorded_repair: _Run, evidence_defect: str
 ) -> None:
-    """Refuse missing or unreferenced repair versions instead of expanding or dropping scope."""
+    """Refuse missing or unreferenced repair versions instead of expanding or dropping scope.
+
+    Given: A bound repair receipt and an enumeration with a missing, extra or mismatched version.
+    When: Derive the rebuild scope from the recorded write.
+    Then: The rebuild refuses the discrepancy without altering the approved scope.
+    """
     run = recorded_repair
     receipt = _document(run.repair_dir / repair.RECEIPT_FILE)
     if evidence_defect == "missing":
@@ -999,7 +1081,13 @@ async def _duplicate_repair_version(run: _Run, receipt: JsonObject) -> None:
 async def test_verification_accepts_only_supersession_of_the_same_original_resolution(
     recorded_repair: _Run,
 ) -> None:
-    """Verify a superseded uncertain repair row and require a fresh write vote."""
+    """Verify a superseded uncertain repair row and require a fresh write vote.
+
+    Given: A repair outcome that was originally uncertain and whose matched version was superseded.
+    When: Verify the rebuild and compare the frozen resolution for a new write.
+    Then: Verification accepts the supersession of the same version and a write requires a fresh
+        vote.
+    """
     run = recorded_repair
     _mark_uncertain(run.repair_dir)
     _manifest(run, _record(run.repair_dir))
@@ -1026,7 +1114,12 @@ async def test_verification_accepts_only_supersession_of_the_same_original_resol
 def test_postgres_chunk_observations_are_from_the_committing_attempt(
     mode: int | str | None, expected: bool | str
 ) -> None:
-    """Use mocked PostgreSQL outcomes to distinguish no write, uncertainty and observed counts."""
+    """Use mocked PostgreSQL outcomes to distinguish no write, uncertainty and observed counts.
+
+    Given: Mocked guarded write outcomes with and without a committing sample.
+    When: Build the chunk's client observation fields.
+    Then: The receipt distinguishes committing observations, no write and uncertainty.
+    """
     repository = MagicMock(spec=SQLAlchemyRepository, dialect_name="postgresql")
     context = repair.RunContext(repository, {}, {})
     adapter = rebuild._RebuildAdapter(context, {})
@@ -1061,7 +1154,12 @@ def test_postgres_chunk_observations_are_from_the_committing_attempt(
 async def test_verification_checks_artifact_and_committed_version_integrity(
     recorded_repair: _Run, binding_error: str
 ) -> None:
-    """Refuse a mismatched evidence file or a corrupted committed rebuild identity or payload."""
+    """Refuse a mismatched evidence file or a corrupted committed rebuild identity or payload.
+
+    Given: A recorded rebuild with an altered artifact or a missing or changed committed version.
+    When: Verify the write against the record and observed versions.
+    Then: The command refuses inconsistent evidence or committed payloads.
+    """
     run = recorded_repair
     dry, write = run.request("dry"), run.request("write")
     plan = await rebuild.plan_rebuild(run.context, dry)
@@ -1140,7 +1238,12 @@ async def _damage_written_payload(run: _Run, error: str) -> None:
 async def test_invalid_json_or_shape_refuses_before_reading_database(
     recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch, args: bytes, message: str
 ) -> None:
-    """Refuse structurally malformed JSON and non-standard JSON numeric tokens."""
+    """Refuse structurally malformed JSON and non-standard JSON numeric tokens.
+
+    Given: Malformed JSON, invalid record shapes or non-standard numeric tokens.
+    When: Read the recorded repair evidence.
+    Then: The command refuses before opening a repository session.
+    """
     run = recorded_repair
     run.records.write_bytes(args)
     forbidden = MagicMock()
@@ -1179,7 +1282,12 @@ async def test_invalid_json_or_shape_refuses_before_reading_database(
 async def test_bound_receipt_consistency_is_checked_before_any_read(
     recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch, defect: str, message: str
 ) -> None:
-    """Matching hashes alone cannot authorize a structurally inconsistent receipt."""
+    """Matching hashes alone cannot authorize a structurally inconsistent receipt.
+
+    Given: Matching file hashes for a receipt with an inconsistent identity, count or chunk.
+    When: Plan the rebuild using the bound receipt.
+    Then: The command refuses before opening a repository session.
+    """
     run = recorded_repair
     receipt = _document(run.repair_dir / repair.RECEIPT_FILE)
     _alter_receipt(receipt, defect)
@@ -1241,7 +1349,12 @@ def _alter_receipt(receipt: JsonObject, defect: str) -> None:
 async def test_only_another_recorded_run_can_prove_an_already_applied_minute(
     recorded_repair: _Run,
 ) -> None:
-    """Reuse the repair resume receipt, counting its no-op lines only against the earlier run."""
+    """Reuse the repair resume receipt, counting its no-op lines only against the earlier run.
+
+    Given: A completed repair and its resumed write reporting already-applied minutes.
+    When: Plan from the resume receipt with and without the earlier recorded run.
+    Then: Only the other run's committed versions prove that the minutes were applied.
+    """
     run = recorded_repair
     old_vote = run.root / "repair-vote"
     digest = repair.sha256_hex((old_vote / repair.APPROVAL_FILE).read_bytes())
@@ -1302,7 +1415,12 @@ async def _reject_conflicting_instrument(run: _Run, resumed: Path) -> None:
 async def test_preview_parser_rejects_malformed_votes(
     recorded_repair: _Run, column: str, value: str
 ) -> None:
-    """Require aligned keys, validated payload and predecessor evidence for write previews."""
+    """Require aligned keys, validated payload and predecessor evidence for write previews.
+
+    Given: Voted preview lines with invalid keys, payloads or predecessor evidence.
+    When: Read the preview for a confirmed write.
+    Then: The parser refuses malformed votes.
+    """
     run = recorded_repair
     dry = run.request("dry")
     await rebuild.plan_rebuild(run.context, dry)
@@ -1320,7 +1438,12 @@ async def test_preview_parser_rejects_malformed_votes(
 async def test_different_input_fingerprint_is_not_voted_and_old_vote_is_changed(
     recorded_repair: _Run,
 ) -> None:
-    """A new minute after the vote removes every affected window from the writable subset."""
+    """A new minute after the vote removes every affected window from the writable subset.
+
+    Given: An approved preview and a new one-minute input for the affected grids.
+    When: Replan and compare the fresh rows with the vote.
+    Then: The affected rows leave the writable subset and the old votes are reported as changed.
+    """
     run = recorded_repair
     dry = run.request("dry")
     plan = await rebuild.plan_rebuild(run.context, dry)
@@ -1347,7 +1470,12 @@ async def test_different_input_fingerprint_is_not_voted_and_old_vote_is_changed(
 async def test_postgres_read_modes_use_one_session_and_required_statement_order(
     recorded_repair: _Run,
 ) -> None:
-    """Check READ COMMITTED enumeration and repeatable read verification with a mock."""
+    """Check READ COMMITTED enumeration and repeatable read verification with a mock.
+
+    Given: A mocked PostgreSQL session that records each issued statement.
+    When: Enumerate repair versions and read a verification snapshot.
+    Then: Each operation uses one session and sets the required transaction mode before reading.
+    """
     run = recorded_repair
     record = rebuild._load_runs(run.request("read"), run.context.database).runs[0]
     key = (XRP, "5m", OPEN)
@@ -1403,7 +1531,12 @@ async def test_sqlite_verification_holds_a_snapshot_across_the_two_selects(
     monkeypatch: pytest.MonkeyPatch,
     verify: bool,
 ) -> None:
-    """Commit a paired input/output batch between the reads and prove neither version enters."""
+    """Commit a paired input/output batch between the reads and prove neither version enters.
+
+    Given: SQLite output and minute rows read inside a verification transaction.
+    When: Commit a paired update from another connection between the two reads.
+    Then: Both reads observe the same snapshot and exclude the new pair.
+    """
     run = recorded_repair
     async with run.repository.engine.connect() as connection:
         result = await connection.execute(text("PRAGMA journal_mode=WAL"))
@@ -1442,7 +1575,12 @@ async def test_sqlite_verification_holds_a_snapshot_across_the_two_selects(
 async def test_cancellation_writes_the_rebuild_chunk_then_the_final_receipt(
     recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Leave a fully durable uncertain chunk when a write await is cancelled."""
+    """Leave a fully durable uncertain chunk when a write await is cancelled.
+
+    Given: A write cancelled while a chunk attempt is outstanding.
+    When: Allow the cancellation to propagate through the command.
+    Then: The uncertain chunk is logged durably and the final receipt records the cancellation.
+    """
     run = recorded_repair
     dry, write = run.request("dry"), run.request("write")
     plan = await rebuild.plan_rebuild(run.context, dry)
@@ -1507,7 +1645,12 @@ def _replace_preview(directory: Path, lines: list[dict[str, str]]) -> str:
 async def test_repair_refuses_semantically_inconsistent_evidence(
     recorded_repair: _Run, case: str, message: str
 ) -> None:
-    """Reject authenticated files or stored facts that cannot describe the approved run."""
+    """Reject authenticated files or stored facts that cannot describe the approved run.
+
+    Given: Authenticated artifacts with inconsistent scope, catalog data or authoring time.
+    When: Plan the rebuild from that evidence.
+    Then: The command refuses the facts that cannot describe the approved repair.
+    """
     run = recorded_repair
     request = run.request("invalid")
     if case == "file":
@@ -1569,7 +1712,12 @@ async def _alter_db_evidence(run: _Run, case: str) -> None:
 async def test_rebuilt_approval_validates_every_binding(
     recorded_repair: _Run, case: str, message: str
 ) -> None:
-    """Reject a different approved header or frozen resolution even with a matching digest."""
+    """Reject a different approved header or frozen resolution even with a matching digest.
+
+    Given: A voted approval with a changed binding and a matching supplied digest.
+    When: Validate it for the rebuilt request.
+    Then: The changed approval or frozen resolution is refused.
+    """
     run = recorded_repair
     dry = run.request("dry")
     await rebuild.plan_rebuild(run.context, dry)
@@ -1612,7 +1760,12 @@ async def test_rebuilt_approval_validates_every_binding(
 async def test_voted_preview_cannot_expand_beyond_the_derived_scope(
     recorded_repair: _Run, change: str
 ) -> None:
-    """A missing vote withholds a candidate and an extra window is outside the scope."""
+    """A missing vote withholds a candidate and an extra window is outside the scope.
+
+    Given: A voted preview with a missing or extra window.
+    When: Attempt the rebuild against the derived scope.
+    Then: A missing vote withholds the candidate and an out-of-scope vote is refused.
+    """
     run = recorded_repair
     dry = run.request("dry")
     await rebuild.plan_rebuild(run.context, dry)
@@ -1648,7 +1801,12 @@ async def test_voted_preview_cannot_expand_beyond_the_derived_scope(
     ("data", "message"), [(b"", "unexpected header"), (b'"', "does not parse")]
 )
 def test_preview_csv_rejects_missing_header_or_broken_quoting(data: bytes, message: str) -> None:
-    """Treat a bad CSV token or missing schema as a refusal."""
+    """Treat a bad CSV token or missing schema as a refusal.
+
+    Given: CSV with a missing preview schema or broken quoting.
+    When: Read the preview.
+    Then: The command reports an evidence refusal.
+    """
     with pytest.raises(repair.RepairRefusedError, match=message):
         rebuild._parse_preview(data)
 
@@ -1657,7 +1815,12 @@ def test_preview_csv_rejects_missing_header_or_broken_quoting(data: bytes, messa
 async def test_planner_refuses_an_ambiguous_current_version_or_missing_fold(
     recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Refuse ambiguous output ownership and an aggregator that emits the wrong window."""
+    """Refuse ambiguous output ownership and an aggregator that emits the wrong window.
+
+    Given: Ambiguous current versions or an aggregator result for the wrong window.
+    When: Classify the rebuild candidate.
+    Then: The planner refuses the inconsistent output.
+    """
     run = recorded_repair
     key = (XRP, "5m", OPEN)
     window = rebuild._Window(key, "XRP-EUR", 1, "no_input")
@@ -1713,7 +1876,12 @@ async def test_voted_replacement_reclassified_before_write_preserves_the_live_ou
     recorded_repair: _Run,
     subsequent: str,
 ) -> None:
-    """Classify a voted replacement using the current output's new ownership and observations."""
+    """Classify a voted replacement using the current output's new ownership and observations.
+
+    Given: A voted replacement whose current output changes before application.
+    When: Replan and apply the voted subset.
+    Then: The fresh classification withholds the row and preserves the current output.
+    """
     run = recorded_repair
     candidate = cast(CandleUpsertRow, (await _five_minute_candidate(run)).row)
     await _seed_old_output(run, candidate)
@@ -1778,7 +1946,12 @@ async def test_observation_loss_agrees_in_plan_preflight_and_under_the_fence(
     observation: _Observation,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Refuse lower or unknown observations at all three boundaries, including non-finite payloads."""
+    """Refuse lower or unknown observations at all three boundaries, including non-finite payloads.
+
+    Given: Rebuilt and current observations that can be lower, unknown or non-finite.
+    When: Check the plan, preflight and guarded write.
+    Then: The stages agree about what to write and which observations block a replacement.
+    """
     run = recorded_repair
     window = await _five_minute_candidate(run)
     candidate = cast(CandleUpsertRow, window.row)
@@ -1850,7 +2023,12 @@ async def _guard_observation_at_each_read(
 
 
 def test_application_batches_respect_row_and_grid_ceilings() -> None:
-    """Bound a dense group by rows and a full-day grid by minutes."""
+    """Bound a dense group by rows and a full-day grid by minutes.
+
+    Given: Dense rows and grids that reach the per-chunk limits.
+    When: Split the approved rows into chunks.
+    Then: Each chunk stays within both the row and full-grid limits.
+    """
     windows = []
     for index in range(101):
         opening = OPEN + timedelta(minutes=index * 5)
@@ -1870,7 +2048,12 @@ async def test_live_edge_checks_dry_run_and_confirmed_write_before_a_read(
     recorded_repair: _Run,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Refuse an otherwise valid vote when its end falls inside the invocation's live edge."""
+    """Refuse an otherwise valid vote when its end falls inside the invocation's live edge.
+
+    Given: A rebuild end inside the 180-minute live edge.
+    When: Attempt both preview and confirmed write.
+    Then: Both modes refuse before opening a database session.
+    """
     run = recorded_repair
     dry = run.request("old-vote")
     plan = await rebuild.plan_rebuild(run.context, dry)
@@ -1917,7 +2100,12 @@ async def test_rebuild_retry_and_terminal_constraint_receipts(
     case: _RetryCase,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exercise all known-rollback paths with the actual rebuild adapter and durable receipt."""
+    """Exercise all known-rollback paths with the actual rebuild adapter and durable receipt.
+
+    Given: Retryable and terminal errors from the guarded writer.
+    When: Apply the rebuild and inspect the per-attempt effects.
+    Then: Retries keep the same rows and the receipt records the final outcome.
+    """
     run = recorded_repair
     dry = _short(run, "retry-plan")
     approved = await rebuild.plan_rebuild(run.context, dry)
@@ -1966,7 +2154,12 @@ async def test_lost_acknowledgement_reports_a_superseded_version(
     recorded_repair: _Run,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Find the historical version by exact payload when a live successor already replaced it."""
+    """Find the historical version by exact payload when a live successor already replaced it.
+
+    Given: A committed rebuild that loses its acknowledgement and gains a live successor.
+    When: Reconcile the original write against stored versions.
+    Then: The exact matched historical version is reported as superseded.
+    """
     run = recorded_repair
     dry = _short(run, "superseded-plan")
     approved = await rebuild.plan_rebuild(run.context, dry)
@@ -2007,7 +2200,12 @@ async def test_reconciliation_proceeds_while_the_unacknowledged_transaction_is_o
     monkeypatch: pytest.MonkeyPatch,
     settles_as_applied: bool,
 ) -> None:
-    """Keep uncommitted versions uncertain and let reconciliation read behind the writer fence."""
+    """Keep uncommitted versions uncertain and let reconciliation read behind the writer fence.
+
+    Given: A write attempt whose transaction remains open after losing acknowledgement.
+    When: Reconcile the attempted rows from another session.
+    Then: The read proceeds and uncommitted rows remain uncertain.
+    """
     run = recorded_repair
     dry = _short(run, "active-plan")
     approved = await rebuild.plan_rebuild(run.context, dry)
@@ -2050,7 +2248,12 @@ async def test_reconciliation_proceeds_while_the_unacknowledged_transaction_is_o
 async def test_failure_between_chunks_keeps_the_committed_chunk_and_final_receipt(
     recorded_repair: _Run,
 ) -> None:
-    """Persist the first chunk, then raise during the pause before the daily window."""
+    """Persist the first chunk, then raise during the pause before the daily window.
+
+    Given: An approved rebuild whose first chunk commits before a pause fails.
+    When: Attempt the full write and inspect its artifacts.
+    Then: The committed chunk and the final error receipt remain on disk.
+    """
     run = recorded_repair
     dry = run.request("pause-vote")
     approved = await rebuild.plan_rebuild(run.context, dry)
@@ -2077,7 +2280,12 @@ async def test_run_receipts_bind_start_and_successful_chunk_samples(
     expected: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Record sole-client transitions using the committing attempt and the start sample."""
+    """Record sole-client transitions using the committing attempt and the start sample.
+
+    Given: Mocked clients and acknowledged, failed or uncertain chunk attempts.
+    When: Apply the rebuild and read the run and chunk receipts.
+    Then: Only acknowledged attempts contribute committing samples to the reported status.
+    """
     run = recorded_repair
     start_count, second, third = observations
     sample_time = datetime.now(UTC)
@@ -2167,7 +2375,12 @@ async def test_verification_mutations_fail_before_any_database_read(
     field: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Refuse each record-binding mismatch and still validate rebound receipt contents."""
+    """Refuse each record-binding mismatch and still validate rebound receipt contents.
+
+    Given: A verification record or receipt with an altered field, hash or reference.
+    When: Request verification and monitor repository access.
+    Then: The command refuses the inconsistency before reading the database.
+    """
     run = recorded_repair
     dry, write = _short(run, "file-vote"), _short(run, "file-write")
     approved = await rebuild.plan_rebuild(run.context, dry)
@@ -2207,7 +2420,12 @@ async def test_verification_mutations_fail_before_any_database_read(
 async def test_verification_accepts_a_current_fold_from_newer_committed_minutes(
     recorded_repair: _Run,
 ) -> None:
-    """Verify a superseded target whose current value is the fold at the verification snapshot."""
+    """Verify a superseded target whose current value is the fold at the verification snapshot.
+
+    Given: A superseded rebuild whose current replacement agrees with newer minute inputs.
+    When: Verify the original write.
+    Then: The verification snapshot still classifies the target as verified.
+    """
     run = recorded_repair
     dry, write = _short(run, "old-inputs"), _short(run, "old-output")
     approved = await rebuild.plan_rebuild(run.context, dry)
@@ -2239,7 +2457,12 @@ async def test_verification_accepts_a_current_fold_from_newer_committed_minutes(
 async def test_recorded_trades_correction_uses_the_receipt_write_time(
     recorded_repair: _Run,
 ) -> None:
-    """Authenticate a real stored-trade correction, then refuse a different version time."""
+    """Authenticate a real stored-trade correction, then refuse a different version time.
+
+    Given: A recorded correction calculated from stored trades.
+    When: Verify its authoring time, then alter the stored version timestamp.
+    Then: The original version is accepted and the altered version is refused.
+    """
     run = recorded_repair
     opening = OPEN + timedelta(minutes=8)
     await run.repository.upsert_candles([candle(XRP, opening, timestamp=opening)])
@@ -2286,7 +2509,12 @@ async def test_repair_selection_overlap_keeps_not_voted_independent(
     recorded_repair: _Run,
     list_name: str,
 ) -> None:
-    """Permit a repair selection reference to appear in not_voted and one terminal selection list."""
+    """Permit a repair selection reference to appear in not_voted and one terminal selection list.
+
+    Given: A minute appearing in the not-voted list and one terminal selection list.
+    When: Validate the receipt's selection references.
+    Then: The independent not-voted reference is allowed to overlap the terminal list.
+    """
     run = recorded_repair
     directory = run.repair_dir
     receipt = _document(directory / repair.RECEIPT_FILE)
@@ -2313,7 +2541,13 @@ def test_settlement_endpoint_checks_each_part_of_the_effective_target(
     key: str,
     value: str | int,
 ) -> None:
-    """Bind the collector's configured target without comparing its observed server address."""
+    """Bind the collector's configured target without comparing its observed server address.
+
+    Given: A settlement capture with a changed endpoint field or observed address.
+    When: Validate the capture against the approved endpoint.
+    Then: Configured endpoint differences are refused and observed server address differences are
+        allowed.
+    """
     run = _capture_target(recorded_repair)
     record = _record(run.repair_dir)
     capture = _capture(record, run.context.database)
@@ -2342,7 +2576,12 @@ def test_settlement_endpoint_checks_each_part_of_the_effective_target(
     ],
 )
 def test_run_record_requires_each_named_field(recorded_repair: _Run, field: str) -> None:
-    """Require the exact run record even for an acknowledged run with no settlements."""
+    """Require the exact run record even for an acknowledged run with no settlements.
+
+    Given: A settled repair record from which one required field is removed.
+    When: Validate the record schema.
+    Then: Each omitted field causes refusal.
+    """
     run = recorded_repair
     raw = _record(run.repair_dir)
     raw.pop(field)
@@ -2355,7 +2594,12 @@ async def test_sqlite_enumerates_the_approved_scope_inside_begin_immediate(
     recorded_repair: _Run,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Record the opener from the production enumeration and attest its approved scope."""
+    """Record the opener from the production enumeration and attest its approved scope.
+
+    Given: A locally recorded write and a SQLite statement trace.
+    When: Enumerate the approved repair scope.
+    Then: The enumeration begins with BEGIN IMMEDIATE and returns the approved versions.
+    """
     run = recorded_repair
     record = rebuild._load_runs(run.request("enum"), run.context.database).runs[0]
     observed: list[str] = []
@@ -2378,7 +2622,12 @@ async def test_sqlite_enumerates_the_approved_scope_inside_begin_immediate(
 
 
 async def test_approval_digest_binds_each_planning_input(recorded_repair: _Run) -> None:
-    """Change one dimension at a time and hash the actual approval and preview serializers."""
+    """Change one dimension at a time and hash the actual approval and preview serializers.
+
+    Given: An approval and preview with one planning input changed at a time.
+    When: Compute the digest for each variant.
+    Then: Every bound input changes the digest.
+    """
     run = recorded_repair
     request = _short(run, "digest")
     context = run.context
@@ -2430,7 +2679,12 @@ def _approval_digest(
 
 
 def test_read_units_use_at_most_twenty_instruments_and_never_cross_a_utc_day() -> None:
-    """Partition the reads by calendar day before dividing instruments into batches."""
+    """Partition the reads by calendar day before dividing instruments into batches.
+
+    Given: Candle windows for many instruments on either side of UTC midnight.
+    When: Group the windows into read units.
+    Then: Each unit stays within one UTC day and includes at most twenty instruments.
+    """
     keys = [(f"instrument-{index:02}", "5m", OPEN) for index in range(41)]
     keys.append(("instrument-00", "5m", OPEN + timedelta(days=1)))
     units = rebuild._units(keys)

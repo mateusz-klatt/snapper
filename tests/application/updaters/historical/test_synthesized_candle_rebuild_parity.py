@@ -94,7 +94,12 @@ def _window(timeframe: str) -> rebuild._Window:
 def test_both_fold_implementations_agree_bit_for_bit(
     timeframe: str, seed: int, gapped: bool, zero_volume: bool
 ) -> None:
-    """Compare arithmetic for full, randomly gapped, and zero-volume grids at each scale."""
+    """Compare arithmetic for full, randomly gapped, and zero-volume grids at each scale.
+
+    Given: Full, gapped and zero-volume grids at each supported timeframe.
+    When: Fold them through the rebuild and script implementations.
+    Then: The resulting payloads match bit for bit.
+    """
     width = _WIDTHS[timeframe]
     openings = sorted(_grid(width))
     if gapped:
@@ -230,7 +235,13 @@ async def _historical_repair(
 async def test_live_and_historical_repair_match_the_guarded_rebuild(
     repository: SQLAlchemyRepository, timeframe: str, shape: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Match durable ordinary output across gaps and historical output on an exact full grid."""
+    """Match durable ordinary output across gaps and historical output on an exact full grid.
+
+    Given: Full and sparse minute grids for each supported timeframe.
+    When: Rebuild them and run the ordinary and historical live repair paths.
+    Then: Ordinary output matches each rebuild and historical repair agrees on full grids and
+        refuses gaps.
+    """
     inputs = await _seed_grid(repository, timeframe, shape)
     candidate = await _install_rebuild(repository, timeframe, inputs)
     publisher = _publisher(repository, timeframe)
@@ -246,7 +257,12 @@ async def test_live_and_historical_repair_match_the_guarded_rebuild(
 
 
 def test_scope_floors_midnight_and_the_last_minute_at_every_timeframe() -> None:
-    """Keep all scales UTC-aligned and attribute 23:59 to the ending UTC day."""
+    """Keep all scales UTC-aligned and attribute 23:59 to the ending UTC day.
+
+    Given: Repaired minutes at UTC midnight and at 23:59.
+    When: Derive every higher-timeframe window that contains them.
+    Then: Each window starts on its UTC boundary and remains in the correct day.
+    """
     last = _DAY + timedelta(hours=23, minutes=59)
     following = _DAY + timedelta(days=1)
     counted = rebuild._count_windows([(XRP, _DAY), (XRP, last), (XRP, following)])

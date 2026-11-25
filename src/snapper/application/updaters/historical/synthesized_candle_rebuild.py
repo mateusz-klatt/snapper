@@ -429,7 +429,17 @@ class RebuildRequest:
 
 
 def code_revision(cli_module: ModuleType) -> JsonObject:
-    """Hash the installed source bound by the rebuild approval."""
+    """Hash the installed source bound by the rebuild approval.
+
+    Args:
+        cli_module: Installed rebuild command module to hash.
+
+    Returns:
+        A mapping from installed module paths to their SHA-256 digests.
+
+    Raises:
+        OSError: An installed source file could not be read.
+    """
     modules = (
         repository_module,
         candle_aggregator,
@@ -461,7 +471,15 @@ def _minute(value: str) -> datetime:
 
 
 def validate_end(end: datetime, run_time: datetime) -> None:
-    """Enforce the UTC-minute and 180-minute live-edge bounds."""
+    """Enforce the UTC-minute and 180-minute live-edge bounds.
+
+    Args:
+        end: Requested upper bound for completed windows.
+        run_time: Invocation time used to calculate the live edge.
+
+    Raises:
+        RepairRefusedError: The end is unaligned or within the live edge.
+    """
     if end.utcoffset() != timedelta(0) or end.second or end.microsecond:
         raise RepairRefusedError("--end must be a UTC minute boundary")
     if end > run_time - LIVE_EDGE:
@@ -2293,7 +2311,18 @@ async def _verify(
 
 
 async def plan_rebuild(context: RunContext, request: RebuildRequest) -> PlanArtifacts:
-    """Read the recorded inputs and write a dry-run preview and optional verification."""
+    """Read the recorded inputs and write a dry-run preview and optional verification.
+
+    Args:
+        context: Repository, endpoint, code revision and clock for the invocation.
+        request: Repair evidence, time bound, output path and optional verification.
+
+    Returns:
+        The written preview's approval digest and summary.
+
+    Raises:
+        RepairRefusedError: The request or recorded evidence fails validation.
+    """
     at = context.clock()
     validate_end(request.end, at)
     recorded = _load_runs(request, context.database)
@@ -2317,7 +2346,19 @@ async def plan_rebuild(context: RunContext, request: RebuildRequest) -> PlanArti
 async def write_rebuild(
     context: RunContext, request: RebuildRequest, options: WriteOptions
 ) -> WriteReport:
-    """Bind a confirmed write to the voted subset, then execute exactly the surviving rows."""
+    """Bind a confirmed write to the voted subset, then execute exactly the surviving rows.
+
+    Args:
+        context: Repository, endpoint, code revision, clock and write run identifier.
+        request: Repair evidence, time bound and output path.
+        options: Voted preview, approval digest and write limits.
+
+    Returns:
+        The voted and fresh plan digests, stop reason and row counts.
+
+    Raises:
+        RepairRefusedError: The request, approval or recorded evidence fails validation.
+    """
     if request.verification is not None:
         raise RepairRefusedError("verification options are only available in a dry run")
     voted = _voted_preview(options)

@@ -43,7 +43,12 @@ def _candidate(timeframe: str, sequence_id: int) -> CandleUpsertRow:
 
 @pytest.mark.asyncio
 async def test_reconciliation_keeps_timeframes_distinct_and_can_require_extra_fields() -> None:
-    """Accept matched payloads and keep mismatched time or price basis uncertain."""
+    """Accept matched payloads and keep mismatched time or price basis uncertain.
+
+    Given: Identical opening times at different timeframes and mismatched extra fields.
+    When: Reconcile the submitted rows against versions from the run.
+    Then: Each timeframe is reconciled separately and extra-field mismatches stay uncertain.
+    """
     first, second, time_changed, price_changed = (
         _candidate(timeframe, sequence_id)
         for sequence_id, timeframe in enumerate(("5m", "15m", "30m", "1h"), start=1)

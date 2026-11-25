@@ -96,6 +96,9 @@ class RefusingParser(argparse.ArgumentParser):
         Args:
             message: Parser's description of the error.
 
+        Returns:
+            Never returns.
+
         Raises:
             UsageError: Always.
         """
@@ -103,7 +106,11 @@ class RefusingParser(argparse.ArgumentParser):
 
 
 def add_write_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare the shared approval and retry options."""
+    """Declare the shared approval and retry options.
+
+    Args:
+        parser: Command parser to extend.
+    """
     parser.add_argument("--confirm", action="store_true", help="Write the voted rows")
     parser.add_argument("--voted-preview", type=Path, help="Output directory of the voted run")
     parser.add_argument("--expect-digest", help="sha256 of the voted approval.json")
@@ -115,7 +122,18 @@ def add_write_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def write_options(confirm: bool, writing: Mapping[str, object]) -> WriteOptions | None:
-    """Return the write options of a confirmed run; refuse them without ``--confirm``."""
+    """Validate the write options for a confirmed run.
+
+    Args:
+        confirm: Whether the caller requested a write.
+        writing: Write option values supplied by the caller.
+
+    Returns:
+        Validated write options, or None for a preview.
+
+    Raises:
+        typer.Exit: The caller supplied invalid or conflicting write options.
+    """
     if not confirm:
         if writing:
             given = [option for name, option in WRITE_OPTIONS if name in writing]
@@ -144,7 +162,14 @@ def write_options(confirm: bool, writing: Mapping[str, object]) -> WriteOptions 
 
 
 def failure_text(error: BaseException) -> str:
-    """Describe an unexpected failure by class and SQLSTATE only."""
+    """Describe an unexpected failure by class and SQLSTATE only.
+
+    Args:
+        error: Failure to describe without exposing its message.
+
+    Returns:
+        The exception class name and, when available, its SQLSTATE.
+    """
     fields = error_fields(error)
     sqlstate = fields["sqlstate"]
     return f"{fields['error']}" + (f" sqlstate={sqlstate}" if sqlstate else "")

@@ -51,7 +51,13 @@ def _invoke(*arguments: str) -> Result:
 def test_help_describes_live_edge_verification_and_the_run_order_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reach help without reading settings and show both distinct end constraints."""
+    """Reach help without reading settings and show both distinct end constraints.
+
+    Given: The rebuild CLI and a settings loader that must stay unused.
+    When: Request command help.
+    Then: Help describes verification and the live-edge and run-order bounds without loading
+        settings.
+    """
     settings = MagicMock()
     monkeypatch.setattr(cli, "get_bootstrap_settings", settings)
     result = _invoke("--help")
@@ -84,7 +90,12 @@ def test_help_describes_live_edge_verification_and_the_run_order_note(
 def test_bad_arguments_refuse_without_reading_settings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, end: str, extra: list[str], message: str
 ) -> None:
-    """Reject malformed command-line evidence and keep arbitrary option text out of the output."""
+    """Reject malformed command-line evidence and keep arbitrary option text out of the output.
+
+    Given: Malformed options, including an option value containing a credential sentinel.
+    When: Invoke the rebuild command.
+    Then: The command refuses before loading settings and keeps the sentinel out of its output.
+    """
     settings = MagicMock()
     monkeypatch.setattr(cli, "get_bootstrap_settings", settings)
     result = _invoke(*_arguments(tmp_path / "out", end), *extra)
@@ -119,7 +130,13 @@ def named_configuration(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 def test_dry_run_is_named_and_passes_both_recorded_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, named_configuration: list[str], verify: bool
 ) -> None:
-    """Use one named connection and print only short counts and the credential-free target."""
+    """Use one named connection and print only short counts and the credential-free target.
+
+    Given: Two recorded runs, a configured database URL and optional verification arguments.
+    When: Invoke a dry run through the rebuild command.
+    Then: Both runs reach the planner and the CLI uses a single named connection and safe summary
+        output.
+    """
     summary: JsonObject = {
         "actions": {"insert": 1},
         "by_timeframe": {},
@@ -171,7 +188,12 @@ def test_write_exit_status_and_invocation_identity(
     stop: str,
     code: int,
 ) -> None:
-    """Report stable write statuses using the same generated id as the configured repository."""
+    """Report stable write statuses using the same generated id as the configured repository.
+
+    Given: A stubbed confirmed write with a complete or stopped outcome.
+    When: Invoke the rebuild command with the voted preview.
+    Then: Its exit status reflects the outcome and the write run ID matches the connection name.
+    """
     write = AsyncMock(return_value=WriteReport("a" * 64, "b" * 64, stop, {"applied": 1}))
     monkeypatch.setattr(cli.rebuild, "write_rebuild", write)
     result = _invoke(
@@ -203,7 +225,12 @@ def test_errors_dispose_the_repository_without_echoing_credentials(
     error: Exception,
     message: str,
 ) -> None:
-    """Use a safe refusal or error class and always dispose the repository."""
+    """Use a safe refusal or error class and always dispose the repository.
+
+    Given: A safe refusal or an unexpected failure with credential text.
+    When: Invoke the rebuild command.
+    Then: The repository is disposed and only safe failure details reach the output.
+    """
     monkeypatch.setattr(cli.rebuild, "plan_rebuild", AsyncMock(side_effect=error))
     result = _invoke(*_arguments(tmp_path / "out"))
     assert result.exit_code == 1
@@ -216,7 +243,12 @@ def test_shared_operator_source_changes_both_command_revisions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Bind the exact imported operator-helper bytes into both approval digests."""
+    """Bind the exact imported operator-helper bytes into both approval digests.
+
+    Given: Both command revisions computed from the installed shared helper.
+    When: Change only the helper source and recompute the revisions.
+    Then: Both revisions change only in the shared helper's digest.
+    """
     changed_source = tmp_path / "operator_support.py"
     original = Path(str(operator_support.__file__))
     before_repair = repair_app.code_revision([])

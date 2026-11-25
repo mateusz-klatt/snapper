@@ -71,7 +71,13 @@ def test_repository_resolution_uses_the_configured_url(monkeypatch: pytest.Monke
 async def test_named_repository_is_uncached_and_disposed_with_the_others(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Named SQLite repositories ignore connection naming and remain tracked for disposal."""
+    """Named SQLite repositories ignore connection naming and remain tracked for disposal.
+
+    Given: One SQLite URL and multiple application names.
+    When: Build named and unnamed repositories, then dispose the configuration.
+    Then: The unnamed repository is cached and the tracked named repositories are distinct and
+        disposed.
+    """
     url = f"sqlite+aiosqlite:///{tmp_path / 'operator.db'}"
     cached = operator_support.configured_repository(url)
     named = operator_support.configured_repository(url, application_name="snapper:repair-candles")
