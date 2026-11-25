@@ -40,6 +40,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import astuple
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import UTC
 from datetime import date
 from datetime import datetime
@@ -294,6 +295,7 @@ class RunContext:
         code_revision: Hashes from :func:`code_revision`.
         clock: Current UTC time.
         sleep: Asynchronous pause, used for backoff and between chunks.
+        run_id: The UUIDv7 shared by this invocation's connections and write receipt.
     """
 
     repository: Repository
@@ -301,6 +303,7 @@ class RunContext:
     code_revision: JsonObject
     clock: Callable[[], datetime] = _utc_now
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    run_id: str = field(default_factory=lambda: str(uuid7()))
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -1907,7 +1910,7 @@ async def apply_selection(
     """
     write_time = context.clock()
     batch = selection.selected[: options.max_rows]
-    run = _WriteRun(voted_digest, str(uuid7()), write_time, write_time, selection, len(batch))
+    run = _WriteRun(voted_digest, context.run_id, write_time, write_time, selection, len(batch))
     log = ReceiptLog(request.output_dir / RECEIPT_LINES_FILE)
     adapter = _WriteAdapter(context.repository, request.source, run.run_id)
     writer = ChunkWriter(

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Final
 from typing import NoReturn
 from typing import cast
+from uuid import uuid7
 
 import typer
 
@@ -276,13 +277,14 @@ async def _execute(
         await dispose_repositories()
 
 
-def _run(db_url: str, request: RepairRequest, options: WriteOptions | None) -> int:
+def _run(db_url: str, request: RepairRequest, options: WriteOptions | None, run_id: str) -> int:
     """Bind the run to its database and code, then execute it.
 
     Args:
         db_url: Configured database URL; it is never printed.
         request: Validated request.
         options: Write options, or None for a dry run.
+        run_id: The invocation's UUIDv7, also used to identify database connections.
 
     Returns:
         The exit code.
@@ -290,9 +292,12 @@ def _run(db_url: str, request: RepairRequest, options: WriteOptions | None) -> i
     typer.echo(f"target database: {database_identity(db_url)}")
     prepare_output_dir(request.output_dir)
     context = RunContext(
-        repository=configured_repository(db_url),
+        repository=configured_repository(
+            db_url, application_name=f"snapper:repair-candles:{run_id}"
+        ),
         database=database_endpoint(db_url),
         code_revision=code_revision([sys.modules[__name__]]),
+        run_id=run_id,
     )
     return asyncio.run(_execute(context, request, options))
 
@@ -315,12 +320,13 @@ def repair_candles(ctx: typer.Context) -> None:
     Raises:
         typer.Exit: With the command's exit code; refusals exit with 1.
     """
+    run_id = str(uuid7())
     arguments = _arguments(ctx.args)
     request = _request(arguments)
     options = _write_options(arguments)
     db_url = get_bootstrap_settings().db_url
     try:
-        code = _run(db_url, request, options)
+        code = _run(db_url, request, options, run_id)
     except RepairRefusedError as error:
         refuse(f"refused: {error}")
     except Exception as error:
