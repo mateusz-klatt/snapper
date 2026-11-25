@@ -11,10 +11,12 @@ import pytest
 from click.testing import Result
 from typer.testing import CliRunner
 
+from snapper.application.updaters.historical import candle_repair as repair_app
 from snapper.application.updaters.historical.candle_repair import RepairRefusedError
 from snapper.application.updaters.historical.candle_repair import RunContext
 from snapper.application.updaters.historical.candle_repair import WriteReport
 from snapper.application.updaters.historical.synthesized_candle_rebuild import RebuildRequest
+from snapper.cli import operator_support
 from snapper.cli import synthesized_candle_rebuild as cli
 from snapper.cli.app import app
 from snapper.core.json_types import JsonObject
@@ -208,3 +210,24 @@ def test_errors_dispose_the_repository_without_echoing_credentials(
     assert result.stderr.strip() == message
     assert _SECRET not in result.output
     assert len(named_configuration) == 1
+
+
+def test_shared_operator_source_changes_both_command_revisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bind the exact imported operator-helper bytes into both approval digests."""
+    changed_source = tmp_path / "operator_support.py"
+    original = Path(str(operator_support.__file__))
+    before_repair = repair_app.code_revision([])
+    before_rebuild = cli.rebuild.code_revision(cli)
+    changed_source.write_bytes(original.read_bytes() + b"\n")
+    monkeypatch.setattr(operator_support, "__file__", str(changed_source))
+    after_repair = repair_app.code_revision([])
+    after_rebuild = cli.rebuild.code_revision(cli)
+    assert {key for key, digest in before_repair.items() if digest != after_repair[key]} == {
+        "snapper/cli/operator_support.py"
+    }
+    assert {key for key, digest in before_rebuild.items() if digest != after_rebuild[key]} == {
+        "snapper/cli/operator_support.py"
+    }

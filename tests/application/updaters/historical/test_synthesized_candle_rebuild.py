@@ -6,12 +6,16 @@ import io
 import json
 from collections.abc import AsyncIterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from math import inf
+from math import nan
+from math import nextafter
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock
@@ -20,6 +24,7 @@ from uuid import uuid7
 
 import pytest
 import pytest_asyncio
+from loguru import logger
 from sqlalchemy import insert
 from sqlalchemy import select
 from sqlalchemy import text
@@ -39,13 +44,16 @@ from snapper.data.repository_types import CandleUpsertRow
 from snapper.data.repository_types import CandleVersionRow
 from snapper.data.repository_types import ClientSample
 from snapper.data.repository_types import SynthesizedRebuildExpectation
+from snapper.data.repository_types import SynthesizedRebuildOutcome
 from snapper.data.repository_types import SynthesizedRebuildResult
 from tests.helpers.candle_repair import OPEN
 from tests.helpers.candle_repair import XRP
 from tests.helpers.candle_repair import candle
+from tests.helpers.candle_repair import install_exclusive_file_spy
 from tests.helpers.candle_repair import kraken_row
 from tests.helpers.candle_repair import seed_instrument
 from tests.helpers.candle_repair import snapshot_request
+from tests.helpers.candle_repair import trade
 from tests.helpers.candle_repair import write_snapshot
 
 _END = datetime(2026, 11, 11, tzinfo=UTC)
@@ -551,12 +559,57 @@ def _manifest(run: _Run, record: JsonObject) -> None:
     _save(run.records, {"runs": [record]})
 
 
-def _capture_target(run: _Run) -> _Run:
+def _capture_target(run: _Run, url: str = "postgresql+asyncpg://localhost:5432/scratch") -> _Run:
     """Bind mocked PostgreSQL evidence while keeping all reads and writes on SQLite."""
-    database = repair.database_endpoint("postgresql+asyncpg://localhost:5432/scratch")
+    database = repair.database_endpoint(url)
     path = run.repair_dir / repair.APPROVAL_FILE
     _save(path, {**_document(path), "database": database})
     return replace(run, context=replace(run.context, database=database))
+
+
+@pytest.mark.asyncio
+async def test_rebuild_artifacts_and_logs_exclude_connection_credentials(
+    recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bind the public endpoint and retain only sanitized failure details in private files."""
+    url = "postgresql+asyncpg://TEST_LOGIN:TEST_PASSWORD@localhost:5432/scratch"
+    run = _capture_target(recorded_repair, url)
+    _manifest(run, _record(run.repair_dir))
+    exclusive = install_exclusive_file_spy(monkeypatch)
+    dry, writing = run.request("private-vote"), run.request("private-write")
+    messages: list[str] = []
+    sink = logger.add(lambda message: messages.append(str(message)))
+    try:
+        plan = await rebuild.plan_rebuild(run.context, dry)
+        original = run.repository.rebuild_synthesized_candles
+
+        async def fail(
+            rows: list[CandleUpsertRow],
+            *,
+            expected: Mapping[CandleKey, SynthesizedRebuildExpectation],
+            dry_run: bool = False,
+        ) -> SynthesizedRebuildResult:
+            """Report a driver failure whose raw message contains the configured URL."""
+            if dry_run:
+                return await original(rows, expected=expected, dry_run=True)
+            raise OSError(url)
+
+        monkeypatch.setattr(run.repository, "rebuild_synthesized_candles", fail)
+        result = await rebuild.write_rebuild(
+            run.context, writing, _vote(dry.output_dir, plan.digest)
+        )
+    finally:
+        logger.remove(sink)
+
+    assert result.stop_reason == "uncertain_acknowledgement"
+    assert _document(dry.output_dir / repair.APPROVAL_FILE)["database"] == run.context.database
+    for path in (*dry.output_dir.iterdir(), *writing.output_dir.iterdir()):
+        exclusive(path)
+        messages.append(path.read_text())
+    assert any("OSError" in message for message in messages)
+    assert all(
+        "TEST_LOGIN" not in message and "TEST_PASSWORD" not in message for message in messages
+    )
 
 
 @pytest.mark.parametrize(
@@ -569,6 +622,8 @@ def _capture_target(run: _Run) -> _Run:
         ("named_exact", True),
         ("named_other", False),
         ("named_hidden", True),
+        ("named_restart", True),
+        ("restart_without_reconnect", False),
         ("docker", True),
         ("observed", True),
         ("run_time", True),
@@ -597,6 +652,7 @@ def test_settlement_matches_only_possible_repair_backends(
         "named_exact": {"application_name": name, "client_addr": "10.0.0.1"},
         "named_other": {"application_name": "different", "backend_start": at},
         "named_hidden": {"application_name": None},
+        "named_restart": {"application_name": name, "client_addr": "10.0.0.1", "backend_start": at},
         "docker": {"client_addr": "172.18.0.9/32"},
         "observed": {"client_addr": "172.18.0.50"},
         "run_time": {"backend_start": at, "client_addr": "10.0.0.2"},
@@ -607,7 +663,7 @@ def test_settlement_matches_only_possible_repair_backends(
     }
     if mode in edits:
         _candidate(capture, **edits[mode])
-    if mode == "recent_reconnect":
+    if mode in {"recent_reconnect", "named_restart", "restart_without_reconnect"}:
         cast(JsonObject, capture["observer"])["postmaster_start"] = at
     record["settlements"] = [capture]
     parsed = rebuild._RunRecord.model_validate(record)
@@ -623,6 +679,8 @@ def test_settlement_matches_only_possible_repair_backends(
         "endpoint",
         "database",
         "role",
+        "session_role",
+        "pid",
         "missing_observer",
         "dupe_observer",
         "state",
@@ -650,6 +708,8 @@ async def test_structural_settlement_mismatch_refuses_before_database_access(
         "endpoint": (cast(JsonObject, first["endpoint"]), "database", "wrong"),
         "database": (observer, "database", "wrong"),
         "role": (observer, "current_user", "another"),
+        "session_role": (observer, "session_user", "another"),
+        "pid": (own, "pid", 99991),
         "missing_observer": (first, "backends", []),
         "dupe_observer": (first, "backends", [own, own]),
         "state": (own, "state", "idle"),
@@ -796,6 +856,8 @@ async def test_enumerated_correction_requires_the_exact_intended_payload(
         ("history", "history_without_current"),
         ("invalid", "invalid_input"),
         ("future", "invalid_input"),
+        ("null_vwap", "invalid_input"),
+        ("null_trades", "invalid_input"),
         ("absent", "no_input"),
     ],
 )
@@ -818,13 +880,14 @@ async def test_planning_reports_each_exclusion(
             if case == "history":
                 row["known_to"] = OPEN + timedelta(hours=1)
             await session.execute(insert(Candle).values(**row))
-        elif case in {"invalid", "future"}:
+        elif expected == "invalid_input":
             minute = OPEN + timedelta(minutes=2)
             row = candle(
                 XRP,
                 minute,
-                timestamp=datetime.now(UTC) + timedelta(days=1),
-                complete=case == "future",
+                timestamp=datetime.now(UTC) + timedelta(days=int(case == "future")),
+                complete=case != "invalid",
+                **{kind: None for kind in ("vwap", "trades") if case == f"null_{kind}"},
             )
             await session.execute(insert(Candle).values(**row))
         else:
@@ -838,10 +901,11 @@ async def test_planning_reports_each_exclusion(
     await rebuild.plan_rebuild(run.context, request)
     line = _preview(request.output_dir)[0]
     assert line["action"] == expected
-    if case in {"invalid", "future"}:
+    if expected == "invalid_input":
         assert line["input_minutes"] == "2"
         assert line["absent_minutes"] == "2"
-        assert line["reason"] == f"{case}_minute@{(OPEN + timedelta(minutes=2)).isoformat()}"
+        issue = "future" if case == "future" else "invalid"
+        assert line["reason"] == f"{issue}_minute@{(OPEN + timedelta(minutes=2)).isoformat()}"
 
 
 @pytest.mark.parametrize("phase", ["preflight", "under_lock"])
@@ -1102,10 +1166,12 @@ async def test_invalid_json_or_shape_refuses_before_reading_database(
         ("failed_without_error", "missing its error type"),
         ("chunk_time", "timestamps are out of order"),
         ("repeated_minute", "repeats a minute"),
+        ("repeated_sequence", "repeats a minute or sequence"),
         ("out_of_scope", "outside its write preview"),
         ("duplicate_selection", "invalid selection list"),
         ("overlapping_selection", "overlaps already_applied"),
         ("identity", "identity differs"),
+        ("terminal_status", "identity differs"),
         ("lines", "differs from receipt.json"),
     ],
 )
@@ -1123,6 +1189,8 @@ async def test_bound_receipt_consistency_is_checked_before_any_read(
     record = _record(run.repair_dir)
     if defect == "identity":
         record["voted_digest"] = "b" * 64
+    if defect == "terminal_status":
+        record["stop_reason"] = "error"
     _manifest(run, record)
     forbidden = MagicMock()
     monkeypatch.setattr(run.repository, "session", forbidden)
@@ -1133,7 +1201,7 @@ async def test_bound_receipt_consistency_is_checked_before_any_read(
 
 def _alter_receipt(receipt: JsonObject, defect: str) -> None:
     """Mutate precisely the part of the receipt checked by the test."""
-    chunk = cast(list[JsonObject], receipt["chunks"])[0]
+    chunk, correction = cast(list[JsonObject], receipt["chunks"])
     attempt = cast(list[JsonObject], chunk["attempts"])[0]
     written = cast(list[JsonObject], chunk["applied"])
     selection = {**written[0], "action": "insert"}
@@ -1151,6 +1219,11 @@ def _alter_receipt(receipt: JsonObject, defect: str) -> None:
         "failed_without_error": (attempt, "outcome", "uncertain"),
         "chunk_time": (chunk, "ended_at", OPEN.isoformat()),
         "repeated_minute": (chunk, "applied", [written[0], written[0]]),
+        "repeated_sequence": (
+            cast(list[JsonObject], correction["applied"])[0],
+            "sequence_id",
+            written[0]["sequence_id"],
+        ),
         "out_of_scope": (written[0], "minute_utc", _END.isoformat()),
         "duplicate_selection": (receipt, "not_voted", [selection, selection]),
         "overlapping_selection": (receipt, "already_applied", [selection]),
@@ -1324,8 +1397,11 @@ async def test_postgres_read_modes_use_one_session_and_required_statement_order(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("verify", [False, True])
 async def test_sqlite_verification_holds_a_snapshot_across_the_two_selects(
-    recorded_repair: _Run, monkeypatch: pytest.MonkeyPatch
+    recorded_repair: _Run,
+    monkeypatch: pytest.MonkeyPatch,
+    verify: bool,
 ) -> None:
     """Commit a paired input/output batch between the reads and prove neither version enters."""
     run = recorded_repair
@@ -1351,9 +1427,14 @@ async def test_sqlite_verification_holds_a_snapshot_across_the_two_selects(
         return seen
 
     monkeypatch.setattr(rebuild, "_read_output_versions", output_then_concurrent_commit)
-    snapshot = await rebuild._snapshot(run.context, unit)
-    assert snapshot.outputs == {}
-    assert len(snapshot.inputs[XRP]) == 2
+    if verify:
+        snapshot = await rebuild._snapshot(run.context, unit)
+        assert snapshot.outputs == {}
+        assert len(snapshot.inputs[XRP]) == 2
+    else:
+        initial = {key: rebuild._Window(key, "XRP-EUR", 2, "no_input")}
+        planned = await rebuild._plan_unit(run.context, unit, initial)
+        assert planned[key].action == "insert" and planned[key].present == 3
     assert len(await _higher_rows(run.repository)) == 1
 
 
@@ -1417,6 +1498,7 @@ def _replace_preview(directory: Path, lines: list[dict[str, str]]) -> str:
         ("logical_repeat", "repeats a logical minute"),
         ("preview_symbol", "unapproved minute or symbol"),
         ("active_instrument", "active Kraken spot symbol"),
+        ("inactive_instrument", "active Kraken spot symbol"),
         ("insert_time", "not authored inside"),
         ("snapshot_time", "invalid preview timestamp"),
     ],
@@ -1458,16 +1540,17 @@ def _alter_b_preview(directory: Path, case: str) -> None:
 
 
 async def _alter_db_evidence(run: _Run, case: str) -> None:
-    """Change either the catalog exchange or an insert's author time."""
-    statement = (
-        update(Instrument).where(Instrument.public_id == XRP).values(exchange="paper")
-        if case == "active_instrument"
-        else update(Candle)
+    """Change the catalog exchange or expiry, or an insert's author time."""
+    instrument = update(Instrument).where(Instrument.public_id == XRP)
+    statements = {
+        "active_instrument": instrument.values(exchange="paper"),
+        "inactive_instrument": instrument.values(known_to=_END),
+        "insert_time": update(Candle)
         .where(Candle.open_at == OPEN + timedelta(minutes=1))
-        .values(timestamp=OPEN)
-    )
+        .values(timestamp=OPEN),
+    }
     async with run.repository.session() as session:
-        await session.execute(statement)
+        await session.execute(statements[case])
         await session.commit()
 
 
@@ -1588,3 +1671,769 @@ async def test_planner_refuses_an_ambiguous_current_version_or_missing_fold(
     monkeypatch.setattr(rebuild, "CandleAggregator", aggregator)
     with pytest.raises(repair.RepairRefusedError, match="did not emit"):
         rebuild._fold(window, versions)
+
+
+def _short(run: _Run, name: str) -> rebuild.RebuildRequest:
+    """Limit the writable plan to its first five-minute window."""
+    return run.request(name, OPEN + timedelta(minutes=5))
+
+
+async def _five_minute_candidate(run: _Run) -> rebuild._Window:
+    """Read and fold the actual recorded fixture's current source minutes."""
+    key = (XRP, "5m", OPEN)
+    window = rebuild._Window(key, "XRP-EUR", 2, "no_input")
+    return (await rebuild._plan_unit(run.context, rebuild._units([key])[0], {key: window}))[key]
+
+
+async def _seed_old_output(
+    run: _Run, proposed: CandleUpsertRow, **changes: object
+) -> CandleVersionRow:
+    """Install an older synthesized predecessor with a distinct price and fewer observations."""
+    row = (
+        dict(proposed)
+        | {
+            "close": 1.05,
+            "volume": 10.0,
+            "trades": 2,
+            "timestamp": OPEN + timedelta(minutes=6),
+            "session_id": str(uuid7()),
+            "sequence_id": 1,
+        }
+        | changes
+    )
+    async with run.repository.session() as session:
+        result = await session.execute(insert(Candle).values(**row).returning(Candle.__table__))
+        stored = cast(CandleVersionRow, dict(result.mappings().one()))
+        await session.commit()
+    return stored
+
+
+@pytest.mark.parametrize("subsequent", ["unchanged", "protected", "would_lose_observations"])
+async def test_voted_replacement_reclassified_before_write_preserves_the_live_output(
+    recorded_repair: _Run,
+    subsequent: str,
+) -> None:
+    """Classify a voted replacement using the current output's new ownership and observations."""
+    run = recorded_repair
+    candidate = cast(CandleUpsertRow, (await _five_minute_candidate(run)).row)
+    await _seed_old_output(run, candidate)
+    dry = _short(run, "voted-overlap")
+    vote = await rebuild.plan_rebuild(run.context, dry)
+    assert _preview(dry.output_dir)[0]["action"] == "rebuild"
+    live = candidate.copy()
+    live.update({"timestamp": datetime.now(UTC), "session_id": str(uuid7()), "sequence_id": 1})
+    if subsequent == "protected":
+        live["source"] = "native"
+    if subsequent == "would_lose_observations":
+        live["volume"] += 1.0
+    assert await run.repository.upsert_candles([live]) == 1
+    before = await _higher_rows(run.repository)
+    write = _short(run, "write-overlap")
+    report = await rebuild.write_rebuild(run.context, write, _vote(dry.output_dir, vote.digest))
+    assert report.totals["applied"] == 0
+    assert await _higher_rows(run.repository) == before
+    assert _preview(write.output_dir)[0]["action"] == subsequent
+    receipt = _document(write.output_dir / repair.RECEIPT_FILE)
+    bucket = "already_applied" if subsequent == "unchanged" else "changed"
+    assert len(cast(list[JsonObject], receipt[bucket])) == 1
+    request = replace(_short(run, "verify-overlap"), verification=run.evidence(write.output_dir))
+    report_snapshot = _verification(
+        await rebuild.plan_rebuild(run.context, request), run.context.run_id
+    )
+    window = cast(list[JsonObject], report_snapshot["windows"])[0]
+    assert window["class"] == ("unchanged_at_write" if subsequent == "unchanged" else "excluded")
+    assert window["reason"] == ("" if subsequent == "unchanged" else subsequent)
+
+
+@dataclass(frozen=True, slots=True)
+class _Observation:
+    """Business values visible to the planner and repository at a chosen read."""
+
+    values: Mapping[str, object]
+    loss: str
+
+    def apply(self, current: CandleVersionRow) -> CandleVersionRow:
+        """Keep the exact predecessor identity and change only its observations."""
+        return cast(CandleVersionRow, {**current, **self.values})
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        _Observation({"volume": 21.0}, "lower_volume"),
+        _Observation({"volume": nextafter(20.0, inf)}, "lower_volume"),
+        _Observation({"trades": 6}, "lower_trades"),
+        _Observation({"volume": 21.0, "trades": 6}, "lower_volume+lower_trades"),
+        _Observation({"trades": None}, "unknown_current"),
+        _Observation({"volume": 21.0, "trades": None}, "lower_volume+unknown_current"),
+        *[
+            _Observation({field: value}, "unknown_current")
+            for field in ("volume", "trades")
+            for value in (nan, inf, -inf)
+        ],
+    ],
+)
+async def test_observation_loss_agrees_in_plan_preflight_and_under_the_fence(
+    recorded_repair: _Run,
+    observation: _Observation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse lower or unknown observations at all three boundaries, including non-finite payloads."""
+    run = recorded_repair
+    window = await _five_minute_candidate(run)
+    candidate = cast(CandleUpsertRow, window.row)
+    previous = await _seed_old_output(run, candidate)
+    real_read = rebuild._read_output_versions
+
+    async def read_poisoned(
+        session: AsyncSession,
+        unit: rebuild._ReadUnit,
+    ) -> dict[CandleKey, list[CandleVersionRow]]:
+        """Expose values that SQLite cannot round-trip, including float NaN on a NOT NULL column."""
+        observed = await real_read(session, unit)
+        observed[window.key] = [observation.apply(previous)]
+        return observed
+
+    with monkeypatch.context() as planner:
+        planner.setattr(rebuild, "_read_output_versions", read_poisoned)
+        plan = await _five_minute_candidate(run)
+    assert (plan.action, plan.reason) == ("would_lose_observations", observation.loss)
+    await _guard_observation_at_each_read(run, plan, observation, monkeypatch)
+
+
+async def _guard_observation_at_each_read(
+    run: _Run,
+    plan: rebuild._Window,
+    observation: _Observation,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the real read and lock path and inject the observed payload at its comparison boundary."""
+    repository = run.repository
+    compare = SQLAlchemyRepository._synthesized_rebuild_outcome
+    begin = repository._begin_candle_reconciliation_write
+    in_fence, poison_preflight = False, True
+
+    async def mark_fence(session: AsyncSession, *, sqlite_write_lock: bool) -> None:
+        """Take the actual fence before selecting the changed read payload."""
+        nonlocal in_fence
+        await begin(session, sqlite_write_lock=sqlite_write_lock)
+        in_fence = True
+
+    def compare_observed(
+        row: CandleUpsertRow,
+        expectation: SynthesizedRebuildExpectation,
+        current: CandleVersionRow | None,
+        history: bool,
+        inputs: Sequence[CandleVersionRow],
+    ) -> SynthesizedRebuildOutcome:
+        """Expose only the current payload while keeping both repository guard phases real."""
+        if current is not None and (poison_preflight or in_fence):
+            current = observation.apply(current)
+        return compare(row, expectation, current, history, inputs)
+
+    monkeypatch.setattr(repository, "_begin_candle_reconciliation_write", mark_fence)
+    monkeypatch.setattr(
+        SQLAlchemyRepository, "_synthesized_rebuild_outcome", staticmethod(compare_observed)
+    )
+    at = datetime.now(UTC)
+    row = rebuild._write_row(plan, run.context.run_id, at, 1)
+    expected = {plan.key: rebuild._expectation(plan)}
+    refused = SynthesizedRebuildOutcome("would_lose_observations", observation.loss)
+    dry = await repository.rebuild_synthesized_candles([row], expected=expected, dry_run=True)
+    assert dry.outcomes[plan.key] == refused
+    preflight = await repository.rebuild_synthesized_candles([row], expected=expected)
+    assert preflight.outcomes[plan.key] == refused and not in_fence
+    poison_preflight = False
+    locked = await repository.rebuild_synthesized_candles([row], expected=expected)
+    assert locked.outcomes[plan.key] == refused and in_fence
+    assert len(await _higher_rows(repository)) == 1
+
+
+def test_application_batches_respect_row_and_grid_ceilings() -> None:
+    """Bound a dense group by rows and a full-day grid by minutes."""
+    windows = []
+    for index in range(101):
+        opening = OPEN + timedelta(minutes=index * 5)
+        row = candle(XRP, opening, timeframe="5m")
+        windows.append(rebuild._Window((XRP, "5m", opening), "XRP-EUR", 1, "insert", row=row))
+    daily = candle(XRP, _END, timeframe="1d")
+    windows.append(rebuild._Window((XRP, "1d", _END), "XRP-EUR", 1, "insert", row=daily))
+    chunks = rebuild._chunks(windows, str(uuid7()), _END + timedelta(days=2))
+    assert [len(chunk.rows) for chunk in chunks] == [100, 1, 1]
+    assert [row["sequence_id"] for chunk in chunks for row in chunk.rows] == list(range(1, 103))
+    assert all(
+        chunk.expected.keys() == {rebuild.candle_key(row) for row in chunk.rows} for chunk in chunks
+    )
+
+
+async def test_live_edge_checks_dry_run_and_confirmed_write_before_a_read(
+    recorded_repair: _Run,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse an otherwise valid vote when its end falls inside the invocation's live edge."""
+    run = recorded_repair
+    dry = run.request("old-vote")
+    plan = await rebuild.plan_rebuild(run.context, dry)
+    recent = replace(run.context, clock=lambda: _END + timedelta(minutes=179))
+    session = MagicMock()
+    monkeypatch.setattr(run.repository, "session", session)
+    with pytest.raises(repair.RepairRefusedError, match="180 minutes"):
+        await rebuild.plan_rebuild(recent, run.request("too-recent"))
+    with pytest.raises(repair.RepairRefusedError, match="180 minutes"):
+        await rebuild.write_rebuild(
+            recent, run.request("too-recent-write"), _vote(dry.output_dir, plan.digest)
+        )
+    session.assert_not_called()
+
+
+@dataclass(frozen=True, slots=True)
+class _RetryCase:
+    """A known rollback or terminal constraint error and its expected receipt."""
+
+    sqlstate: str
+    outcome: str
+    failures: int
+    stop: str = "completed"
+
+    def error(self) -> OperationalError:
+        """Supply only driver metadata that the retry classifier inspects."""
+        name = "uq_candle_itf_open" if self.outcome == "natural_key_conflict" else "other_index"
+        return OperationalError(None, None, MagicMock(sqlstate=self.sqlstate, constraint_name=name))
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        _RetryCase("40001", "serialization_failure", 1),
+        _RetryCase("40P01", "deadlock", 1),
+        _RetryCase("23505", "natural_key_conflict", 1),
+        _RetryCase("23505", "unique_violation", 1, "unique_violation"),
+        _RetryCase("40001", "serialization_failure", 4, "attempts_exhausted"),
+        _RetryCase("55P03", "lock_timeout", 3, "lock_timeouts"),
+    ],
+)
+async def test_rebuild_retry_and_terminal_constraint_receipts(
+    recorded_repair: _Run,
+    case: _RetryCase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise all known-rollback paths with the actual rebuild adapter and durable receipt."""
+    run = recorded_repair
+    dry = _short(run, "retry-plan")
+    approved = await rebuild.plan_rebuild(run.context, dry)
+    writer = run.repository.rebuild_synthesized_candles
+    rows_by_attempt: list[list[CandleUpsertRow]] = []
+
+    async def attempt(
+        rows: list[CandleUpsertRow],
+        *,
+        expected: Mapping[CandleKey, SynthesizedRebuildExpectation],
+        dry_run: bool = False,
+    ) -> SynthesizedRebuildResult:
+        """Inject a known rollback before the first successful whole chunk."""
+        if not dry_run:
+            rows_by_attempt.append([row.copy() for row in rows])
+            if len(rows_by_attempt) <= case.failures:
+                raise case.error()
+        return await writer(rows, expected=expected, dry_run=dry_run)
+
+    reconcile = AsyncMock(wraps=run.repository.get_session_candle_versions)
+    monkeypatch.setattr(run.repository, "rebuild_synthesized_candles", attempt)
+    monkeypatch.setattr(run.repository, "get_session_candle_versions", reconcile)
+    sleep = AsyncMock()
+    context = replace(run.context, sleep=sleep)
+    write = _short(run, "retry-write")
+    report = await rebuild.write_rebuild(context, write, _vote(dry.output_dir, approved.digest))
+    assert report.stop_reason == case.stop
+    reconcile.assert_not_awaited()
+    receipt = _document(write.output_dir / repair.RECEIPT_FILE)
+    records = cast(list[JsonObject], receipt["chunks"])
+    attempts = cast(list[JsonObject], records[0]["attempts"])
+    states = [case.outcome] * case.failures + (["acknowledged"] if case.stop == "completed" else [])
+    assert [attempt["outcome"] for attempt in attempts] == states
+    assert records[0]["attempt_count"] == len(states)
+    assert all(rows == rows_by_attempt[0] for rows in rows_by_attempt)
+    assert [call.args[0] for call in sleep.await_args_list] == [0.25, 0.5, 1.0][: len(states) - 1]
+    assert report.totals["applied"] == int(case.stop == "completed")
+    assert report.totals["not_applied"] == int(case.stop != "completed")
+    if case.stop != "completed":
+        request = replace(_short(run, "verify-stop"), verification=run.evidence(write.output_dir))
+        check = _verification(await rebuild.plan_rebuild(run.context, request), run.context.run_id)
+        assert cast(list[JsonObject], check["windows"])[0]["reason"] == "not_applied"
+
+
+async def test_lost_acknowledgement_reports_a_superseded_version(
+    recorded_repair: _Run,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Find the historical version by exact payload when a live successor already replaced it."""
+    run = recorded_repair
+    dry = _short(run, "superseded-plan")
+    approved = await rebuild.plan_rebuild(run.context, dry)
+    original = run.repository.rebuild_synthesized_candles
+
+    async def lose_ack(
+        rows: list[CandleUpsertRow],
+        *,
+        expected: Mapping[CandleKey, SynthesizedRebuildExpectation],
+        dry_run: bool = False,
+    ) -> SynthesizedRebuildResult:
+        """Commit both versions before returning a transport error to the caller."""
+        result = await original(rows, expected=expected, dry_run=dry_run)
+        if dry_run:
+            return result
+        successor = rows[0].copy()
+        successor.update(
+            {
+                "session_id": str(uuid7()),
+                "timestamp": datetime.now(UTC),
+                "volume": rows[0]["volume"] + 1.0,
+            }
+        )
+        assert await run.repository.upsert_candles([successor]) == 1
+        raise ConnectionError("lost acknowledgement")
+
+    monkeypatch.setattr(run.repository, "rebuild_synthesized_candles", lose_ack)
+    report = await rebuild.write_rebuild(
+        run.context, _short(run, "superseded"), _vote(dry.output_dir, approved.digest)
+    )
+    assert report.stop_reason == "uncertain_acknowledgement"
+    assert report.totals["applied_superseded"] == 1 and report.totals["uncertain"] == 0
+
+
+@pytest.mark.parametrize("settles_as_applied", [False, True])
+async def test_reconciliation_proceeds_while_the_unacknowledged_transaction_is_open(
+    recorded_repair: _Run,
+    monkeypatch: pytest.MonkeyPatch,
+    settles_as_applied: bool,
+) -> None:
+    """Keep uncommitted versions uncertain and let reconciliation read behind the writer fence."""
+    run = recorded_repair
+    dry = _short(run, "active-plan")
+    approved = await rebuild.plan_rebuild(run.context, dry)
+    write = _short(run, "active")
+    original = run.repository.rebuild_synthesized_candles
+    async with run.repository.session() as held:
+
+        async def leave_open(
+            rows: list[CandleUpsertRow],
+            *,
+            expected: Mapping[CandleKey, SynthesizedRebuildExpectation],
+            dry_run: bool = False,
+        ) -> SynthesizedRebuildResult:
+            """Stage the selected row without committing or releasing the original lock."""
+            if dry_run:
+                return await original(rows, expected=expected, dry_run=True)
+            await held.execute(text("BEGIN IMMEDIATE"))
+            await held.execute(insert(Candle).values(**rows[0]))
+            raise ConnectionError("connection outcome unknown")
+
+        monkeypatch.setattr(run.repository, "rebuild_synthesized_candles", leave_open)
+        async with asyncio.timeout(3):
+            report = await rebuild.write_rebuild(
+                run.context, write, _vote(dry.output_dir, approved.digest)
+            )
+        assert report.totals["uncertain"] == 1
+        assert report.stop_reason == "uncertain_acknowledgement"
+        if settles_as_applied:
+            await held.commit()
+        else:
+            await held.rollback()
+    assert len(await _higher_rows(run.repository)) == int(settles_as_applied)
+    request = replace(_short(run, "verify-active"), verification=run.evidence(write.output_dir))
+    checked = _verification(await rebuild.plan_rebuild(run.context, request), run.context.run_id)
+    assert cast(list[JsonObject], checked["windows"])[0]["class"] == (
+        "verified" if settles_as_applied else "uncertain"
+    )
+
+
+async def test_failure_between_chunks_keeps_the_committed_chunk_and_final_receipt(
+    recorded_repair: _Run,
+) -> None:
+    """Persist the first chunk, then raise during the pause before the daily window."""
+    run = recorded_repair
+    dry = run.request("pause-vote")
+    approved = await rebuild.plan_rebuild(run.context, dry)
+    context = replace(run.context, sleep=AsyncMock(side_effect=RuntimeError("pause interrupted")))
+    write = run.request("pause-write")
+    with pytest.raises(RuntimeError, match="pause interrupted"):
+        await rebuild.write_rebuild(context, write, _vote(dry.output_dir, approved.digest))
+    receipt = _document(write.output_dir / repair.RECEIPT_FILE)
+    assert receipt["stop_reason"] == "error"
+    assert (receipt["scheduled"], receipt["reached"]) == (6, 5)
+    assert cast(JsonObject, receipt["totals"])["applied"] == 5
+    assert len(await _higher_rows(run.repository)) == 5
+    for artifact in write.output_dir.iterdir():
+        assert artifact.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    ("observations", "expected"),
+    [((0, 0, 0), True), ((1, 0, 0), False), ((0, 0, 1), False), ((0, 0, None), True)],
+)
+async def test_run_receipts_bind_start_and_successful_chunk_samples(
+    recorded_repair: _Run,
+    observations: tuple[int, int, int | None],
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Record sole-client transitions using the committing attempt and the start sample."""
+    run = recorded_repair
+    start_count, second, third = observations
+    sample_time = datetime.now(UTC)
+    start = AsyncMock(return_value=ClientSample(start_count, sample_time))
+    monkeypatch.setattr(rebuild, "sample_other_client_backends", start)
+    repository = MagicMock(spec=SQLAlchemyRepository, dialect_name="postgresql")
+    repository.session.side_effect = run.repository.session
+    stub = _SampledWrites((second, third), sample_time)
+    repository.rebuild_synthesized_candles = AsyncMock(side_effect=stub.__call__)
+    context = replace(run.context, repository=repository, sleep=AsyncMock())
+    first = await _five_minute_candidate(run)
+    daily_row = candle(XRP, _END - timedelta(days=1), timeframe="1d")
+    daily = rebuild._Window(rebuild.candle_key(daily_row), "XRP-EUR", 1, "insert", row=daily_row)
+    request = run.request("sampled")
+    stop, _ = await rebuild._apply(
+        context, request, _vote(run.root, "a" * 64), rebuild._Selection([first, daily], [], [], [])
+    )
+    receipt = _document(request.output_dir / repair.RECEIPT_FILE)
+    assert stop == "completed" and receipt["sole_client_write"] is expected
+    assert receipt["start_sample"] == {
+        "other_client_backends": start_count,
+        "observed_at": sample_time.isoformat(),
+    }
+    chunks = cast(list[JsonObject], receipt["chunks"])
+    assert cast(list[JsonObject], chunks[0]["attempts"])[0]["outcome"] == "lock_timeout"
+    for count, chunk in zip((second, third), chunks, strict=True):
+        if count is None:
+            assert chunk["sole_client"] == "not_observed" and chunk["client_sample"] is None
+        else:
+            assert chunk["sole_client"] is (count == 0)
+            assert chunk["client_sample"] == {
+                "other_client_backends": count,
+                "observed_at": (
+                    sample_time + timedelta(seconds=cast(int, chunk["chunk"]))
+                ).isoformat(),
+            }
+
+
+class _SampledWrites:
+    """Supply committed samples after a known first rollback."""
+
+    def __init__(self, counts: tuple[int, int | None], at: datetime) -> None:
+        """Remember the sample of each committing attempt."""
+        self._counts = counts
+        self._at = at
+        self.attempts = 0
+
+    async def __call__(
+        self,
+        rows: list[CandleUpsertRow],
+        *,
+        expected: Mapping[CandleKey, SynthesizedRebuildExpectation],
+    ) -> SynthesizedRebuildResult:
+        """Return only the observations made for successful transactions."""
+        assert len(rows) == len(expected)
+        self.attempts += 1
+        if self.attempts == 1:
+            raise OperationalError(None, None, MagicMock(sqlstate="55P03"))
+        count = self._counts[self.attempts - 2]
+        if count is None:
+            return SynthesizedRebuildResult(
+                {key: SynthesizedRebuildOutcome("inputs_changed") for key in expected}
+            )
+        return SynthesizedRebuildResult(
+            {key: SynthesizedRebuildOutcome("inserted") for key in expected},
+            ClientSample(count, self._at + timedelta(seconds=self.attempts - 1)),
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "run_id",
+        "voted_digest",
+        "stop_reason",
+        "approval_sha256",
+        "receipt_sha256",
+        "receipt_lines_sha256",
+        "rebound_jsonl",
+        "rebound_totals",
+        "rebound_end",
+        "rebound_records",
+    ],
+)
+async def test_verification_mutations_fail_before_any_database_read(
+    recorded_repair: _Run,
+    field: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refuse each record-binding mismatch and still validate rebound receipt contents."""
+    run = recorded_repair
+    dry, write = _short(run, "file-vote"), _short(run, "file-write")
+    approved = await rebuild.plan_rebuild(run.context, dry)
+    await rebuild.write_rebuild(run.context, write, _vote(dry.output_dir, approved.digest))
+    artifacts = write.output_dir
+    if field == "rebound_jsonl":
+        (artifacts / repair.RECEIPT_LINES_FILE).write_bytes(b"")
+    if field == "rebound_totals":
+        receipt = _document(artifacts / repair.RECEIPT_FILE)
+        cast(JsonObject, receipt["totals"])["applied"] = 0
+        _rewrite_receipt(artifacts, receipt)
+    if field in {"rebound_end", "rebound_records"}:
+        path = artifacts / repair.APPROVAL_FILE
+        approval = _document(path)
+        if field == "rebound_end":
+            approval["end"] = _END.isoformat()
+        else:
+            cast(JsonObject, approval["run_records"])["sha256"] = "0" * 64
+        _save(path, approval)
+    evidence = run.evidence(artifacts)
+    mismatches = {
+        "run_id": str(uuid7()),
+        "voted_digest": "0" * 64,
+        "stop_reason": "error",
+        **dict.fromkeys(("approval_sha256", "receipt_sha256", "receipt_lines_sha256"), "0" * 64),
+    }
+    if field in mismatches:
+        _save(evidence.record, {**_document(evidence.record), field: mismatches[field]})
+    session = MagicMock()
+    monkeypatch.setattr(run.repository, "session", session)
+    request = replace(_short(run, "file-verify"), verification=evidence)
+    with pytest.raises(repair.RepairRefusedError):
+        await rebuild.plan_rebuild(run.context, request)
+    session.assert_not_called()
+
+
+async def test_verification_accepts_a_current_fold_from_newer_committed_minutes(
+    recorded_repair: _Run,
+) -> None:
+    """Verify a superseded target whose current value is the fold at the verification snapshot."""
+    run = recorded_repair
+    dry, write = _short(run, "old-inputs"), _short(run, "old-output")
+    approved = await rebuild.plan_rebuild(run.context, dry)
+    await rebuild.write_rebuild(run.context, write, _vote(dry.output_dir, approved.digest))
+    assert (
+        await run.repository.upsert_candles(
+            [
+                candle(
+                    XRP,
+                    OPEN + timedelta(minutes=2),
+                    timestamp=datetime.now(UTC),
+                    volume=1.0,
+                    trades=1,
+                )
+            ]
+        )
+        == 1
+    )
+    candidate = await _five_minute_candidate(run)
+    assert candidate.action == "rebuild"
+    output = rebuild._write_row(candidate, str(uuid7()), datetime.now(UTC), 1)
+    assert await run.repository.upsert_candles([output]) == 1
+    request = replace(_short(run, "new-verify"), verification=run.evidence(write.output_dir))
+    observed = _verification(await rebuild.plan_rebuild(run.context, request), run.context.run_id)
+    row = cast(list[JsonObject], observed["windows"])[0]
+    assert row["class"] == "verified" and row["still_written"] is False
+
+
+async def test_recorded_trades_correction_uses_the_receipt_write_time(
+    recorded_repair: _Run,
+) -> None:
+    """Authenticate a real stored-trade correction, then refuse a different version time."""
+    run = recorded_repair
+    opening = OPEN + timedelta(minutes=8)
+    await run.repository.upsert_candles([candle(XRP, opening, timestamp=opening)])
+    await run.repository.upsert_trades(
+        [trade(XRP, opening + timedelta(seconds=10), 2.0, 3.0, "trade")]
+    )
+    first, written = run.root / "trades-preview", run.root / "trades-write"
+    first.mkdir()
+    written.mkdir()
+    request = repair.RepairRequest(
+        source=repair.RepairSource.TRADES,
+        exchange="kraken",
+        symbols=("XRP-EUR",),
+        all_mapped=False,
+        snapshot_dir=None,
+        output_dir=first,
+        window=repair.RepairWindow(opening, opening + timedelta(minutes=1)),
+    )
+    context = replace(run.context, run_id=str(uuid7()))
+    drafted = await repair.plan_repair(context, request)
+    report = await repair.write_repair(
+        context, replace(request, output_dir=written), _vote(first, drafted.digest)
+    )
+    assert report.totals["applied"] == 1
+    _manifest(run, _record(written))
+    valid = replace(run.request("trades-rebuild"), repair_runs=(written,))
+    summary = (await rebuild.plan_rebuild(run.context, valid)).summary
+    assert summary["actions"] == {"insert": 6}
+    async with run.repository.session() as session:
+        await session.execute(
+            update(Candle)
+            .where(Candle.session_id == context.run_id)
+            .values(timestamp=datetime.now(UTC) - timedelta(hours=1))
+        )
+        await session.commit()
+    with pytest.raises(repair.RepairRefusedError, match="correction identity or timestamp"):
+        await rebuild.plan_rebuild(
+            run.context, replace(valid, output_dir=run.request("refuse-trades").output_dir)
+        )
+
+
+@pytest.mark.parametrize("list_name", ["already_applied", "changed"])
+async def test_repair_selection_overlap_keeps_not_voted_independent(
+    recorded_repair: _Run,
+    list_name: str,
+) -> None:
+    """Permit a B selection reference to appear in not_voted and one terminal selection list."""
+    run = recorded_repair
+    directory = run.repair_dir
+    receipt = _document(directory / repair.RECEIPT_FILE)
+    reference: JsonObject = {
+        "instrument_public_id": XRP,
+        "minute_utc": (OPEN + timedelta(minutes=4)).isoformat(),
+        "action": "insert",
+    }
+    receipt[list_name] = [reference]
+    receipt["not_voted"] = [reference]
+    _rewrite_receipt(directory, receipt)
+    _manifest(run, _record(directory))
+    result = await rebuild.plan_rebuild(run.context, run.request("overlap"))
+    summaries = cast(list[JsonObject], result.summary["runs"])
+    assert result.summary["actions"] == {"insert": 6}
+    assert summaries[0]["already_applied_unproven"] == int(list_name == "already_applied")
+
+
+@pytest.mark.parametrize(
+    "key,value", [("dialect", "sqlite"), ("host", "elsewhere"), ("port", 5433)]
+)
+def test_settlement_endpoint_checks_each_part_of_the_effective_target(
+    recorded_repair: _Run,
+    key: str,
+    value: str | int,
+) -> None:
+    """Bind the collector's configured target without comparing its observed server address."""
+    run = _capture_target(recorded_repair)
+    record = _record(run.repair_dir)
+    capture = _capture(record, run.context.database)
+    record["settlements"] = [capture]
+    valid = rebuild._RunRecord.model_validate(record)
+    rebuild._check_record(valid, run.context.database)
+    cast(JsonObject, capture["endpoint"])[key] = value
+    changed = rebuild._RunRecord.model_validate(record)
+    with pytest.raises(repair.RepairRefusedError, match="endpoint differs"):
+        rebuild._check_record(changed, run.context.database)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "run_id",
+        "voted_digest",
+        "stop_reason",
+        "approval_sha256",
+        "receipt_sha256",
+        "receipt_lines_sha256",
+        "application_name",
+        "observed_addresses",
+        "container",
+        "settlements",
+    ],
+)
+def test_run_record_requires_each_named_field(recorded_repair: _Run, field: str) -> None:
+    """Require the exact run record even for an acknowledged run with no settlements."""
+    run = recorded_repair
+    raw = _record(run.repair_dir)
+    raw.pop(field)
+    _manifest(run, raw)
+    with pytest.raises(repair.RepairRefusedError, match="invalid format"):
+        rebuild._load_runs(run.request("missing-field"), run.context.database)
+
+
+async def test_sqlite_enumerates_the_approved_scope_inside_begin_immediate(
+    recorded_repair: _Run,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Record the opener from the production enumeration and attest its approved scope."""
+    run = recorded_repair
+    record = rebuild._load_runs(run.request("enum"), run.context.database).runs[0]
+    observed: list[str] = []
+
+    @asynccontextmanager
+    async def inspect_session() -> AsyncIterator[AsyncSession]:
+        """Record the real first statement while leaving its transaction intact."""
+        async with run.repository.session() as session:
+            execute = AsyncMock(wraps=session.execute)
+            with monkeypatch.context() as patch:
+                patch.setattr(session, "execute", execute)
+                yield session
+            observed.extend(str(call.args[0]) for call in execute.await_args_list)
+
+    stub = MagicMock(spec=SQLAlchemyRepository, dialect_name="sqlite")
+    stub.session.side_effect = inspect_session
+    assert len(await rebuild._enumerate_repair(stub, record)) == 2
+    assert observed[0] == "BEGIN IMMEDIATE"
+    assert all("candles.session_id =" in statement for statement in observed[1:])
+
+
+async def test_approval_digest_binds_each_planning_input(recorded_repair: _Run) -> None:
+    """Change one dimension at a time and hash the actual approval and preview serializers."""
+    run = recorded_repair
+    request = _short(run, "digest")
+    context = run.context
+    at = context.clock()
+    recorded = rebuild._load_runs(request, context.database)
+    scope = await rebuild._derive_scope(context, recorded, at)
+    windows = await rebuild._plan(context, scope, request, at)
+    preview = repair.sha256_hex(rebuild._preview_bytes(windows.values()))
+    digest = _approval_digest(context, request, scope, preview)
+    assert digest == _approval_digest(context, request, scope, preview)
+    for changed_context in (
+        replace(context, database={"dialect": "sqlite", "path": "/different.db"}),
+        replace(context, code_revision={"application.py": "1" * 64}),
+    ):
+        assert digest != _approval_digest(changed_context, request, scope, preview)
+    assert digest != _approval_digest(
+        context, replace(request, end=request.end + timedelta(minutes=1)), scope, preview
+    )
+    for changed_records in (
+        replace(recorded, digest="2" * 64),
+        replace(recorded, instruments={XRP: "XRP-USD"}),
+    ):
+        assert digest != _approval_digest(
+            context, request, replace(scope, recorded=changed_records), preview
+        )
+    first = scope.resolved[0]
+    resolved = replace(first, resolution={(XRP, OPEN): {"outcome": "not_applied", "version": None}})
+    assert digest != _approval_digest(
+        context, request, replace(scope, resolved=(resolved,)), preview
+    )
+    bar = windows[XRP, "5m", OPEN]
+    payload = cast(CandleUpsertRow, bar.row).copy()
+    payload["volume"] += 1.0
+    windows[bar.key] = replace(bar, row=payload)
+    changed_preview = repair.sha256_hex(rebuild._preview_bytes(windows.values()))
+    assert digest != _approval_digest(context, request, scope, changed_preview)
+
+
+def _approval_digest(
+    context: repair.RunContext,
+    request: rebuild.RebuildRequest,
+    scope: rebuild._Scope,
+    preview: str,
+) -> str:
+    """Hash the same canonical approval bytes the CLI writes."""
+    return repair.sha256_hex(
+        repair.canonical_json(rebuild._approval(context, request, scope, preview))
+    )
+
+
+def test_read_units_use_at_most_twenty_instruments_and_never_cross_a_utc_day() -> None:
+    """Partition the reads by calendar day before dividing instruments into batches."""
+    keys = [(f"instrument-{index:02}", "5m", OPEN) for index in range(41)]
+    keys.append(("instrument-00", "5m", OPEN + timedelta(days=1)))
+    units = rebuild._units(keys)
+    assert [len(unit.instruments) for unit in units] == [20, 20, 1, 1]
+    assert all(key[2].date() == unit.day.date() for unit in units for key in unit.keys)
+    assert {key for unit in units for key in unit.keys} == set(keys)
