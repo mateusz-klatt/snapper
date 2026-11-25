@@ -1,7 +1,9 @@
 """Tests for OutboxDispatcher — durable trade command delivery."""
 
 import asyncio
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -10,7 +12,9 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from loguru import logger
 
+import snapper.application.trade.outbox as outbox_module
 from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.core.command_material import TradeCommandMaterialChangedError
@@ -796,3 +800,646 @@ class TestDispatchTtl:
         await dispatcher._dispatch_batch()
         publish_fn.assert_not_awaited()
         expire_fn.assert_awaited_once_with(cmd)
+
+
+@dataclass
+class _CapturedLog:
+    """Minimal log record summary captured from a Loguru sink."""
+
+    level: str
+    message: str
+    has_exception: bool
+
+
+class _ManualClock:
+    """Deterministic monotonic clock helper for backoff tests."""
+
+    def __init__(self, initial: float = 100.0) -> None:
+        """Initialize the manual clock.
+
+        Args:
+            initial: Starting monotonic timestamp in seconds.
+        """
+        self.now = initial
+
+    def __call__(self) -> float:
+        """Return the current monotonic timestamp."""
+        return self.now
+
+    def advance(self, delta_s: float) -> float:
+        """Advance the monotonic clock by ``delta_s`` seconds.
+
+        Args:
+            delta_s: Positive offset in seconds to add.
+
+        Returns:
+            Updated monotonic timestamp.
+        """
+        self.now += delta_s
+        return self.now
+
+
+def _install_clock(monkeypatch: pytest.MonkeyPatch, initial: float = 100.0) -> _ManualClock:
+    """Install a controllable monotonic clock in ``outbox`` and ``time``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        initial: Starting monotonic timestamp in seconds.
+
+    Returns:
+        Controlled :class:`_ManualClock` instance.
+    """
+    clock = _ManualClock(initial)
+    monkeypatch.setattr(time, "monotonic", clock)
+    return clock
+
+
+def _make_backoff_row(
+    public_id: str,
+    *,
+    command_type: str = "submit",
+    shard_key: str = "kraken.BTC-USD.live",
+    created_at: datetime | None = None,
+) -> TradeCommandRow:
+    """Build a command row customized by type, shard, and creation timestamp.
+
+    Args:
+        public_id: Command public ID.
+        command_type: Command type string.
+        shard_key: Partition shard key.
+        created_at: Optional explicit UTC creation timestamp.
+
+    Returns:
+        Configured :class:`TradeCommandRow`.
+    """
+    row = _make_cmd_row(public_id)
+    row["command_type"] = command_type
+    row["shard_key"] = shard_key
+    row["client_order_id"] = f"cid-{public_id}"
+    if created_at is not None:
+        row["created_at"] = created_at
+        row["timestamp"] = created_at
+    return row
+
+
+def _make_queue_repo(rows_ref: list[list[TradeCommandRow]]) -> MagicMock:
+    """Build a warning-free mock repository serving sliced rows from ``rows_ref[0]``.
+
+    Args:
+        rows_ref: Single-element list wrapping the current undispatched queue.
+
+    Returns:
+        Mock repository with AsyncMock methods and pagination support.
+    """
+    repo = MagicMock()
+
+    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
+        return rows_ref[0][offset : offset + limit]
+
+    repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+    repo.require_consistent_trade_command_material = AsyncMock(return_value=None)
+    repo.has_order_submit_evidence = AsyncMock(return_value=False)
+    repo.cas_trade_command_status = AsyncMock(return_value=True)
+    repo.update_trade_command_status = AsyncMock(return_value=1)
+    repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
+    return repo
+
+
+def _attach_log_capture() -> tuple[int, list[_CapturedLog]]:
+    """Attach a Loguru sink collecting level, message, and exception presence.
+
+    Returns:
+        Tuple of Loguru handler ID and captured log list.
+    """
+    records: list[_CapturedLog] = []
+
+    def _sink(message: object) -> None:
+        record = getattr(message, "record", None)
+        if record is None:
+            return
+        records.append(
+            _CapturedLog(
+                level=str(record["level"].name),
+                message=str(record["message"]),
+                has_exception=record["exception"] is not None,
+            )
+        )
+
+    handler_id = logger.add(_sink, level="DEBUG")
+    return handler_id, records
+
+
+class TestOutboxRetryBackoff:
+    """Bounded per-command retry backoff, per-shard FIFO, logging, and pruning."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("command_type", ["create", "submit"])
+    async def test_ttl_command_backoff_schedule_cap_and_single_scd2_write(
+        self, monkeypatch: pytest.MonkeyPatch, command_type: str
+    ) -> None:
+        """TTL-bound commands double backoff from 0.25 s up to the 5 s cap.
+
+        Given: A create or submit command whose publish callback always fails,
+        When: The dispatcher ticks before and at each backoff deadline,
+        Then: Retries follow 0.25, 0.5, 1, 2, 4, 5, 5 s with one SCD2 write per attempt.
+        """
+        clock = _install_clock(monkeypatch, initial=100.0)
+        cmd = _make_backoff_row("cmd-ttl-cap", command_type=command_type)
+        queue: list[list[TradeCommandRow]] = [[cmd]]
+        repo = _make_queue_repo(queue)
+        publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn, dispatch_ttl_s=None)
+
+        expected_delays = [0.25, 0.5, 1.0, 2.0, 4.0, 5.0, 5.0]
+        for attempt, delay in enumerate(expected_delays, start=1):
+            await dispatcher._dispatch_batch()
+            assert publish_fn.await_count == attempt
+            assert repo.update_trade_command_status.await_count == attempt
+            assert dispatcher._retry["cmd-ttl-cap"].failures == attempt
+            assert dispatcher._retry["cmd-ttl-cap"].next_at == pytest.approx(clock.now + delay)
+            clock.advance(delay - 0.01)
+            await dispatcher._dispatch_batch()
+            assert publish_fn.await_count == attempt
+            assert repo.update_trade_command_status.await_count == attempt
+            clock.advance(0.01)
+
+    @pytest.mark.asyncio
+    async def test_non_ttl_command_backoff_schedule_hits_60s_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-TTL commands back off exponentially up to the 60 s cap.
+
+        Given: A cancel command whose publish callback fails repeatedly,
+        When: Each due retry executes at the monotonic deadline,
+        Then: Delays double from 0.25 s to 60 s and stay capped at 60 s.
+        """
+        clock = _install_clock(monkeypatch, initial=50.0)
+        cmd = _make_backoff_row("cmd-cancel-cap", command_type="cancel")
+        repo = _make_queue_repo([[cmd]])
+        publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn)
+
+        expected_delays = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+        for attempt, delay in enumerate(expected_delays, start=1):
+            await dispatcher._dispatch_batch()
+            assert repo.update_trade_command_status.await_count == attempt
+            assert dispatcher._retry["cmd-cancel-cap"].next_at == pytest.approx(clock.now + delay)
+            clock.advance(delay)
+
+    @pytest.mark.asyncio
+    async def test_publish_failure_log_cadence_and_300s_error_relog(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Publish failures log ERROR first, WARNING between, and ERROR every 300 s.
+
+        Given: A cancel command failing continuously across more than five minutes,
+        When: Deferred ticks and due retries run against a controlled clock,
+        Then: Attempt 1 logs ERROR with traceback, deferred ticks log nothing,
+            subsequent due attempts log one-line WARNINGs with id/attempt/delay,
+            and crossing 300 s re-emits ERROR with traceback.
+        """
+        clock = _install_clock(monkeypatch, initial=1000.0)
+        cmd = _make_backoff_row("cmd-cadence", command_type="cancel")
+        repo = _make_queue_repo([[cmd]])
+        publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn)
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+            assert [(entry.level, entry.has_exception) for entry in logs] == [("ERROR", True)]
+            logs.clear()
+
+            clock.advance(0.10)
+            await dispatcher._dispatch_batch()
+            assert logs == []
+
+            clock.advance(0.15)
+            delays = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0, 60.0, 60.0]
+            for index, delay in enumerate(delays, start=2):
+                await dispatcher._dispatch_batch()
+                assert len(logs) == 1
+                assert logs[0].level == "WARNING"
+                assert "\n" not in logs[0].message
+                assert "cmd-cadence" in logs[0].message
+                assert f"attempt={index}" in logs[0].message
+                assert f"{delay:.2f}s" in logs[0].message
+                logs.clear()
+                clock.advance(delay)
+
+            assert clock.now - 1000.0 >= 300.0
+            await dispatcher._dispatch_batch()
+            assert [(entry.level, entry.has_exception) for entry in logs] == [("ERROR", True)]
+            logs.clear()
+
+            clock.advance(60.0)
+            await dispatcher._dispatch_batch()
+            assert len(logs) == 1
+            assert logs[0].level == "WARNING"
+            assert "attempt=14" in logs[0].message
+        finally:
+            logger.remove(handler_id)
+
+    @pytest.mark.asyncio
+    async def test_material_barrier_logs_error_once_and_backs_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Material barrier holds log ERROR once, back off, and re-log at 300 s.
+
+        Given: A create command held by TradeCommandMaterialChangedError,
+        When: Ticks fire before and at due times across 300 s,
+        Then: Deferred ticks skip the material check silently, attempt 2 logs WARNING,
+            and the check after 300 s re-logs ERROR.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        cmd = _make_backoff_row("cmd-barrier", command_type="create")
+        repo = _make_queue_repo([[cmd]])
+        repo.require_consistent_trade_command_material = AsyncMock(
+            side_effect=TradeCommandMaterialChangedError("cmd-barrier", ("price",))
+        )
+        publish_fn = AsyncMock()
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn)
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+            assert repo.require_consistent_trade_command_material.await_count == 1
+            assert [(entry.level, entry.has_exception) for entry in logs] == [("ERROR", False)]
+            logs.clear()
+
+            clock.advance(0.10)
+            await dispatcher._dispatch_batch()
+            assert repo.require_consistent_trade_command_material.await_count == 1
+            assert logs == []
+
+            clock.advance(0.15)
+            await dispatcher._dispatch_batch()
+            assert repo.require_consistent_trade_command_material.await_count == 2
+            assert len(logs) == 1
+            assert logs[0].level == "WARNING"
+            assert "cmd-barrier" in logs[0].message
+            assert "attempt=2" in logs[0].message
+            assert "0.50s" in logs[0].message
+            logs.clear()
+
+            clock.now = 300.0
+            await dispatcher._dispatch_batch()
+            assert repo.require_consistent_trade_command_material.await_count == 3
+            assert [(entry.level, entry.has_exception) for entry in logs] == [("ERROR", False)]
+            publish_fn.assert_not_awaited()
+        finally:
+            logger.remove(handler_id)
+
+    @pytest.mark.asyncio
+    async def test_ttl_probe_error_backs_off_with_error_warning_cadence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """TTL probe exceptions schedule backoff and respect the log cadence.
+
+        Given: A stale submit whose evidence probe raises a repository error,
+        When: Ticks run immediately, during backoff, and at due times,
+        Then: The probe is skipped while deferred, attempt 1 logs ERROR with traceback,
+            attempt 2 logs WARNING, and publishing never occurs.
+        """
+        clock = _install_clock(monkeypatch, initial=10.0)
+        cmd = _make_backoff_row(
+            "cmd-probe-err",
+            command_type="submit",
+            created_at=datetime.now(UTC) - timedelta(seconds=120),
+        )
+        repo = _make_queue_repo([[cmd]])
+        repo.has_order_submit_evidence = AsyncMock(side_effect=RuntimeError("db down"))
+        publish_fn = AsyncMock()
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn, dispatch_ttl_s=30.0)
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+            assert repo.has_order_submit_evidence.await_count == 1
+            assert [(entry.level, entry.has_exception) for entry in logs] == [("ERROR", True)]
+            logs.clear()
+
+            clock.advance(0.10)
+            await dispatcher._dispatch_batch()
+            assert repo.has_order_submit_evidence.await_count == 1
+            assert logs == []
+
+            clock.advance(0.15)
+            await dispatcher._dispatch_batch()
+            assert repo.has_order_submit_evidence.await_count == 2
+            assert len(logs) == 1
+            assert logs[0].level == "WARNING"
+            assert "cmd-probe-err" in logs[0].message
+            assert "attempt=2" in logs[0].message
+            publish_fn.assert_not_awaited()
+        finally:
+            logger.remove(handler_id)
+
+    @pytest.mark.asyncio
+    async def test_deferred_rows_consume_no_slots_and_other_shards_keep_flowing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deferred head rows skip without consuming batch slots for other shards.
+
+        Given: A batch size of two and three BTC commands headed by a deferred row
+            followed by healthy ETH and SOL commands,
+        When: The dispatcher runs while the BTC head is backing off,
+        Then: All BTC rows are deferred without taking batch slots and both healthy
+            other-shard commands publish in one batch.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        btc_head = _make_backoff_row("btc-1", shard_key="kraken.BTC-USD.live")
+        btc_two = _make_backoff_row("btc-2", shard_key="kraken.BTC-USD.live")
+        btc_three = _make_backoff_row("btc-3", shard_key="kraken.BTC-USD.live")
+        eth = _make_backoff_row("eth-1", shard_key="kraken.ETH-USD.live")
+        sol = _make_backoff_row("sol-1", shard_key="kraken.SOL-USD.live")
+        queue: list[list[TradeCommandRow]] = [[btc_head]]
+        repo = _make_queue_repo(queue)
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if cmd["public_id"] == "btc-1":
+                raise RuntimeError("ZMQ down")
+            published.append(cmd["public_id"])
+
+        dispatcher = OutboxDispatcher(
+            repository=repo, publish_fn=AsyncMock(side_effect=_publish), batch_size=2
+        )
+        await dispatcher._dispatch_batch()
+        assert published == []
+
+        clock.advance(0.05)
+        queue[0] = [btc_head, btc_two, btc_three, eth, sol]
+        await dispatcher._dispatch_batch()
+        assert published == ["eth-1", "sol-1"]
+
+    @pytest.mark.asyncio
+    async def test_per_shard_fifo_defers_later_submit_and_cancel_across_pages(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deferred row defers every later command on its shard across fetch pages.
+
+        Given: A failing BTC row followed by twenty same-shard submits and a later
+            same-shard cancel spanning two fetch pages before an ETH row,
+        When: A batch runs during the BTC backoff window and then again once due,
+        Then: Same-shard submits and cancels stay deferred across pages while ETH
+            dispatches, and once due the fast path resumes without offset paging.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        btc_head = _make_backoff_row(
+            "btc-0", command_type="submit", shard_key="kraken.BTC-USD.live"
+        )
+        queue: list[list[TradeCommandRow]] = [[btc_head]]
+        repo = _make_queue_repo(queue)
+        published: list[str] = []
+        fail_btc_head = True
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if fail_btc_head and cmd["public_id"] == "btc-0":
+                raise RuntimeError("ZMQ down")
+            published.append(cmd["public_id"])
+
+        dispatcher = OutboxDispatcher(
+            repository=repo, publish_fn=AsyncMock(side_effect=_publish), batch_size=2
+        )
+        await dispatcher._dispatch_batch()
+
+        clock.advance(0.05)
+        btc_followers = [
+            _make_backoff_row(
+                f"btc-{i}",
+                command_type="cancel" if i % 2 == 0 else "submit",
+                shard_key="kraken.BTC-USD.live",
+            )
+            for i in range(1, 22)
+        ]
+        eth_row = _make_backoff_row("eth-1", command_type="submit", shard_key="kraken.ETH-USD.live")
+        queue[0] = [btc_head, *btc_followers, eth_row]
+        await dispatcher._dispatch_batch()
+        assert published == ["eth-1"]
+
+        clock.advance(0.20)
+        fail_btc_head = False
+        queue[0] = [btc_head]
+        repo.get_undispatched_commands.reset_mock()
+        await dispatcher._dispatch_batch()
+        assert published == ["eth-1", "btc-0"]
+        assert repo.get_undispatched_commands.await_args is not None
+        assert "offset" not in repo.get_undispatched_commands.await_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_ttl_expiry_during_backoff_expires_without_publishing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A create whose TTL passes while backing off expires and never publishes.
+
+        Given: A create command failing just before its dispatch TTL elapses,
+        When: Wall-clock time passes the TTL before the retry becomes due,
+        Then: The due retry transitions the command to EXPIRED, calls expire_fn,
+            removes its retry state, and never calls publish_fn.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        base_time = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+        wall_now = [base_time + timedelta(seconds=29.8)]
+
+        class _FakeDateTime:
+            """Controllable UTC datetime replacement for TTL progression."""
+
+            @staticmethod
+            def now(tz: object = None) -> datetime:
+                """Return the controlled test timestamp."""
+                return wall_now[0]
+
+        monkeypatch.setattr(outbox_module, "datetime", _FakeDateTime)
+
+        cmd = _make_backoff_row("cmd-ttl-expire", command_type="create", created_at=base_time)
+        repo = _make_queue_repo([[cmd]])
+        publish_fn = AsyncMock(side_effect=[RuntimeError("ZMQ down"), None])
+        expire_fn = AsyncMock()
+        dispatcher = OutboxDispatcher(
+            repository=repo,
+            publish_fn=publish_fn,
+            dispatch_ttl_s=30.0,
+            expire_fn=expire_fn,
+        )
+
+        await dispatcher._dispatch_batch()
+        assert publish_fn.await_count == 1
+        assert "cmd-ttl-expire" in dispatcher._retry
+
+        clock.advance(0.25)
+        wall_now[0] = base_time + timedelta(seconds=30.5)
+        await dispatcher._dispatch_batch()
+        assert publish_fn.await_count == 1
+        repo.cas_trade_command_status.assert_awaited_once()
+        expire_fn.assert_awaited_once_with(cmd)
+        assert "cmd-ttl-expire" not in dispatcher._retry
+
+    @pytest.mark.asyncio
+    async def test_retry_entry_removed_on_success_expiry_cas_loss_and_bulk_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Retry entries clear on success, expiry, CAS loss, and keep bulk-write semantics.
+
+        Given: Commands whose retries end in success, bulk-write failure, expiry,
+            or CAS loss, plus an unresolved cancel,
+        When: Each due retry runs,
+        Then: Retry entries are deleted in all three completion cases, bulk-write
+            failure does not re-defer, and unresolved cancels stay untracked.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+
+        cmd_ok = _make_backoff_row("cmd-ok", command_type="cancel")
+        repo_ok = _make_queue_repo([[cmd_ok]])
+        pub_ok = AsyncMock(side_effect=[RuntimeError("down"), None])
+        disp_ok = OutboxDispatcher(repository=repo_ok, publish_fn=pub_ok)
+        await disp_ok._dispatch_batch()
+        assert "cmd-ok" in disp_ok._retry
+        clock.advance(0.25)
+        await disp_ok._dispatch_batch()
+        assert "cmd-ok" not in disp_ok._retry
+
+        cmd_bulk = _make_backoff_row("cmd-bulk", command_type="cancel")
+        repo_bulk = _make_queue_repo([[cmd_bulk]])
+        pub_bulk = AsyncMock(side_effect=[RuntimeError("down"), None, None])
+        repo_bulk.bulk_dispatch_trade_commands = AsyncMock(side_effect=[RuntimeError("DB down"), 1])
+        disp_bulk = OutboxDispatcher(repository=repo_bulk, publish_fn=pub_bulk)
+        await disp_bulk._dispatch_batch()
+        clock.advance(0.25)
+        await disp_bulk._dispatch_batch()
+        assert "cmd-bulk" not in disp_bulk._retry
+        clock.advance(0.05)
+        await disp_bulk._dispatch_batch()
+        assert pub_bulk.await_count == 3
+
+        stale_created = datetime.now(UTC) - timedelta(seconds=120)
+        cmd_cas = _make_backoff_row("cmd-cas", command_type="submit", created_at=stale_created)
+        repo_cas = _make_queue_repo([[cmd_cas]])
+        repo_cas.has_order_submit_evidence = AsyncMock(side_effect=[RuntimeError("blip"), False])
+        repo_cas.cas_trade_command_status = AsyncMock(return_value=False)
+        expire_cas = AsyncMock()
+        disp_cas = OutboxDispatcher(
+            repository=repo_cas,
+            publish_fn=AsyncMock(),
+            dispatch_ttl_s=30.0,
+            expire_fn=expire_cas,
+        )
+        await disp_cas._dispatch_batch()
+        assert "cmd-cas" in disp_cas._retry
+        clock.advance(0.25)
+        await disp_cas._dispatch_batch()
+        assert "cmd-cas" not in disp_cas._retry
+        expire_cas.assert_not_awaited()
+
+        cmd_hold = _make_backoff_row("cmd-hold", command_type="cancel")
+        repo_hold = _make_queue_repo([[cmd_hold]])
+        pub_hold = AsyncMock(side_effect=CancelTargetUnresolvedError("unresolved"))
+        disp_hold = OutboxDispatcher(repository=repo_hold, publish_fn=pub_hold)
+        await disp_hold._dispatch_batch()
+        clock.advance(0.05)
+        await disp_hold._dispatch_batch()
+        assert disp_hold._retry == {}
+        assert pub_hold.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_last_seen_refresh_and_stale_entry_pruning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Appearing in a fetched page refreshes last_seen and unseen entries prune at 300 s.
+
+        Given: Two failing commands where one vanishes immediately and the other
+            stays visible in a fetched page at 200 s before later vanishing,
+        When: Batches run at 200 s, 300.1 s, and 600.2 s,
+        Then: The absent command is pruned after 300 s while the refreshed one
+            survives until it is absent for more than 300 s.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        cmd_keep = _make_backoff_row("cmd-keep", command_type="cancel")
+        cmd_drop = _make_backoff_row("cmd-drop", command_type="cancel")
+        queue: list[list[TradeCommandRow]] = [[cmd_keep, cmd_drop]]
+        repo = _make_queue_repo(queue)
+        publish_fn = AsyncMock(
+            side_effect=[
+                RuntimeError("down"),
+                RuntimeError("down"),
+                CancelTargetUnresolvedError("hold"),
+                CancelTargetUnresolvedError("hold"),
+            ]
+        )
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn)
+        await dispatcher._dispatch_batch()
+        assert set(dispatcher._retry) == {"cmd-keep", "cmd-drop"}
+
+        clock.now = 200.0
+        queue[0] = [cmd_keep]
+        await dispatcher._dispatch_batch()
+        assert set(dispatcher._retry) == {"cmd-keep", "cmd-drop"}
+        assert dispatcher._retry["cmd-keep"].last_seen == 200.0
+
+        clock.now = 300.1
+        await dispatcher._dispatch_batch()
+        assert set(dispatcher._retry) == {"cmd-keep"}
+
+        clock.now = 600.2
+        queue[0] = []
+        await dispatcher._dispatch_batch()
+        assert dispatcher._retry == {}
+
+    @pytest.mark.asyncio
+    async def test_ownership_and_deferral_paging_respects_max_scan_rows_warning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ownership and deferral combine in paging and warn at max_scan_rows.
+
+        Given: Foreign rows, a deferred owned shard, and another healthy owned shard,
+        When: One batch paginates with ownership and deferral, and another hits
+            max_scan_rows due to deferred same-shard rows,
+        Then: The first batch skips foreign and deferred rows to dispatch the other
+            owned shard, and the second emits the max_scan_rows warning.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        ownership = MagicMock()
+        ownership.owns.side_effect = lambda shard_key: shard_key.startswith("kraken.MINE")
+
+        mine_head = _make_backoff_row("mine-head", shard_key="kraken.MINE1.live")
+        queue: list[list[TradeCommandRow]] = [[mine_head]]
+        repo = _make_queue_repo(queue)
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if cmd["public_id"] == "mine-head":
+                raise RuntimeError("ZMQ down")
+            published.append(cmd["public_id"])
+
+        dispatcher = OutboxDispatcher(
+            repository=repo,
+            publish_fn=AsyncMock(side_effect=_publish),
+            batch_size=2,
+            ownership=ownership,
+            max_scan_rows=40,
+        )
+        await dispatcher._dispatch_batch()
+
+        clock.advance(0.05)
+        foreign_rows = [
+            _make_backoff_row(f"foreign-{i}", shard_key="kraken.FOREIGN.live") for i in range(18)
+        ]
+        mine_follow = _make_backoff_row(
+            "mine-follow", command_type="cancel", shard_key="kraken.MINE1.live"
+        )
+        mine_two_a = _make_backoff_row("mine-2a", shard_key="kraken.MINE2.live")
+        mine_two_b = _make_backoff_row("mine-2b", shard_key="kraken.MINE2.live")
+        queue[0] = [*foreign_rows, mine_head, mine_follow, mine_two_a, mine_two_b]
+        await dispatcher._dispatch_batch()
+        assert published == ["mine-2a", "mine-2b"]
+
+        blocked_rows = [
+            _make_backoff_row(f"mine1-{i}", shard_key="kraken.MINE1.live") for i in range(45)
+        ]
+        queue[0] = [mine_head, *blocked_rows, mine_two_a]
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+        finally:
+            logger.remove(handler_id)
+        assert published == ["mine-2a", "mine-2b"]
+        assert any(
+            entry.level == "WARNING" and "max_scan_rows=40" in entry.message for entry in logs
+        )
