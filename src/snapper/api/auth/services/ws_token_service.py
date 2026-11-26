@@ -176,11 +176,10 @@ class WsTokenService:
         )
         return WsTokenResult(token=token, expires_at=expires_at, payload=payload)
 
-    def verify(self, token: str, *, expected_sub: str, expected_sid_hash: str) -> WsTokenPayload:
-        """Verify a WebSocket token without consuming it.
-
-        Validates signature, expiration, purpose, subject, and session binding.
-        Does NOT mark the token as used (call mark_used separately).
+    def _validate_claims(
+        self, token: str, *, expected_sub: str, expected_sid_hash: str
+    ) -> tuple[WsTokenPayload, int]:
+        """Decode and validate JWT claims without checking store state.
 
         Args:
             token: The JWT token string.
@@ -188,11 +187,10 @@ class WsTokenService:
             expected_sid_hash: Expected session ID hash.
 
         Returns:
-            Validated token payload.
+            Tuple of validated token payload and current Unix timestamp.
 
         Raises:
             WsTokenError: If token is invalid, expired, or mismatched.
-            WsTokenAlreadyUsedError: If token has already been consumed.
         """
         now_ts = int(self._now().timestamp())
         try:
@@ -213,7 +211,62 @@ class WsTokenService:
             raise WsTokenError("ws_token_subject_mismatch")
         if payload.sid_hash != expected_sid_hash:
             raise WsTokenError("ws_token_session_mismatch")
+        return payload, now_ts
+
+    def verify(self, token: str, *, expected_sub: str, expected_sid_hash: str) -> WsTokenPayload:
+        """Verify a WebSocket token without consuming it.
+
+        Validates signature, expiration, purpose, subject, and session binding.
+        Does NOT mark the token as used (call mark_used separately).
+
+        Args:
+            token: The JWT token string.
+            expected_sub: Expected user ID.
+            expected_sid_hash: Expected session ID hash.
+
+        Returns:
+            Validated token payload.
+
+        Raises:
+            WsTokenError: If token is invalid, expired, or mismatched.
+            WsTokenAlreadyUsedError: If token has already been consumed.
+        """
+        payload, now_ts = self._validate_claims(
+            token,
+            expected_sub=expected_sub,
+            expected_sid_hash=expected_sid_hash,
+        )
         if self._store.is_used(payload.jti, now_ts):
+            raise WsTokenAlreadyUsedError("ws_token_already_used")
+        return payload
+
+    def verify_and_consume(
+        self, token: str, *, expected_sub: str, expected_sid_hash: str
+    ) -> WsTokenPayload:
+        """Verify a WebSocket token and atomically consume it.
+
+        Validates signature, expiration, purpose, subject, and session binding,
+        then checks and records usage in a single atomic operation under the
+        store lock.
+
+        Args:
+            token: The JWT token string.
+            expected_sub: Expected user ID.
+            expected_sid_hash: Expected session ID hash.
+
+        Returns:
+            Validated token payload.
+
+        Raises:
+            WsTokenError: If token is invalid, expired, or mismatched.
+            WsTokenAlreadyUsedError: If token has already been consumed.
+        """
+        payload, now_ts = self._validate_claims(
+            token,
+            expected_sub=expected_sub,
+            expected_sid_hash=expected_sid_hash,
+        )
+        if not self._store.consume(payload.jti, payload.exp, now_ts):
             raise WsTokenAlreadyUsedError("ws_token_already_used")
         return payload
 

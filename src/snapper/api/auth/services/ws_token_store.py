@@ -41,6 +41,35 @@ class WsTokenStore:
             if self._used_tokens.get(jti) == exp:
                 del self._used_tokens[jti]
 
+    def _is_used_unlocked(self, jti: str, now_ts: int) -> bool:
+        """Check token usage and prune expired entries while holding ``self._lock``.
+
+        Args:
+            jti: Token unique identifier.
+            now_ts: Current Unix timestamp.
+
+        Returns:
+            True if the token is recorded and unexpired, False otherwise.
+        """
+        self._cleanup(now_ts)
+        exp = self._used_tokens.get(jti)
+        if exp is None:
+            return False
+        if exp <= now_ts:
+            del self._used_tokens[jti]
+            return False
+        return True
+
+    def _mark_used_unlocked(self, jti: str, exp: int) -> None:
+        """Record a token as used while holding ``self._lock``.
+
+        Args:
+            jti: Token unique identifier.
+            exp: Token expiration timestamp (for cleanup).
+        """
+        self._used_tokens[jti] = exp
+        heapq.heappush(self._expiry_heap, (exp, jti))
+
     def is_used(self, jti: str, now_ts: int) -> bool:
         """Check if a token has already been used.
 
@@ -54,14 +83,7 @@ class WsTokenStore:
             True if the token has been used, False otherwise.
         """
         with self._lock:
-            self._cleanup(now_ts)
-            exp = self._used_tokens.get(jti)
-            if exp is None:
-                return False
-            if exp <= now_ts:
-                del self._used_tokens[jti]
-                return False
-            return True
+            return self._is_used_unlocked(jti, now_ts)
 
     def mark_used(self, jti: str, exp: int) -> None:
         """Mark a token as used.
@@ -71,5 +93,27 @@ class WsTokenStore:
             exp: Token expiration timestamp (for cleanup).
         """
         with self._lock:
-            self._used_tokens[jti] = exp
-            heapq.heappush(self._expiry_heap, (exp, jti))
+            self._mark_used_unlocked(jti, exp)
+
+    def consume(self, jti: str, exp: int, now_ts: int) -> bool:
+        """Atomically check and consume a token under the store lock.
+
+        Acquires ``self._lock`` once, runs bounded cleanup of expired entries,
+        and treats an entry with ``exp <= now_ts`` as unused, matching
+        :meth:`is_used`. If the token is already used, returns False without
+        changing token state; otherwise records the token and returns True.
+
+        Args:
+            jti: Token unique identifier.
+            exp: Token expiration timestamp (for cleanup).
+            now_ts: Current Unix timestamp.
+
+        Returns:
+            True if the token was unused and is now recorded as used,
+            False if it was already used and unexpired.
+        """
+        with self._lock:
+            if self._is_used_unlocked(jti, now_ts):
+                return False
+            self._mark_used_unlocked(jti, exp)
+            return True
