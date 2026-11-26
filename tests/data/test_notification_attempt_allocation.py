@@ -266,3 +266,77 @@ async def test_matching_zero_attempt_schedule_reports_success(repo: SQLAlchemyRe
     assert rows[0].known_to == _at(1)
     assert rows[1].known_to == KNOWN_TO_MAX
     assert rows[1].next_attempt_at == _at(10)
+
+
+@pytest.mark.asyncio
+async def test_retry_schedule_rejects_stale_transition_at_and_accepts_non_stale(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Retry schedules reject stale timestamps and accept monotonic ones.
+
+    Given: An active delivery version whose ``timestamp`` is ``_at(10)`` and
+        ``attempt_count == 1``.
+    When: ``update_delivery_retry_schedule`` is called first with a stale
+        ``transition_at`` of ``_at(3)`` and then with ``_at(10)`` and
+        ``_at(12)``.
+    Then: The stale write returns ``False`` without modifying the active row,
+        while non-stale writes (``>= existing.timestamp``) return ``True``
+        and extend the SCD2 history monotonically.
+    """
+    public_id = await _seed(repo)
+    assert (
+        await repo.begin_delivery_attempt(
+            public_id, transition_at=_at(10), session_id="worker", sequence_id=2
+        )
+        == 1
+    )
+    assert (
+        await repo.update_delivery_retry_schedule(
+            public_id,
+            attempt_count=1,
+            next_attempt_at=_at(25),
+            error_reason="stale-delayed",
+            transition_at=_at(3),
+            session_id="recovery",
+            sequence_id=3,
+        )
+        is False
+    )
+    rows_after_reject = await _history(repo, public_id)
+    assert len(rows_after_reject) == 2
+    assert rows_after_reject[1].timestamp == _at(10)
+    assert rows_after_reject[1].known_to == KNOWN_TO_MAX
+    assert rows_after_reject[1].next_attempt_at is None
+    assert rows_after_reject[1].error_reason is None
+
+    assert (
+        await repo.update_delivery_retry_schedule(
+            public_id,
+            attempt_count=1,
+            next_attempt_at=_at(25),
+            error_reason="delayed-at-boundary",
+            transition_at=_at(10),
+            session_id="recovery",
+            sequence_id=4,
+        )
+        is True
+    )
+    assert (
+        await repo.update_delivery_retry_schedule(
+            public_id,
+            attempt_count=1,
+            next_attempt_at=_at(30),
+            error_reason="delayed-later",
+            transition_at=_at(12),
+            session_id="recovery",
+            sequence_id=5,
+        )
+        is True
+    )
+    rows = await _history(repo, public_id)
+    assert len(rows) == 4
+    assert [row.timestamp for row in rows] == [_at(0), _at(10), _at(10), _at(12)]
+    assert [row.known_to for row in rows] == [_at(10), _at(10), _at(12), KNOWN_TO_MAX]
+    assert rows[3].next_attempt_at == _at(30)
+    assert rows[3].error_reason == "delayed-later"
+    assert rows[3].last_attempt_at == _at(12)
