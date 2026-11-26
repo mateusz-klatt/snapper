@@ -417,9 +417,7 @@ async def test_paginated_dispatch_skips_foreign_rows_and_stops_at_batch_size() -
     ) -> list[TradeCommandRow]:
         if after is not None:
             remaining = [
-                row
-                for row in rows
-                if (row["created_at"], row["public_id"], row.get("id", 0)) > after
+                row for row in rows if (row["created_at"], row["public_id"], row["id"]) > after
             ]
             return remaining[:limit]
         return rows[offset : offset + limit]
@@ -965,7 +963,7 @@ def _make_queue_repo(rows_ref: list[list[TradeCommandRow]]) -> MagicMock:
             remaining = [
                 row
                 for row in rows_ref[0]
-                if (row["created_at"], row["public_id"], row.get("id", 0)) > after
+                if (row["created_at"], row["public_id"], row["id"]) > after
             ]
             return remaining[:limit]
         return rows_ref[0][offset : offset + limit]
@@ -1872,9 +1870,7 @@ class TestOutboxRetryBackoff:
                 live_rows.pop(0)
                 return page
             remaining = [
-                row
-                for row in live_rows
-                if (row["created_at"], row["public_id"], row.get("id", 0)) > after
+                row for row in live_rows if (row["created_at"], row["public_id"], row["id"]) > after
             ]
             return remaining[:limit]
 
@@ -1895,17 +1891,18 @@ class TestOutboxRetryBackoff:
     async def test_stale_deferred_follower_expires_while_fresh_follower_stays_deferred(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Stale shard-deferred followers expire without publishing or material checks.
+        """Stale shard-deferred followers check material then expire without publishing.
 
         Given: A failing cancel backing off on a shard, followed by a stale submit
             without evidence, a stale submit with durable submit evidence, a fresh
             submit, and a stale submit deferred by its own retry entry,
         When: A batch runs while the cancel and own-retry submit are backing off,
             and then runs again once the own-retry submit comes due,
-        Then: Only the stale shard-deferred submit without evidence expires via CAS
-            and invokes expire_fn without material checks or publishing, the
-            evidence-bearing and fresh submits stay unpublished, and the own-retry
-            submit expires only when its own backoff becomes due.
+        Then: Expire-only rows run material consistency before expiry checks
+            without publishing; only the stale shard-deferred submit without
+            evidence expires via CAS and invokes expire_fn; the evidence-bearing
+            row enters shard-blocking backoff; the fresh row stays deferred; and
+            the own-retry submit expires only when its own backoff comes due.
         """
         clock = _install_clock(monkeypatch, initial=0.0)
         head_cancel = _make_backoff_row("btc-cancel", command_type="cancel")
@@ -1974,13 +1971,17 @@ class TestOutboxRetryBackoff:
 
         assert published == []
         assert publish_fn.await_count == publish_calls_before
-        repo.require_consistent_trade_command_material.assert_not_awaited()
+        assert [
+            call.args[0] for call in repo.require_consistent_trade_command_material.await_args_list
+        ] == ["btc-stale", "btc-stale-evidence"]
         expire_fn.assert_awaited_once_with(stale)
         cas_kwargs = repo.cas_trade_command_status.await_args.kwargs
         assert cas_kwargs["public_id"] == "btc-stale"
         assert cas_kwargs["expected_status"] == TradeCommandStatusEnum.CREATED
         assert cas_kwargs["new_status"] == TradeCommandStatusEnum.EXPIRED
         assert "btc-own-retry" in dispatcher._retry
+        assert "btc-stale-evidence" in dispatcher._retry
+        assert dispatcher._retry["btc-stale-evidence"].blocks_shard is True
 
         clock.advance(0.25)
         queue[0] = [own_retry_stale]
@@ -2085,3 +2086,251 @@ class TestOutboxRetryBackoff:
             and "max_scan_rows=5" in entry.message
             for entry in logs
         )
+
+    @pytest.mark.asyncio
+    async def test_stale_deferred_follower_blocked_by_material_barrier_does_not_expire(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stale shard-deferred create blocked by material barrier is neither expired nor published.
+
+        Given: A backing-off cancel head followed by a stale create whose material
+            consistency check raises TradeCommandMaterialChangedError,
+        When: A dispatch batch processes the expire-only candidate,
+        Then: The create is held by its non-shard-blocking own retry entry,
+            neither has_order_submit_evidence nor cas_trade_command_status runs,
+            and expire_fn and publish_fn are not called.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        head_cancel = _make_backoff_row("btc-cancel-head", command_type="cancel")
+        queue: list[list[TradeCommandRow]] = [[head_cancel]]
+        repo = _make_queue_repo(queue)
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if cmd["public_id"] == "btc-cancel-head":
+                raise RuntimeError("ZMQ down")
+            published.append(cmd["public_id"])
+
+        publish_fn = AsyncMock(side_effect=_publish)
+        expire_fn = AsyncMock()
+        dispatcher = OutboxDispatcher(
+            repository=repo,
+            publish_fn=publish_fn,
+            batch_size=5,
+            dispatch_ttl_s=30.0,
+            expire_fn=expire_fn,
+        )
+        await dispatcher._dispatch_batch()
+        clock.advance(0.05)
+
+        stale_create = _make_backoff_row(
+            "btc-stale-create",
+            command_type="create",
+            created_at=datetime.now(UTC) - timedelta(seconds=120),
+        )
+        repo.require_consistent_trade_command_material = AsyncMock(
+            side_effect=TradeCommandMaterialChangedError("btc-stale-create", ("price",))
+        )
+        repo.has_order_submit_evidence.reset_mock()
+        repo.cas_trade_command_status.reset_mock()
+        publish_calls_before = publish_fn.await_count
+
+        queue[0] = [head_cancel, stale_create]
+        await dispatcher._dispatch_batch()
+
+        assert published == []
+        assert publish_fn.await_count == publish_calls_before
+        repo.require_consistent_trade_command_material.assert_awaited_once_with("btc-stale-create")
+        repo.has_order_submit_evidence.assert_not_awaited()
+        repo.cas_trade_command_status.assert_not_awaited()
+        expire_fn.assert_not_awaited()
+        assert "btc-stale-create" in dispatcher._retry
+        assert dispatcher._retry["btc-stale-create"].blocks_shard is False
+
+    @pytest.mark.asyncio
+    async def test_dispatch_batch_commits_dispatches_before_expire_only_probes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Successful dispatches commit via bulk_dispatch before expire-only work starts.
+
+        Given: A backing-off BTC cancel head, a stale BTC submit follower, and a
+            healthy ETH submit in the same poll cycle,
+        When: The dispatch batch records repository, publish, and expire calls,
+        Then: ``bulk_dispatch_trade_commands`` commits the ETH publish strictly
+            before any material check, evidence probe, CAS, or expire callback
+            for the expire-only BTC follower.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        head_cancel = _make_backoff_row(
+            "btc-cancel-head", command_type="cancel", shard_key="kraken.BTC-USD.live"
+        )
+        queue: list[list[TradeCommandRow]] = [[head_cancel]]
+        repo = _make_queue_repo(queue)
+        events: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if cmd["public_id"] == "btc-cancel-head":
+                raise RuntimeError("ZMQ down")
+            events.append(f"publish:{cmd['public_id']}")
+
+        async def _material(public_id: str) -> None:
+            events.append(f"material:{public_id}")
+
+        async def _bulk_dispatch(updates: list[object]) -> int:
+            events.append("bulk_dispatch")
+            return len(updates)
+
+        async def _evidence(client_order_id: str) -> bool:
+            events.append(f"evidence:{client_order_id}")
+            return False
+
+        async def _cas(**kwargs: object) -> bool:
+            events.append(f"cas:{kwargs['public_id']}")
+            return True
+
+        async def _expire(cmd: TradeCommandRow) -> None:
+            events.append(f"expire:{cmd['public_id']}")
+
+        repo.require_consistent_trade_command_material = AsyncMock(side_effect=_material)
+        repo.bulk_dispatch_trade_commands = AsyncMock(side_effect=_bulk_dispatch)
+        repo.has_order_submit_evidence = AsyncMock(side_effect=_evidence)
+        repo.cas_trade_command_status = AsyncMock(side_effect=_cas)
+        expire_fn = AsyncMock(side_effect=_expire)
+
+        dispatcher = OutboxDispatcher(
+            repository=repo,
+            publish_fn=AsyncMock(side_effect=_publish),
+            batch_size=5,
+            dispatch_ttl_s=30.0,
+            expire_fn=expire_fn,
+        )
+        await dispatcher._dispatch_batch()
+        clock.advance(0.05)
+
+        stale_btc = _make_backoff_row(
+            "btc-stale",
+            command_type="submit",
+            shard_key="kraken.BTC-USD.live",
+            created_at=datetime.now(UTC) - timedelta(seconds=120),
+        )
+        eth_submit = _make_backoff_row(
+            "eth-1",
+            command_type="submit",
+            shard_key="kraken.ETH-USD.live",
+        )
+        events.clear()
+        queue[0] = [head_cancel, stale_btc, eth_submit]
+        await dispatcher._dispatch_batch()
+
+        assert events == [
+            "material:eth-1",
+            "publish:eth-1",
+            "bulk_dispatch",
+            "material:btc-stale",
+            f"evidence:{stale_btc['client_order_id']}",
+            "cas:btc-stale",
+            "expire:btc-stale",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_stale_deferred_with_submit_evidence_waits_with_info_cadence_without_reprobe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stale submit-evidence followers back off with INFO cadence instead of re-probing.
+
+        Given: A failing cancel head backing off for at least 1 s and a stale
+            same-shard submit whose evidence probe returns True,
+        When: Ticks run initially, during the 0.25 s cooldown, and once the
+            cooldown expires,
+        Then: Attempt 1 probes evidence once, records a shard-blocking backoff
+            entry, and emits one INFO log without ERROR/traceback; the cooldown
+            tick skips the evidence probe silently; the due retry re-probes with
+            WARNING cadence; and the command never publishes.
+        """
+        clock = _install_clock(monkeypatch, initial=100.0)
+        head_cancel = _make_backoff_row("btc-cancel-head", command_type="cancel")
+        queue: list[list[TradeCommandRow]] = [[head_cancel]]
+        repo = _make_queue_repo(queue)
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if cmd["public_id"] == "btc-cancel-head":
+                raise RuntimeError("ZMQ down")
+            published.append(cmd["public_id"])
+
+        publish_fn = AsyncMock(side_effect=_publish)
+        expire_fn = AsyncMock()
+        dispatcher = OutboxDispatcher(
+            repository=repo,
+            publish_fn=publish_fn,
+            batch_size=5,
+            dispatch_ttl_s=30.0,
+            expire_fn=expire_fn,
+        )
+        for step_delay in (0.25, 0.50, 1.0):
+            await dispatcher._dispatch_batch()
+            clock.advance(step_delay)
+        await dispatcher._dispatch_batch()
+        clock.advance(0.05)
+
+        stale_evidence = _make_backoff_row(
+            "btc-stale-evidence",
+            command_type="submit",
+            created_at=datetime.now(UTC) - timedelta(seconds=120),
+        )
+        repo.has_order_submit_evidence = AsyncMock(return_value=True)
+        publish_calls_before = publish_fn.await_count
+        queue[0] = [head_cancel, stale_evidence]
+
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+            assert repo.has_order_submit_evidence.await_count == 1
+            assert published == []
+            assert publish_fn.await_count == publish_calls_before
+            expire_fn.assert_not_awaited()
+            assert "btc-stale-evidence" in dispatcher._retry
+            assert dispatcher._retry["btc-stale-evidence"].blocks_shard is True
+            assert [(entry.level, entry.has_exception) for entry in logs] == [("INFO", False)]
+            assert "stale with submit evidence; waiting behind shard head" in logs[0].message
+            logs.clear()
+
+            clock.advance(0.05)
+            await dispatcher._dispatch_batch()
+            assert repo.has_order_submit_evidence.await_count == 1
+            assert logs == []
+            assert published == []
+
+            clock.advance(0.20)
+            await dispatcher._dispatch_batch()
+            assert repo.has_order_submit_evidence.await_count == 2
+            assert len(logs) == 1
+            assert logs[0].level == "WARNING"
+            assert "btc-stale-evidence" in logs[0].message
+            assert "attempt=2" in logs[0].message
+            assert "0.50s" in logs[0].message
+            assert published == []
+        finally:
+            logger.remove(handler_id)
+
+    @pytest.mark.asyncio
+    async def test_keyset_cursor_missing_id_raises_key_error(self) -> None:
+        """Building a keyset cursor from a row without ``id`` fails loudly with KeyError.
+
+        Given: A repository returning an unowned page row that lacks ``id``,
+        When: The multi-page keyset scan advances the cursor past page one,
+        Then: ``KeyError`` is raised rather than defaulting ``id`` to zero.
+        """
+        row = _make_backoff_row("missing-id-row", shard_key="kraken.FOREIGN.live")
+        row.pop("id")
+        repo = _make_queue_repo([[row]])
+        ownership = MagicMock()
+        ownership.owns.return_value = False
+        dispatcher = OutboxDispatcher(
+            repository=repo,
+            publish_fn=AsyncMock(),
+            batch_size=1,
+            ownership=ownership,
+        )
+        with pytest.raises(KeyError):
+            await dispatcher._fetch_owned_batch(datetime.now(UTC))

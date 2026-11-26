@@ -93,9 +93,7 @@ def _make_repo_with_rows(
     ) -> list[TradeCommandRow]:
         if after is not None:
             remaining = [
-                row
-                for row in rows
-                if (row["created_at"], row["public_id"], row.get("id", 0)) > after
+                row for row in rows if (row["created_at"], row["public_id"], row["id"]) > after
             ]
             return remaining[:limit]
         return rows[offset : offset + limit]
