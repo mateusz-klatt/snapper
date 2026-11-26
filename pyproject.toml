@@ -30,7 +30,7 @@ sqlalchemy = {extras = ["asyncio"], version = "^2.1.9"}
 aiosqlite = "^0.22.1"
 pandas = "^3.1.1"
 numpy = "^2.5.5"
-typer = {extras = ["all"], version = "^0.29.2"}
+typer = {extras = ["all"], version = "^0.29.3"}
 python-dotenv = "^1.2.4"
 loguru = "^0.8.0"
 alembic = "^1.20.1"
@@ -82,7 +82,7 @@ memory-profiler = "^0.61.0"
 ipdb = "^0.13.13"
 objgraph = "^3.7.0"
 pytest-xdist = "^3.8.0"
-markdown = "^3.11.3"
+markdown = "^3.11.4"
 weasyprint = "^70.0"
 plotly = "^7.2.0"
 kaleido = "^1.5.2"
