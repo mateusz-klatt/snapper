@@ -36,6 +36,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import StringConstraints
 from pydantic import ValidationError
+from sqlalchemy import Row
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -112,6 +113,7 @@ _CANDLE_WRITERS = (
     "polygon_grouped_candle_load",
     "polygon_csv_load",
 )
+_PUBLISHER_TAGS = ("market-data", "publisher")
 _BUCKETS = ("applied", "skipped_by_guard", "applied_superseded", "uncertain", "not_applied")
 _SELECTIONS = ("not_voted", "already_applied", "changed")
 _VALUES = ("open", "high", "low", "close", "volume", "vwap", "trades")
@@ -864,21 +866,23 @@ async def _check_instruments(
 async def _process_guard(repository: Repository, at: datetime) -> list[JsonObject]:
     """Read current process-run records and reject a running candle writer after the release."""
     async with repository.session() as session:
+        if repository.dialect_name == "postgresql":
+            await session.execute(text(_TIMEOUT))
         rows = (
-            (
-                await session.execute(
-                    select(ProcessRun)
-                    .where(*where_active(ProcessRun, at))
-                    .order_by(ProcessRun.started_at.desc(), ProcessRun.id.desc())
+            await session.execute(
+                select(
+                    ProcessRun.process_name,
+                    ProcessRun.public_id,
+                    ProcessRun.status,
+                    ProcessRun.started_at,
+                    ProcessRun.tags,
                 )
+                .where(*where_active(ProcessRun, at))
+                .order_by(ProcessRun.started_at.desc(), ProcessRun.id.desc())
             )
-            .scalars()
-            .all()
-        )
-    publisher = next(
-        (row for row in rows if {"market-data", "publisher"} <= set(row.tags or ())), None
-    )
-    writers: dict[str, ProcessRun] = {}
+        ).all()
+    publisher = next((row for row in rows if set(_PUBLISHER_TAGS) <= set(row.tags or ())), None)
+    writers: dict[str, Row[str, str, str, datetime, list[str] | None]] = {}
     for row in rows:
         if row.process_name in _CANDLE_WRITERS:
             writers.setdefault(row.process_name, row)
@@ -1472,11 +1476,10 @@ def _check_preview_values(line: Mapping[str, str]) -> None:
         "input_minutes",
         "absent_minutes",
         "current_id",
-        "current_trades",
     ):
         if line[column]:
             int(line[column])
-    for column in _VALUES[:-1]:
+    for column in _VALUES:
         if line[f"current_{column}"]:
             float(line[f"current_{column}"])
     if line["current_known_at"]:

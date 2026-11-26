@@ -1,9 +1,11 @@
 """Exercise the voted predecessor, input fingerprint and writer fence."""
 
+import time
 from collections.abc import AsyncIterator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 from hashlib import sha256
 from math import inf
 from math import nan
@@ -144,6 +146,46 @@ def test_fingerprint_encodes_the_ordered_payload_as_canonical_json() -> None:
     assert synthesis_inputs_sha256([first.copy(), second.copy()]) == digest
     assert synthesis_inputs_sha256([first]) != digest
     assert synthesis_inputs_sha256([]) == sha256(b"[]").hexdigest()
+
+
+def test_fingerprint_keeps_the_digest_for_aware_timestamps() -> None:
+    """Keep the existing fingerprint of a timestamp with a known offset.
+
+    Given: A fixed input whose timestamps carry a non-UTC offset.
+    When: Fingerprint the input.
+    Then: The digest matches the existing canonical UTC representation.
+    """
+    version = _input_version()
+    offset = timezone(timedelta(hours=5, minutes=30))
+    version["open_at"] = version["open_at"].astimezone(offset)
+    version["timestamp"] = version["timestamp"].astimezone(offset)
+
+    assert synthesis_inputs_sha256([version]) == (
+        "0c70ccdcbb21271cec8b7319564ad587076c0291b71581d49941c4e62d32cb75"
+    )
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="requires process-wide timezone changes")
+def test_fingerprint_treats_naive_timestamps_as_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the same fingerprint for naive UTC and timezone-aware timestamps.
+
+    Given: The same instants as aware UTC and naive SQLite timestamps on a non-UTC host.
+    When: Fingerprint each representation.
+    Then: Both hashes match regardless of the host time zone.
+    """
+    aware = _input_version()
+    naive = aware.copy()
+    naive["open_at"] = aware["open_at"].replace(tzinfo=None)
+    naive["timestamp"] = aware["timestamp"].replace(tzinfo=None)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("TZ", "EST5")
+            time.tzset()
+            assert time.timezone == 5 * 3600
+            assert synthesis_inputs_sha256([naive]) == synthesis_inputs_sha256([aware])
+    finally:
+        time.tzset()
 
 
 @pytest.mark.parametrize(
