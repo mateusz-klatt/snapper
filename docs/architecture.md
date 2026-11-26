@@ -1634,9 +1634,10 @@ disappears transition to terminal `unregistered` or `cancelled_scope`. Because
 a 30s send timeout can fire after APNs already accepted the HTTP/2 request
 before the response returns, the delivery stays `queued` and a subsequent retry
 can duplicate the push (collapsed per `thread_key` via `apns-collapse-id` when
-present). Batch-prefetched devices and preferences during one drain or retry
-tick have bounded staleness up to the tick's processing length, and outage
-window tracking is scoped per APNs environment (`sandbox` vs `prod`). Recovery
+present). Each queued APNs delivery reads current device registration and
+routing preferences before admission. A drain or retry batch prefetches
+events and recipient languages. Outage window tracking is scoped per APNs
+environment (`sandbox` vs `prod`). Recovery
 waits for in-flight retry scheduling in that environment before taking the
 backlog. Provider outcomes are ordered by observation in the sidecar, so a
 wall-clock adjustment cannot cause a later success to be ignored. Backoffs

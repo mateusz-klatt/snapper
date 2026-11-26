@@ -66,9 +66,7 @@ from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
-from snapper.data.repository_types import DeviceAlertPrefRow
 from snapper.data.repository_types import NotificationDeviceRow
-from snapper.data.repository_types import UserAlertDefaultRow
 from snapper.i18n import catalog
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -122,13 +120,10 @@ class _OutageWindow:
 
 @dataclass(frozen=True, slots=True)
 class _PrefetchedBatchCaches:
-    """Bulk-loaded lookup tables for one drain or retry batch."""
+    """Bulk-loaded event and language lookups for one drain or retry batch."""
 
     events: dict[str, AlertEventRow]
-    devices: dict[str, list[NotificationDeviceRow]]
     languages: dict[str, str | None]
-    prefs: dict[str, list[DeviceAlertPrefRow]] = field(default_factory=dict)
-    defaults: dict[str, list[UserAlertDefaultRow]] = field(default_factory=dict)
 
 
 def _format_exception_reason(exc: BaseException) -> str:
@@ -1136,10 +1131,9 @@ class NotifySidecar(RegisterableProcess):
         ``next_attempt_at`` backoff while still expiring rows already past
         their outage TTL regardless of APNs sender availability.
 
-        Bulk-prefetches the alert_event, active devices, user languages,
-        and routing preferences once for the eligible batch so drain avoids
-        N+1 reads; prefetched devices and prefs carry bounded staleness up to
-        the drain duration. Each eligible row uses a fresh UTC timestamp.
+        Bulk-prefetches events and languages for the eligible batch. Each
+        queued APNs row uses a fresh UTC timestamp and reads the active
+        device and routing preferences after the preceding row finishes.
         """
         _ = now
         queued = await self._repo.list_queued_deliveries_all()
@@ -1158,31 +1152,19 @@ class NotifySidecar(RegisterableProcess):
     async def _prefetch_caches_for_rows(
         self, rows: list[AlertDeliveryRow]
     ) -> _PrefetchedBatchCaches:
-        """Bulk-load alert_event, device, language, and routing pref maps.
+        """Bulk-load alert events and recipient languages for one batch.
 
         Returns a :class:`_PrefetchedBatchCaches` bundle, deduplicating IDs
         so underlying SELECTs touch each event or user at most once per batch.
-        Device and preference snapshots can exhibit bounded staleness over a
-        long drain or retry tick (up to batch length * ``_APNS_SEND_TIMEOUT_S``).
+        Admission reads active devices and routing preferences per row.
         """
         if not rows:
-            return _PrefetchedBatchCaches(events={}, devices={}, languages={})
+            return _PrefetchedBatchCaches(events={}, languages={})
         event_pids = [row["alert_event_public_id"] for row in rows]
         user_pids = list(dict.fromkeys(row["user_public_id"] for row in rows))
         events_cache = await self._repo.get_alert_events_by_public_ids(event_pids)
-        devices_cache = await self._repo.list_active_notification_devices_for_users(user_pids)
         languages_cache = await self._repo.get_default_languages_for_users(user_pids)
-        prefs_cache = {
-            uid: await self._repo.list_device_alert_prefs_for_user(uid) for uid in user_pids
-        }
-        defaults_cache = {uid: await self._repo.list_user_alert_defaults(uid) for uid in user_pids}
-        return _PrefetchedBatchCaches(
-            events=events_cache,
-            devices=devices_cache,
-            languages=languages_cache,
-            prefs=prefs_cache,
-            defaults=defaults_cache,
-        )
+        return _PrefetchedBatchCaches(events=events_cache, languages=languages_cache)
 
     async def _safe_attempt_on_queued_row(
         self,
@@ -1210,17 +1192,10 @@ class NotifySidecar(RegisterableProcess):
         return await self._repo.get_alert_event_by_public_id(event_pid)
 
     async def _resolve_queued_device(
-        self,
-        user_pid: str,
-        device_pid: str,
-        caches: _PrefetchedBatchCaches | None,
+        self, user_pid: str, device_pid: str
     ) -> NotificationDeviceRow | None:
-        """Resolve an active APNs device from batch prefetch caches or DB."""
-        devices = (
-            caches.devices[user_pid]
-            if caches is not None and user_pid in caches.devices
-            else await self._repo.list_active_notification_devices_for_user(user_pid)
-        )
+        """Read the current active APNs device for one queued delivery."""
+        devices = await self._repo.list_active_notification_devices_for_user(user_pid)
         return next((d for d in devices if d["public_id"] == device_pid), None)
 
     async def _resolve_user_language(
@@ -1233,12 +1208,7 @@ class NotifySidecar(RegisterableProcess):
         return language_map.get(user_pid)
 
     async def _cancel_if_routing_suppressed(
-        self,
-        row: AlertDeliveryRow,
-        event: AlertEventRow,
-        now: datetime,
-        *,
-        caches: _PrefetchedBatchCaches | None = None,
+        self, row: AlertDeliveryRow, event: AlertEventRow, now: datetime
     ) -> bool:
         """Cancel a queued APNs row if rollout gate or alert prefs now suppress it."""
         user_pid = row["user_public_id"]
@@ -1247,16 +1217,8 @@ class NotifySidecar(RegisterableProcess):
         ):
             await self._mark_cancelled(row["public_id"], "routing_suppressed", now)
             return True
-        prefs = (
-            caches.prefs[user_pid]
-            if caches is not None and user_pid in caches.prefs
-            else await self._repo.list_device_alert_prefs_for_user(user_pid)
-        )
-        defaults = (
-            caches.defaults[user_pid]
-            if caches is not None and user_pid in caches.defaults
-            else await self._repo.list_user_alert_defaults(user_pid)
-        )
+        prefs = await self._repo.list_device_alert_prefs_for_user(user_pid)
+        defaults = await self._repo.list_user_alert_defaults(user_pid)
         if not allows_device_alert(row["device_public_id"], event, prefs, defaults, now):
             await self._mark_cancelled(row["public_id"], "routing_suppressed", now)
             return True
@@ -1298,9 +1260,7 @@ class NotifySidecar(RegisterableProcess):
             )
             await self._mark_failed(row["public_id"], "alert_event missing", self._clock())
             return
-        device = await self._resolve_queued_device(
-            row["user_public_id"], row["device_public_id"], caches
-        )
+        device = await self._resolve_queued_device(row["user_public_id"], row["device_public_id"])
         if device is None:
             logger.info(
                 "sidecar: delivery={pid} target device inactive —"
@@ -1309,7 +1269,7 @@ class NotifySidecar(RegisterableProcess):
             )
             await self._mark_unregistered_no_device(row["public_id"], self._clock())
             return
-        if await self._cancel_if_routing_suppressed(row, event, self._clock(), caches=caches):
+        if await self._cancel_if_routing_suppressed(row, event, self._clock()):
             return
         user_language = await self._resolve_user_language(row["user_public_id"], caches)
         target = _DeliveryTarget(
@@ -1361,10 +1321,10 @@ class NotifySidecar(RegisterableProcess):
 
         Background task spawned in ``start()``; tears down when
         ``stop()`` sets the stop event. Each tick selects ready rows at tick
-        entry, prefetches batch caches (whose device and preference snapshots
-        carry bounded staleness over the tick duration), and passes a fresh
-        UTC timestamp for each row so earlier slow/timed-out sends do not
-        leave later rows with stale expiry or retry timestamps.
+        entry and prefetches their events and languages. Each row receives a
+        fresh UTC timestamp, and APNs admission reads the active device and
+        routing preferences per row, so slow sends do not leave stale expiry,
+        retry timestamps or routing data for later rows.
 
         Why every send is bounded: both retry selections
         (``list_deliveries_ready_for_retry`` and ``list_queued_deliveries_all``)
