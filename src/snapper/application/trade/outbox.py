@@ -72,17 +72,25 @@ class _ExpiryOutcome(Enum):
     HANDLED = auto()
 
 
+class _RetryKind(Enum):
+    """Distinguish command backoff from an expiry probe cooldown."""
+
+    BLOCKING_FAILURE = auto()
+    NONBLOCKING_FAILURE = auto()
+    EXPIRY_PROBE = auto()
+
+
 @dataclass(frozen=True, slots=True)
 class _CommandRetryState:
     """Per-command retry backoff and error-logging cadence state.
 
     Attributes:
-        failures: Consecutive failure count for this command.
-        next_at: Monotonic timestamp when the command is next eligible.
+        failures: Consecutive failure or evidence hold count for this command.
+        next_at: Monotonic timestamp when the command or expiry probe is next eligible.
         first_failed_at: Monotonic timestamp of the initial failure in the streak.
         last_error_logged_at: Monotonic timestamp of the most recent ERROR log.
         last_seen: Monotonic timestamp when the command last appeared in a fetch page.
-        blocks_shard: Whether later rows on the same shard wait behind this command.
+        kind: How this delay affects dispatch and other rows on the shard.
     """
 
     failures: int
@@ -90,7 +98,7 @@ class _CommandRetryState:
     first_failed_at: float
     last_error_logged_at: float
     last_seen: float
-    blocks_shard: bool = True
+    kind: _RetryKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,11 +184,13 @@ class OutboxDispatcher:
     move into an expire-only pass executed after committing any successful
     dispatches; that pass runs material consistency checks before
     :meth:`_expire_if_stale` without publishing, and if durable submit
-    evidence prevents expiry it schedules a TTL-capped shard-blocking retry
-    backoff with INFO/WARNING cadence logging so evidence is not re-probed
-    every poll tick. Expiry is terminal and publishes nothing, so shard
-    order does not matter for it, whereas rows deferred by their own retry
-    entry are re-checked (including material consistency and TTL) when due.
+    evidence prevents expiry it schedules a TTL-capped probe cooldown with
+    INFO/WARNING cadence logging. The cooldown suppresses repeat expiry
+    probes only while an earlier command blocks the shard. When eligible
+    for dispatch, the command checks material and TTL through the normal
+    path, including a fresh evidence probe if stale. Expiry is terminal and
+    publishes nothing, so shard order does not matter for it, whereas rows
+    deferred by their own failure backoff are re-checked when due.
 
     Pagination bounds scan work with two caps when ``max_scan_rows`` is
     set: ``max_scan_rows`` counts considered rows (dispatch candidates,
@@ -337,8 +347,10 @@ class OutboxDispatcher:
     def _classify_owned_row(self, cmd: TradeCommandRow, state: _ScanState) -> bool:
         """Route one owned row into dispatch, expire-only, or deferred skip.
 
-        Rows deferred by their own retry entry stay skipped (including stale
-        ones, which re-check TTL when due) and count toward ``max_scan_rows``.
+        Rows deferred by their own failure backoff stay skipped (including
+        stale ones, which re-check TTL when due) and count toward
+        ``max_scan_rows``. An evidence probe cooldown defers the row only
+        while it is already behind a shard blocker.
         Expirable rows deferred only behind a shard-blocking peer move into
         ``expire_only`` when stale (counting toward ``max_scan_rows``) or
         increment ``shard_skipped`` when non-stale.
@@ -351,13 +363,20 @@ class OutboxDispatcher:
             True when ``cmd`` was appended to ``state.dispatch``; False otherwise.
         """
         shard_key = cmd["shard_key"]
+        behind_blocker = (
+            cmd["command_type"] in _EXPIRABLE_COMMAND_TYPES and shard_key in state.deferred_shards
+        )
         entry = self._retry.get(cmd["public_id"])
-        if entry is not None and entry.next_at > state.now_mono:
-            if entry.blocks_shard:
+        if (
+            entry is not None
+            and entry.next_at > state.now_mono
+            and (entry.kind is not _RetryKind.EXPIRY_PROBE or behind_blocker)
+        ):
+            if entry.kind is _RetryKind.BLOCKING_FAILURE:
                 state.deferred_shards.add(shard_key)
             state.considered += 1
             return False
-        if cmd["command_type"] in _EXPIRABLE_COMMAND_TYPES and shard_key in state.deferred_shards:
+        if behind_blocker:
             if self._is_stale_expirable(cmd, state.now):
                 state.expire_only.append(cmd)
                 state.considered += 1
@@ -490,7 +509,7 @@ class OutboxDispatcher:
         *,
         message: str,
         reason: str,
-        blocks_shard: bool = True,
+        kind: _RetryKind,
         level: str = "exception",
     ) -> None:
         """Schedule exponential per-command backoff and emit cadence-bounded logs.
@@ -504,13 +523,14 @@ class OutboxDispatcher:
             cmd: Command entering or extending per-command backoff.
             message: Primary message emitted when the 300 s cadence fires.
             reason: Short single-line summary used in intermediate WARNING logs.
-            blocks_shard: Whether later rows on the same shard wait behind this command.
+            kind: Whether this delay gates dispatch or only repeat expiry probes.
             level: Loguru level name for the primary 300 s cadence log.
         """
         now_mono = time.monotonic()
         public_id = cmd["public_id"]
         prev = self._retry.get(public_id)
-        if prev is None:
+        is_probe = kind is _RetryKind.EXPIRY_PROBE
+        if prev is None or (prev.kind is _RetryKind.EXPIRY_PROBE) != is_probe:
             failures = 1
             first_failed_at = now_mono
             should_log_primary = True
@@ -528,7 +548,7 @@ class OutboxDispatcher:
             else _RETRY_BACKOFF_CAP_S
         )
         delay = min(_RETRY_BACKOFF_BASE_S * (_RETRY_BACKOFF_FACTOR ** min(failures - 1, 30)), cap)
-        if blocks_shard:
+        if kind is _RetryKind.BLOCKING_FAILURE:
             self._tick_blocked_shards.add(cmd["shard_key"])
         self._retry[public_id] = _CommandRetryState(
             failures=failures,
@@ -536,7 +556,7 @@ class OutboxDispatcher:
             first_failed_at=first_failed_at,
             last_error_logged_at=last_error_logged_at,
             last_seen=now_mono,
-            blocks_shard=blocks_shard,
+            kind=kind,
         )
         if not should_log_primary:
             logger.warning(
@@ -577,7 +597,7 @@ class OutboxDispatcher:
             cmd,
             message=error_message,
             reason=reason,
-            blocks_shard=blocks_shard,
+            kind=_RetryKind.BLOCKING_FAILURE if blocks_shard else _RetryKind.NONBLOCKING_FAILURE,
             level=level,
         )
 
@@ -615,7 +635,7 @@ class OutboxDispatcher:
           the dispatch path (``publish_on_evidence=True``), publish anyway
           with a WARN so the executor's duplicate-submit guard absorbs the
           replay; when called on the expire-only path, callers schedule a
-          shard-blocking backoff instead of publishing behind a shard head.
+          probe cooldown instead of publishing behind a shard head.
         - Stale without evidence → CAS CREATED→EXPIRED (race-safe
           against concurrent dispatchers and the guard scanner's
           CREATED→CANCELLED), clearing any retry state; only the CAS
@@ -814,7 +834,7 @@ class OutboxDispatcher:
                 "stale with submit evidence; waiting behind shard head"
             ),
             reason="stale with submit evidence; waiting behind shard head",
-            blocks_shard=True,
+            kind=_RetryKind.EXPIRY_PROBE,
             level="info",
         )
 
@@ -830,7 +850,7 @@ class OutboxDispatcher:
         first so the replay window stays narrow, and only then do stale
         shard-deferred expirable rows run material consistency checks followed
         by :meth:`_expire_if_stale` (never publishing; durable submit evidence
-        records a shard-blocking backoff instead of hot-loop probing).
+        records a cooldown for repeat expiry probes while the shard is blocked).
         Material-barrier holds and unresolved-cancel holds do not block the
         shard.
         """
