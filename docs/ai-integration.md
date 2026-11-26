@@ -1054,8 +1054,8 @@ envelopes.
 
 ### Operator prerequisites
 
-1. **Apply database migration `0052`** (`snapper db-upgrade`) before
-    provisioning clients or enabling OAuth.
+1. **Run `snapper db-upgrade`** to bring the schema to the current head
+    before provisioning clients or enabling OAuth.
 2. **Expose Snapper over HTTPS** at `https://<your-snapper-host>/api/mcp`.
     Client provisioning requires HTTPS redirect URIs (HTTP is accepted
     only for loopback hosts `localhost`, `127.0.0.1`, and `[::1]`).
