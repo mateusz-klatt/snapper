@@ -266,3 +266,44 @@ async def test_matching_zero_attempt_schedule_reports_success(repo: SQLAlchemyRe
     assert rows[0].known_to == _at(1)
     assert rows[1].known_to == KNOWN_TO_MAX
     assert rows[1].next_attempt_at == _at(10)
+
+
+@pytest.mark.asyncio
+async def test_retry_schedule_clamps_transition_at_earlier_than_active_version(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Clamped SCD2 intervals never close an active version before it starts.
+
+    Given an active delivery version whose ``timestamp`` is ``_at(10)``,
+    When ``update_delivery_retry_schedule`` is called with an older
+        ``transition_at`` of ``_at(3)``,
+    Then the active version closes at ``_at(10)`` and the successor opens at
+        ``_at(10)`` with monotonic, non-inverted SCD2 bounds.
+    """
+    public_id = await _seed(repo)
+    assert (
+        await repo.begin_delivery_attempt(
+            public_id, transition_at=_at(10), session_id="worker", sequence_id=2
+        )
+        == 1
+    )
+    assert (
+        await repo.update_delivery_retry_schedule(
+            public_id,
+            attempt_count=1,
+            next_attempt_at=_at(25),
+            error_reason="delayed",
+            transition_at=_at(3),
+            session_id="recovery",
+            sequence_id=3,
+        )
+        is True
+    )
+    rows = await _history(repo, public_id)
+    assert len(rows) == 3
+    assert rows[1].timestamp == _at(10)
+    assert rows[1].known_to == _at(10)
+    assert rows[2].timestamp == _at(10)
+    assert rows[2].known_to == KNOWN_TO_MAX
+    assert rows[2].next_attempt_at == _at(25)
+    assert rows[2].last_attempt_at == _at(10)

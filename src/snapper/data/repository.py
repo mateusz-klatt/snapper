@@ -10396,8 +10396,11 @@ class Repository(ABC):
     ) -> bool:
         """Reschedule a queued delivery only at the expected attempt_count.
 
-        The counter is preserved. Return False for absent or terminal rows,
-        a different active count, or a lost selected-version close race.
+        The counter is preserved and ``transition_at`` is clamped to
+        ``max(transition_at, existing.timestamp)`` so clock skew or stale
+        callers never invert the active SCD2 validity interval. Return False
+        for absent or terminal rows, a different active count, or a lost
+        selected-version close race.
         """
         ...
 
@@ -40502,6 +40505,9 @@ class SQLAlchemyRepository(Repository):
         absent, terminal, at a different expected count, or another writer
         closes the selected version first. The conditional UPDATE identifies
         that exact version; a losing writer never inserts a successor.
+        Effective ``transition_at`` is clamped to
+        ``max(transition_at, existing.timestamp)`` so a lagging caller clock
+        cannot close a newer version before its start timestamp.
 
         Queued successors remain eligible for later allocations. This guards
         version transitions and counter updates, not exclusive APNs delivery.
@@ -40524,6 +40530,7 @@ class SQLAlchemyRepository(Repository):
                 and existing.attempt_count != attempt.expected_count
             ):
                 return None
+            effective_transition_at = max(transition_at, existing.timestamp)
             close_result = await s.execute(
                 update(AlertDelivery)
                 .where(
@@ -40531,7 +40538,7 @@ class SQLAlchemyRepository(Repository):
                     AlertDelivery.known_to == KNOWN_TO_MAX,
                     AlertDelivery.status == "queued",
                 )
-                .values(known_to=transition_at)
+                .values(known_to=effective_transition_at)
                 .execution_options(synchronize_session=False)
             )
             if int(cast(Any, close_result).rowcount or 0) == 0:
@@ -40541,7 +40548,7 @@ class SQLAlchemyRepository(Repository):
                 public_id=public_id,
                 session_id=session_id,
                 sequence_id=sequence_id,
-                timestamp=transition_at,
+                timestamp=effective_transition_at,
                 known_to=KNOWN_TO_MAX,
                 alert_event_public_id=existing.alert_event_public_id,
                 device_public_id=existing.device_public_id,
@@ -40553,7 +40560,7 @@ class SQLAlchemyRepository(Repository):
                 last_attempt_at=(
                     last_attempt_at_override
                     if last_attempt_at_override is not None
-                    else transition_at
+                    else effective_transition_at
                 ),
                 next_attempt_at=next_attempt_at_override,
                 provider=existing.provider,
@@ -40695,7 +40702,8 @@ class SQLAlchemyRepository(Repository):
     ) -> bool:
         """Reschedule only the selected queued version at attempt_count.
 
-        The argument is an expected count, never a replacement counter.
+        The argument is an expected count, never a replacement counter, and
+        ``transition_at`` is clamped to ``max(transition_at, existing.timestamp)``.
         Refuse stale results or a lost version-close race without writing.
         """
         committed_count = await self._scd2_transition_delivery(
