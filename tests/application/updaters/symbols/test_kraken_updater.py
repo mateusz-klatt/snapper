@@ -1070,14 +1070,14 @@ class TestVerifyWebsocketSymbols:
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("immediate_verification_timeout")
     @pytest.mark.parametrize("during_deadline", [False, True])
-    async def test_verify_upstream_timeout_falls_back_without_retry(
+    async def test_verify_upstream_timeout_aborts_without_retry(
         self, updater: KrakenSymbolUpdaterService, during_deadline: bool
     ) -> None:
-        """Verify a subscription timeout uses the normal exception fallback.
+        """Verify an upstream subscription timeout propagates without retrying.
 
         Given: A subscription raises TimeoutError before or while handling the deadline,
         When: verify_websocket_symbols called,
-        Then: All expected symbols are returned without retrying.
+        Then: TimeoutError propagates after error logging and disconnect without retrying.
         """
         ws_symbols = {"BTC/USD", "ETH/EUR", "XRP/USD"}
 
@@ -1092,19 +1092,29 @@ class TestVerifyWebsocketSymbols:
             raise TimeoutError("subscribe")
 
         client = MagicMock(subscribe_instruments=subscribe, disconnect_websocket=AsyncMock())
-        with patch.object(updater, "_create_exchange_client", return_value=client) as factory:
-            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
-        assert verified == ws_symbols
-        assert ws_only == []
+        with (
+            patch.object(updater, "_create_exchange_client", return_value=client) as factory,
+            patch.object(logger, "error") as error_log,
+            pytest.raises(TimeoutError, match=r"^subscribe( cleanup)?$"),
+        ):
+            await updater.verify_websocket_symbols(ws_symbols)
         factory.assert_called_once_with()
+        client.disconnect_websocket.assert_awaited_once_with()
+        error_log.assert_called_once()
+        assert error_log.call_args.args[:2] == (
+            "Error verifying symbols via WebSocket ({}): {}",
+            "TimeoutError",
+        )
 
     @pytest.mark.asyncio
-    async def test_verify_exception_fallback(self, updater: KrakenSymbolUpdaterService) -> None:
-        """Verify fallback to all symbols on exception.
+    async def test_verify_exception_propagates_and_disconnects(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify first-collection exception logs error, disconnects, and propagates.
 
-        Given: WebSocket connection that raises error,
+        Given: WebSocket connection that raises ConnectionError on first collection,
         When: verify_websocket_symbols called,
-        Then: All requested symbols returned as fallback with empty WS-only.
+        Then: ConnectionError propagates after error logging and disconnect.
         """
         ws_symbols = {"BTC/USD"}
 
@@ -1115,10 +1125,18 @@ class TestVerifyWebsocketSymbols:
         mock_client = AsyncMock()
         mock_client.subscribe_instruments = error_subscribe
         mock_client.disconnect_websocket = MagicMock()
-        with patch.object(updater, "_create_exchange_client", return_value=mock_client):
-            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
-        assert verified == ws_symbols
-        assert ws_only == []
+        with (
+            patch.object(updater, "_create_exchange_client", return_value=mock_client),
+            patch.object(logger, "error") as error_log,
+            pytest.raises(ConnectionError, match="WebSocket error"),
+        ):
+            await updater.verify_websocket_symbols(ws_symbols)
+        mock_client.disconnect_websocket.assert_called_once_with()
+        error_log.assert_called_once()
+        assert error_log.call_args.args[:2] == (
+            "Error verifying symbols via WebSocket ({}): {}",
+            "ConnectionError",
+        )
 
 
 class TestTokenizedAssetWarnings:
@@ -1396,14 +1414,14 @@ class TestKrakenVerifyWebsocketSymbols:
             await updater.verify_websocket_symbols(ws_symbols)
 
     @pytest.mark.asyncio
-    async def test_verify_websocket_symbols_error_fallback(
+    async def test_verify_websocket_symbols_error_aborts(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
-        """Verify fallback to all symbols on connection error.
+        """Verify first-collection connection error propagates without retry or fallback.
 
-        Given: WebSocket raising ConnectionError,
+        Given: WebSocket raising ConnectionError on the first collection,
         When: verify_websocket_symbols called,
-        Then: All requested symbols returned as fallback.
+        Then: ConnectionError propagates without retrying and the client disconnects.
         """
         ws_symbols = {"BTC/USD", "ETH/EUR"}
 
@@ -1414,11 +1432,19 @@ class TestKrakenVerifyWebsocketSymbols:
         mock_client = MagicMock()
         mock_client.subscribe_instruments = mock_subscribe
         mock_client.disconnect_websocket = MagicMock()
-        with patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory:
-            verified, ws_only = await updater.verify_websocket_symbols(ws_symbols)
-        assert verified == ws_symbols
-        assert ws_only == []
+        with (
+            patch.object(updater, "_create_exchange_client", return_value=mock_client) as factory,
+            patch.object(logger, "error") as error_log,
+            pytest.raises(ConnectionError, match="WebSocket connection failed"),
+        ):
+            await updater.verify_websocket_symbols(ws_symbols)
         factory.assert_called_once_with()
+        mock_client.disconnect_websocket.assert_called_once_with()
+        error_log.assert_called_once()
+        assert error_log.call_args.args[:2] == (
+            "Error verifying symbols via WebSocket ({}): {}",
+            "ConnectionError",
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("immediate_verification_timeout")
@@ -1653,6 +1679,39 @@ class TestKrakenBuildVerifiedMappings:
             assert success is False
 
     @pytest.mark.asyncio
+    async def test_build_verified_mappings_first_ws_collection_error_fails(
+        self, updater: KrakenSymbolUpdaterService
+    ) -> None:
+        """Verify build_verified_mappings returns failure when first WS collection raises.
+
+        Given: REST symbols loaded and first WebSocket collection raising ConnectionError,
+        When: build_verified_mappings called,
+        Then: Empty mappings and False success flag are returned and client disconnects.
+        """
+        rest_symbols = {
+            "XXBTZUSD": {
+                "base": "XXBT",
+                "quote": "ZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "asset_class": "currency",
+            },
+        }
+        client = _mock_snapshot_client(
+            [{"symbol": "BTC/USD"}],
+            error=ConnectionError("WebSocket outage"),
+        )
+        with (
+            patch.object(updater, "load_kraken_rest_symbols", return_value=rest_symbols),
+            patch.object(updater, "_create_exchange_client", return_value=client) as factory,
+        ):
+            mappings, success = await updater.build_verified_mappings()
+
+        assert mappings == {}
+        assert success is False
+        factory.assert_called_once_with()
+        client.disconnect_websocket.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
     async def test_build_verified_mappings_empty_base_or_quote_skipped(
         self, updater: KrakenSymbolUpdaterService
     ) -> None:
@@ -1739,6 +1798,73 @@ class TestKrakenFetchSymbols:
         assert "ValueError" in captured[0].splitlines()[0]
         assert "Traceback (most recent call last)" in captured[0]
         assert "ValueError: malformed REST catalog" in captured[0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error", "error_name"),
+        [
+            (ConnectionError("WebSocket outage"), "ConnectionError"),
+            (TimeoutError("upstream timeout"), "TimeoutError"),
+        ],
+        ids=("connection-error", "timeout-error"),
+    )
+    async def test_fetch_symbols_aborts_on_first_ws_collection_error(
+        self,
+        updater: KrakenSymbolUpdaterService,
+        error: Exception,
+        error_name: str,
+    ) -> None:
+        """Verify _fetch_symbols aborts when the first WebSocket collection raises.
+
+        Given: A REST catalog and a first WebSocket verification stream that raises,
+        When: _fetch_symbols runs,
+        Then: RuntimeError names the exception class, BTNL discovery is skipped,
+        and the WebSocket client is disconnected.
+        """
+        rest_symbols = {
+            "XXBTZUSD": {
+                "base": "XXBT",
+                "quote": "ZUSD",
+                "ccxt_symbol": "BTC/USD",
+                "asset_class": "currency",
+            },
+            "XETHZEUR": {
+                "base": "XETH",
+                "quote": "ZEUR",
+                "ccxt_symbol": "ETH/EUR",
+                "asset_class": "currency",
+            },
+        }
+        client = _mock_snapshot_client([{"symbol": "BTC/USD"}], error=error)
+        captured_errors: list[str] = []
+        sink_id = logger.add(
+            captured_errors.append, format="{message}", level="ERROR", diagnose=False
+        )
+        try:
+            with (
+                patch.object(updater, "load_kraken_rest_symbols", return_value=rest_symbols),
+                patch.object(updater, "_create_exchange_client", return_value=client) as factory,
+                patch.object(updater, "discover_btnl_symbols", return_value={}) as discover_btnl,
+                pytest.raises(
+                    RuntimeError,
+                    match=rf"^WebSocket verification failed: {error_name} "
+                    r"while building mappings - aborting update$",
+                ),
+            ):
+                await updater._fetch_symbols(MagicMock())
+        finally:
+            logger.remove(sink_id)
+
+        factory.assert_called_once_with()
+        client.disconnect_websocket.assert_awaited_once_with()
+        discover_btnl.assert_not_awaited()
+        assert any(
+            f"Error verifying symbols via WebSocket ({error_name})" in msg
+            for msg in captured_errors
+        )
+        assert any(
+            f"Error building verified mappings ({error_name})" in msg for msg in captured_errors
+        )
 
     @pytest.mark.asyncio
     async def test_fetch_symbols_no_mappings(self, updater: KrakenSymbolUpdaterService) -> None:

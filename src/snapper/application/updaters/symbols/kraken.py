@@ -657,8 +657,14 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
 
         Returns:
             Tuple of (verified symbols, WS-only instrument dicts).
-            A first collection error falls back to (all ws_symbols, empty
-            WS-only list). A retry error returns the first collection's results.
+            A retry error returns the first collection's results so the
+            coverage threshold decides whether the update proceeds.
+
+        Raises:
+            asyncio.CancelledError: If verification is cancelled.
+            Exception: If the first collection raises a non-cancellation
+                error, re-raised so callers abort the update instead of
+                failing open.
         """
         verified, ws_only, _ = await self._verify_websocket_symbols(ws_symbols)
         return verified, ws_only
@@ -666,7 +672,24 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
     async def _verify_websocket_symbols(
         self, ws_symbols: set[str]
     ) -> tuple[set[str], list[dict[str, str]], bool]:
-        """Return verification results and whether a short read prompted a retry."""
+        """Collect WebSocket verification evidence, retrying once on a short read.
+
+        A non-cancellation error during the first collection is logged and
+        re-raised so the caller aborts the update instead of failing open.
+        A retry error preserves the first collection's results so the
+        coverage threshold check decides whether to abort.
+
+        Args:
+            ws_symbols: Set of REST-derived symbols to verify.
+
+        Returns:
+            Tuple of (verified symbols, WS-only instrument dicts, whether a
+            short read triggered a retry).
+
+        Raises:
+            asyncio.CancelledError: If verification is cancelled.
+            Exception: If the first collection raises a non-cancellation error.
+        """
         expected_count = len(ws_symbols)
         logger.info("Verifying {} symbols against WebSocket v2 API", expected_count)
         timeout = min(
@@ -690,9 +713,12 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             )
             raise
         except Exception as exc:
-            logger.error("Error verifying symbols via WebSocket: {}", exc)
-            logger.warning("Falling back to assume all symbols valid")
-            return ws_symbols, [], False
+            logger.error(
+                "Error verifying symbols via WebSocket ({}): {}",
+                type(exc).__name__,
+                exc,
+            )
+            raise
         finally:
             await self._safe_disconnect_ws(client)
         retried = (
