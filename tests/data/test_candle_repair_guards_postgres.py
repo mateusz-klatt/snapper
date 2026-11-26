@@ -18,13 +18,16 @@ afterwards. Never point it at production.
 """
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator
 from collections.abc import Awaitable
 from collections.abc import Callable
+from collections.abc import Mapping
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from typing import Protocol
 from typing import cast
 from uuid import uuid4
 
@@ -32,7 +35,9 @@ import pytest
 from sqlalchemy import delete
 from sqlalchemy import insert
 from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy import update
+from sqlalchemy.dialects.postgresql.asyncpg import PGDialect_asyncpg
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.exc import IntegrityError
@@ -359,3 +364,129 @@ async def test_voted_zero_replaced_between_preflight_and_lock_is_skipped_on_post
     assert replaced == [True]
     assert result == []
     assert [(row["source"], row["id"] != voted["id"]) for row in current] == [("synthesized", True)]
+
+
+class _FetchValConnection(Protocol):
+    """Typed protocol for an asyncpg raw connection executing EXPLAIN queries."""
+
+    async def fetchval(self, query: str, *args: object) -> str:
+        """Execute a parameterized scalar SQL query and return its string payload."""
+        ...
+
+
+def _scanned_candle_relations(plan_node: object) -> set[str]:
+    """Collect scanned candle table and leaf partition names from a PostgreSQL plan tree.
+
+    Args:
+        plan_node: Root ``Plan`` object decoded from ``EXPLAIN (ANALYZE, FORMAT JSON)``.
+
+    Returns:
+        Distinct scanned relation names whose names start with ``candles``.
+    """
+    names: set[str] = set()
+    stack: list[object] = [plan_node]
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, Mapping):
+            continue
+        relation = current.get("Relation Name")
+        node_type = current.get("Node Type")
+        if (
+            isinstance(relation, str)
+            and relation.startswith("candles")
+            and node_type != "ModifyTable"
+        ):
+            names.add(relation)
+        children = current.get("Plans")
+        if isinstance(children, list):
+            stack.extend(children)
+    return names
+
+
+async def _run_fenced_explain(
+    repository: SQLAlchemyRepository,
+    sql: str,
+    params: tuple[object, ...],
+) -> tuple[str, str, dict[str, object]]:
+    """Run EXPLAIN (ANALYZE, FORMAT JSON) inside the candle reconciliation writer fence.
+
+    Args:
+        repository: PostgreSQL-backed repository under test.
+        sql: Asyncpg-compiled SQL statement text.
+        params: Positional bind arguments ordered for ``sql``.
+
+    Returns:
+        Tuple of ``(jit_setting, plan_cache_mode_setting, top_explain_entry)``.
+    """
+    async with repository.session() as session:
+        await repository._begin_candle_reconciliation_write(session, sqlite_write_lock=False)
+        jit_setting = str((await session.execute(text("SHOW jit"))).scalar_one())
+        plan_cache_setting = str((await session.execute(text("SHOW plan_cache_mode"))).scalar_one())
+        raw_conn = await (await session.connection()).get_raw_connection()
+        driver = cast(_FetchValConnection, raw_conn.driver_connection)
+        raw_json = await driver.fetchval(f"EXPLAIN (ANALYZE, FORMAT JSON) {sql}", *params)
+        await session.rollback()
+    parsed: object = json.loads(raw_json)
+    assert isinstance(parsed, list) and parsed
+    top_entry: object = parsed[0]
+    assert isinstance(top_entry, Mapping)
+    return jit_setting, plan_cache_setting, dict(top_entry)
+
+
+@pytest.mark.asyncio
+async def test_postgres_missing_candle_insert_disables_jit_and_prunes_partitions(
+    repository: SQLAlchemyRepository, instrument: str
+) -> None:
+    """Given repeated PostgreSQL missing-candle inserts, when planning past the generic-plan threshold, then JIT stays off and scanned candle partitions remain pruned."""
+    for batch_index in range(6):
+        await repository.insert_missing_candles(
+            [
+                _row(instrument, offset=batch_index * 2, source="native"),
+                _row(instrument, offset=batch_index * 2 + 1, source="native"),
+            ]
+        )
+    explain_rows = repository._normalize_reconciled_candle_rows(
+        [
+            _row(instrument, offset=100, source="native"),
+            _row(instrument, offset=101, source="native"),
+        ],
+        "native",
+    )
+    stmt = repository._missing_candle_batch_insert_statement(explain_rows)
+    compiled = stmt.compile(
+        dialect=PGDialect_asyncpg(),
+        compile_kwargs={"render_postcompile": True},
+    )
+    compiled_params = compiled.params or {}
+    positional_args = tuple(compiled_params[name] for name in (compiled.positiontup or ()))
+    jit_setting, plan_cache_setting, top_entry = await _run_fenced_explain(
+        repository, compiled.string, positional_args
+    )
+    assert jit_setting == "off"
+    assert plan_cache_setting == "force_custom_plan"
+    jit_info = top_entry.get("JIT")
+    if isinstance(jit_info, Mapping):
+        assert jit_info.get("Functions", 0) == 0
+    assert len(_scanned_candle_relations(top_entry.get("Plan"))) <= 2
+
+
+@pytest.mark.asyncio
+async def test_postgres_concurrent_missing_insert_and_live_upsert_preserve_rows(
+    repository: SQLAlchemyRepository, instrument: str
+) -> None:
+    """Given concurrent missing-candle insertion and live upsert on overlapping keys, when executed together on PostgreSQL, then neither drops rows or fails with a unique violation."""
+    shared_catchup = _row(instrument, offset=20, source="native")
+    gap_only = _row(instrument, offset=21, source="native")
+    shared_live = _row(instrument, offset=20, source="native")
+    live_only = _row(instrument, offset=22, source="native")
+    await asyncio.gather(
+        repository.insert_missing_candles([shared_catchup, gap_only]),
+        repository.upsert_candles([shared_live, live_only]),
+    )
+    current = await _current(repository, instrument)
+    open_ats = {row["open_at"] for row in current}
+    assert open_ats == {
+        shared_catchup["open_at"],
+        gap_only["open_at"],
+        live_only["open_at"],
+    }
