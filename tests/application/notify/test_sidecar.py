@@ -2616,9 +2616,7 @@ class TestTerminalSuppressionAndIsolation:
         sidecar._record_outage_delay(
             "sandbox",
             delayed_null_reason_pid,
-            setup_now,
-            _OutageDelay(0, setup_now + timedelta(hours=6)),
-            0,
+            _OutageDelay(0, setup_now + timedelta(hours=6), setup_now, 0),
         )
 
         apns.send = AsyncMock(
@@ -3022,6 +3020,98 @@ class TestReviewRegressionFixes:
         assert delayed["next_attempt_at"] == recovered_at
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("same_delivery", "backoff_seconds"), [(False, 30), (True, 60)], ids=["different", "same"]
+    )
+    async def test_recovery_leaves_newer_failures_in_an_existing_window(
+        self,
+        repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+        same_delivery: bool,
+        backoff_seconds: int,
+    ) -> None:
+        """An earlier success expedites only failures it could have recovered.
+
+        Given: An outage window and a successful send with a paused sent-state write.
+        When: Another network failure commits its schedule before the success is recorded.
+        Then: Any original delay is expedited and the recent delay waits for a later success.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+        older_pid, success_pid, other_pid, later_success_pid = [
+            await _seed_queued_delivery(
+                repo,
+                event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+            )
+            for _ in range(4)
+        ]
+        newer_pid = older_pid if same_delivery else other_pid
+        sidecar, apns = _make_sidecar(repo, clock=_ts)
+        success = apns.send.return_value
+        apns.send = AsyncMock(
+            side_effect=[MaxAttemptsExceeded(), success, MaxAttemptsExceeded(), success]
+        )
+        success_waiting = asyncio.Event()
+        allow_success = asyncio.Event()
+        mark_sent = repo.mark_delivery_sent
+
+        async def pause_first_success(
+            public_id: str,
+            apns_id: str,
+            *,
+            transition_at: datetime,
+            session_id: str,
+            sequence_id: int,
+        ) -> None:
+            """Hold the first success after APNs responded and before its database write."""
+            if public_id == success_pid:
+                success_waiting.set()
+                await allow_success.wait()
+            await mark_sent(
+                public_id,
+                apns_id,
+                transition_at=transition_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+            )
+
+        monkeypatch.setattr(repo, "mark_delivery_sent", pause_first_success)
+        await sidecar._attempt_once(older_pid, device, event, _ts())
+        success_at = _ts() + timedelta(seconds=5)
+        newer_error_at = _ts() + timedelta(seconds=35 if same_delivery else 10)
+        _pin_clock(sidecar, success_at)
+        async with asyncio.timeout(10), asyncio.TaskGroup() as group:
+            group.create_task(sidecar._attempt_once(success_pid, device, event, success_at))
+            await success_waiting.wait()
+            _pin_clock(sidecar, newer_error_at)
+            await sidecar._attempt_once(newer_pid, device, event, newer_error_at)
+            newer_before = await repo.get_delivery_by_public_id(newer_pid)
+            assert newer_before is not None
+            assert newer_before["next_attempt_at"] == newer_error_at + timedelta(
+                seconds=backoff_seconds
+            )
+            allow_success.set()
+
+        if not same_delivery:
+            older = await repo.get_delivery_by_public_id(older_pid)
+            assert older is not None and older["next_attempt_at"] == newer_error_at
+        assert await repo.get_delivery_by_public_id(newer_pid) == newer_before
+        assert set(sidecar._outage_windows["sandbox"].delayed) == {newer_pid}
+
+        later_success_at = newer_error_at + timedelta(seconds=5)
+        _pin_clock(sidecar, later_success_at)
+        await sidecar._attempt_once(later_success_pid, device, event, later_success_at)
+
+        newer = await repo.get_delivery_by_public_id(newer_pid)
+        assert newer is not None and newer["next_attempt_at"] == later_success_at
+        assert sidecar._outage_windows == {}
+
+    @pytest.mark.asyncio
     async def test_recovery_preserves_later_attempt_throttle_schedule(
         self, repo: SQLAlchemyRepository
     ) -> None:
@@ -3095,9 +3185,9 @@ class TestReviewRegressionFixes:
         sidecar, _ = _make_sidecar(repo, send_result=MaxAttemptsExceeded(), clock=lambda: outage_at)
         await sidecar._attempt_once(evicted_pid, device, event, outage_at)
         sidecar._record_outage_delay(
-            "sandbox", "expired", outage_at, _OutageDelay(1, recovered_at), 1
+            "sandbox", "expired", _OutageDelay(1, recovered_at, outage_at, 1)
         )
-        sidecar._record_outage_delay("sandbox", "retained", outage_at, _OutageDelay(1, deadline), 2)
+        sidecar._record_outage_delay("sandbox", "retained", _OutageDelay(1, deadline, outage_at, 2))
         assert set(sidecar._outage_windows["sandbox"].delayed) == {"expired", "retained"}
 
         get_delivery = repo.get_delivery_by_public_id
@@ -3121,7 +3211,8 @@ class TestReviewRegressionFixes:
         Then: Its backlog stays tracked without an expedited lookup.
         """
         sidecar, _ = _make_sidecar(repo, clock=lambda: _ts(2))
-        sidecar._record_outage_delay("sandbox", "delayed", _ts(1), _OutageDelay(1, _ts(360)), 2)
+        delay = _OutageDelay(1, _ts(360), _ts(1), 2)
+        sidecar._record_outage_delay("sandbox", "delayed", delay)
         lookups = AsyncMock(return_value=None)
         monkeypatch.setattr(repo, "get_delivery_by_public_id", lookups)
 
@@ -3130,7 +3221,7 @@ class TestReviewRegressionFixes:
         lookups.assert_not_awaited()
         window = sidecar._outage_windows["sandbox"]
         assert window.started_at == _ts(1)
-        assert window.delayed == {"delayed": _OutageDelay(1, _ts(360))}
+        assert window.delayed == {"delayed": delay}
 
     @pytest.mark.asyncio
     async def test_refused_network_retry_write_is_not_tracked(
@@ -3201,7 +3292,7 @@ class TestReviewRegressionFixes:
         current_time = _ts(recovery_minute)
         transition_at = max(current_time, _ts(2))
         sidecar, _ = _make_sidecar(repo, clock=lambda: current_time)
-        sidecar._record_outage_delay("sandbox", delayed_pid, _ts(2), _OutageDelay(1, _ts(360)), 0)
+        sidecar._record_outage_delay("sandbox", delayed_pid, _OutageDelay(1, _ts(360), _ts(2), 0))
 
         await sidecar._maybe_log_outage_recovery("sandbox", "recovered-other", _ts(), 1)
 

@@ -1635,7 +1635,8 @@ tick have bounded staleness up to the tick's processing length, and outage
 window tracking is scoped per APNs environment (`sandbox` vs `prod`). Recovery
 waits for in-flight retry scheduling in that environment before taking the
 backlog. Provider outcomes are ordered by observation in the sidecar, so a
-wall-clock adjustment cannot cause a later success to be ignored. Advancing
+wall-clock adjustment cannot cause a later success to be ignored. Backoffs
+observed after that success stay tracked for the next recovery. Advancing
 retries on recovery is best-effort. It retains the 256 most recently delayed
 deliveries in each environment and skips expired entries. Recovery advances
 only the attempt that saw an outage, preserving backoff from later attempts.

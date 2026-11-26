@@ -103,10 +103,12 @@ class _DeliveryTarget:
 
 @dataclass(frozen=True, slots=True)
 class _OutageDelay:
-    """The committed attempt and expiry of a delivery delayed by a network error."""
+    """The committed attempt, expiry and network outcome that delayed a delivery."""
 
     attempt_count: int
     deadline: datetime
+    observed_at: datetime
+    outcome_sequence: int
 
 
 @dataclass(slots=True)
@@ -983,9 +985,7 @@ class NotifySidecar(RegisterableProcess):
                 self._record_outage_delay(
                     env,
                     target.delivery_public_id,
-                    now,
-                    _OutageDelay(attempt_number, deadline),
-                    outcome_sequence,
+                    _OutageDelay(attempt_number, deadline, now, outcome_sequence),
                 )
 
     async def _resolve_delivery_deadline(self, target: _DeliveryTarget, now: datetime) -> datetime:
@@ -1047,9 +1047,7 @@ class NotifySidecar(RegisterableProcess):
         self,
         env: str,
         delivery_public_id: str,
-        now: datetime,
         delay: _OutageDelay,
-        outcome_sequence: int,
     ) -> None:
         """Keep only the most recent delays in the recovery backlog.
 
@@ -1057,7 +1055,9 @@ class NotifySidecar(RegisterableProcess):
         """
         window = self._outage_windows.get(env)
         if window is None:
-            window = self._outage_windows[env] = _OutageWindow(now, outcome_sequence)
+            window = self._outage_windows[env] = _OutageWindow(
+                delay.observed_at, delay.outcome_sequence
+            )
         delayed = window.delayed
         delayed.pop(delivery_public_id, None)
         delayed[delivery_public_id] = delay
@@ -1077,9 +1077,22 @@ class NotifySidecar(RegisterableProcess):
             window = self._outage_windows.get(env)
             if window is None or window.start_sequence > outcome_sequence:
                 return
-            del self._outage_windows[env]
+            recovered: dict[str, _OutageDelay] = {}
+            remaining: dict[str, _OutageDelay] = {}
+            for pid, delay in window.delayed.items():
+                if delay.outcome_sequence > outcome_sequence:
+                    remaining[pid] = delay
+                else:
+                    recovered[pid] = delay
+            if remaining:
+                first = min(remaining.values(), key=lambda delay: delay.outcome_sequence)
+                self._outage_windows[env] = _OutageWindow(
+                    first.observed_at, first.outcome_sequence, remaining
+                )
+            else:
+                del self._outage_windows[env]
         cutoff = self._clock()
-        delayed = {pid: delay for pid, delay in window.delayed.items() if delay.deadline > cutoff}
+        delayed = {pid: delay for pid, delay in recovered.items() if delay.deadline > cutoff}
         logger.warning(
             "sidecar: {count} deliveries delayed by an outage in env={env}"
             " (started_at={t1}, recovered_at={t2}, tracked for recovery)",
