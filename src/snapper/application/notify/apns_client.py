@@ -506,7 +506,10 @@ class _HardenedKeyConnectionPool(APNsKeyConnectionPool):
         except ApnsConnectionError as exc:
             cause = _next_exception(exc)
             if cause is not None and not is_network_delivery_error(cause):
-                raise cause from _next_exception(cause)
+                previous_cause = _next_exception(cause)
+                if previous_cause is None:
+                    raise cause from None
+                raise cause from previous_cause
             raise
 
 
