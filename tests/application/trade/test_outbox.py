@@ -2088,6 +2088,56 @@ class TestOutboxRetryBackoff:
         )
 
     @pytest.mark.asyncio
+    async def test_clock_step_does_not_hold_a_fresh_shard_follower(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A follower that becomes fresh can publish as soon as its shard clears.
+
+        Given: A cancel head in backoff and a submit just older than its TTL,
+        When: The wall clock steps back between fetching and checking expiry,
+        Then: The submit stays queued without a probe or expiry, and publishes
+            on the next poll once the cancel head is gone.
+        """
+        _install_clock(monkeypatch)
+        fetched_at = datetime(2026, 1, 1, tzinfo=UTC)
+        stepped_at = fetched_at - timedelta(seconds=2)
+        head = _make_backoff_row(
+            "btc-cancel-head", command_type="cancel", created_at=fetched_at - timedelta(minutes=1)
+        )
+        follower = _make_backoff_row(
+            "btc-follower", command_type="submit", created_at=fetched_at - timedelta(seconds=31)
+        )
+        queue = [[head]]
+        repo = _make_queue_repo(queue)
+        publish_fn = AsyncMock(side_effect=[RuntimeError("ZMQ down"), None])
+        expire_fn = AsyncMock()
+        dispatcher = OutboxDispatcher(
+            repository=repo, publish_fn=publish_fn, dispatch_ttl_s=30.0, expire_fn=expire_fn
+        )
+        wall_clock = MagicMock(return_value=fetched_at)
+        monkeypatch.setattr(outbox_module, "datetime", MagicMock(now=wall_clock))
+        await dispatcher._dispatch_batch()
+        publish_fn.reset_mock()
+        repo.cas_trade_command_status.reset_mock()
+
+        queue[0] = [head, follower]
+        wall_clock.side_effect = [fetched_at, stepped_at]
+        await dispatcher._dispatch_batch()
+
+        publish_fn.assert_not_awaited()
+        repo.has_order_submit_evidence.assert_not_awaited()
+        repo.cas_trade_command_status.assert_not_awaited()
+        expire_fn.assert_not_awaited()
+
+        queue[0] = [follower]
+        wall_clock.side_effect = None
+        wall_clock.return_value = stepped_at
+        await dispatcher._dispatch_batch()
+
+        publish_fn.assert_awaited_once_with(follower)
+        repo.bulk_dispatch_trade_commands.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_stale_deferred_follower_blocked_by_material_barrier_does_not_expire(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

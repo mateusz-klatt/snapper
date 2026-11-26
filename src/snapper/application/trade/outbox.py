@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
+from enum import Enum
+from enum import auto
 from typing import Final
 
 from loguru import logger
@@ -60,6 +62,14 @@ _RETRY_STALE_PRUNE_S: Final[float] = 300.0
 
 _SHARD_SKIP_CAP_MULTIPLIER: Final[int] = 10
 """Multiplier on ``max_scan_rows`` capping non-stale shard-deferred skips."""
+
+
+class _ExpiryOutcome(Enum):
+    """Result of checking whether a command can be expired."""
+
+    INELIGIBLE = auto()
+    SUBMIT_EVIDENCE = auto()
+    HANDLED = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -595,12 +605,8 @@ class OutboxDispatcher:
         cmd: TradeCommandRow,
         *,
         publish_on_evidence: bool = True,
-    ) -> bool:
+    ) -> _ExpiryOutcome:
         """Expire a stale create/submit command instead of dispatching it.
-
-        Returns True when the command was handled here (expired, lost
-        the expiry race, or deferred with backoff on probe/CAS error)
-        and must NOT be published this cycle; False when it did not expire.
 
         Decision table:
 
@@ -621,21 +627,23 @@ class OutboxDispatcher:
 
         Args:
             cmd: Candidate command row from the fetched batch.
-            publish_on_evidence: Whether returning False on submit evidence
-                will immediately publish the command for executor dedup.
+            publish_on_evidence: Whether the caller will publish on submit
+                evidence, which is logged here.
 
         Returns:
-            True when the row was handled here (expired, lost race, or probe error).
+            INELIGIBLE if TTL does not apply or the command is still fresh,
+            SUBMIT_EVIDENCE if durable evidence prevents expiry, and HANDLED
+            if the command expired, lost the expiry race, or backed off on error.
         """
         ttl = self._dispatch_ttl_s
         if ttl is None or ttl <= 0:
-            return False
+            return _ExpiryOutcome.INELIGIBLE
         if cmd["command_type"] not in _EXPIRABLE_COMMAND_TYPES:
-            return False
+            return _ExpiryOutcome.INELIGIBLE
         now = datetime.now(UTC)
         age_s = (now - cmd["created_at"]).total_seconds()
         if age_s <= ttl:
-            return False
+            return _ExpiryOutcome.INELIGIBLE
         try:
             if await self._repo.has_order_submit_evidence(cmd["client_order_id"]):
                 if publish_on_evidence:
@@ -645,7 +653,7 @@ class OutboxDispatcher:
                         f"exists — publishing for the executor guard to dedup instead of "
                         f"expiring a possibly-live order"
                     )
-                return False
+                return _ExpiryOutcome.SUBMIT_EVIDENCE
             won = await self._repo.cas_trade_command_status(
                 public_id=cmd["public_id"],
                 expected_status=TradeCommandStatusEnum.CREATED,
@@ -666,20 +674,20 @@ class OutboxDispatcher:
                 reason="TTL handling failed",
                 include_traceback=True,
             )
-            return True
+            return _ExpiryOutcome.HANDLED
         self._retry.pop(cmd["public_id"], None)
         if not won:
             logger.info(
                 f"OutboxDispatcher: lost the expiry race for {cmd['public_id']} "
                 f"(status moved concurrently); skipping this cycle"
             )
-            return True
+            return _ExpiryOutcome.HANDLED
         logger.warning(
             f"OutboxDispatcher: EXPIRED stale command {cmd['public_id']} "
             f"({cmd['client_order_id']}, age {age_s:.1f}s > TTL {ttl:.1f}s) — never published"
         )
         await self._invoke_expire_callback(cmd)
-        return True
+        return _ExpiryOutcome.HANDLED
 
     async def _material_permits_dispatch(self, command: TradeCommandRow) -> bool:
         """Hold a durably blocked logical CREATE with backoff while retaining healthy peers.
@@ -742,7 +750,7 @@ class OutboxDispatcher:
         """
         if not await self._material_permits_dispatch(cmd):
             return None
-        if await self._expire_if_stale(cmd):
+        if await self._expire_if_stale(cmd) is _ExpiryOutcome.HANDLED:
             return None
         try:
             if not await self._publish_or_hold(cmd):
@@ -796,7 +804,8 @@ class OutboxDispatcher:
         """
         if not await self._material_permits_dispatch(cmd):
             return
-        if await self._expire_if_stale(cmd, publish_on_evidence=False):
+        outcome = await self._expire_if_stale(cmd, publish_on_evidence=False)
+        if outcome is not _ExpiryOutcome.SUBMIT_EVIDENCE:
             return
         self._schedule_retry_and_log(
             cmd,
