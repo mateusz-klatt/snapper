@@ -8,22 +8,34 @@ always mocked — the tests assert our routing semantics, not
 Apple's HTTP/2 stack.
 """
 
+import asyncio
 import errno
 import socket
+import ssl
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from aioapns.common import NotificationRequest
 from aioapns.common import NotificationResult
+from aioapns.common import PushType
 from aioapns.exceptions import ConnectionClosed as ApnsConnectionClosed
 from aioapns.exceptions import ConnectionError as ApnsConnectionError
 from aioapns.exceptions import MaxAttemptsExceeded as ApnsMaxAttemptsExceeded
+from h2.config import H2Configuration
+from h2.connection import H2Connection
+from h2.events import RequestReceived
+from h2.settings import SettingCodes
 
 from snapper.application.notify.apns_client import ApnsClientPool
 from snapper.application.notify.apns_client import _coarse_status
+from snapper.application.notify.apns_client import _HardenedKeyConnectionPool
 from snapper.application.notify.apns_client import _map_result
 from snapper.application.notify.apns_client import _status_code_from
+from snapper.application.notify.apns_client import _TimeoutSafeDevelopmentClientProtocol
+from snapper.application.notify.apns_client import _TimeoutSafeProductionClientProtocol
+from snapper.application.notify.apns_client import _TimeoutSafeProtocolMixin
 from snapper.application.notify.apns_client import build_apns_client_pool
 from snapper.application.notify.apns_client import is_network_delivery_error
 from snapper.application.notify.apns_config import ApnsConfig
@@ -402,3 +414,320 @@ class TestNetworkDeliveryErrorClassification:
         cycle_a.__cause__ = cycle_b
         cycle_b.__cause__ = cycle_a
         assert is_network_delivery_error(cycle_a) is False
+
+    def test_ssl_errors_and_causes_classified_non_network(self) -> None:
+        """TLS/certificate errors and wrapped non-network causes return False.
+
+        Given: Direct ``ssl.SSLError`` / ``ssl.SSLCertVerificationError``,
+            ``MaxAttemptsExceeded`` or ``ConnectionError`` wrapping SSL or
+            ``ValueError`` causes, and ``httpx.ConnectError`` holding an SSL
+            verification error in nested exception arguments.
+        When: ``is_network_delivery_error`` evaluates each exception chain.
+        Then: All return ``False`` so permanent TLS/config errors stop at 3 attempts,
+            while wrapped network causes still return ``True``.
+        """
+        cert_err = ssl.SSLCertVerificationError(1, "certificate verify failed")
+        assert is_network_delivery_error(cert_err) is False
+        assert is_network_delivery_error(ssl.SSLError(errno.ECONNRESET, "ssl failure")) is False
+
+        wrapped_max = ApnsMaxAttemptsExceeded()
+        wrapped_max.__cause__ = cert_err
+        assert is_network_delivery_error(wrapped_max) is False
+
+        wrapped_conn = ApnsConnectionError()
+        wrapped_conn.__context__ = cert_err
+        assert is_network_delivery_error(wrapped_conn) is False
+
+        wrapped_value = ApnsMaxAttemptsExceeded()
+        wrapped_value.__cause__ = ValueError("bad payload")
+        assert is_network_delivery_error(wrapped_value) is False
+
+        wrapped_net = ApnsMaxAttemptsExceeded()
+        inner_conn = ApnsConnectionError()
+        inner_conn.__context__ = socket.gaierror(-2, "dns fail")
+        wrapped_net.__cause__ = inner_conn
+        assert is_network_delivery_error(wrapped_net) is True
+
+        inner_http = Exception(cert_err)
+        httpx_ssl = httpx.ConnectError("tls verify failed")
+        httpx_ssl.__cause__ = inner_http
+        assert is_network_delivery_error(httpx_ssl) is False
+
+    def test_suppress_context_stops_chain_walk(self) -> None:
+        """``raise ... from None`` stops context inspection at the outer exception.
+
+        Given: A ``RuntimeError`` raised ``from None`` inside an ``except TimeoutError``
+            block so ``__suppress_context__`` is ``True``.
+        When: ``is_network_delivery_error`` walks the chain.
+        Then: It respects ``__suppress_context__`` and returns ``False``.
+        """
+        try:
+            try:
+                raise TimeoutError("timed out")
+            except TimeoutError:
+                raise RuntimeError("suppressed wrapper") from None
+        except RuntimeError as suppressed:
+            assert suppressed.__context__ is not None
+            assert suppressed.__suppress_context__ is True
+            assert is_network_delivery_error(suppressed) is False
+
+
+class _FakeH2Transport(asyncio.Transport):
+    """Minimal in-memory asyncio transport recording outbound HTTP/2 frames."""
+
+    def __init__(self) -> None:
+        """Initialize an empty outbound frame buffer and open closing flag."""
+        super().__init__()
+        self.written = bytearray()
+        self.closing = False
+
+    def write(self, data: bytes | bytearray | memoryview) -> None:
+        """Append outbound bytes written by ``H2Protocol.flush``."""
+        self.written.extend(data)
+
+    def is_closing(self) -> bool:
+        """Return whether the transport has started closing."""
+        return self.closing
+
+    def close(self) -> None:
+        """Mark the transport closing."""
+        self.closing = True
+
+
+def _connected_h2_pair(
+    protocol_cls: type[_TimeoutSafeProtocolMixin],
+    loop: asyncio.AbstractEventLoop,
+    *,
+    max_concurrent_streams: int = 1,
+) -> tuple[_TimeoutSafeProtocolMixin, _FakeH2Transport, H2Connection]:
+    """Build a connected real aioapns protocol paired with an H2 server state machine."""
+    server = H2Connection(config=H2Configuration(client_side=False))
+    server.initiate_connection()
+    server.update_settings({SettingCodes.MAX_CONCURRENT_STREAMS: max_concurrent_streams})
+    transport = _FakeH2Transport()
+    protocol = protocol_cls("ie.klatt.snapper", loop=loop)
+    protocol.connection_made(transport)
+    server.receive_data(bytes(transport.written))
+    transport.written.clear()
+    protocol.data_received(server.data_to_send())
+    server.receive_data(bytes(transport.written))
+    transport.written.clear()
+    return protocol, transport, server
+
+
+def _request(notification_id: str) -> NotificationRequest:
+    """Create a minimal ``NotificationRequest`` with a deterministic id."""
+    return NotificationRequest(
+        device_token="a" * 64,
+        message={"aps": {"alert": "ping"}},
+        notification_id=notification_id,
+        push_type=PushType.ALERT,
+        apns_topic="ie.klatt.snapper",
+    )
+
+
+class TestProtocolTimeoutSlotSafety:
+    """Timeout-safe protocol prevents late-frame InvalidStateError and stream leaks."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "protocol_cls",
+        [_TimeoutSafeDevelopmentClientProtocol, _TimeoutSafeProductionClientProtocol],
+        ids=["sandbox-protocol", "production-protocol"],
+    )
+    async def test_late_200_after_timeout_does_not_raise_or_leak_stream_slot(
+        self,
+        protocol_cls: type[_TimeoutSafeProtocolMixin],
+    ) -> None:
+        """Late HTTP/2 200 after timeout leaves stream capacity intact for subsequent sends.
+
+        Given: A real timeout-safe APNs protocol with ``MAX_CONCURRENT_STREAMS=1``.
+        When: Request 1 times out under ``asyncio.wait_for``, then APNs delivers a
+            late 200 + ``END_STREAM`` frame, followed by request 2 on the same protocol.
+        Then: ``data_received`` raises no ``InvalidStateError``, the stream slot is
+            restored to capacity ``1``, and request 2 completes with status ``200``.
+        """
+        loop = asyncio.get_running_loop()
+        protocol, transport, server = _connected_h2_pair(
+            protocol_cls, loop, max_concurrent_streams=1
+        )
+        assert protocol.free_channels._value == 1
+
+        req1 = _request("notif-timeout-1")
+        task1 = asyncio.create_task(protocol.send_notification(req1))
+        await asyncio.sleep(0)
+        events = server.receive_data(bytes(transport.written))
+        transport.written.clear()
+        stream_id = next(e.stream_id for e in events if isinstance(e, RequestReceived))
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(task1, timeout=0.01)
+
+        assert protocol.free_channels._value == 1
+        server.send_headers(
+            stream_id, [(":status", "200"), ("apns-id", "notif-timeout-1")], end_stream=True
+        )
+        protocol.data_received(server.data_to_send())
+        assert protocol.free_channels._value == 1
+        server.receive_data(bytes(transport.written))
+        transport.written.clear()
+
+        req2 = _request("notif-ok-2")
+        task2 = asyncio.create_task(protocol.send_notification(req2))
+        await asyncio.sleep(0)
+        events2 = server.receive_data(bytes(transport.written))
+        transport.written.clear()
+        stream_id2 = next(e.stream_id for e in events2 if isinstance(e, RequestReceived))
+        server.send_headers(
+            stream_id2, [(":status", "200"), ("apns-id", "notif-ok-2")], end_stream=True
+        )
+        protocol.data_received(server.data_to_send())
+        result2 = await asyncio.wait_for(task2, timeout=1.0)
+        assert result2.status == "200"
+        assert protocol.free_channels._value == 1
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_same_tick_cancel_race_with_late_200_and_400(self) -> None:
+        """Same-tick cancellations handle late 200 and 400 frames without double-release.
+
+        Given: A real protocol with an active request alongside requests whose
+            response futures are cancelled in-place before their tasks unwind.
+        When: Late 200 and late 400 + DATA frames arrive before task cancellation
+            unwinds, followed by a normal 400 response.
+        Then: No ``InvalidStateError`` is raised, stream capacity stays intact,
+            and the normal 400 response completes cleanly.
+        """
+        loop = asyncio.get_running_loop()
+        protocol, transport, server = _connected_h2_pair(
+            _TimeoutSafeDevelopmentClientProtocol, loop, max_concurrent_streams=2
+        )
+
+        live_task = asyncio.create_task(protocol.send_notification(_request("notif-live")))
+        race_task = asyncio.create_task(protocol.send_notification(_request("notif-race-200")))
+        await asyncio.sleep(0)
+        events = server.receive_data(bytes(transport.written))
+        transport.written.clear()
+        stream_ids = [e.stream_id for e in events if isinstance(e, RequestReceived)]
+        assert len(stream_ids) == 2
+
+        protocol.requests["notif-race-200"].cancel()
+        server.send_headers(
+            stream_ids[1], [(":status", "200"), ("apns-id", "notif-race-200")], end_stream=True
+        )
+        protocol.data_received(server.data_to_send())
+        race_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await race_task
+        assert protocol.free_channels._value == 1
+
+        race_400_task = asyncio.create_task(protocol.send_notification(_request("notif-race-400")))
+        await asyncio.sleep(0)
+        events_400 = server.receive_data(bytes(transport.written))
+        transport.written.clear()
+        stream_400 = next(e.stream_id for e in events_400 if isinstance(e, RequestReceived))
+        protocol.requests["notif-race-400"].cancel()
+        server.send_headers(stream_400, [(":status", "400"), ("apns-id", "notif-race-400")])
+        server.send_data(stream_400, b'{"reason":"BadDeviceToken"}', end_stream=True)
+        protocol.data_received(server.data_to_send())
+        race_400_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await race_400_task
+        assert protocol.free_channels._value == 1
+
+        err_task = asyncio.create_task(protocol.send_notification(_request("notif-real-400")))
+        await asyncio.sleep(0)
+        events_err = server.receive_data(bytes(transport.written))
+        transport.written.clear()
+        stream_err = next(e.stream_id for e in events_err if isinstance(e, RequestReceived))
+        server.send_headers(stream_err, [(":status", "400"), ("apns-id", "notif-real-400")])
+        server.send_data(stream_err, b'{"reason":"BadDeviceToken"}', end_stream=True)
+        protocol.data_received(server.data_to_send())
+        err_result = await asyncio.wait_for(err_task, timeout=1.0)
+        assert err_result.status == "400"
+        assert protocol.free_channels._value == 1
+
+        protocol.requests["notif-live"].cancel()
+        protocol.connection_lost(None)
+        live_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await live_task
+
+    @pytest.mark.asyncio
+    async def test_acquire_cancel_closing_transport_and_disconnect(self) -> None:
+        """Acquire cancellation, closing-transport cancellation, and disconnect stay safe.
+
+        Given: A saturated protocol with an in-flight stream and a blocked waiter.
+        When: The acquire-blocked task cancels, a new stream cancels while the
+            transport is already closing, and ``connection_lost`` runs.
+        Then: No ``InvalidStateError`` occurs and slots are not leaked or double-released.
+        """
+        loop = asyncio.get_running_loop()
+        protocol, transport, server = _connected_h2_pair(
+            _TimeoutSafeDevelopmentClientProtocol, loop, max_concurrent_streams=1
+        )
+        live_task = asyncio.create_task(protocol.send_notification(_request("notif-busy")))
+        await asyncio.sleep(0)
+        server.receive_data(bytes(transport.written))
+        transport.written.clear()
+        assert protocol.free_channels._value == 0
+
+        blocked_task = asyncio.create_task(protocol.send_notification(_request("notif-blocked")))
+        await asyncio.sleep(0)
+        blocked_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await blocked_task
+
+        protocol.requests["notif-busy"].cancel()
+        transport.close()
+        live_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await live_task
+        assert protocol.free_channels._value == 1
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_build_apns_client_pool_wires_hardened_protocol_and_surfaces_ssl_error(
+        self,
+    ) -> None:
+        """Real pool wiring uses timeout-safe protocols and preserves SSL errors.
+
+        Given: A real ``ApnsClientPool`` constructed inside a running event loop via
+            ``build_apns_client_pool``.
+        When: ``sandbox`` hits ``ssl.SSLCertVerificationError`` and ``production`` hits
+            ``ConnectionRefusedError`` during connection setup.
+        Then: ``sandbox`` propagates ``SSLCertVerificationError`` directly without
+            converting it to ``MaxAttemptsExceeded``, while ``production`` exhausts
+            connection attempts into ``MaxAttemptsExceeded``.
+        """
+        pool = build_apns_client_pool(_config(environment="sandbox_and_production"))
+        sandbox_client = pool._select_client("sandbox")
+        prod_client = pool._select_client("prod")
+        assert isinstance(sandbox_client.pool, _HardenedKeyConnectionPool)
+        assert isinstance(prod_client.pool, _HardenedKeyConnectionPool)
+        assert sandbox_client.pool.protocol_class is _TimeoutSafeDevelopmentClientProtocol
+        assert prod_client.pool.protocol_class is _TimeoutSafeProductionClientProtocol
+
+        sandbox_client.pool.create_connection = AsyncMock(
+            side_effect=ssl.SSLCertVerificationError(1, "certificate verify failed")
+        )
+        with pytest.raises(ssl.SSLCertVerificationError):
+            await pool.send(
+                env="sandbox",
+                device_token="a" * 64,
+                payload={"aps": {"alert": {"title": "t", "body": "b"}}},
+                apns_topic="ie.klatt.snapper",
+            )
+
+        prod_client.pool.max_connection_attempts = 1
+        prod_client.pool.create_connection = AsyncMock(
+            side_effect=ConnectionRefusedError("connection refused")
+        )
+        with pytest.raises(ApnsMaxAttemptsExceeded):
+            await pool.send(
+                env="prod",
+                device_token="a" * 64,
+                payload={"aps": {"alert": {"title": "t", "body": "b"}}},
+                apns_topic="ie.klatt.snapper",
+            )
+        sandbox_client.pool.close()
+        prod_client.pool.close()

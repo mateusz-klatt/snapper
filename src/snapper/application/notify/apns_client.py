@@ -11,8 +11,11 @@ Returned by ``build_apns_client_pool`` rather than a classmethod so
 tests can fake out both ends without needing an event loop.
 """
 
+import asyncio
+import contextlib
 import errno
 import socket
+import ssl
 from dataclasses import dataclass
 from typing import Final
 
@@ -21,9 +24,16 @@ from aioapns import APNs as _AioApns
 from aioapns import NotificationRequest
 from aioapns.common import NotificationResult
 from aioapns.common import PushType
+from aioapns.connection import APNsBaseClientProtocol
+from aioapns.connection import APNsBaseConnectionPool
+from aioapns.connection import APNsDevelopmentClientProtocol
+from aioapns.connection import APNsKeyConnectionPool
+from aioapns.connection import APNsProductionClientProtocol
+from aioapns.connection import APNsTLSClientProtocol
 from aioapns.exceptions import ConnectionClosed as ApnsConnectionClosed
 from aioapns.exceptions import ConnectionError as ApnsConnectionError
 from aioapns.exceptions import MaxAttemptsExceeded as ApnsMaxAttemptsExceeded
+from h2.exceptions import ProtocolError
 
 from snapper.application.notify.apns_config import ApnsConfig
 from snapper.core.json_types import JsonObject
@@ -38,6 +48,11 @@ _NETWORK_ERROR_TYPES: Final[tuple[type[BaseException], ...]] = (
     httpx.TransportError,
 )
 
+_GENERIC_NETWORK_WRAPPERS: Final[tuple[type[BaseException], ...]] = (
+    ApnsMaxAttemptsExceeded,
+    ApnsConnectionError,
+)
+
 _NETWORK_OS_ERRNOS: Final[frozenset[int]] = frozenset(
     {
         errno.ENETUNREACH,
@@ -50,6 +65,22 @@ _NETWORK_OS_ERRNOS: Final[frozenset[int]] = frozenset(
 )
 
 
+def _next_exception(exc: BaseException) -> BaseException | None:
+    """Return the explicit ``__cause__`` or unsuppressed ``__context__`` of ``exc``."""
+    if exc.__cause__ is not None:
+        return exc.__cause__
+    if not exc.__suppress_context__:
+        return exc.__context__
+    return None
+
+
+def _is_ssl_node(exc: BaseException) -> bool:
+    """Return whether ``exc`` or any nested argument exception is an ``ssl.SSLError``."""
+    if isinstance(exc, ssl.SSLError):
+        return True
+    return any(isinstance(arg, ssl.SSLError) for arg in exc.args)
+
+
 def _matches_network_exception(exc: BaseException) -> bool:
     """Return whether one exception node matches a transient network outage."""
     if isinstance(exc, _NETWORK_ERROR_TYPES):
@@ -60,28 +91,37 @@ def _matches_network_exception(exc: BaseException) -> bool:
 def is_network_delivery_error(exc: BaseException) -> bool:
     """Classify whether a delivery exception belongs to the network outage class.
 
-    Inspects ``exc`` and its ``__cause__`` / ``__context__`` chain purely by
-    exception type (and ``OSError.errno`` for bare ``OSError``). Matches DNS
-    lookups (``socket.gaierror``), ``ConnectionError`` subclasses, ``TimeoutError``,
-    ``httpx.TransportError``, ``aioapns`` connection/exhaustion exceptions, and
-    ``OSError`` with network errnos (``ENETUNREACH``, ``EHOSTUNREACH``,
-    ``ENETDOWN``, ``ETIMEDOUT``, ``ECONNREFUSED``, ``ECONNRESET``). Filesystem
-    errors such as ``FileNotFoundError`` or ``PermissionError`` return ``False``.
+    Walks ``exc`` along ``__cause__`` and unsuppressed ``__context__``
+    (respecting ``__suppress_context__``). Treats ``ssl.SSLError`` (including
+    ``ssl.SSLCertVerificationError``) anywhere in the chain or nested
+    exception args as non-network so permanent TLS faults do not retry for
+    hours. Defers generic ``aioapns`` exhaustion/connection wrappers
+    (``MaxAttemptsExceeded``, ``ConnectionError``) to their concrete deeper
+    cause when one is available, while still treating bare wrappers as
+    network-class.
 
     Args:
         exc: Exception raised while sending an APNs notification.
 
     Returns:
         ``True`` for transient network/transport outage errors that should retry
-        until expiry; ``False`` for non-network exceptions.
+        until expiry; ``False`` for non-network, filesystem, and TLS errors.
     """
+    chain: list[BaseException] = []
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
-        if _matches_network_exception(current):
-            return True
+        chain.append(current)
         seen.add(id(current))
-        current = current.__cause__ if current.__cause__ is not None else current.__context__
+        current = _next_exception(current)
+    if any(_is_ssl_node(node) for node in chain):
+        return False
+    for index, node in enumerate(chain):
+        has_deeper_cause = index + 1 < len(chain)
+        if has_deeper_cause and isinstance(node, _GENERIC_NETWORK_WRAPPERS):
+            continue
+        if _matches_network_exception(node):
+            return True
     return False
 
 
@@ -324,6 +364,131 @@ def _coarse_status(status_code: int, description: str) -> str:
     return "unknown"
 
 
+class _TimeoutSafeProtocolMixin(APNsTLSClientProtocol):
+    """Prevent cancelled request futures from raising ``InvalidStateError`` or leaking slots.
+
+    When an outer ``asyncio.wait_for`` times out, Python cancels the awaited
+    ``Future`` in ``self.requests``. Stock ``aioapns`` calls ``set_result`` /
+    ``set_exception`` without checking ``done()``, raising ``InvalidStateError``
+    inside ``data_received`` before ``on_stream_ended`` can release
+    ``free_channels``. This mixin prunes done futures before response and
+    disconnect callbacks, cleans up stream mappings on ``StreamEnded``, and
+    resets the stream + releases the slot once if cancelled before
+    ``StreamEnded`` arrives.
+    """
+
+    def _prune_done_requests(self) -> None:
+        """Drop already-completed or cancelled request futures before aioapns touches them."""
+        done_ids = [nid for nid, fut in self.requests.items() if fut.done()]
+        for nid in done_ids:
+            self.requests.pop(nid, None)
+            self.request_statuses.pop(nid, None)
+
+    def _drop_stream_mapping(self, notification_id: str) -> int | None:
+        """Pop and return the active ``stream_id`` for ``notification_id``, if any."""
+        for stream_id, nid in list(self.request_streams.items()):
+            if nid == notification_id:
+                self.request_streams.pop(stream_id, None)
+                return stream_id
+        return None
+
+    async def send_notification(self, request: NotificationRequest) -> NotificationResult:
+        """Release the acquired stream slot once if cancelled before ``StreamEnded``."""
+        try:
+            return await super().send_notification(request)
+        except asyncio.CancelledError:
+            self.requests.pop(request.notification_id, None)
+            self.request_statuses.pop(request.notification_id, None)
+            stream_id = self._drop_stream_mapping(request.notification_id)
+            if stream_id is not None:
+                with contextlib.suppress(ProtocolError):
+                    self.conn.reset_stream(stream_id)
+                if self.transport is not None and not self.transport.is_closing():
+                    self.transport.write(self.conn.data_to_send())
+                self.free_channels.release()
+            raise
+
+    def on_response_received(self, headers: dict[bytes, bytes]) -> None:
+        """Ignore late response headers for cancelled or unknown requests."""
+        self._prune_done_requests()
+        notification_id = headers.get(b"apns-id", b"").decode("utf8")
+        if notification_id not in self.requests:
+            return
+        super().on_response_received(headers)
+
+    def on_data_received(self, raw_data: bytes, stream_id: int) -> None:
+        """Ignore late error payloads for cancelled requests without losing ``stream_id``."""
+        self._prune_done_requests()
+        notification_id = self.request_streams.get(stream_id)
+        if notification_id is not None and notification_id not in self.requests:
+            return
+        super().on_data_received(raw_data, stream_id)
+
+    def on_stream_ended(self, stream_id: int) -> None:
+        """Forget the stream mapping when ``StreamEnded`` releases the slot."""
+        notification_id = self.request_streams.pop(stream_id, None)
+        if notification_id is not None:
+            self.requests.pop(notification_id, None)
+            self.request_statuses.pop(notification_id, None)
+        super().on_stream_ended(stream_id)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        """Clear done futures and stream maps so disconnect never skips channel destroy."""
+        self._prune_done_requests()
+        self.request_streams.clear()
+        self.request_statuses.clear()
+        super().connection_lost(exc)
+
+
+class _TimeoutSafeDevelopmentClientProtocol(
+    _TimeoutSafeProtocolMixin, APNsDevelopmentClientProtocol
+):
+    """Sandbox APNs HTTP/2 protocol with timeout-safe stream slot cleanup."""
+
+
+class _TimeoutSafeProductionClientProtocol(_TimeoutSafeProtocolMixin, APNsProductionClientProtocol):
+    """Production APNs HTTP/2 protocol with timeout-safe stream slot cleanup."""
+
+
+class _HardenedKeyConnectionPool(APNsKeyConnectionPool):
+    """Key-auth APNs connection pool that propagates SSL/TLS failures directly."""
+
+    async def acquire(self) -> APNsBaseClientProtocol:
+        """Surface ``ssl.SSLError`` causes directly instead of retrying into ``MaxAttemptsExceeded``."""
+        try:
+            return await super().acquire()
+        except ApnsConnectionError as exc:
+            cause = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+            if isinstance(cause, ssl.SSLError):
+                raise cause from exc
+            raise
+
+
+def _configure_apns_client(client: _AioApns, *, use_sandbox: bool) -> None:
+    """Wire the timeout-safe protocol and SSL-preserving pool onto real ``aioapns`` clients."""
+    pool = getattr(client, "pool", None)
+    if not isinstance(pool, APNsKeyConnectionPool):
+        return
+    hardened: APNsBaseConnectionPool = _HardenedKeyConnectionPool(
+        key=pool.key,
+        key_id=pool.key_id,
+        team_id=pool.team_id,
+        topic=pool.apns_topic or "",
+        max_connections=pool.max_connections,
+        max_connection_attempts=pool.max_connection_attempts,
+        use_sandbox=use_sandbox,
+        ssl_context=pool.ssl_context,
+        proxy_host=pool.proxy_host,
+        proxy_port=pool.proxy_port,
+    )
+    hardened.protocol_class = (
+        _TimeoutSafeDevelopmentClientProtocol
+        if use_sandbox
+        else _TimeoutSafeProductionClientProtocol
+    )
+    client.pool = hardened
+
+
 def build_apns_client_pool(config: ApnsConfig) -> ApnsClientPool:
     """Build an ``ApnsClientPool`` from a hydrated ``ApnsConfig``.
 
@@ -352,6 +517,7 @@ def build_apns_client_pool(config: ApnsConfig) -> ApnsClientPool:
             topic=config.topic,
             use_sandbox=True,
         )
+        _configure_apns_client(sandbox, use_sandbox=True)
     if env in {"production", "sandbox_and_production"}:
         production = _AioApns(
             key=config.private_key_pem,
@@ -360,4 +526,5 @@ def build_apns_client_pool(config: ApnsConfig) -> ApnsClientPool:
             topic=config.topic,
             use_sandbox=False,
         )
+        _configure_apns_client(production, use_sandbox=False)
     return ApnsClientPool(sandbox_client=sandbox, production_client=production)
