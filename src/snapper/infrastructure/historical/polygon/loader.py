@@ -30,6 +30,7 @@ import json
 from collections import defaultdict
 from collections.abc import Iterable
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import date
@@ -37,6 +38,8 @@ from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from shutil import copymode
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from loguru import logger
@@ -722,21 +725,7 @@ class PolygonHistoricalLoader:
         logger.info(f"Received {len(rows)} grouped rows")
         if save_csv:
             csv_path = self._resolve_grouped_csv_path(target_date, market_type, locale)
-            if rows:
-                await asyncio.to_thread(self._write_grouped_csv, csv_path, rows)
-            else:
-                await asyncio.to_thread(csv_path.parent.mkdir, parents=True, exist_ok=True)
-
-                def _write_empty_marker() -> None:
-                    """Write CSV header as empty marker file."""
-                    with csv_path.open("w", encoding="utf-8", newline="") as f:
-                        f.write(
-                            "ticker,open,high,low,close,volume,vwap,"
-                            "total_trades,closing_timestamp\n"
-                        )
-
-                await asyncio.to_thread(_write_empty_marker)
-                logger.debug(f"Created empty marker: {csv_path}")
+            await asyncio.to_thread(self._write_grouped_csv, csv_path, rows)
         if rows:
             await asyncio.sleep(self._rate_delay)
         return rows
@@ -873,39 +862,49 @@ class PolygonHistoricalLoader:
                 )
 
     def _write_grouped_csv(self, path: Path, rows: Iterable[GroupedDailyRow]) -> None:
-        """Write grouped daily rows to CSV file.
+        """Publish a grouped day after the complete CSV has been closed.
+
+        The cache can be a Git worktree. Keep staging files out of its daily
+        snapshot even if the process is killed before the directory is removed.
 
         Args:
             path: Target file path.
             rows: Grouped daily rows to write.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.writer(handle, lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
-            writer.writerow(
-                [
-                    "ticker",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "vwap",
-                    "total_trades",
-                    "closing_timestamp",
-                ]
-            )
-            for row in rows:
+        with TemporaryDirectory(dir=path.parent, prefix=".grouped-") as directory:
+            staging = Path(directory)
+            (staging / ".gitignore").write_text("*\n", encoding="utf-8")
+            staged = staging / "snapshot.tmp"
+            with staged.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle, lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
                 writer.writerow(
                     [
-                        row.ticker,
-                        _format_decimal(row.open),
-                        _format_decimal(row.high),
-                        _format_decimal(row.low),
-                        _format_decimal(row.close),
-                        _format_decimal(row.volume),
-                        _format_decimal(row.vwap),
-                        str(row.total_trades or 0),
-                        row.closing_timestamp.isoformat(),
+                        "ticker",
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume",
+                        "vwap",
+                        "total_trades",
+                        "closing_timestamp",
                     ]
                 )
+                for row in rows:
+                    writer.writerow(
+                        [
+                            row.ticker,
+                            _format_decimal(row.open),
+                            _format_decimal(row.high),
+                            _format_decimal(row.low),
+                            _format_decimal(row.close),
+                            _format_decimal(row.volume),
+                            _format_decimal(row.vwap),
+                            str(row.total_trades or 0),
+                            row.closing_timestamp.isoformat(),
+                        ]
+                    )
+            with suppress(FileNotFoundError):
+                copymode(path, staged)
+            staged.replace(path)
