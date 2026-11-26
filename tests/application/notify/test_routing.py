@@ -8,11 +8,13 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from loguru import logger
 
 from snapper.application.notify.push_beta import PushBetaConfig
 from snapper.application.notify.routing import _in_quiet_hours
 from snapper.application.notify.routing import _narrowest_matches
 from snapper.application.notify.routing import _policy_allows
+from snapper.application.notify.routing import _warn_invalid_timezone
 from snapper.application.notify.routing import route_alert_to_devices
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.repository_types import AlertEventRow
@@ -415,6 +417,38 @@ class TestQuietHours:
         pref = _pref(quiet_start=11 * 60, quiet_end=13 * 60, timezone="Mars/Olympus_Mons")
 
         assert _in_quiet_hours(pref, _now()) is True
+
+    @pytest.mark.parametrize(
+        "malformed_tz",
+        ["/America/New_York", "a/../b", "UTC\x00bad", "Mars/Olympus_Mons"],
+        ids=["leading-slash", "path-traversal", "null-byte", "unknown-zone"],
+    )
+    def test_malformed_or_unknown_timezone_falls_back_to_utc_and_logs_once(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        malformed_tz: str,
+    ) -> None:
+        """Malformed and unknown timezones fall back to UTC and log only once per value.
+
+        Given: A device-alert preference whose stored ``timezone`` makes ``ZoneInfo``
+            raise ``ValueError`` or ``ZoneInfoNotFoundError``.
+        When: ``_in_quiet_hours`` evaluates the preference twice consecutively.
+        Then: Neither call raises, UTC comparison applies cleanly, and the warning is
+            emitted only once for that malformed timezone string.
+        """
+        _warn_invalid_timezone.cache_clear()
+        pref = _pref(quiet_start=11 * 60, quiet_end=13 * 60, timezone=malformed_tz)
+        handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
+        try:
+            assert _in_quiet_hours(pref, _now()) is True
+            assert _in_quiet_hours(pref, _now()) is True
+        finally:
+            logger.remove(handler_id)
+        warnings = [
+            r for r in caplog.records if "unknown device-alert pref timezone" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert malformed_tz in warnings[0].getMessage()
 
 
 class TestRouteAlertToDevices:

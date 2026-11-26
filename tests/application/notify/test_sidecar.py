@@ -14,6 +14,7 @@ import asyncio
 import errno
 import socket
 from collections.abc import AsyncGenerator
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -238,12 +239,18 @@ class _FakeMessagePublisher:
         self.sends.append((stream_key, data))
 
 
+def _pin_clock(sidecar: NotifySidecar, at: datetime) -> None:
+    """Pin ``sidecar._clock`` to a deterministic timestamp for virtual-time tests."""
+    sidecar._clock = lambda: at
+
+
 def _make_sidecar(
     repo: SQLAlchemyRepository,
     *,
     send_result: ApnsSendResult | Exception | None = None,
     registry: RuleRegistry | None = None,
     portfolio_drift_recovery_scanner: PortfolioDriftRecoveryScanner | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> tuple[NotifySidecar, MagicMock]:
     """Construct a sidecar with a mock subscriber + mock APNs pool.
 
@@ -276,6 +283,8 @@ def _make_sidecar(
         registry=registry,
         portfolio_drift_recovery_scanner=portfolio_drift_recovery_scanner,
     )
+    if clock is not None:
+        sidecar._clock = clock
     return sidecar, apns
 
 
@@ -717,7 +726,7 @@ class TestDispatchFlow:
         await _seed_device(repo, user)
         reg = RuleRegistry()
         reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
-        sidecar, apns = _make_sidecar(repo, registry=reg)
+        sidecar, apns = _make_sidecar(repo, registry=reg, clock=lambda: _ts())
 
         await sidecar._dispatch("test.something", b"{}", _ts())
 
@@ -751,7 +760,7 @@ class TestDispatchFlow:
         await _seed_device(repo, user)
         reg = RuleRegistry()
         reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
-        sidecar, apns = _make_sidecar(repo, registry=reg)
+        sidecar, apns = _make_sidecar(repo, registry=reg, clock=lambda: _ts())
         order_log: list[str] = []
         publisher = cast("_FakeMessagePublisher", sidecar._publisher)
         original_send = publisher.send
@@ -820,7 +829,7 @@ class TestDispatchFlow:
                 },
             )
         )
-        sidecar, apns = _make_sidecar(repo, registry=reg)
+        sidecar, apns = _make_sidecar(repo, registry=reg, clock=lambda: _ts())
 
         await sidecar._dispatch("test.something", b"{}", _ts())
 
@@ -851,7 +860,7 @@ class TestDispatchFlow:
         reg = RuleRegistry()
         reg.register(_RaisingRule())
         reg.register(_SingleRowRule(user_public_id=user, topic_prefix="boom."))
-        sidecar, apns = _make_sidecar(repo, registry=reg)
+        sidecar, apns = _make_sidecar(repo, registry=reg, clock=lambda: _ts())
 
         await sidecar._dispatch("boom.anything", b"{}", _ts())
 
@@ -882,7 +891,7 @@ class TestDispatchFlow:
         await _seed_user(repo, user)
         reg = RuleRegistry()
         reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
-        sidecar, apns = _make_sidecar(repo, registry=reg)
+        sidecar, apns = _make_sidecar(repo, registry=reg, clock=lambda: _ts())
 
         await sidecar._dispatch("test.topic", b"{}", _ts())
 
@@ -1008,7 +1017,7 @@ class TestScopePreSendSkip:
             session_id="admin",
             sequence_id=1,
         )
-        sidecar, apns = _make_sidecar(repo)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(2))
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         await sidecar._attempt_once(delivery_pid, device, event, _ts(2))
@@ -1028,7 +1037,7 @@ class TestScopePreSendSkip:
             device_public_id=device_pid,
             user_public_id=user,
         )
-        sidecar, apns = _make_sidecar(repo)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts())
         sidecar._scope_revalidator = MagicMock()
         sidecar._scope_revalidator.should_skip_send = AsyncMock(return_value=True)
         device = (await repo.list_active_notification_devices_for_user(user))[0]
@@ -1060,7 +1069,7 @@ class TestScopePreSendSkip:
             device_public_id=device_pid,
             user_public_id=user,
         )
-        sidecar, apns = _make_sidecar(repo)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts())
         sidecar._scope_revalidator = MagicMock()
         sidecar._scope_revalidator.should_skip_send = AsyncMock(side_effect=[False, True])
         device = (await repo.list_active_notification_devices_for_user(user))[0]
@@ -1090,7 +1099,7 @@ class TestScopePreSendSkip:
         unreg = ApnsSendResult(
             status_code=410, status="unregistered", apns_id="", description="BadDeviceToken"
         )
-        sidecar, _ = _make_sidecar(repo, send_result=unreg)
+        sidecar, _ = _make_sidecar(repo, send_result=unreg, clock=lambda: _ts())
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         await sidecar._attempt_once(delivery_pid, device, event, _ts())
@@ -1114,7 +1123,7 @@ class TestScopePreSendSkip:
             user_public_id=user,
         )
         mapped = _map_result(NotificationResult("", "400", "BadDeviceToken", None))
-        sidecar, _ = _make_sidecar(repo, send_result=mapped)
+        sidecar, _ = _make_sidecar(repo, send_result=mapped, clock=lambda: _ts())
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         await sidecar._attempt_once(delivery_pid, device, event, _ts())
@@ -1141,7 +1150,7 @@ class TestScopePreSendSkip:
             user_public_id=user,
         )
         mapped = _map_result(NotificationResult("", "400", "DeviceTokenNotForTopic", None))
-        sidecar, _ = _make_sidecar(repo, send_result=mapped)
+        sidecar, _ = _make_sidecar(repo, send_result=mapped, clock=lambda: _ts())
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         handler_id = logger.add(caplog.handler, format="{message}", level="ERROR")
@@ -1203,7 +1212,7 @@ class TestScopePreSendSkip:
         )
         mapped = _map_result(NotificationResult("", "400", raw_description, None))
         assert mapped.status == "other"
-        sidecar, _ = _make_sidecar(repo, send_result=mapped)
+        sidecar, _ = _make_sidecar(repo, send_result=mapped, clock=lambda: _ts())
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         await sidecar._attempt_once(delivery_pid, device, event, _ts())
@@ -1232,7 +1241,7 @@ class TestScopePreSendSkip:
         unreg = ApnsSendResult(
             status_code=410, status="unregistered", apns_id="", description="BadDeviceToken"
         )
-        sidecar, _ = _make_sidecar(repo, send_result=unreg)
+        sidecar, _ = _make_sidecar(repo, send_result=unreg, clock=lambda: _ts())
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         await sidecar._attempt_once(delivery_pid, device, event, _ts())
@@ -1266,7 +1275,7 @@ class TestScopePreSendSkip:
             user_public_id=user,
         )
         err = ApnsSendResult(status_code=500, status="server_error", apns_id="", description="")
-        sidecar, _ = _make_sidecar(repo, send_result=err)
+        sidecar, _ = _make_sidecar(repo, send_result=err, clock=lambda: _ts())
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         await sidecar._attempt_once(delivery_pid, device, event, _ts())
@@ -1291,7 +1300,7 @@ class TestScopePreSendSkip:
             user_public_id=user,
         )
         err = ApnsSendResult(status_code=500, status="server_error", apns_id="", description="")
-        sidecar, _ = _make_sidecar(repo, send_result=err)
+        sidecar, _ = _make_sidecar(repo, send_result=err, clock=lambda: _ts())
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         await sidecar._attempt_once(delivery_pid, device, event, _ts())
@@ -1314,7 +1323,9 @@ class TestScopePreSendSkip:
             device_public_id=device_pid,
             user_public_id=user,
         )
-        sidecar, _ = _make_sidecar(repo, send_result=RuntimeError("connection reset"))
+        sidecar, _ = _make_sidecar(
+            repo, send_result=RuntimeError("connection reset"), clock=lambda: _ts()
+        )
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         await sidecar._attempt_once(delivery_pid, device, event, _ts())
@@ -1343,7 +1354,7 @@ class TestScopePreSendSkip:
             user_public_id=user,
         )
         err = ApnsSendResult(status_code=500, status="server_error", apns_id="", description="")
-        sidecar, _ = _make_sidecar(repo, send_result=err)
+        sidecar, _ = _make_sidecar(repo, send_result=err, clock=lambda: _ts())
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
@@ -1379,7 +1390,7 @@ class TestDrainOutbox:
             device_public_id=device_pid,
             user_public_id=user,
         )
-        sidecar, apns = _make_sidecar(repo)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(5))
 
         await sidecar._drain_outbox(_ts(5))
 
@@ -1407,7 +1418,7 @@ class TestDrainOutbox:
             session_id="close",
             sequence_id=42,
         )
-        sidecar, apns = _make_sidecar(repo)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(2))
 
         await sidecar._drain_outbox(_ts(2))
 
@@ -1429,7 +1440,7 @@ class TestDrainOutbox:
             device_public_id=device_pid,
             user_public_id=user,
         )
-        sidecar, apns = _make_sidecar(repo)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts())
 
         await sidecar._drain_outbox(_ts())
 
@@ -1466,7 +1477,7 @@ class TestAttemptOnQueuedRowNoCache:
             device_public_id=device_pid,
             user_public_id=user,
         )
-        sidecar, apns = _make_sidecar(repo)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(5))
         row = await repo.get_delivery_by_public_id(delivery_pid)
         assert row is not None
 
@@ -1656,7 +1667,7 @@ class TestSidecarStart:
         await _seed_device(repo, user)
         reg = RuleRegistry()
         reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
-        sidecar, apns = _make_sidecar(repo, registry=reg)
+        sidecar, apns = _make_sidecar(repo, registry=reg, clock=lambda: _ts())
 
         received = asyncio.Event()
         dispatched = asyncio.Event()
@@ -1822,7 +1833,7 @@ class TestRetryQueueLoop:
             sequence_id=99,
         )
         ok = ApnsSendResult(status_code=200, status="success", apns_id="apns-ok", description="")
-        sidecar, apns = _make_sidecar(repo, send_result=ok)
+        sidecar, apns = _make_sidecar(repo, send_result=ok, clock=lambda: _ts(1))
 
         monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 0.05)
         task = asyncio.create_task(sidecar._process_retry_queue_loop())
@@ -1886,7 +1897,9 @@ class TestNetworkOutageRetryAndExpiry:
         await _seed_device(repo, user)
         reg = RuleRegistry()
         reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
-        sidecar, _ = _make_sidecar(repo, registry=reg, send_result=MaxAttemptsExceeded())
+        sidecar, _ = _make_sidecar(
+            repo, registry=reg, send_result=MaxAttemptsExceeded(), clock=lambda: _ts()
+        )
 
         await sidecar._dispatch("test.outage", b"{}", _ts())
 
@@ -1940,10 +1953,12 @@ class TestNetworkOutageRetryAndExpiry:
         handler_id = logger.add(caplog.handler, format="{message}", level="WARNING")
         try:
             for idx, minute in enumerate((0, 1, 2, 4, 8), start=1):
+                _pin_clock(sidecar, _ts(minute))
                 await sidecar._attempt_once(delivery_pid, device, event, _ts(minute))
                 queued = await repo.list_queued_deliveries_all()
                 assert len(queued) == 1
                 assert queued[0]["attempt_count"] == idx
+            _pin_clock(sidecar, _ts(23))
             await sidecar._attempt_once(delivery_pid, device, event, _ts(23))
             second_pid = await _seed_queued_delivery(
                 repo,
@@ -1951,6 +1966,7 @@ class TestNetworkOutageRetryAndExpiry:
                 device_public_id=device_pid,
                 user_public_id=user,
             )
+            _pin_clock(sidecar, _ts(24))
             await sidecar._attempt_once(second_pid, device, event, _ts(24))
         finally:
             logger.remove(handler_id)
@@ -2001,17 +2017,20 @@ class TestNetworkOutageRetryAndExpiry:
         row = await repo.get_delivery_by_public_id(delivery_pid)
         assert row is not None
 
+        _pin_clock(sidecar, _ts(2))
         await sidecar._attempt_on_queued_row(row, _ts(2))
         row_after_one = await repo.get_delivery_by_public_id(delivery_pid)
         assert row_after_one is not None
         assert row_after_one["next_attempt_at"] == _ts(2) + timedelta(seconds=30)
 
+        _pin_clock(sidecar, _ts(2) + timedelta(seconds=45))
         await sidecar._attempt_on_queued_row(row_after_one, _ts(2) + timedelta(seconds=45))
         row_after_two = await repo.get_delivery_by_public_id(delivery_pid)
         assert row_after_two is not None
         assert row_after_two["next_attempt_at"] == expiry
 
         calls_before_expiry = apns.send.await_count
+        _pin_clock(sidecar, expiry)
         await sidecar._attempt_on_queued_row(row_after_two, expiry)
         assert apns.send.await_count == calls_before_expiry
         final_row = await repo.get_delivery_by_public_id(delivery_pid)
@@ -2042,14 +2061,14 @@ class TestNetworkOutageRetryAndExpiry:
             device_public_id=device_pid,
             user_public_id=user,
         )
-        sidecar, _ = _make_sidecar(repo, send_result=MaxAttemptsExceeded())
+        sidecar, _ = _make_sidecar(repo, send_result=MaxAttemptsExceeded(), clock=lambda: _ts(360))
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         await sidecar._attempt_once(delivery_pid, device, event, _ts(360))
         row = await repo.get_delivery_by_public_id(delivery_pid)
         assert row is not None
         assert row["status"] == "failed"
-        assert row["error_reason"] == "expired during outage: exception: MaxAttemptsExceeded"
+        assert row["error_reason"] == "expired during outage"
 
         explicit_pid = await repo.insert_alert_delivery(
             AlertDeliveryInsertRow(
@@ -2064,6 +2083,7 @@ class TestNetworkOutageRetryAndExpiry:
                 created_at=_ts(),
             )
         )
+        _pin_clock(sidecar, _ts(10))
         await sidecar._attempt_once(explicit_pid, device, event, _ts(10))
         explicit_row = await repo.get_delivery_by_public_id(explicit_pid)
         assert explicit_row is not None
@@ -2078,13 +2098,12 @@ class TestNetworkOutageRetryAndExpiry:
         legacy_row = await repo.get_delivery_by_public_id(legacy_pid)
         assert legacy_row is not None
         assert legacy_row.get("expires_at") is None
+        _pin_clock(sidecar, _ts(360))
         await sidecar._attempt_on_queued_row(legacy_row, _ts(360))
         legacy_after = await repo.get_delivery_by_public_id(legacy_pid)
         assert legacy_after is not None
         assert legacy_after["status"] == "failed"
-        assert (
-            legacy_after["error_reason"] == "expired during outage: exception: MaxAttemptsExceeded"
-        )
+        assert legacy_after["error_reason"] == "expired during outage"
 
         missing_target = _DeliveryTarget(
             delivery_public_id="nonexistent-delivery",
@@ -2132,6 +2151,7 @@ class TestNetworkOutageRetryAndExpiry:
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         for minute in (0, 1, 2):
+            _pin_clock(sidecar, _ts(minute))
             await sidecar._attempt_once(delivery_pid, device, event, _ts(minute))
 
         final_row = await repo.get_delivery_by_public_id(delivery_pid)
@@ -2222,7 +2242,13 @@ class TestNetworkOutageRetryAndExpiry:
         assert row_one["error_reason"] == "exception: TimeoutError"
         assert row_two is not None
         assert row_two["status"] == "sent"
-        assert row_one["next_attempt_at"] == row_two["last_attempt_at"]
+        assert row_one["next_attempt_at"] is not None
+        assert row_two["last_attempt_at"] is not None
+        assert (
+            row_two["last_attempt_at"]
+            <= row_one["next_attempt_at"]
+            < row_two["last_attempt_at"] + timedelta(seconds=5)
+        )
 
 
 class TestTerminalSuppressionAndIsolation:
@@ -2254,7 +2280,7 @@ class TestTerminalSuppressionAndIsolation:
         )
         reg = RuleRegistry()
         reg.register(_SingleRowRule(user_public_id=user, topic_prefix="test."))
-        sidecar, apns = _make_sidecar(repo, registry=reg)
+        sidecar, apns = _make_sidecar(repo, registry=reg, clock=lambda: _ts())
 
         await sidecar._dispatch("test.suppressed", b"{}", _ts())
 
@@ -2311,8 +2337,10 @@ class TestTerminalSuppressionAndIsolation:
 
         row_beta = await repo.get_delivery_by_public_id(pid_beta)
         assert row_beta is not None
+        _pin_clock(sidecar, _ts(1))
         await sidecar._attempt_on_queued_row(row_beta, _ts(1))
 
+        _pin_clock(sidecar, _ts(2))
         await sidecar._drain_outbox(_ts(2))
 
         apns.send.assert_not_awaited()
@@ -2352,7 +2380,7 @@ class TestTerminalSuppressionAndIsolation:
             device_public_id=device_pid,
             user_public_id=user,
         )
-        sidecar, apns = _make_sidecar(repo)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
         original = sidecar._attempt_on_queued_row
 
         async def _boom_on_first(
@@ -2409,6 +2437,7 @@ class TestTerminalSuppressionAndIsolation:
             cast(MessagePublisher, _FakeMessagePublisher()),
         )
 
+        _pin_clock(sidecar, _ts(1))
         await sidecar._attempt_on_queued_row(row, _ts(1))
 
         after = await repo.get_delivery_by_public_id(pid)
@@ -2448,6 +2477,7 @@ class TestTerminalSuppressionAndIsolation:
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
         for minute in (0, 1, 2):
+            _pin_clock(sidecar, _ts(minute))
             await sidecar._attempt_once(pid, device, event, _ts(minute))
 
         after = await repo.get_delivery_by_public_id(pid)
@@ -2478,42 +2508,75 @@ class TestTerminalSuppressionAndIsolation:
         event = await _seed_alert_event(repo, user)
         device = (await repo.list_active_notification_devices_for_user(user))[0]
 
-        delayed_future_pid = await _seed_queued_delivery(
-            repo,
-            event_public_id=event["public_id"],
-            device_public_id=device_pid,
-            user_public_id=user,
-        )
-        delayed_ready_pid = await _seed_queued_delivery(
-            repo,
-            event_public_id=event["public_id"],
-            device_public_id=device_pid,
-            user_public_id=user,
-        )
-        delayed_terminal_pid = await _seed_queued_delivery(
-            repo,
-            event_public_id=event["public_id"],
-            device_public_id=device_pid,
-            user_public_id=user,
-        )
-        delayed_null_reason_pid = await _seed_queued_delivery(
-            repo,
-            event_public_id=event["public_id"],
-            device_public_id=device_pid,
-            user_public_id=user,
-        )
-        trigger_pid = await _seed_queued_delivery(
-            repo,
-            event_public_id=event["public_id"],
-            device_public_id=device_pid,
-            user_public_id=user,
-        )
-
-        sidecar, apns = _make_sidecar(repo, send_result=MaxAttemptsExceeded())
-        for pid in (delayed_future_pid, delayed_ready_pid, delayed_terminal_pid, trigger_pid):
-            await sidecar._attempt_once(pid, device, event, _ts(0))
-
         recovery_now = datetime.now(UTC)
+        setup_now = recovery_now - timedelta(minutes=10)
+        delayed_future_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=1,
+                timestamp=setup_now,
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                created_at=setup_now,
+            )
+        )
+        delayed_ready_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=2,
+                timestamp=setup_now,
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                created_at=setup_now,
+            )
+        )
+        delayed_terminal_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=3,
+                timestamp=setup_now,
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                created_at=setup_now,
+            )
+        )
+        delayed_null_reason_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=4,
+                timestamp=setup_now,
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                created_at=setup_now,
+            )
+        )
+        trigger_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=5,
+                timestamp=setup_now,
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                created_at=setup_now,
+            )
+        )
+
+        sidecar, apns = _make_sidecar(
+            repo, send_result=MaxAttemptsExceeded(), clock=lambda: setup_now
+        )
+        for pid in (delayed_future_pid, delayed_ready_pid, delayed_terminal_pid, trigger_pid):
+            await sidecar._attempt_once(pid, device, event, setup_now)
+
         future_next = recovery_now + timedelta(minutes=15)
         await repo.update_delivery_retry_schedule(
             delayed_future_pid,
@@ -2556,17 +2619,21 @@ class TestTerminalSuppressionAndIsolation:
                 status_code=200, status="success", apns_id="apns-ok", description=""
             )
         )
+        sidecar._clock = lambda: datetime.now(UTC)
         await sidecar._attempt_once(trigger_pid, device, event, recovery_now)
+        after_recovery = datetime.now(UTC)
 
         expedited = await repo.get_delivery_by_public_id(delayed_future_pid)
         assert expedited is not None
         assert expedited["status"] == "queued"
         assert expedited["attempt_count"] == 1
-        assert expedited["next_attempt_at"] == recovery_now
+        assert expedited["next_attempt_at"] is not None
+        assert recovery_now <= expedited["next_attempt_at"] <= after_recovery
 
         expedited_null = await repo.get_delivery_by_public_id(delayed_null_reason_pid)
         assert expedited_null is not None
-        assert expedited_null["next_attempt_at"] == recovery_now
+        assert expedited_null["next_attempt_at"] is not None
+        assert recovery_now <= expedited_null["next_attempt_at"] <= after_recovery
         assert expedited_null["error_reason"] is None
 
         still_ready = await repo.get_delivery_by_public_id(delayed_ready_pid)
@@ -2581,3 +2648,542 @@ class TestTerminalSuppressionAndIsolation:
 
         assert await repo.list_queued_deliveries_all() == []
         assert await repo.count_deliveries_by_status() == {"sent": 4, "failed": 1}
+
+
+class TestReviewRegressionFixes:
+    """Targeted regression tests for deadline freshness, SCD2 recovery, routing, and drain."""
+
+    @pytest.mark.asyncio
+    async def test_legacy_null_expires_at_expired_before_send_never_calls_apns(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Legacy rows without ``expires_at`` expire at ``created_at + 6 h`` before sending.
+
+        Given: A queued legacy delivery with ``expires_at=None`` and a prior
+            error reason created at ``_ts(0)``.
+        When: ``_attempt_once`` and ``_attempt_on_queued_row`` run at ``_ts(360)``.
+        Then: Neither invokes ``apns.send``, and both transition to ``failed``
+            preserving the prior error reason in ``expired during outage: ...``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        pid_queued = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        await repo.update_delivery_retry_schedule(
+            pid_queued,
+            attempt_count=0,
+            next_attempt_at=_ts(10),
+            error_reason="exception: TimeoutError",
+            transition_at=_ts(1),
+            session_id="prep",
+            sequence_id=1,
+        )
+        pid_direct = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(360))
+        row_queued = await repo.get_delivery_by_public_id(pid_queued)
+        assert row_queued is not None
+        assert row_queued.get("expires_at") is None
+        await sidecar._attempt_on_queued_row(row_queued, _ts(360))
+        await sidecar._attempt_once(pid_direct, device, event, _ts(360))
+
+        apns.send.assert_not_awaited()
+        after_queued = await repo.get_delivery_by_public_id(pid_queued)
+        after_direct = await repo.get_delivery_by_public_id(pid_direct)
+        assert after_queued is not None and after_queued["status"] == "failed"
+        assert after_queued["error_reason"] == "expired during outage: exception: TimeoutError"
+        assert after_direct is not None and after_direct["status"] == "failed"
+        assert after_direct["error_reason"] == "expired during outage"
+
+    @pytest.mark.asyncio
+    async def test_row_expiring_during_earlier_send_in_tick_expires_without_sending(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A delivery whose TTL elapses during an earlier row's slow send is not sent.
+
+        Given: Two queued rows ready at ``_ts(0)`` where row 1 takes 40 s to send
+            and row 2 expires at ``_ts(0) + 20 s``.
+        When: ``_process_retry_queue_loop`` executes one tick.
+        Then: Only row 1 calls ``apns.send``, while row 2 checks fresh UTC and
+            expires to ``failed`` without calling ``apns.send``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        pid_one = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=1,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                next_attempt_at=_ts(0) - timedelta(seconds=10),
+                expires_at=_ts(60),
+                created_at=_ts(0),
+            )
+        )
+        pid_two = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=2,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                next_attempt_at=_ts(0) - timedelta(seconds=5),
+                expires_at=_ts(0) + timedelta(seconds=20),
+                created_at=_ts(0),
+            )
+        )
+
+        current_time = _ts(0)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: current_time)
+
+        async def _slow_send(**_kwargs: object) -> ApnsSendResult:
+            nonlocal current_time
+            current_time = _ts(0) + timedelta(seconds=40)
+            return ApnsSendResult(
+                status_code=200, status="success", apns_id="apns-1", description=""
+            )
+
+        apns.send = AsyncMock(side_effect=_slow_send)
+        original_safe = sidecar._safe_attempt_on_queued_row
+
+        async def _stop_after_second(
+            row: AlertDeliveryRow,
+            now: datetime,
+            *,
+            caches: _PrefetchedBatchCaches | None = None,
+        ) -> None:
+            await original_safe(row, now, caches=caches)
+            if row["public_id"] == pid_two:
+                await sidecar.stop()
+
+        monkeypatch.setattr(sidecar, "_safe_attempt_on_queued_row", _stop_after_second)
+        monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 0.01)
+
+        await asyncio.wait_for(sidecar._process_retry_queue_loop(), timeout=2.0)
+
+        apns.send.assert_awaited_once()
+        row_one = await repo.get_delivery_by_public_id(pid_one)
+        row_two = await repo.get_delivery_by_public_id(pid_two)
+        assert row_one is not None and row_one["status"] == "sent"
+        assert row_two is not None and row_two["status"] == "failed"
+        assert row_two["error_reason"] == "expired during outage"
+
+    @pytest.mark.asyncio
+    async def test_row_expiring_during_bump_expires_at_send_admission_without_sending(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A delivery expiring between attempt bump and send admission does not send.
+
+        Given: A queued delivery whose ``expires_at`` is ``_ts(5)`` and a clock
+            returning ``_ts(4)`` at admission/bump then ``_ts(6)`` at send check.
+        When: ``_attempt_once`` runs.
+        Then: ``apns.send`` is not called and the delivery fails as expired.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+        pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=1,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                expires_at=_ts(5),
+                created_at=_ts(0),
+            )
+        )
+        ticks = iter([_ts(4), _ts(4), _ts(6), _ts(6)])
+        sidecar, apns = _make_sidecar(repo, clock=lambda: next(ticks))
+
+        await sidecar._attempt_once(pid, device, event, _ts(4))
+
+        apns.send.assert_not_awaited()
+        final_row = await repo.get_delivery_by_public_id(pid)
+        assert final_row is not None
+        assert final_row["status"] == "failed"
+        assert final_row["attempt_count"] == 1
+        assert final_row["error_reason"] == "expired during outage"
+
+    @pytest.mark.asyncio
+    async def test_failure_backoff_and_transition_at_computed_from_fresh_failure_utc(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Backoff and ``next_attempt_at`` use fresh UTC captured after send failure.
+
+        Given: A queued delivery whose send attempt starts at ``_ts(0)`` and
+            fails with ``MaxAttemptsExceeded`` after 25 s.
+        When: ``_attempt_once`` handles the failure.
+        Then: ``last_attempt_at`` and ``timestamp`` record ``_ts(0) + 25 s``,
+            and ``next_attempt_at`` adds the 30 s backoff to that failure time.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+        pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+
+        current_time = _ts(0)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: current_time)
+
+        async def _slow_failure(**_kwargs: object) -> ApnsSendResult:
+            nonlocal current_time
+            current_time = _ts(0) + timedelta(seconds=25)
+            raise MaxAttemptsExceeded()
+
+        apns.send = AsyncMock(side_effect=_slow_failure)
+
+        await sidecar._attempt_once(pid, device, event, _ts(0))
+
+        row = await repo.get_delivery_by_public_id(pid)
+        assert row is not None
+        expected_failure_at = _ts(0) + timedelta(seconds=25)
+        assert row["last_attempt_at"] == expected_failure_at
+        assert row["timestamp"] == expected_failure_at
+        assert row["next_attempt_at"] == expected_failure_at + timedelta(seconds=30)
+
+    @pytest.mark.asyncio
+    async def test_network_failure_crossing_deadline_during_send_marks_expired(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A delivery whose TTL expires while ``apns.send`` is in flight fails as expired.
+
+        Given: A queued delivery with ``expires_at = _ts(0) + 10 s`` that starts
+            sending at ``_ts(0)`` before expiry and raises ``TimeoutError`` at
+            ``_ts(0) + 30 s``.
+        When: ``_attempt_once`` processes the post-send network exception.
+        Then: Because fresh failure UTC is past ``expires_at``, it transitions
+            directly to ``failed`` with ``expired during outage: exception: TimeoutError``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+        pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=1,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                expires_at=_ts(0) + timedelta(seconds=10),
+                created_at=_ts(0),
+            )
+        )
+
+        current_time = _ts(0)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: current_time)
+
+        async def _timeout_past_expiry(**_kwargs: object) -> ApnsSendResult:
+            nonlocal current_time
+            current_time = _ts(0) + timedelta(seconds=30)
+            raise TimeoutError("apns send timed out")
+
+        apns.send = AsyncMock(side_effect=_timeout_past_expiry)
+
+        await sidecar._attempt_once(pid, device, event, _ts(0))
+
+        final_row = await repo.get_delivery_by_public_id(pid)
+        assert final_row is not None
+        assert final_row["status"] == "failed"
+        assert (
+            final_row["error_reason"]
+            == "expired during outage: exception: TimeoutError: apns send timed out"
+        )
+
+    @pytest.mark.asyncio
+    async def test_expedite_outage_backlog_writes_fresh_utc_after_newer_version(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """``_expedite_outage_backlog`` writes fresh UTC per row instead of stale tick time.
+
+        Given: An outage-delayed row whose active SCD2 version was later updated
+            at ``_ts(2)`` before recovery expediting runs with stale ``now = _ts(0)``.
+        When: ``_expedite_outage_backlog`` writes while the sidecar clock reads ``_ts(3)``.
+        Then: The expedited version records ``_ts(3)`` for both ``timestamp`` and
+            ``next_attempt_at``, leaving monotonic SCD2 intervals.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delayed_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        await repo.begin_delivery_attempt(
+            delayed_pid, transition_at=_ts(1), session_id="s", sequence_id=1
+        )
+        await repo.update_delivery_retry_schedule(
+            delayed_pid,
+            attempt_count=1,
+            next_attempt_at=_ts(15),
+            error_reason="exception: MaxAttemptsExceeded",
+            transition_at=_ts(2),
+            session_id="s",
+            sequence_id=2,
+        )
+        sidecar, _ = _make_sidecar(repo, clock=lambda: _ts(3))
+        sidecar._record_outage_delay(delayed_pid, _ts(0))
+
+        await sidecar._maybe_log_outage_recovery("recovered-other", _ts(0))
+
+        expedited = await repo.get_delivery_by_public_id(delayed_pid)
+        assert expedited is not None
+        assert expedited["timestamp"] == _ts(3)
+        assert expedited["next_attempt_at"] == _ts(3)
+
+        async with repo.session() as s:
+            versions = (
+                (
+                    await s.execute(
+                        select(AlertDelivery)
+                        .where(AlertDelivery.public_id == delayed_pid)
+                        .order_by(AlertDelivery.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert [v.timestamp for v in versions] == [_ts(0), _ts(1), _ts(2), _ts(3)]
+        assert [v.known_to for v in versions] == [_ts(1), _ts(2), _ts(3), KNOWN_TO_MAX]
+
+    @pytest.mark.asyncio
+    async def test_expired_delivery_fails_before_routing_even_with_malformed_timezone(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Expiry is enforced before routing, and malformed pref timezones do not stall retries.
+
+        Given: A device preference with malformed ``timezone='/Bad/Zone'`` and quiet
+            hours covering the evaluation timestamp, plus one expired and one
+            non-expired queued APNs delivery.
+        When: ``_attempt_on_queued_row`` runs on both rows at ``_ts(10)``.
+        Then: The expired row transitions to ``failed`` (not cancelled by routing),
+            and the non-expired row evaluates quiet hours in UTC without raising.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                session_id="seed",
+                sequence_id=3,
+                timestamp=_ts(0),
+                device_public_id=device_pid,
+                alert_type="order_fill_full",
+                enabled=True,
+                min_priority="medium",
+                quiet_hours_start_min=0,
+                quiet_hours_end_min=1439,
+                timezone="/Bad/Zone",
+            )
+        )
+        expired_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=1,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                expires_at=_ts(5),
+                created_at=_ts(0),
+            )
+        )
+        active_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=2,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                expires_at=_ts(60),
+                created_at=_ts(0),
+            )
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(10))
+
+        expired_row = await repo.get_delivery_by_public_id(expired_pid)
+        active_row = await repo.get_delivery_by_public_id(active_pid)
+        assert expired_row is not None and active_row is not None
+        await sidecar._attempt_on_queued_row(expired_row, _ts(10))
+        await sidecar._attempt_on_queued_row(active_row, _ts(10))
+
+        apns.send.assert_not_awaited()
+        expired_after = await repo.get_delivery_by_public_id(expired_pid)
+        active_after = await repo.get_delivery_by_public_id(active_pid)
+        assert expired_after is not None and expired_after["status"] == "failed"
+        assert expired_after["error_reason"] == "expired during outage"
+        assert active_after is not None and active_after["status"] == "cancelled_scope"
+        assert active_after["error_reason"] == "routing_suppressed"
+
+    @pytest.mark.asyncio
+    async def test_drain_outbox_honors_future_next_attempt_at_and_expires_past_ttl(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Startup ``_drain_outbox`` respects ``next_attempt_at`` while expiring stale rows.
+
+        Given: Three queued deliveries at ``_ts(5)``: one with ``next_attempt_at``
+            in the future and valid TTL, one ready for retry, and one with
+            future ``next_attempt_at`` whose ``expires_at`` already passed.
+        When: ``_drain_outbox`` runs at ``_ts(5)``.
+        Then: The future-backoff row remains ``queued`` untouched, the ready row
+            sends and transitions to ``sent``, and the expired row becomes ``failed``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+
+        future_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=1,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                next_attempt_at=_ts(15),
+                expires_at=_ts(60),
+                created_at=_ts(0),
+            )
+        )
+        ready_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=2,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                next_attempt_at=_ts(4),
+                expires_at=_ts(60),
+                created_at=_ts(0),
+            )
+        )
+        expired_future_next_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=3,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                next_attempt_at=_ts(15),
+                expires_at=_ts(3),
+                created_at=_ts(0),
+            )
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(5))
+
+        await sidecar._drain_outbox(_ts(5))
+
+        apns.send.assert_awaited_once()
+        future_after = await repo.get_delivery_by_public_id(future_pid)
+        ready_after = await repo.get_delivery_by_public_id(ready_pid)
+        expired_after = await repo.get_delivery_by_public_id(expired_future_next_pid)
+        assert future_after is not None and future_after["status"] == "queued"
+        assert ready_after is not None and ready_after["status"] == "sent"
+        assert expired_after is not None and expired_after["status"] == "failed"
+        assert expired_after["error_reason"] == "expired during outage"
+
+    @pytest.mark.asyncio
+    async def test_expired_apns_rows_cleaned_up_when_apns_disabled(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Expiry cleanup runs in drain even when APNs sending is disabled.
+
+        Given: A ``NotifySidecar`` with ``apns=None`` and two queued APNs rows:
+            one expired at ``_ts(2)`` and one valid until ``_ts(60)``.
+        When: ``_drain_outbox`` runs at ``_ts(5)``.
+        Then: The expired row transitions to ``failed`` while the valid row stays ``queued``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        expired_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=1,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                expires_at=_ts(2),
+                created_at=_ts(0),
+            )
+        )
+        valid_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=2,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                expires_at=_ts(60),
+                created_at=_ts(0),
+            )
+        )
+        sidecar = NotifySidecar(
+            MagicMock(),
+            repo,
+            None,
+            "",
+            SequenceTracker(),
+            cast(MessagePublisher, _FakeMessagePublisher()),
+        )
+        _pin_clock(sidecar, _ts(5))
+
+        await sidecar._drain_outbox(_ts(5))
+
+        expired_after = await repo.get_delivery_by_public_id(expired_pid)
+        valid_after = await repo.get_delivery_by_public_id(valid_pid)
+        assert expired_after is not None and expired_after["status"] == "failed"
+        assert expired_after["error_reason"] == "expired during outage"
+        assert valid_after is not None and valid_after["status"] == "queued"

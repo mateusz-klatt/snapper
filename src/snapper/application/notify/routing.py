@@ -22,6 +22,7 @@ we just refuse to silently shove them behind a quiet-hour wall.
 """
 
 from datetime import datetime
+from functools import lru_cache
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 from zoneinfo import ZoneInfoNotFoundError
@@ -181,6 +182,15 @@ def _priority_rank(priority: str) -> int:
     return _PRIORITY_RANK.get(priority, 0)
 
 
+@lru_cache(maxsize=256)
+def _warn_invalid_timezone(tz_name: str) -> None:
+    """Log an invalid device-alert preference timezone once per distinct value."""
+    logger.warning(
+        "routing: unknown device-alert pref timezone={tz} — falling back to UTC",
+        tz=tz_name,
+    )
+
+
 def _in_quiet_hours(pref: DeviceAlertPrefRow, now: datetime) -> bool:
     """Return True when ``now`` falls inside the pref's quiet-hours window.
 
@@ -189,7 +199,8 @@ def _in_quiet_hours(pref: DeviceAlertPrefRow, now: datetime) -> bool:
     comparison happens after converting ``now`` to that zone. The
     default zone on fresh preference rows is ``"UTC"``, which is a
     no-op conversion; users who configure ``"America/New_York"`` or
-    similar get suppression tied to local clock minutes.
+    similar get suppression tied to local clock minutes. Unknown or
+    malformed stored timezones fall back to UTC and log once.
 
     ``quiet_hours_start_min`` / ``quiet_hours_end_min`` are both None
     when the feature is disabled. A wrap-around window (start > end)
@@ -204,11 +215,8 @@ def _in_quiet_hours(pref: DeviceAlertPrefRow, now: datetime) -> bool:
     tz_name = pref.get("timezone") or "UTC"
     try:
         zone = ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
-        logger.warning(
-            "routing: unknown device-alert pref timezone={tz} — falling back to UTC",
-            tz=tz_name,
-        )
+    except (ZoneInfoNotFoundError, ValueError):
+        _warn_invalid_timezone(tz_name)
         zone = ZoneInfo("UTC")
     local_now = now.astimezone(zone)
     current_min = local_now.hour * 60 + local_now.minute

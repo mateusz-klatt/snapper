@@ -139,6 +139,34 @@ def _expired_error_reason(prior_reason: str | None) -> str:
     return "expired during outage"
 
 
+def _deadline_for_delivery_row(row: AlertDeliveryRow) -> datetime:
+    """Resolve the effective outage TTL deadline for one queued delivery row.
+
+    Args:
+        row: Queued ``AlertDeliveryRow`` snapshot.
+
+    Returns:
+        ``expires_at`` when populated, else ``created_at + _DEFAULT_DELIVERY_TTL``.
+    """
+    explicit_expiry = row.get("expires_at")
+    if explicit_expiry is not None:
+        return explicit_expiry
+    return row["created_at"] + _DEFAULT_DELIVERY_TTL
+
+
+def _is_drain_eligible(row: AlertDeliveryRow, now: datetime) -> bool:
+    """Return whether startup drain should evaluate ``row`` at ``now``.
+
+    Honours persisted ``next_attempt_at`` backoff for rows still within their
+    outage TTL while admitting rows whose TTL already expired so cleanup runs
+    independently of sender availability.
+    """
+    next_attempt = row.get("next_attempt_at")
+    if next_attempt is None or next_attempt <= now:
+        return True
+    return now >= _deadline_for_delivery_row(row)
+
+
 def _backoff_seconds(attempt_number: int, *, cap_s: float = _BACKOFF_CAP_S) -> float:
     """Compute the exponential backoff for the N-th attempt.
 
@@ -249,6 +277,7 @@ class NotifySidecar(RegisterableProcess):
         self._registry = registry or load_default_registry()
         self._scope_revalidator = scope_revalidator or ScopeRevalidator(tracker=tracker)
         self._push_beta_provider = push_beta_provider
+        self._clock: Callable[[], datetime] = lambda: datetime.now(UTC)
         self._outage_started_at: datetime | None = None
         self._outage_delayed_delivery_ids: set[str] = set()
         self._portfolio_drift_recovery_scanner = (
@@ -289,7 +318,7 @@ class NotifySidecar(RegisterableProcess):
             self._subscriber.subscribe("admin.scope_revoked")
             self._subscriber.subscribe("admin.user_deactivated")
             self._subscriber.subscribe("admin.membership_revoked")
-            await self._drain_outbox(datetime.now(UTC))
+            await self._drain_outbox(self._clock())
             await self._portfolio_drift_recovery_scanner.start()
             await self._run_workers()
         except BaseException as exc:
@@ -325,7 +354,7 @@ class NotifySidecar(RegisterableProcess):
             topic, payload = await self._subscriber.recv_multipart()
             if self._stop_event.is_set():
                 return
-            await self._dispatch(topic, payload, datetime.now(UTC))
+            await self._dispatch(topic, payload, self._clock())
 
     async def _join_cleanup(
         self, cleanup_task: asyncio.Task[BaseException | None]
@@ -657,34 +686,54 @@ class NotifySidecar(RegisterableProcess):
         )
         await self._attempt_delivery(target, now)
 
+    async def _expire_if_past_deadline(
+        self,
+        delivery_public_id: str,
+        prior_reason: str | None,
+        deadline: datetime,
+        now: datetime,
+    ) -> bool:
+        """Transition a delivery to ``failed`` without sending when ``now >= deadline``."""
+        if now < deadline:
+            return False
+        await self._fail_expired_delivery(delivery_public_id, prior_reason, now)
+        return True
+
     async def _attempt_delivery(self, target: _DeliveryTarget, now: datetime) -> None:
         """Run exactly one APNs send attempt on a queued delivery row.
 
         Before reserving an attempt and again immediately before the APNs
         call, ``ScopeRevalidator.should_skip_send`` decides whether the
-        event's scope is still active. The second check is the send-admission
-        barrier: a desk detach that commits while the durable attempt counter
-        is bumped prevents the network call from starting. Scope-stale
-        deliveries transition to ``cancelled_scope`` in the outbox.
+        event's scope is still active and a fresh UTC check enforces the
+        resolved delivery deadline (``expires_at`` or ``created_at + 6 h``).
+        Deliveries past their deadline transition to ``failed`` without
+        sending. Otherwise, bumps ``attempt_count`` first, bounds
+        ``ApnsClientPool.send`` with ``_APNS_SEND_TIMEOUT_S``, and computes
+        retry backoff and SCD2 transition times from fresh UTC timestamps.
 
-        Deliveries with an explicit ``expires_at`` already reached (``now >=
-        expires_at``) transition to ``failed`` without sending. Otherwise,
-        bumps ``attempt_count`` first, bounds ``ApnsClientPool.send`` with
-        ``_APNS_SEND_TIMEOUT_S``, and routes results or exceptions to the
-        outage-retry or 3-attempt-limit policy.
+        Note:
+            If ``ApnsClientPool.send`` hits the 30s timeout after APNs already
+            accepted the push before the HTTP/2 response returned, the row
+            stays ``queued`` and a subsequent retry can duplicate the push
+            (collapsed per ``thread_key`` via ``apns-collapse-id`` when set).
         """
+        _ = now
         if self._apns is None:
             return
-        if await self._cancel_if_scope_revoked(target.delivery_public_id, target.event, now):
+        admission_now = self._clock()
+        if await self._cancel_if_scope_revoked(
+            target.delivery_public_id, target.event, admission_now
+        ):
             return
-        if target.expires_at is not None and now >= target.expires_at:
-            await self._fail_expired_delivery(
-                target.delivery_public_id,
-                target.prior_error_reason,
-                now,
-            )
+        deadline = await self._resolve_delivery_deadline(target, admission_now)
+        if await self._expire_if_past_deadline(
+            target.delivery_public_id,
+            target.prior_error_reason,
+            deadline,
+            admission_now,
+        ):
             return
-        current_attempt = await self._bump_attempt(target.delivery_public_id, now)
+        current_attempt = await self._bump_attempt(target.delivery_public_id, self._clock())
         if current_attempt is None:
             logger.info(
                 "sidecar: delivery {pid} no longer queued at bump time —"
@@ -692,7 +741,15 @@ class NotifySidecar(RegisterableProcess):
                 pid=target.delivery_public_id,
             )
             return
-        if await self._cancel_if_scope_revoked(target.delivery_public_id, target.event, now):
+        send_now = self._clock()
+        if await self._cancel_if_scope_revoked(target.delivery_public_id, target.event, send_now):
+            return
+        if await self._expire_if_past_deadline(
+            target.delivery_public_id,
+            target.prior_error_reason,
+            deadline,
+            send_now,
+        ):
             return
         payload = _build_apns_payload(target.event, user_language=target.user_language)
         try:
@@ -709,9 +766,9 @@ class NotifySidecar(RegisterableProcess):
                 timeout=_APNS_SEND_TIMEOUT_S,
             )
         except Exception as exc:
-            await self._handle_send_exception(target, current_attempt, exc, now)
+            await self._handle_send_exception(target, current_attempt, exc, self._clock())
             return
-        await self._apply_result(target, current_attempt, result, now)
+        await self._apply_result(target, current_attempt, result, self._clock())
 
     async def _handle_send_exception(
         self,
@@ -908,10 +965,7 @@ class NotifySidecar(RegisterableProcess):
             return target.created_at + _DEFAULT_DELIVERY_TTL
         row = await self._repo.get_delivery_by_public_id(target.delivery_public_id)
         if row is not None:
-            row_expiry = row.get("expires_at")
-            if row_expiry is not None:
-                return row_expiry
-            return row["created_at"] + _DEFAULT_DELIVERY_TTL
+            return _deadline_for_delivery_row(row)
         return now
 
     async def _fail_expired_delivery(
@@ -948,7 +1002,11 @@ class NotifySidecar(RegisterableProcess):
         )
 
     def _record_outage_delay(self, delivery_public_id: str, now: datetime) -> None:
-        """Record one delivery delayed by an active network outage."""
+        """Record one delivery delayed by an active network outage.
+
+        Outage state is tracked process-wide across APNs ``sandbox`` and
+        ``prod`` environments rather than per environment.
+        """
         if self._outage_started_at is None:
             self._outage_started_at = now
         self._outage_delayed_delivery_ids.add(delivery_public_id)
@@ -956,7 +1014,13 @@ class NotifySidecar(RegisterableProcess):
     async def _maybe_log_outage_recovery(
         self, recovered_delivery_public_id: str, now: datetime
     ) -> None:
-        """Log one recovery summary and reschedule delayed backlog for the next tick."""
+        """Log one recovery summary and reschedule delayed backlog for the next tick.
+
+        Because outage tracking is shared process-wide across APNs
+        environments, the first successful send in either ``sandbox`` or
+        ``prod`` closes the shared outage window and expedites all queued
+        deliveries in the delayed set.
+        """
         if self._outage_started_at is None:
             return
         delayed_ids = sorted(self._outage_delayed_delivery_ids)
@@ -977,37 +1041,40 @@ class NotifySidecar(RegisterableProcess):
         recovered_delivery_public_id: str,
         now: datetime,
     ) -> None:
-        """Set ``next_attempt_at = now`` on still-queued rows delayed by the outage."""
+        """Set ``next_attempt_at`` to a fresh UTC time on still-queued outage rows."""
+        _ = now
         for pid in delayed_ids:
             if pid == recovered_delivery_public_id:
                 continue
             row = await self._repo.get_delivery_by_public_id(pid)
             if row is None or row["status"] != "queued":
                 continue
+            write_now = self._clock()
             next_attempt = row.get("next_attempt_at")
-            if next_attempt is None or next_attempt <= now:
+            if next_attempt is None or next_attempt <= write_now:
                 continue
             await self._persist_retry_schedule(
                 pid,
                 row["attempt_count"],
-                now,
+                write_now,
                 row.get("error_reason"),
-                now,
+                write_now,
             )
 
     async def _drain_outbox(self, now: datetime) -> None:
-        """Process every ``status='queued'`` row on startup (crash recovery).
+        """Process ready or expired ``status='queued'`` rows on startup (crash recovery).
 
-        Ordered ``last_attempt_at ASC NULLS FIRST`` (never-
-        attempted rows first, then longest-waiting retries). Each
-        row gets one fresh attempt; a second-or-later failure stays
-        inside the retry loop's normal scheduling.
+        Ordered ``last_attempt_at ASC NULLS FIRST`` (never-attempted rows
+        first, then longest-waiting retries). Honours persisted
+        ``next_attempt_at`` backoff while still expiring rows already past
+        their outage TTL regardless of APNs sender availability.
 
         Bulk-prefetches the alert_event, active devices, user languages,
-        and routing preferences for every row in the batch so drain/retry
-        avoids N+1 reads and isolates per-row failures without aborting
-        the drain.
+        and routing preferences once for the eligible batch so drain avoids
+        N+1 reads; prefetched devices and prefs carry bounded staleness up to
+        the drain duration. Each eligible row uses a fresh UTC timestamp.
         """
+        _ = now
         queued = await self._repo.list_queued_deliveries_all()
         queued.sort(
             key=lambda r: (
@@ -1015,9 +1082,11 @@ class NotifySidecar(RegisterableProcess):
                 r["created_at"],
             )
         )
-        caches = await self._prefetch_caches_for_rows(queued)
-        for row in queued:
-            await self._safe_attempt_on_queued_row(row, now, caches=caches)
+        drain_now = self._clock()
+        eligible = [row for row in queued if _is_drain_eligible(row, drain_now)]
+        caches = await self._prefetch_caches_for_rows(eligible)
+        for row in eligible:
+            await self._safe_attempt_on_queued_row(row, self._clock(), caches=caches)
 
     async def _prefetch_caches_for_rows(
         self, rows: list[AlertDeliveryRow]
@@ -1026,6 +1095,8 @@ class NotifySidecar(RegisterableProcess):
 
         Returns a :class:`_PrefetchedBatchCaches` bundle, deduplicating IDs
         so underlying SELECTs touch each event or user at most once per batch.
+        Device and preference snapshots can exhibit bounded staleness over a
+        long drain or retry tick (up to batch length * ``_APNS_SEND_TIMEOUT_S``).
         """
         if not rows:
             return _PrefetchedBatchCaches(events={}, devices={}, languages={})
@@ -1133,15 +1204,21 @@ class NotifySidecar(RegisterableProcess):
     ) -> None:
         """Load the source alert_event + device for one queued row and send.
 
-        ``caches`` is an optional pre-loaded bundle produced by
-        :meth:`_prefetch_caches_for_rows`. Cache misses fall through to per-row
-        repository fetches. Missing events, inactive devices, and rows suppressed
-        by the routing cascade transition to terminal ``failed``,
-        ``unregistered``, or ``cancelled_scope`` instead of remaining ``queued``.
+        Enforces the resolved delivery TTL before routing and before checking
+        APNs sender availability so expired APNs rows transition to ``failed``
+        even when APNs is disabled or routing data is malformed. Missing
+        events, inactive devices, and rows suppressed by the routing cascade
+        transition to terminal ``failed``, ``unregistered``, or
+        ``cancelled_scope`` instead of remaining ``queued``.
         """
         if row.get("provider", "apns") == "fcm":
             if self._android is not None:
                 await self._android.attempt(row, now)
+            return
+        deadline = _deadline_for_delivery_row(row)
+        if await self._expire_if_past_deadline(
+            row["public_id"], row.get("error_reason"), deadline, self._clock()
+        ):
             return
         if self._apns is None:
             return
@@ -1152,7 +1229,7 @@ class NotifySidecar(RegisterableProcess):
                 pid=row["public_id"],
                 evt=row["alert_event_public_id"],
             )
-            await self._mark_failed(row["public_id"], "alert_event missing", now)
+            await self._mark_failed(row["public_id"], "alert_event missing", self._clock())
             return
         device = await self._resolve_queued_device(
             row["user_public_id"], row["device_public_id"], caches
@@ -1163,9 +1240,9 @@ class NotifySidecar(RegisterableProcess):
                 " marking unregistered (no APNs call)",
                 pid=row["public_id"],
             )
-            await self._mark_unregistered_no_device(row["public_id"], now)
+            await self._mark_unregistered_no_device(row["public_id"], self._clock())
             return
-        if await self._cancel_if_routing_suppressed(row, event, now, caches=caches):
+        if await self._cancel_if_routing_suppressed(row, event, self._clock(), caches=caches):
             return
         user_language = await self._resolve_user_language(row["user_public_id"], caches)
         target = _DeliveryTarget(
@@ -1216,9 +1293,11 @@ class NotifySidecar(RegisterableProcess):
         """Wake every 30s and retry deliveries whose ``next_attempt_at`` arrived.
 
         Background task spawned in ``start()``; tears down when
-        ``stop()`` sets the stop event. Each tick mints one ``now`` at
-        the entry boundary that drives both the retry-eligibility SELECT
-        and every SCD2 write performed while processing that batch.
+        ``stop()`` sets the stop event. Each tick selects ready rows at tick
+        entry, prefetches batch caches (whose device and preference snapshots
+        carry bounded staleness over the tick duration), and passes a fresh
+        UTC timestamp for each row so earlier slow/timed-out sends do not
+        leave later rows with stale expiry or retry timestamps.
 
         Why every send is bounded: both retry selections
         (``list_deliveries_ready_for_retry`` and ``list_queued_deliveries_all``)
@@ -1237,11 +1316,11 @@ class NotifySidecar(RegisterableProcess):
                 await asyncio.wait_for(self._stop_event.wait(), timeout=_RETRY_LOOP_INTERVAL_S)
             if self._stop_event.is_set():
                 return
-            now = datetime.now(UTC)
-            rows = await self._repo.list_deliveries_ready_for_retry(now)
+            tick_now = self._clock()
+            rows = await self._repo.list_deliveries_ready_for_retry(tick_now)
             caches = await self._prefetch_caches_for_rows(rows)
             for row in rows:
-                await self._safe_attempt_on_queued_row(row, now, caches=caches)
+                await self._safe_attempt_on_queued_row(row, self._clock(), caches=caches)
 
 
 def _priority_to_apns(priority: str) -> int:

@@ -1621,12 +1621,22 @@ or configured Android FID registrations via the outbox-backed `NotifySidecar`
 (`application/notify/sidecar.py`). On its 30s retry scheduler, permanent APNs
 rejects and HTTP 429/5xx responses keep the 3-attempt limit (`_RETRY_GIVE_UP_AFTER_ATTEMPTS`),
 while transient network-class outages (DNS, connect/proxy, timeouts, and
-aioapns `MaxAttemptsExceeded`) retry with exponential backoff capped at 15 min
-until the delivery's `expires_at` (default 6 h from creation) before marking
-`failed`. APNs sends enforce a 30s per-attempt timeout so a stalled transport
-call cannot wedge the sequential retry loop, and queued rows whose device
-registration or routing eligibility disappears transition to terminal
-`unregistered` or `cancelled_scope`. The same process owns a guarded periodic recovery
+aioapns `MaxAttemptsExceeded` without a non-network/SSL cause) retry with
+exponential backoff capped at 15 min until the delivery's `expires_at`
+(default 6 h from creation) before marking `failed`. APNs sends enforce a 30s
+per-attempt timeout so a stalled transport call cannot wedge the sequential
+retry loop, and queued rows whose device registration or routing eligibility
+disappears transition to terminal `unregistered` or `cancelled_scope`. Because
+a 30s send timeout can fire after APNs already accepted the HTTP/2 request
+before the response returns, the delivery stays `queued` and a subsequent retry
+can duplicate the push (collapsed per `thread_key` via `apns-collapse-id` when
+present). Batch-prefetched devices and preferences during one drain or retry
+tick have bounded staleness up to the tick's processing length, and outage
+window tracking is shared process-wide across APNs `sandbox` and `prod`
+environments so recovery in either environment expedites the shared delayed
+backlog. Startup outbox drain honours persisted `next_attempt_at` backoff while
+expiring APNs rows past TTL independently of whether an APNs sender is enabled.
+The same process owns a guarded periodic recovery
 scanner for sentinel-current open portfolio-drift episodes. An eager pass
 at startup and later
 `PORTFOLIO_DRIFT_RECOVERY_INTERVAL_SECONDS` ticks rebuild the exact Stage 1
