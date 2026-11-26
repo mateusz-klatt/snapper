@@ -5968,6 +5968,28 @@ class Repository(ABC):
         ...
 
     @abstractmethod
+    async def get_undispatched_commands(
+        self,
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
+    ) -> list[TradeCommandRow]:
+        """Return undispatched created trade commands ordered for outbox delivery.
+
+        Args:
+            as_of: Temporal visibility cutoff for the command itself.
+            limit: Maximum number of eligible rows to return.
+            offset: Optional row offset for callers not using keyset paging.
+            after: Optional exclusive ``(created_at, public_id, id)`` keyset cursor.
+
+        Returns:
+            Ordered list of eligible ``TradeCommandRow`` dictionaries.
+        """
+        ...
+
+    @abstractmethod
     async def get_executions_for_order(
         self,
         order_public_id: str,
@@ -28194,13 +28216,18 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         limit: int = 10,
         offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
     ) -> list[TradeCommandRow]:
         """Return trade commands with status='created' for outbox dispatch.
 
-        When ``offset > 0``, the query skips the first ``offset`` rows. Used by
-        :meth:`OutboxDispatcher._fetch_owned_batch` when multi-instance
-        shard ownership filtering is active. Held id-less cancels persist as
-        ``awaiting_target`` and are never fetched by this query.
+        When ``after`` is provided, applies keyset filtering strictly past the
+        ``(created_at, public_id, id)`` tuple so intervening dispatches,
+        expiries, or cancel-guard retirements between page reads cannot shift
+        offsets and skip a backing-off head row. When ``offset > 0``, the
+        query skips the first ``offset`` rows for callers not using keyset
+        paging. Held id-less cancels persist as ``awaiting_target`` and are
+        never fetched by this query.
         Ordering is ``(created_at, public_id, id)`` for stable enqueue order
         and deterministic pagination: plan-service dispatch inserts multiple
         commands within a single ``now`` tick (see
@@ -28223,6 +28250,7 @@ class SQLAlchemyRepository(Repository):
             as_of: Temporal visibility cutoff for the command itself.
             limit: Maximum number of eligible rows.
             offset: Number of eligible rows skipped before selection.
+            after: Optional exclusive ``(created_at, public_id, id)`` keyset cursor.
 
         Returns:
             Dispatch candidates excluding every exact-scope material barrier.
@@ -28259,15 +28287,38 @@ class SQLAlchemyRepository(Repository):
                 )
             ),
         )
+        filters: list[ColumnElement[bool]] = [
+            TradeCommand.status == "created",
+            *where_active(TradeCommand, as_of),
+            dispatchable_paired_gate,
+            ~material_barrier,
+        ]
+        if after is not None:
+            after_created_at, after_public_id, after_id = after
+            filters.append(
+                tuple_(
+                    TradeCommand.created_at,
+                    TradeCommand.public_id,
+                    TradeCommand.id,
+                )
+                > tuple_(
+                    bindparam(
+                        "after_created_at",
+                        after_created_at,
+                        type_=TradeCommand.created_at.type,
+                    ),
+                    bindparam(
+                        "after_public_id",
+                        after_public_id,
+                        type_=TradeCommand.public_id.type,
+                    ),
+                    bindparam("after_id", after_id, type_=TradeCommand.id.type),
+                )
+            )
         async with self.session() as s:
             result = await s.execute(
                 select(TradeCommand)
-                .where(
-                    TradeCommand.status == "created",
-                    *where_active(TradeCommand, as_of),
-                    dispatchable_paired_gate,
-                    ~material_barrier,
-                )
+                .where(*filters)
                 .order_by(TradeCommand.created_at, TradeCommand.public_id, TradeCommand.id)
                 .offset(offset)
                 .limit(limit)
@@ -28323,6 +28374,7 @@ class SQLAlchemyRepository(Repository):
     def _trade_command_to_row(cmd: TradeCommand) -> TradeCommandRow:
         """Project a TradeCommand ORM row into the TradeCommandRow TypedDict shape."""
         return {
+            "id": cmd.id,
             "public_id": cmd.public_id,
             "timestamp": cmd.timestamp,
             "session_id": cmd.session_id,

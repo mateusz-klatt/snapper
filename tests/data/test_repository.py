@@ -84,6 +84,7 @@ from snapper.data.repository_types import SpotAssetPrecisionEvidenceRow
 from snapper.data.repository_types import SpotAssetPrecisionEvidenceUpsertRow
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TradeCommandInsertRow
+from snapper.data.repository_types import TradeCommandRow
 from snapper.data.repository_types import TradeRow
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.data.repository_types import VenueEventInsertRow
@@ -2096,6 +2097,18 @@ class DummyRepository(Repository):
         """Get setting categories - returns empty list."""
         return []
 
+    async def get_undispatched_commands(
+        self,
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
+    ) -> list[TradeCommandRow]:
+        """Return no undispatched commands for the dummy repository."""
+        del as_of, limit, offset, after
+        return []
+
 
 @pytest.mark.parametrize(
     ("input_url", "expected"),
@@ -3307,6 +3320,17 @@ class _MinimalRepository(Repository):
         return None
 
     async def get_setting_categories(self, as_of: datetime) -> list[str]:
+        return []
+
+    async def get_undispatched_commands(
+        self,
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
+    ) -> list[TradeCommandRow]:
+        del as_of, limit, offset, after
         return []
 
 
@@ -10528,6 +10552,106 @@ async def test_get_undispatched_commands_preserves_order_after_failure_version(
         assert [row["public_id"] for row in rows] == [pid_a, pid_b]
         assert rows[0]["attempt_count"] == 1
         assert rows[0]["last_error"] == "dispatch failed"
+    finally:
+        await r.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_get_undispatched_commands_keyset_after_strictly_advances_including_tied_created_at(
+    tmp_path: Path,
+) -> None:
+    """Keyset ``after`` returns strictly later rows in ``(created_at, public_id, id)`` order.
+
+    Given: Four undispatched commands in SQLite where three share ``created_at`` (and
+        the first carries a newer SCD2 failure row id) followed by a later command,
+    When: ``get_undispatched_commands`` paginates with ``after=(created_at, public_id, id)``,
+    Then: Each page returns strictly greater keys in ``(created_at, public_id, id)``
+        order without skipping or repeating rows across the ``created_at`` tie.
+    """
+    db_path = tmp_path / "keyset_after.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    try:
+        tied_now = datetime.now(UTC)
+        pids: list[str] = []
+        for idx in range(3):
+            _, pid = await r.insert_trade_command(
+                {
+                    "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+                    "command_type": "submit",
+                    "shard_key": "kraken.BTC-USD.live",
+                    "exchange": "kraken",
+                    "instrument": "BTC-USD",
+                    "mode": "live",
+                    "strategy_id": "engine-buy",
+                    "client_order_id": f"cid-ks-{idx}",
+                    "venue_client_id": f"vcid-ks-{idx}",
+                    "side": "buy",
+                    "order_type": "market",
+                    "quantity": 0.5,
+                    "price": None,
+                    "status": "created",
+                    "created_at": tied_now,
+                    "correlation_id": f"corr-ks-{idx}",
+                    "session_id": "s1",
+                    "sequence_id": idx + 1,
+                    "timestamp": tied_now,
+                }
+            )
+            pids.append(pid)
+
+        later = tied_now + timedelta(seconds=1)
+        _, pid_later = await r.insert_trade_command(
+            {
+                "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+                "command_type": "submit",
+                "shard_key": "kraken.BTC-USD.live",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "engine-buy",
+                "client_order_id": "cid-ks-later",
+                "venue_client_id": "vcid-ks-later",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "created",
+                "created_at": later,
+                "correlation_id": "corr-ks-later",
+                "session_id": "s1",
+                "sequence_id": 4,
+                "timestamp": later,
+            }
+        )
+
+        t1 = tied_now + timedelta(milliseconds=100)
+        assert (
+            await r.cas_trade_command_status(
+                public_id=pids[0],
+                expected_status="created",
+                new_status="created",
+                bus_time=t1,
+                session_id="s1",
+                sequence_id=5,
+                attempt_count=1,
+                last_error="dispatch failed",
+            )
+            is True
+        )
+
+        as_of = later + timedelta(seconds=1)
+        page1 = await r.get_undispatched_commands(as_of=as_of, limit=2)
+        assert [row["public_id"] for row in page1] == pids[:2]
+        assert "id" in page1[-1]
+
+        cursor1 = (page1[-1]["created_at"], page1[-1]["public_id"], page1[-1]["id"])
+        page2 = await r.get_undispatched_commands(as_of=as_of, limit=2, after=cursor1)
+        assert [row["public_id"] for row in page2] == [pids[2], pid_later]
+
+        cursor2 = (page2[-1]["created_at"], page2[-1]["public_id"], page2[-1]["id"])
+        page3 = await r.get_undispatched_commands(as_of=as_of, limit=2, after=cursor2)
+        assert page3 == []
     finally:
         await r.engine.dispose()
 

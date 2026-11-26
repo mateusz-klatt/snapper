@@ -58,6 +58,9 @@ _RETRY_ERROR_RELOG_INTERVAL_S: Final[float] = 300.0
 _RETRY_STALE_PRUNE_S: Final[float] = 300.0
 """Seconds since last fetch sighting after which a retry entry is pruned."""
 
+_SHARD_SKIP_CAP_MULTIPLIER: Final[int] = 10
+"""Multiplier on ``max_scan_rows`` capping non-stale shard-deferred skips."""
+
 
 @dataclass(frozen=True, slots=True)
 class _CommandRetryState:
@@ -80,6 +83,46 @@ class _CommandRetryState:
     blocks_shard: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class _FetchedBatch:
+    """Owned commands split between normal dispatch and stale shard-deferred expiry.
+
+    Attributes:
+        dispatch: Eligible non-deferred commands to run through full dispatch.
+        expire_only: Stale expirable rows deferred only by shard blocking.
+    """
+
+    dispatch: list[TradeCommandRow]
+    expire_only: list[TradeCommandRow]
+
+
+@dataclass(slots=True)
+class _ScanState:
+    """Mutable accumulator and scan-ceiling counters for one paginated poll.
+
+    Attributes:
+        dispatch: Eligible rows queued for dispatch up to ``batch_size``.
+        expire_only: Stale shard-deferred expirable rows queued for expiry only.
+        deferred_shards: Shard keys already deferred in fetch order this cycle.
+        seen_public_ids: Public IDs already processed across keyset pages.
+        now: Current UTC wall clock used to evaluate dispatch TTL staleness.
+        now_mono: Current monotonic clock reading in seconds.
+        considered: Rows counted against ``max_scan_rows``.
+        shard_skipped: Non-stale shard-deferred rows counted against the skip ceiling.
+        stop_reason: Cap reason when pagination terminates early, or ``None``.
+    """
+
+    dispatch: list[TradeCommandRow]
+    expire_only: list[TradeCommandRow]
+    deferred_shards: set[str]
+    seen_public_ids: set[str]
+    now: datetime
+    now_mono: float
+    considered: int = 0
+    shard_skipped: int = 0
+    stop_reason: str | None = None
+
+
 class OutboxDispatcher:
     """Polls TradeCommand table and publishes undispatched commands to ZMQ.
 
@@ -91,9 +134,9 @@ class OutboxDispatcher:
     every coordinator's OutboxDispatcher receives every ``created``
     row on a poll. The ``ownership`` kwarg filters rows in Python so
     each dispatcher only publishes its own shards. Scans paginate via
-    the repository ``offset`` parameter up to ``max_scan_rows`` to
-    avoid pathological starvation when foreign-owner rows dominate
-    the backlog.
+    the repository keyset cursor ``after=(created_at, public_id, id)``
+    rather than ``offset`` so concurrent status transitions between
+    pages cannot shift rows and skip a backing-off shard blocker.
 
     Failing commands back off exponentially per ``public_id`` starting at
     0.25 s (factor 2), capped at 5 s for TTL-bound commands (``create``,
@@ -106,13 +149,23 @@ class OutboxDispatcher:
     Non-expirable rows (``cancel`` and others) are deferred only by their
     own retry entry: a failing head must never block a safety cancel of an
     independent live order (a cancel whose target is unpublished is already
-    held cleanly by :class:`CancelTargetUnresolvedError`). Its cost is that
-    a stuck non-TTL command blocks later expirable commands on its own
-    shard, capped at 60 s per retry and re-logging an ERROR every 5
-    minutes. A create held by the durable material barrier backs off
-    without blocking its shard: the barrier runs before TTL expiry, so such
-    a hold can persist indefinitely, and later commands on the shard never
-    depend on a create that cannot be published.
+    held cleanly by :class:`CancelTargetUnresolvedError`). Stale expirable
+    rows deferred only behind a blocked shard (not by their own retry entry)
+    move into an expire-only pass that runs :meth:`_expire_if_stale` without
+    material checks or publishing; expiry is terminal and publishes nothing,
+    so shard order does not matter for it, whereas rows deferred by their
+    own retry entry are re-checked (including TTL) when due.
+
+    Pagination bounds scan work with two caps when ``max_scan_rows`` is
+    set: ``max_scan_rows`` counts considered rows (dispatch candidates,
+    expire-only rows, own-retry skips, and foreign-shard skips), while
+    non-stale rows skipped only because their shard is blocked count toward
+    a separate ``10 * max_scan_rows`` ceiling so a backed-off non-TTL head
+    cannot starve healthy shards (both remain unbounded when
+    ``max_scan_rows`` is ``None``). A create held by the durable material
+    barrier backs off without blocking its shard: the barrier runs before
+    TTL expiry, so such a hold can persist indefinitely, and later commands
+    on the shard never depend on a create that cannot be published.
 
     Args:
         repository: Database repository for reading/updating commands.
@@ -236,97 +289,132 @@ class OutboxDispatcher:
         for public_id in stale_ids:
             del self._retry[public_id]
 
-    def _is_row_deferred(
-        self,
-        cmd: TradeCommandRow,
-        deferred_shards: set[str],
-        now_mono: float,
-    ) -> bool:
-        """Return whether a row is backing off or queued behind a deferred shard peer.
-
-        Only expirable command types (``create``, ``submit``) wait behind a
-        deferred peer on the same shard; non-expirable rows such as cancels
-        are deferred only by their own retry entry so a failing head never
-        blocks a safety cancel of an independent live order.
+    def _is_stale_expirable(self, cmd: TradeCommandRow, now: datetime) -> bool:
+        """Return whether an expirable row exceeds the enabled dispatch TTL.
 
         Args:
-            cmd: Candidate command row from the current fetch page.
-            deferred_shards: Shard keys already deferred in fetch order this cycle.
-            now_mono: Current monotonic clock reading in seconds.
+            cmd: Expirable candidate command row.
+            now: Current UTC timestamp for age evaluation.
 
         Returns:
-            True when ``cmd`` must be deferred; False when eligible for dispatch.
+            True when ``dispatch_ttl_s`` is positive and ``cmd`` is older than it.
+        """
+        ttl = self._dispatch_ttl_s
+        if ttl is None or ttl <= 0:
+            return False
+        return (now - cmd["created_at"]).total_seconds() > ttl
+
+    def _classify_owned_row(self, cmd: TradeCommandRow, state: _ScanState) -> bool:
+        """Route one owned row into dispatch, expire-only, or deferred skip.
+
+        Rows deferred by their own retry entry stay skipped (including stale
+        ones, which re-check TTL when due) and count toward ``max_scan_rows``.
+        Expirable rows deferred only behind a shard-blocking peer move into
+        ``expire_only`` when stale (counting toward ``max_scan_rows``) or
+        increment ``shard_skipped`` when non-stale.
+
+        Args:
+            cmd: Owned command row from the current keyset page.
+            state: Mutable scan accumulator and counters.
+
+        Returns:
+            True when ``cmd`` was appended to ``state.dispatch``; False otherwise.
         """
         shard_key = cmd["shard_key"]
-        if cmd["command_type"] in _EXPIRABLE_COMMAND_TYPES and shard_key in deferred_shards:
-            return True
         entry = self._retry.get(cmd["public_id"])
-        if entry is not None and entry.next_at > now_mono:
+        if entry is not None and entry.next_at > state.now_mono:
             if entry.blocks_shard:
-                deferred_shards.add(shard_key)
-            return True
-        return False
+                state.deferred_shards.add(shard_key)
+            state.considered += 1
+            return False
+        if cmd["command_type"] in _EXPIRABLE_COMMAND_TYPES and shard_key in state.deferred_shards:
+            if self._is_stale_expirable(cmd, state.now):
+                state.expire_only.append(cmd)
+                state.considered += 1
+            else:
+                state.shard_skipped += 1
+            return False
+        state.dispatch.append(cmd)
+        state.considered += 1
+        return True
 
-    def _filter_owned_rows(
-        self,
-        page: list[TradeCommandRow],
-        owned: list[TradeCommandRow],
-        deferred_shards: set[str],
-        seen_public_ids: set[str],
-        now_mono: float,
-    ) -> None:
-        """Append eligible, non-deferred rows from ``page`` to ``owned``.
+    def _filter_owned_rows(self, page: list[TradeCommandRow], state: _ScanState) -> None:
+        """Filter one keyset page into dispatch and expire-only lists within caps.
 
-        Stops once ``owned`` has reached ``batch_size``. Deduplicates by
-        ``public_id`` across pages (keeping the first occurrence) so OFFSET
-        shifts under concurrent inserts cannot publish a command twice. When
-        ``self._ownership`` is set, foreign-shard rows are skipped; any row
-        whose retry timer has not expired defers itself and every
-        subsequent expirable row on the same ``shard_key`` across pages in
-        fetch order when ``blocks_shard`` is set.
+        Deduplicates by ``public_id`` across pages (keeping the first
+        occurrence). Stops immediately once ``dispatch`` reaches
+        ``batch_size``, ``considered`` reaches ``max_scan_rows``, or
+        ``shard_skipped`` reaches ``10 * max_scan_rows``.
 
         Args:
             page: Current repository page of undispatched commands.
-            owned: Accumulator list receiving eligible rows up to ``batch_size``.
-            deferred_shards: Mutable set of shard keys deferred in fetch order.
-            seen_public_ids: Mutable set of ``public_id`` values seen this poll.
-            now_mono: Current monotonic clock reading in seconds.
+            state: Mutable scan accumulator and ceiling counters.
         """
-        ownership = self._ownership
+        max_scan = self._max_scan_rows
+        shard_skip_limit = None if max_scan is None else max_scan * _SHARD_SKIP_CAP_MULTIPLIER
         for cmd in page:
             public_id = cmd["public_id"]
-            if public_id in seen_public_ids:
+            if public_id in state.seen_public_ids:
                 continue
-            seen_public_ids.add(public_id)
-            if ownership is not None and not ownership.owns(cmd["shard_key"]):
-                continue
-            if self._is_row_deferred(cmd, deferred_shards, now_mono):
-                continue
-            owned.append(cmd)
-            if len(owned) >= self._batch_size:
+            state.seen_public_ids.add(public_id)
+            if self._ownership is not None and not self._ownership.owns(cmd["shard_key"]):
+                state.considered += 1
+            elif self._classify_owned_row(cmd, state):
+                if len(state.dispatch) >= self._batch_size:
+                    return
+            if max_scan is not None and state.considered >= max_scan:
+                state.stop_reason = "scan"
+                return
+            if shard_skip_limit is not None and state.shard_skipped >= shard_skip_limit:
+                state.stop_reason = "shard_skip"
                 return
 
-    async def _fetch_owned_batch(self, now: datetime) -> list[TradeCommandRow]:
-        """Fetch the next batch of eligible, non-deferred commands this instance owns.
+    def _log_scan_cap_warning(self, state: _ScanState) -> None:
+        """Emit a warning when pagination halts on a configured scan ceiling.
+
+        Args:
+            state: Completed scan state carrying ``stop_reason`` and counts.
+        """
+        max_scan = self._max_scan_rows
+        if state.stop_reason == "shard_skip" and max_scan is not None:
+            ceiling = max_scan * _SHARD_SKIP_CAP_MULTIPLIER
+            logger.warning(
+                "OutboxDispatcher: scan reached shard-skip ceiling {} "
+                "(10 * max_scan_rows={}) with only {} owned rows found; partial batch.",
+                ceiling,
+                max_scan,
+                len(state.dispatch),
+            )
+            return
+        logger.warning(
+            "OutboxDispatcher: scan reached max_scan_rows={} with only "
+            "{} owned rows found; partial batch. Consider raising the "
+            "cap or investigating shard skew.",
+            max_scan,
+            len(state.dispatch),
+        )
+
+    async def _fetch_owned_batch(self, now: datetime) -> _FetchedBatch:
+        """Fetch the next dispatch and expire-only batches owned by this instance.
 
         When ``self._ownership`` is ``None`` and no retry entry is currently
         deferred, this is a straight pass-through to
         :meth:`Repository.get_undispatched_commands` with ``limit=batch_size``.
-        Otherwise, the method pages through the ``status='created'`` set with
-        a larger page size, deduplicates repeated ``public_id`` rows across
-        OFFSET pages (keeping the first occurrence), applies ownership (when
-        configured) and per-shard FIFO deferral filtering in Python, and stops
-        when it has collected ``batch_size`` rows OR the DB set is exhausted OR
-        ``max_scan_rows`` is reached. With cancels exempt and creates TTL-bound,
-        deferred rows counting toward ``max_scan_rows`` can delay other shards
-        only until the head expires or recovers.
+        Otherwise, the method pages by keyset ``after=(created_at, public_id,
+        id)`` (never ``offset``), deduplicates repeated ``public_id`` rows
+        keeping the first occurrence, applies ownership and per-shard FIFO
+        deferral filtering, routes stale shard-blocked expirable rows to
+        ``expire_only``, and stops when ``dispatch`` collects ``batch_size``
+        rows, the DB set is exhausted, considered rows reach ``max_scan_rows``,
+        or non-stale shard-blocked skips reach ``10 * max_scan_rows`` (both
+        caps remain unbounded when ``max_scan_rows`` is ``None``).
 
         Args:
             now: Temporal visibility cutoff passed as ``as_of``.
 
         Returns:
-            Up to ``batch_size`` eligible, non-deferred rows owned by this
-            coordinator.
+            :class:`_FetchedBatch` holding up to ``batch_size`` dispatchable
+            rows plus any stale shard-deferred rows to expire.
         """
         now_mono = time.monotonic()
         has_deferred = any(entry.next_at > now_mono for entry in self._retry.values())
@@ -334,33 +422,32 @@ class OutboxDispatcher:
             page = await self._repo.get_undispatched_commands(as_of=now, limit=self._batch_size)
             self._touch_seen_rows(page, now_mono)
             self._prune_stale_retries(now_mono)
-            return page
-        owned: list[TradeCommandRow] = []
-        deferred_shards: set[str] = set()
-        seen_public_ids: set[str] = set()
-        offset = 0
+            return _FetchedBatch(dispatch=page, expire_only=[])
+        state = _ScanState(
+            dispatch=[],
+            expire_only=[],
+            deferred_shards=set(),
+            seen_public_ids=set(),
+            now=now,
+            now_mono=now_mono,
+        )
+        after: tuple[datetime, str, int] | None = None
         page_size = max(self._batch_size * 4, 20)
-        max_scan = self._max_scan_rows
-        while len(owned) < self._batch_size:
+        while len(state.dispatch) < self._batch_size:
             page = await self._repo.get_undispatched_commands(
-                as_of=now, limit=page_size, offset=offset
+                as_of=now, limit=page_size, after=after
             )
             if not page:
                 break
             self._touch_seen_rows(page, now_mono)
-            self._filter_owned_rows(page, owned, deferred_shards, seen_public_ids, now_mono)
-            offset += len(page)
-            if max_scan is not None and offset >= max_scan and len(owned) < self._batch_size:
-                logger.warning(
-                    "OutboxDispatcher: scan reached max_scan_rows={} with only "
-                    "{} owned rows found; partial batch. Consider raising the "
-                    "cap or investigating shard skew.",
-                    max_scan,
-                    len(owned),
-                )
+            self._filter_owned_rows(page, state)
+            if state.stop_reason is not None:
+                self._log_scan_cap_warning(state)
                 break
+            last_cmd = page[-1]
+            after = (last_cmd["created_at"], last_cmd["public_id"], last_cmd.get("id", 0))
         self._prune_stale_retries(now_mono)
-        return owned
+        return _FetchedBatch(dispatch=state.dispatch, expire_only=state.expire_only)
 
     def _record_retry_failure(
         self,
@@ -643,23 +730,25 @@ class OutboxDispatcher:
         )
 
     async def _dispatch_batch(self) -> None:
-        """Fetch one batch of undispatched commands, publish, and bulk-dispatch.
+        """Fetch one batch of undispatched commands, expire stale peers, and publish.
 
         Per-shard FIFO for expirable commands (``create``, ``submit``) also
         holds inside the batch: once a command fails in a way that blocks its
         shard, later expirable commands on that shard are skipped for the rest
         of this tick and deferred on subsequent fetches behind the failing
         command. Non-expirable commands (``cancel`` and others) are never
-        skipped behind a shard-blocking peer. Material-barrier holds and
-        unresolved-cancel holds do not block the shard.
+        skipped behind a shard-blocking peer. Stale shard-deferred expirable
+        rows run only :meth:`_expire_if_stale` (never material checks or
+        publishing). Material-barrier holds and unresolved-cancel holds do not
+        block the shard.
         """
         now = datetime.now(UTC)
-        commands = await self._fetch_owned_batch(now)
-        if not commands:
+        batch = await self._fetch_owned_batch(now)
+        if not batch.dispatch and not batch.expire_only:
             return
         self._tick_blocked_shards.clear()
         success_updates: list[TradeCommandDispatchUpdate] = []
-        for cmd in commands:
+        for cmd in batch.dispatch:
             if (
                 cmd["command_type"] in _EXPIRABLE_COMMAND_TYPES
                 and cmd["shard_key"] in self._tick_blocked_shards
@@ -668,6 +757,8 @@ class OutboxDispatcher:
             update = await self._dispatch_command(cmd)
             if update is not None:
                 success_updates.append(update)
+        for cmd in batch.expire_only:
+            await self._expire_if_stale(cmd)
         if not success_updates:
             return
         try:

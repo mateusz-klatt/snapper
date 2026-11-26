@@ -2223,6 +2223,7 @@ class SettingRow(TypedDict):
 class TradeCommandRow(TypedDict):
     """Row dict returned by trade command queries."""
 
+    id: NotRequired[int]
     public_id: str
     timestamp: datetime
     session_id: str

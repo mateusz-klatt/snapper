@@ -12,6 +12,8 @@ Covers `_fetch_owned_batch` pagination contract:
 
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
+from itertools import count
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -21,14 +23,18 @@ from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.core.partitioning import ShardOwnership
 from snapper.data.repository_types import TradeCommandRow
 
+_ROW_SEQUENCE = count(1)
+
 
 def _make_cmd_row(
     public_id: str,
     shard_key: str = "kraken.BTC-USD.live",
 ) -> TradeCommandRow:
     """Build a minimal :class:`TradeCommandRow` for the pagination tests."""
-    now = datetime.now(UTC)
+    seq = next(_ROW_SEQUENCE)
+    now = datetime.now(UTC) + timedelta(microseconds=seq)
     return {
+        "id": seq,
         "public_id": public_id,
         "timestamp": now,
         "session_id": "s1",
@@ -70,10 +76,10 @@ def _make_cmd_row(
 def _make_repo_with_rows(
     rows: list[TradeCommandRow],
 ) -> AsyncMock:
-    """Build an AsyncMock repo that returns pages from ``rows``.
+    """Build an AsyncMock repo that returns keyset or offset pages from ``rows``.
 
-    Mimics ``get_undispatched_commands(offset=..., limit=...)`` slicing
-    against an in-memory list. Useful for testing the pagination
+    Mimics ``get_undispatched_commands(after=..., offset=..., limit=...)``
+    slicing against an in-memory list. Useful for testing the pagination
     contract without a real DB.
     """
     repo = AsyncMock()
@@ -83,7 +89,15 @@ def _make_repo_with_rows(
         as_of: datetime,
         limit: int = 10,
         offset: int = 0,
+        after: tuple[datetime, str, int] | None = None,
     ) -> list[TradeCommandRow]:
+        if after is not None:
+            remaining = [
+                row
+                for row in rows
+                if (row["created_at"], row["public_id"], row.get("id", 0)) > after
+            ]
+            return remaining[:limit]
         return rows[offset : offset + limit]
 
     repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
@@ -131,7 +145,7 @@ class TestOutboxOwnershipPassthrough:
         repo = _make_repo_with_rows(rows)
         dispatcher = _make_dispatcher(repo, ownership=None, batch_size=10)
         now = datetime.now(UTC)
-        fetched = await dispatcher._fetch_owned_batch(now)
+        fetched = (await dispatcher._fetch_owned_batch(now)).dispatch
         assert len(fetched) == 5
         assert repo.get_undispatched_commands.call_count == 1
 
@@ -148,7 +162,7 @@ class TestOutboxOwnershipFilter:
         ownership = _foreign(shard)
         dispatcher = _make_dispatcher(repo, ownership=ownership, batch_size=10)
         now = datetime.now(UTC)
-        fetched = await dispatcher._fetch_owned_batch(now)
+        fetched = (await dispatcher._fetch_owned_batch(now)).dispatch
         assert fetched == []
 
     @pytest.mark.asyncio
@@ -160,7 +174,7 @@ class TestOutboxOwnershipFilter:
         ownership = _own(shard)
         dispatcher = _make_dispatcher(repo, ownership=ownership, batch_size=10)
         now = datetime.now(UTC)
-        fetched = await dispatcher._fetch_owned_batch(now)
+        fetched = (await dispatcher._fetch_owned_batch(now)).dispatch
         assert len(fetched) == 5
 
     @pytest.mark.asyncio
@@ -179,7 +193,7 @@ class TestOutboxOwnershipFilter:
         repo = _make_repo_with_rows(foreign_rows + owned_rows)
         dispatcher = _make_dispatcher(repo, ownership=ownership, batch_size=10)
         now = datetime.now(UTC)
-        fetched = await dispatcher._fetch_owned_batch(now)
+        fetched = (await dispatcher._fetch_owned_batch(now)).dispatch
         assert len(fetched) == 5
         assert [r["public_id"] for r in fetched] == [f"o-{i}" for i in range(5)]
 
@@ -198,9 +212,13 @@ class TestOutboxOwnershipFilter:
         repo = _make_repo_with_rows(foreign_rows + owned_rows)
         dispatcher = _make_dispatcher(repo, ownership=ownership, batch_size=10, max_scan_rows=1000)
         now = datetime.now(UTC)
-        fetched = await dispatcher._fetch_owned_batch(now)
+        fetched = (await dispatcher._fetch_owned_batch(now)).dispatch
         assert len(fetched) == 10
         assert [r["public_id"] for r in fetched] == [f"o-{i}" for i in range(10)]
+        assert all(
+            "offset" not in call.kwargs for call in repo.get_undispatched_commands.call_args_list
+        )
+        assert repo.get_undispatched_commands.call_args_list[1].kwargs["after"] is not None
 
     @pytest.mark.asyncio
     async def test_max_scan_rows_none_scans_until_exhaustion(self) -> None:
@@ -218,7 +236,7 @@ class TestOutboxOwnershipFilter:
         repo = _make_repo_with_rows(foreign_rows + owned_rows)
         dispatcher = _make_dispatcher(repo, ownership=ownership, batch_size=10, max_scan_rows=None)
         now = datetime.now(UTC)
-        fetched = await dispatcher._fetch_owned_batch(now)
+        fetched = (await dispatcher._fetch_owned_batch(now)).dispatch
         assert len(fetched) == 10
 
     @pytest.mark.asyncio
@@ -234,7 +252,7 @@ class TestOutboxOwnershipFilter:
         repo = _make_repo_with_rows(foreign_rows + owned_rows)
         dispatcher = _make_dispatcher(repo, ownership=ownership, batch_size=10, max_scan_rows=20)
         now = datetime.now(UTC)
-        fetched = await dispatcher._fetch_owned_batch(now)
+        fetched = (await dispatcher._fetch_owned_batch(now)).dispatch
         assert len(fetched) < 10
 
     @pytest.mark.asyncio
@@ -246,5 +264,5 @@ class TestOutboxOwnershipFilter:
         repo = _make_repo_with_rows(rows)
         dispatcher = _make_dispatcher(repo, ownership=ownership, batch_size=10)
         now = datetime.now(UTC)
-        fetched = await dispatcher._fetch_owned_batch(now)
+        fetched = (await dispatcher._fetch_owned_batch(now)).dispatch
         assert len(fetched) == 3

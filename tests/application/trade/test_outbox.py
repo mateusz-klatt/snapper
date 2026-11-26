@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from itertools import count
 from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -23,6 +24,8 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import TradeCommandRow
 
+_ROW_SEQUENCE = count(1)
+
 
 def _make_cmd_row(public_id: str = "cmd-1") -> TradeCommandRow:
     """Build a minimal TradeCommandRow for testing.
@@ -33,8 +36,10 @@ def _make_cmd_row(public_id: str = "cmd-1") -> TradeCommandRow:
     Returns:
         TradeCommandRow dict with required fields.
     """
-    now = datetime.now(UTC)
+    seq = next(_ROW_SEQUENCE)
+    now = datetime.now(UTC) + timedelta(microseconds=seq)
     return {
+        "id": seq,
         "public_id": public_id,
         "timestamp": now,
         "session_id": "s1",
@@ -97,7 +102,13 @@ async def test_dispatch_publishes_and_updates_status() -> None:
     repo = AsyncMock()
     returned_once = False
 
-    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
+    async def _get_cmds(
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
+    ) -> list[TradeCommandRow]:
         nonlocal returned_once
         if not returned_once:
             returned_once = True
@@ -141,7 +152,13 @@ async def test_dispatch_handles_publish_failure() -> None:
     repo = AsyncMock()
     returned_once = False
 
-    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
+    async def _get_cmds(
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
+    ) -> list[TradeCommandRow]:
         nonlocal returned_once
         if not returned_once:
             returned_once = True
@@ -284,6 +301,7 @@ async def test_dispatch_skips_awaiting_target_cancels_without_paging(
         assert get_spy.await_count == 1
         assert get_spy.await_args is not None
         assert "offset" not in get_spy.await_args.kwargs
+        assert "after" not in get_spy.await_args.kwargs
         assert get_spy.await_args.kwargs["limit"] == 10
         assert published == ["cid-create-later", "cid-cancel-identified"]
 
@@ -391,8 +409,19 @@ async def test_paginated_dispatch_skips_foreign_rows_and_stops_at_batch_size() -
     repo = AsyncMock()
 
     async def _get_commands(
-        as_of: datetime, limit: int = 10, offset: int = 0
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
     ) -> list[TradeCommandRow]:
+        if after is not None:
+            remaining = [
+                row
+                for row in rows
+                if (row["created_at"], row["public_id"], row.get("id", 0)) > after
+            ]
+            return remaining[:limit]
         return rows[offset : offset + limit]
 
     repo.get_undispatched_commands = AsyncMock(side_effect=_get_commands)
@@ -482,7 +511,13 @@ async def test_no_publish_fn_skips_publish() -> None:
     repo = AsyncMock()
     returned_once = False
 
-    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
+    async def _get_cmds(
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
+    ) -> list[TradeCommandRow]:
         nonlocal returned_once
         if not returned_once:
             returned_once = True
@@ -542,7 +577,13 @@ async def test_dispatch_post_publish_db_failure_no_revert() -> None:
     repo = AsyncMock()
     returned_once = False
 
-    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
+    async def _get_cmds(
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
+    ) -> list[TradeCommandRow]:
         nonlocal returned_once
         if not returned_once:
             returned_once = True
@@ -580,7 +621,13 @@ async def test_dispatch_revert_db_failure_logged() -> None:
     repo = AsyncMock()
     returned_once = False
 
-    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
+    async def _get_cmds(
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
+    ) -> list[TradeCommandRow]:
         nonlocal returned_once
         if not returned_once:
             returned_once = True
@@ -631,7 +678,11 @@ class TestDispatchTtl:
         served = False
 
         async def _get_cmds(
-            as_of: datetime, limit: int = 10, offset: int = 0
+            as_of: datetime,
+            limit: int = 10,
+            offset: int = 0,
+            *,
+            after: tuple[datetime, str, int] | None = None,
         ) -> list[TradeCommandRow]:
             nonlocal served
             if not served:
@@ -893,17 +944,30 @@ def _make_backoff_row(
 
 
 def _make_queue_repo(rows_ref: list[list[TradeCommandRow]]) -> MagicMock:
-    """Build a warning-free mock repository serving sliced rows from ``rows_ref[0]``.
+    """Build a warning-free mock repository serving keyset/offset slices from ``rows_ref[0]``.
 
     Args:
         rows_ref: Single-element list wrapping the current undispatched queue.
 
     Returns:
-        Mock repository with AsyncMock methods and pagination support.
+        Mock repository with AsyncMock methods and keyset/offset pagination support.
     """
     repo = MagicMock()
 
-    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
+    async def _get_cmds(
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
+    ) -> list[TradeCommandRow]:
+        if after is not None:
+            remaining = [
+                row
+                for row in rows_ref[0]
+                if (row["created_at"], row["public_id"], row.get("id", 0)) > after
+            ]
+            return remaining[:limit]
         return rows_ref[0][offset : offset + limit]
 
     repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
@@ -1189,9 +1253,9 @@ class TestOutboxRetryBackoff:
         Given: A failing BTC submit followed by twenty same-shard submits, a
             same-shard cancel on page two, and an ETH submit,
         When: A batch runs during the BTC backoff window and then again once due,
-        Then: Same-shard submits stay deferred across pages while the same-shard
-            cancel and ETH submit dispatch, and once due the fast path resumes
-            without offset paging.
+        Then: Same-shard submits stay deferred across keyset pages while the
+            same-shard cancel and ETH submit dispatch, and once due the fast
+            path resumes without keyset or offset paging.
         """
         clock = _install_clock(monkeypatch, initial=0.0)
         btc_head = _make_backoff_row(
@@ -1222,8 +1286,14 @@ class TestOutboxRetryBackoff:
         )
         eth_row = _make_backoff_row("eth-1", command_type="submit", shard_key="kraken.ETH-USD.live")
         queue[0] = [btc_head, *btc_followers, btc_cancel, eth_row]
+        repo.get_undispatched_commands.reset_mock()
         await dispatcher._dispatch_batch()
         assert published == ["btc-cancel", "eth-1"]
+        assert repo.get_undispatched_commands.await_count >= 2
+        assert all(
+            "offset" not in call.kwargs for call in repo.get_undispatched_commands.call_args_list
+        )
+        assert repo.get_undispatched_commands.call_args_list[1].kwargs["after"] is not None
 
         clock.advance(0.20)
         fail_btc_head = False
@@ -1233,6 +1303,7 @@ class TestOutboxRetryBackoff:
         assert published == ["btc-cancel", "eth-1", "btc-0"]
         assert repo.get_undispatched_commands.await_args is not None
         assert "offset" not in repo.get_undispatched_commands.await_args.kwargs
+        assert "after" not in repo.get_undispatched_commands.await_args.kwargs
 
     @pytest.mark.asyncio
     async def test_material_barrier_hold_does_not_block_later_rows_on_its_shard(
@@ -1521,7 +1592,7 @@ class TestOutboxRetryBackoff:
 
         Given: Foreign rows, a deferred owned shard, and another healthy owned shard,
         When: One batch paginates with ownership and deferral, and another hits
-            max_scan_rows due to deferred same-shard rows,
+            max_scan_rows due to foreign-owner rows,
         Then: The first batch skips foreign and deferred rows to dispatch the other
             owned shard, and the second emits the max_scan_rows warning.
         """
@@ -1561,10 +1632,11 @@ class TestOutboxRetryBackoff:
         await dispatcher._dispatch_batch()
         assert published == ["mine-2a", "mine-2b"]
 
-        blocked_rows = [
-            _make_backoff_row(f"mine1-{i}", shard_key="kraken.MINE1.live") for i in range(45)
+        overflow_foreign = [
+            _make_backoff_row(f"foreign-overflow-{i}", shard_key="kraken.FOREIGN.live")
+            for i in range(45)
         ]
-        queue[0] = [mine_head, *blocked_rows, mine_two_a]
+        queue[0] = [mine_head, *overflow_foreign, mine_two_a]
         handler_id, logs = _attach_log_capture()
         try:
             await dispatcher._dispatch_batch()
@@ -1632,11 +1704,10 @@ class TestOutboxRetryBackoff:
     async def test_paging_dedupes_duplicate_public_id_keeping_first_occurrence(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """OFFSET paging deduplicates repeated rows by public_id, keeping the first.
+        """Keyset paging deduplicates repeated rows by public_id, keeping the first.
 
-        Given: A mocked repository whose second OFFSET page repeats a row from the
-            first page because of concurrent inserts, with distinct ``last_error``
-            markers on the two copies,
+        Given: A mocked repository whose second keyset page repeats a row from the
+            first page, with distinct ``last_error`` markers on the two copies,
         When: The paging path runs a batch of three commands,
         Then: The repeated command is published exactly once using its first copy.
         """
@@ -1654,7 +1725,11 @@ class TestOutboxRetryBackoff:
         repo = _make_queue_repo([[]])
 
         async def _paged(
-            as_of: datetime, limit: int = 10, offset: int = 0
+            as_of: datetime,
+            limit: int = 10,
+            offset: int = 0,
+            *,
+            after: tuple[datetime, str, int] | None = None,
         ) -> list[TradeCommandRow]:
             nonlocal page_index
             result = pages[page_index]
@@ -1678,6 +1753,9 @@ class TestOutboxRetryBackoff:
         await dispatcher._dispatch_batch()
         assert [row["public_id"] for row in published_rows] == ["dup-1", "own-2"]
         assert published_rows[0]["last_error"] == "first-copy"
+        assert all(
+            "offset" not in call.kwargs for call in repo.get_undispatched_commands.call_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_publish_failure_cas_lost_drops_retry_and_logs_info(
@@ -1736,5 +1814,274 @@ class TestOutboxRetryBackoff:
             and entry.has_exception
             and "cmd-cas-err" in entry.message
             and "status" in entry.message
+            for entry in logs
+        )
+
+    @pytest.mark.asyncio
+    async def test_keyset_paging_does_not_skip_head_when_earlier_row_vanishes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Concurrent row removal between pages cannot skip a backing-off shard head.
+
+        Given: A twenty-row page followed by a backing-off shard head and a fresh
+            same-shard follower, where the first row leaves CREATED between page
+            reads,
+        When: Keyset pagination runs a dispatch batch,
+        Then: The second page resumes strictly after the last row of page one so
+            the backing-off head is seen and the follower stays unpublished.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        foreign = [
+            _make_backoff_row(f"foreign-{i}", shard_key="kraken.FOREIGN.live") for i in range(20)
+        ]
+        head = _make_backoff_row("btc-head", command_type="submit", shard_key="kraken.MINE.live")
+        follower = _make_backoff_row(
+            "btc-follow", command_type="submit", shard_key="kraken.MINE.live"
+        )
+        live_rows: list[TradeCommandRow] = [head]
+        repo = _make_queue_repo([live_rows])
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if cmd["public_id"] == "btc-head":
+                raise RuntimeError("ZMQ down")
+            published.append(cmd["public_id"])
+
+        ownership = MagicMock()
+        ownership.owns.side_effect = lambda shard_key: shard_key == "kraken.MINE.live"
+        dispatcher = OutboxDispatcher(
+            repository=repo,
+            publish_fn=AsyncMock(side_effect=_publish),
+            batch_size=2,
+            ownership=ownership,
+        )
+        await dispatcher._dispatch_batch()
+
+        clock.advance(0.05)
+        live_rows[:] = [*foreign, head, follower]
+
+        async def _keyset_with_concurrent_exit(
+            as_of: datetime,
+            limit: int = 10,
+            offset: int = 0,
+            *,
+            after: tuple[datetime, str, int] | None = None,
+        ) -> list[TradeCommandRow]:
+            if after is None:
+                page = live_rows[:limit]
+                live_rows.pop(0)
+                return page
+            remaining = [
+                row
+                for row in live_rows
+                if (row["created_at"], row["public_id"], row.get("id", 0)) > after
+            ]
+            return remaining[:limit]
+
+        repo.get_undispatched_commands = AsyncMock(side_effect=_keyset_with_concurrent_exit)
+        await dispatcher._dispatch_batch()
+
+        assert published == []
+        calls = repo.get_undispatched_commands.call_args_list
+        assert len(calls) >= 2
+        assert all("offset" not in call.kwargs for call in calls)
+        assert calls[1].kwargs["after"] == (
+            foreign[-1]["created_at"],
+            foreign[-1]["public_id"],
+            foreign[-1]["id"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_stale_deferred_follower_expires_while_fresh_follower_stays_deferred(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stale shard-deferred followers expire without publishing or material checks.
+
+        Given: A failing cancel backing off on a shard, followed by a stale submit
+            without evidence, a stale submit with durable submit evidence, a fresh
+            submit, and a stale submit deferred by its own retry entry,
+        When: A batch runs while the cancel and own-retry submit are backing off,
+            and then runs again once the own-retry submit comes due,
+        Then: Only the stale shard-deferred submit without evidence expires via CAS
+            and invokes expire_fn without material checks or publishing, the
+            evidence-bearing and fresh submits stay unpublished, and the own-retry
+            submit expires only when its own backoff becomes due.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        head_cancel = _make_backoff_row("btc-cancel", command_type="cancel")
+        own_retry = _make_backoff_row(
+            "btc-own-retry",
+            command_type="submit",
+            created_at=datetime.now(UTC),
+        )
+        queue: list[list[TradeCommandRow]] = [[head_cancel]]
+        repo = _make_queue_repo(queue)
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if cmd["public_id"] in ("btc-cancel", "btc-own-retry"):
+                raise RuntimeError("ZMQ down")
+            published.append(cmd["public_id"])
+
+        expire_fn = AsyncMock()
+        publish_fn = AsyncMock(side_effect=_publish)
+        dispatcher = OutboxDispatcher(
+            repository=repo,
+            publish_fn=publish_fn,
+            batch_size=5,
+            dispatch_ttl_s=30.0,
+            expire_fn=expire_fn,
+        )
+        await dispatcher._dispatch_batch()
+        clock.advance(0.25)
+        await dispatcher._dispatch_batch()
+
+        queue[0] = [own_retry]
+        await dispatcher._dispatch_batch()
+        clock.advance(0.05)
+
+        own_retry_stale: TradeCommandRow = {
+            **own_retry,
+            "created_at": datetime.now(UTC) - timedelta(seconds=120),
+        }
+        stale = _make_backoff_row(
+            "btc-stale",
+            command_type="submit",
+            created_at=datetime.now(UTC) - timedelta(seconds=120),
+        )
+        stale_with_evidence = _make_backoff_row(
+            "btc-stale-evidence",
+            command_type="submit",
+            created_at=datetime.now(UTC) - timedelta(seconds=120),
+        )
+        fresh = _make_backoff_row(
+            "btc-fresh",
+            command_type="submit",
+            created_at=datetime.now(UTC) - timedelta(seconds=5),
+        )
+
+        async def _evidence(client_order_id: str) -> bool:
+            return client_order_id == stale_with_evidence["client_order_id"]
+
+        repo.has_order_submit_evidence = AsyncMock(side_effect=_evidence)
+        repo.require_consistent_trade_command_material.reset_mock()
+        repo.cas_trade_command_status.reset_mock()
+        expire_fn.reset_mock()
+        publish_calls_before = publish_fn.await_count
+
+        queue[0] = [head_cancel, stale, stale_with_evidence, fresh, own_retry_stale]
+        await dispatcher._dispatch_batch()
+
+        assert published == []
+        assert publish_fn.await_count == publish_calls_before
+        repo.require_consistent_trade_command_material.assert_not_awaited()
+        expire_fn.assert_awaited_once_with(stale)
+        cas_kwargs = repo.cas_trade_command_status.await_args.kwargs
+        assert cas_kwargs["public_id"] == "btc-stale"
+        assert cas_kwargs["expected_status"] == TradeCommandStatusEnum.CREATED
+        assert cas_kwargs["new_status"] == TradeCommandStatusEnum.EXPIRED
+        assert "btc-own-retry" in dispatcher._retry
+
+        clock.advance(0.25)
+        queue[0] = [own_retry_stale]
+        await dispatcher._dispatch_batch()
+        assert expire_fn.await_count == 2
+        assert expire_fn.await_args_list[1].args[0] == own_retry_stale
+
+    @pytest.mark.asyncio
+    async def test_healthy_shard_dispatches_past_999_blocked_same_shard_rows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-stale shard-blocked rows do not exhaust max_scan_rows for other shards.
+
+        Given: A failing cancel head followed by 999 fresh same-shard submits and
+            one healthy ETH submit under max_scan_rows=1000,
+        When: A dispatch batch runs while the cancel head is backing off,
+        Then: The ETH submit dispatches without hitting max_scan_rows or warning.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        head = _make_backoff_row("btc-head", command_type="cancel", shard_key="kraken.BTC-USD.live")
+        queue: list[list[TradeCommandRow]] = [[head]]
+        repo = _make_queue_repo(queue)
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if cmd["public_id"] == "btc-head":
+                raise RuntimeError("ZMQ down")
+            published.append(cmd["public_id"])
+
+        dispatcher = OutboxDispatcher(
+            repository=repo,
+            publish_fn=AsyncMock(side_effect=_publish),
+            batch_size=2,
+            max_scan_rows=1000,
+        )
+        await dispatcher._dispatch_batch()
+
+        clock.advance(0.05)
+        blocked = [
+            _make_backoff_row(f"btc-{i}", command_type="submit", shard_key="kraken.BTC-USD.live")
+            for i in range(999)
+        ]
+        eth = _make_backoff_row("eth-1", command_type="submit", shard_key="kraken.ETH-USD.live")
+        queue[0] = [head, *blocked, eth]
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+        finally:
+            logger.remove(handler_id)
+
+        assert published == ["eth-1"]
+        assert not any(entry.level == "WARNING" for entry in logs)
+
+    @pytest.mark.asyncio
+    async def test_shard_skip_ceiling_warns_and_stops_scan(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exceeding 10 * max_scan_rows shard-blocked skips emits a warning and stops.
+
+        Given: A failing cancel head followed by 55 fresh same-shard submits and an
+            ETH submit under max_scan_rows=5 (shard-skip ceiling 50),
+        When: A dispatch batch runs during the cancel head's backoff window,
+        Then: Scanning halts at 50 shard skips, emits a WARNING naming the ceiling,
+            and stops before reaching the ETH command.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        head = _make_backoff_row("btc-head", command_type="cancel", shard_key="kraken.BTC-USD.live")
+        queue: list[list[TradeCommandRow]] = [[head]]
+        repo = _make_queue_repo(queue)
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            if cmd["public_id"] == "btc-head":
+                raise RuntimeError("ZMQ down")
+            published.append(cmd["public_id"])
+
+        dispatcher = OutboxDispatcher(
+            repository=repo,
+            publish_fn=AsyncMock(side_effect=_publish),
+            batch_size=2,
+            max_scan_rows=5,
+        )
+        await dispatcher._dispatch_batch()
+
+        clock.advance(0.05)
+        blocked = [
+            _make_backoff_row(f"btc-{i}", command_type="submit", shard_key="kraken.BTC-USD.live")
+            for i in range(55)
+        ]
+        eth = _make_backoff_row("eth-1", command_type="submit", shard_key="kraken.ETH-USD.live")
+        queue[0] = [head, *blocked, eth]
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+        finally:
+            logger.remove(handler_id)
+
+        assert published == []
+        assert any(
+            entry.level == "WARNING"
+            and "50" in entry.message
+            and "max_scan_rows=5" in entry.message
             for entry in logs
         )
