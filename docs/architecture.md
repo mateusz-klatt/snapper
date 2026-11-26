@@ -1632,8 +1632,8 @@ before the response returns, the delivery stays `queued` and a subsequent retry
 can duplicate the push (collapsed per `thread_key` via `apns-collapse-id` when
 present). Batch-prefetched devices and preferences during one drain or retry
 tick have bounded staleness up to the tick's processing length, and outage
-window tracking is shared process-wide across APNs `sandbox` and `prod`
-environments so recovery in either environment expedites the shared delayed
+window tracking is scoped per APNs environment (`sandbox` vs `prod`) so recovery
+in one environment expedites only that environment's delayed
 backlog. Startup outbox drain honours persisted `next_attempt_at` backoff while
 expiring APNs rows past TTL independently of whether an APNs sender is enabled.
 The same process owns a guarded periodic recovery

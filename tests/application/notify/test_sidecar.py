@@ -1979,7 +1979,7 @@ class TestNetworkOutageRetryAndExpiry:
             if r.levelname == "WARNING" and "delayed by an outage" in r.getMessage()
         ]
         assert len(recovery_logs) == 1
-        assert "1 deliveries delayed by an outage between" in recovery_logs[0]
+        assert "1 deliveries delayed by an outage in env=sandbox between" in recovery_logs[0]
 
     @pytest.mark.asyncio
     async def test_custom_expires_at_honored_and_clamped_before_expiry(
@@ -2223,9 +2223,9 @@ class TestNetworkOutageRetryAndExpiry:
         original_recovery = sidecar._maybe_log_outage_recovery
 
         async def _stop_after_first_tick_recovery(
-            recovered_delivery_public_id: str, now: datetime
+            env: str, recovered_delivery_public_id: str, now: datetime
         ) -> None:
-            await original_recovery(recovered_delivery_public_id, now)
+            await original_recovery(env, recovered_delivery_public_id, now)
             await sidecar.stop()
 
         monkeypatch.setattr(sidecar, "_maybe_log_outage_recovery", _stop_after_first_tick_recovery)
@@ -2612,7 +2612,7 @@ class TestTerminalSuppressionAndIsolation:
             session_id="prep",
             sequence_id=13,
         )
-        sidecar._record_outage_delay(delayed_null_reason_pid, _ts(0))
+        sidecar._record_outage_delay("sandbox", delayed_null_reason_pid, _ts(0))
 
         apns.send = AsyncMock(
             return_value=ApnsSendResult(
@@ -2959,9 +2959,9 @@ class TestReviewRegressionFixes:
             sequence_id=2,
         )
         sidecar, _ = _make_sidecar(repo, clock=lambda: _ts(3))
-        sidecar._record_outage_delay(delayed_pid, _ts(0))
+        sidecar._record_outage_delay("sandbox", delayed_pid, _ts(0))
 
-        await sidecar._maybe_log_outage_recovery("recovered-other", _ts(0))
+        await sidecar._maybe_log_outage_recovery("sandbox", "recovered-other", _ts(0))
 
         expedited = await repo.get_delivery_by_public_id(delayed_pid)
         assert expedited is not None
@@ -3187,3 +3187,155 @@ class TestReviewRegressionFixes:
         assert expired_after is not None and expired_after["status"] == "failed"
         assert expired_after["error_reason"] == "expired during outage"
         assert valid_after is not None and valid_after["status"] == "queued"
+
+    @pytest.mark.asyncio
+    async def test_attempt_delivery_expires_when_clock_crosses_deadline_during_scope_check(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Clock crossing ``expires_at`` during the post-bump scope read prevents APNs send.
+
+        Given: A queued delivery expiring at ``_ts(10)`` and a clock that reads
+            ``_ts(9)`` at pre-bump, bump, and post-bump scope check start, then
+            advances to ``_ts(11)`` while the post-bump ``should_skip_send`` awaits.
+        When: ``_attempt_once`` executes.
+        Then: Fresh UTC sampled after the post-bump scope read sees
+            ``_ts(11) >= _ts(10)``, transitions the delivery to ``failed``
+            (``expired during outage``), and never calls ``apns.send``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=1,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                expires_at=_ts(10),
+                created_at=_ts(0),
+            )
+        )
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+
+        current_now = _ts(9)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: current_now)
+        scope_calls = 0
+
+        async def _advance_on_second_scope_check(
+            _event: AlertEventRow, _repo: Repository, _now: datetime
+        ) -> bool:
+            nonlocal scope_calls, current_now
+            scope_calls += 1
+            if scope_calls == 2:
+                current_now = _ts(11)
+            return False
+
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.should_skip_send = AsyncMock(
+            side_effect=_advance_on_second_scope_check
+        )
+
+        await sidecar._attempt_once(delivery_pid, device, event, _ts(9))
+
+        apns.send.assert_not_awaited()
+        assert scope_calls == 2
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+        assert row["status"] == "failed"
+        assert row["attempt_count"] == 1
+        assert row["timestamp"] == _ts(11)
+        assert row["error_reason"] == "expired during outage"
+
+    @pytest.mark.asyncio
+    async def test_outage_recovery_scoped_per_environment_does_not_expedite_other_env(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A recovery in ``prod`` does not clear or expedite an active ``sandbox`` outage.
+
+        Given: A queued ``sandbox`` delivery delayed by ``MaxAttemptsExceeded``
+            until ``+30s``, a queued ``prod`` delivery, and a queued second
+            ``sandbox`` delivery.
+        When: The ``prod`` delivery succeeds at ``+10s``, and later the second
+            ``sandbox`` delivery succeeds at ``+15s``.
+        Then: The ``prod`` success leaves the ``sandbox`` outage window intact
+            and the delayed ``sandbox`` row un-expedited at ``+30s``, whereas
+            the subsequent ``sandbox`` success clears the ``sandbox`` window
+            and expedites its delayed row to ``+15s``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        sandbox_dev_pid = await _seed_device(repo, user, device_token="a" * 64, env="sandbox")
+        prod_dev_pid = await repo.upsert_notification_device(
+            NotificationDeviceUpsertRow(
+                session_id="seed",
+                sequence_id=2,
+                timestamp=_ts(0),
+                user_public_id=user,
+                device_token="b" * 64,
+                device_id="dev-prod",
+                env="prod",
+                registered_at=_ts(0),
+            )
+        )
+        devices = {
+            row["env"]: row for row in await repo.list_active_notification_devices_for_user(user)
+        }
+        event = await _seed_alert_event(repo, user)
+        sandbox_delayed_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=sandbox_dev_pid,
+            user_public_id=user,
+        )
+        prod_ok_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=prod_dev_pid,
+            user_public_id=user,
+        )
+        sandbox_recovery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=sandbox_dev_pid,
+            user_public_id=user,
+        )
+
+        current_now = _ts(0)
+        sidecar, apns = _make_sidecar(
+            repo,
+            send_result=MaxAttemptsExceeded(),
+            clock=lambda: current_now,
+        )
+        await sidecar._attempt_once(sandbox_delayed_pid, devices["sandbox"], event, current_now)
+
+        delayed_after_outage = await repo.get_delivery_by_public_id(sandbox_delayed_pid)
+        assert delayed_after_outage is not None
+        assert delayed_after_outage["next_attempt_at"] == _ts(0) + timedelta(seconds=30)
+        assert list(sidecar._outage_started_at) == ["sandbox"]
+
+        current_now = _ts(0) + timedelta(seconds=10)
+        apns.send = AsyncMock(
+            return_value=ApnsSendResult(
+                status_code=200, status="success", apns_id="apns-prod-ok", description=""
+            )
+        )
+        await sidecar._attempt_once(prod_ok_pid, devices["prod"], event, current_now)
+
+        still_delayed = await repo.get_delivery_by_public_id(sandbox_delayed_pid)
+        assert still_delayed is not None
+        assert still_delayed["next_attempt_at"] == _ts(0) + timedelta(seconds=30)
+        assert "sandbox" in sidecar._outage_started_at
+        assert "prod" not in sidecar._outage_started_at
+
+        current_now = _ts(0) + timedelta(seconds=15)
+        await sidecar._attempt_once(sandbox_recovery_pid, devices["sandbox"], event, current_now)
+
+        expedited = await repo.get_delivery_by_public_id(sandbox_delayed_pid)
+        assert expedited is not None
+        assert expedited["next_attempt_at"] == current_now
+        assert sidecar._outage_started_at == {}
+        assert sidecar._outage_delayed_delivery_ids == {}

@@ -774,11 +774,12 @@ class _FillFinancingEvidence:
 
 @dataclass(frozen=True, slots=True)
 class _DeliveryAttemptTransition:
-    """Counter operation applied to the exact delivery version being closed."""
+    """Counter operation and timestamp guard for closing a delivery version."""
 
     expected_count: int | None = None
     increment: bool = False
     provider_receipt: str | None = None
+    reject_stale_timestamp: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -10396,11 +10397,10 @@ class Repository(ABC):
     ) -> bool:
         """Reschedule a queued delivery only at the expected attempt_count.
 
-        The counter is preserved and ``transition_at`` is clamped to
-        ``max(transition_at, existing.timestamp)`` so clock skew or stale
-        callers never invert the active SCD2 validity interval. Return False
-        for absent or terminal rows, a different active count, or a lost
-        selected-version close race.
+        Reject (return False without writing) when ``transition_at`` is earlier
+        than the active version's ``timestamp``, the delivery is absent or
+        terminal, the active ``attempt_count`` differs, or a competing writer
+        closes the selected version first.
         """
         ...
 
@@ -40485,6 +40485,25 @@ class SQLAlchemyRepository(Repository):
             )
             return [self._alert_delivery_row_from(r) for r in result.scalars().all()]
 
+    @staticmethod
+    def _resolve_delivery_transition_time(
+        existing: AlertDelivery,
+        transition_at: datetime,
+        attempt: _DeliveryAttemptTransition,
+    ) -> datetime | None:
+        """Resolve close/open time for ``existing``, rejecting stale schedules when asked."""
+        if attempt.reject_stale_timestamp and transition_at < existing.timestamp:
+            logger.info(
+                "repository: rejecting stale delivery retry schedule delivery={pid}"
+                " transition_at={ts} active_timestamp={active_ts} attempt={attempt}",
+                pid=existing.public_id,
+                ts=transition_at.isoformat(),
+                active_ts=existing.timestamp.isoformat(),
+                attempt=existing.attempt_count,
+            )
+            return None
+        return max(transition_at, existing.timestamp)
+
     async def _scd2_transition_delivery(
         self,
         public_id: str,
@@ -40502,10 +40521,11 @@ class SQLAlchemyRepository(Repository):
         """Close the selected queued version and commit its successor.
 
         Return the committed attempt count, or None when the delivery is
-        absent, terminal, at a different expected count, or another writer
-        closes the selected version first. The conditional UPDATE identifies
-        that exact version; a losing writer never inserts a successor.
-        Effective ``transition_at`` is clamped to
+        absent, terminal, at a different expected count, rejected as a stale
+        retry-schedule write, or another writer closes the selected version
+        first. The conditional UPDATE identifies that exact version; a losing
+        writer never inserts a successor. Unless ``reject_stale_timestamp``
+        is set, effective ``transition_at`` is clamped to
         ``max(transition_at, existing.timestamp)`` so a lagging caller clock
         cannot close a newer version before its start timestamp.
 
@@ -40530,7 +40550,11 @@ class SQLAlchemyRepository(Repository):
                 and existing.attempt_count != attempt.expected_count
             ):
                 return None
-            effective_transition_at = max(transition_at, existing.timestamp)
+            effective_transition_at = self._resolve_delivery_transition_time(
+                existing, transition_at, attempt
+            )
+            if effective_transition_at is None:
+                return None
             close_result = await s.execute(
                 update(AlertDelivery)
                 .where(
@@ -40702,9 +40726,9 @@ class SQLAlchemyRepository(Repository):
     ) -> bool:
         """Reschedule only the selected queued version at attempt_count.
 
-        The argument is an expected count, never a replacement counter, and
-        ``transition_at`` is clamped to ``max(transition_at, existing.timestamp)``.
-        Refuse stale results or a lost version-close race without writing.
+        The argument is an expected count, never a replacement counter. Reject
+        (return False without writing) if ``transition_at`` precedes the active
+        version's ``timestamp``, the count mismatches, or another writer wins.
         """
         committed_count = await self._scd2_transition_delivery(
             public_id,
@@ -40713,7 +40737,10 @@ class SQLAlchemyRepository(Repository):
             session_id=session_id,
             sequence_id=sequence_id,
             error_reason=error_reason,
-            attempt=_DeliveryAttemptTransition(expected_count=attempt_count),
+            attempt=_DeliveryAttemptTransition(
+                expected_count=attempt_count,
+                reject_stale_timestamp=True,
+            ),
             next_attempt_at_override=next_attempt_at,
         )
         return committed_count is not None
@@ -41056,7 +41083,13 @@ class SQLAlchemyRepository(Repository):
         row first, so we skip the successor insert and return False
         without contending for the partial-unique
         ``(public_id, known_to=KNOWN_TO_MAX)`` index.
+
+        Effective ``transition_at`` is clamped to
+        ``max(transition_at, existing.timestamp)`` so a caller-captured
+        cancellation timestamp earlier than a committed retry version never
+        closes the active interval before its start timestamp.
         """
+        effective_transition_at = max(transition_at, existing.timestamp)
         close_result = await s.execute(
             update(AlertDelivery)
             .where(
@@ -41064,7 +41097,7 @@ class SQLAlchemyRepository(Repository):
                 AlertDelivery.known_to == KNOWN_TO_MAX,
                 AlertDelivery.status == "queued",
             )
-            .values(known_to=transition_at)
+            .values(known_to=effective_transition_at)
             .execution_options(synchronize_session=False)
         )
         if int(cast(Any, close_result).rowcount or 0) == 0:
@@ -41073,7 +41106,7 @@ class SQLAlchemyRepository(Repository):
             public_id=existing.public_id,
             session_id=session_id,
             sequence_id=sequence_id,
-            timestamp=transition_at,
+            timestamp=effective_transition_at,
             known_to=KNOWN_TO_MAX,
             alert_event_public_id=existing.alert_event_public_id,
             device_public_id=existing.device_public_id,

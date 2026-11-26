@@ -1609,6 +1609,75 @@ class TestBulkCancelRaceSafety:
             delivery_pid
         ]
 
+    @pytest.mark.asyncio
+    async def test_bulk_cancel_clamps_earlier_transition_at_than_retry_version(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Bulk cancel never closes an active version before its start timestamp.
+
+        Given: A queued delivery whose retry transition committed at ``_ts(5)``
+            (``t1``).
+        When: ``cancel_pending_deliveries_for_scope`` runs with caller timestamp
+            ``_ts(2)`` (``t0 < t1``).
+        Then: The delivery cancels (``cancelled == 1``), closes at ``_ts(5)``
+            so no SCD2 interval ends before it starts, and opens its
+            ``cancelled_scope`` successor at ``_ts(5)``.
+        """
+        user = "u-bulk-clamp"
+        device_pid = await _seed_user_and_device(repo, user_public_id=user)
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                alert_event_public_id="evt-bulk-clamp",
+                device_public_id=device_pid,
+                user_public_id=user,
+                operator_public_id="op-clamp",
+                wallet_public_id="wal-clamp",
+                status="queued",
+                created_at=_ts(0),
+                session_id="s",
+                sequence_id=1,
+                timestamp=_ts(0),
+            )
+        )
+        assert (
+            await repo.begin_delivery_attempt(
+                delivery_pid, transition_at=_ts(5), session_id="worker", sequence_id=2
+            )
+            == 1
+        )
+
+        cancelled = await repo.cancel_pending_deliveries_for_scope(
+            user_public_id=user,
+            operator_public_id="op-clamp",
+            wallet_public_id="wal-clamp",
+            transition_at=_ts(2),
+            session_id="s-admin",
+            sequence_id=3,
+        )
+
+        assert cancelled == 1
+        async with repo.session() as s:
+            rows = (
+                (
+                    await s.execute(
+                        _select(AlertDelivery)
+                        .where(AlertDelivery.public_id == delivery_pid)
+                        .order_by(AlertDelivery.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 3
+        for row in rows:
+            assert row.known_to >= row.timestamp
+        assert rows[1].status == "queued"
+        assert rows[1].timestamp == _ts(5)
+        assert rows[1].known_to == _ts(5)
+        assert rows[2].status == "cancelled_scope"
+        assert rows[2].timestamp == _ts(5)
+        assert rows[2].known_to == KNOWN_TO_MAX
+
 
 class TestCountDeliveriesByStatus:
     """Status aggregation for ``GET /api/metrics/notifications``."""

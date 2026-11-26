@@ -38,6 +38,14 @@ from h2.exceptions import ProtocolError
 from snapper.application.notify.apns_config import ApnsConfig
 from snapper.core.json_types import JsonObject
 
+_TRANSIENT_SSL_ERROR_TYPES: Final[tuple[type[BaseException], ...]] = (
+    ssl.SSLEOFError,
+    ssl.SSLZeroReturnError,
+    ssl.SSLSyscallError,
+    ssl.SSLWantReadError,
+    ssl.SSLWantWriteError,
+)
+
 _NETWORK_ERROR_TYPES: Final[tuple[type[BaseException], ...]] = (
     ApnsMaxAttemptsExceeded,
     ApnsConnectionError,
@@ -46,6 +54,7 @@ _NETWORK_ERROR_TYPES: Final[tuple[type[BaseException], ...]] = (
     ConnectionError,
     socket.gaierror,
     httpx.TransportError,
+    *_TRANSIENT_SSL_ERROR_TYPES,
 )
 
 _GENERIC_NETWORK_WRAPPERS: Final[tuple[type[BaseException], ...]] = (
@@ -74,11 +83,14 @@ def _next_exception(exc: BaseException) -> BaseException | None:
     return None
 
 
-def _is_ssl_node(exc: BaseException) -> bool:
-    """Return whether ``exc`` or any nested argument exception is an ``ssl.SSLError``."""
-    if isinstance(exc, ssl.SSLError):
+def _is_permanent_ssl_node(exc: BaseException) -> bool:
+    """Return whether ``exc`` or an arg is a non-transient ``ssl.SSLError``."""
+    if isinstance(exc, ssl.SSLError) and not isinstance(exc, _TRANSIENT_SSL_ERROR_TYPES):
         return True
-    return any(isinstance(arg, ssl.SSLError) for arg in exc.args)
+    return any(
+        isinstance(arg, ssl.SSLError) and not isinstance(arg, _TRANSIENT_SSL_ERROR_TYPES)
+        for arg in exc.args
+    )
 
 
 def _matches_network_exception(exc: BaseException) -> bool:
@@ -92,20 +104,22 @@ def is_network_delivery_error(exc: BaseException) -> bool:
     """Classify whether a delivery exception belongs to the network outage class.
 
     Walks ``exc`` along ``__cause__`` and unsuppressed ``__context__``
-    (respecting ``__suppress_context__``). Treats ``ssl.SSLError`` (including
-    ``ssl.SSLCertVerificationError``) anywhere in the chain or nested
-    exception args as non-network so permanent TLS faults do not retry for
-    hours. Defers generic ``aioapns`` exhaustion/connection wrappers
-    (``MaxAttemptsExceeded``, ``ConnectionError``) to their concrete deeper
-    cause when one is available, while still treating bare wrappers as
-    network-class.
+    (respecting ``__suppress_context__``). Treats ``ssl.SSLEOFError``,
+    ``ssl.SSLZeroReturnError``, ``ssl.SSLSyscallError``, and non-blocking SSL
+    socket waits as transient connection drops (``True``), while treating
+    ``ssl.SSLCertVerificationError`` and permanent ``ssl.SSLError`` config/TLS
+    faults anywhere in the chain or nested exception args as non-network
+    (``False``) so permanent TLS faults do not retry for hours. Defers generic
+    ``aioapns`` exhaustion/connection wrappers (``MaxAttemptsExceeded``,
+    ``ConnectionError``) to their concrete deeper cause when one is available,
+    while still treating bare wrappers as network-class.
 
     Args:
         exc: Exception raised while sending an APNs notification.
 
     Returns:
         ``True`` for transient network/transport outage errors that should retry
-        until expiry; ``False`` for non-network, filesystem, and TLS errors.
+        until expiry; ``False`` for non-network, filesystem, and permanent TLS errors.
     """
     chain: list[BaseException] = []
     seen: set[int] = set()
@@ -114,7 +128,7 @@ def is_network_delivery_error(exc: BaseException) -> bool:
         chain.append(current)
         seen.add(id(current))
         current = _next_exception(current)
-    if any(_is_ssl_node(node) for node in chain):
+    if any(_is_permanent_ssl_node(node) for node in chain):
         return False
     for index, node in enumerate(chain):
         has_deeper_cause = index + 1 < len(chain)
@@ -440,11 +454,19 @@ class _TimeoutSafeProtocolMixin(APNsTLSClientProtocol):
         super().on_data_received(raw_data, stream_id)
 
     def on_stream_ended(self, stream_id: int) -> None:
-        """Forget the stream mapping when ``StreamEnded`` releases the slot."""
+        """Fail unresolved bodyless responses cleanly before releasing the slot."""
+        self._prune_done_requests()
         notification_id = self.request_streams.pop(stream_id, None)
         if notification_id is not None:
-            self.requests.pop(notification_id, None)
-            self.request_statuses.pop(notification_id, None)
+            status = self.request_statuses.pop(notification_id, "unknown")
+            pending_future = self.requests.get(notification_id)
+            if pending_future is not None:
+                pending_future.set_exception(
+                    ApnsConnectionClosed(
+                        f"APNs stream {stream_id} ended without response body (status={status})"
+                    )
+                )
+                self.requests.pop(notification_id, None)
         super().on_stream_ended(stream_id)
 
     def connection_lost(self, exc: Exception | None) -> None:
@@ -466,15 +488,15 @@ class _TimeoutSafeProductionClientProtocol(_TimeoutSafeProtocolMixin, APNsProduc
 
 
 class _HardenedKeyConnectionPool(APNsKeyConnectionPool):
-    """Key-auth APNs connection pool that propagates SSL/TLS failures directly."""
+    """Key-auth APNs connection pool that propagates non-network connect failures."""
 
     async def acquire(self) -> APNsBaseClientProtocol:
-        """Surface ``ssl.SSLError`` causes directly instead of retrying into ``MaxAttemptsExceeded``."""
+        """Surface non-network connect causes instead of retrying into ``MaxAttemptsExceeded``."""
         try:
             return await super().acquire()
         except ApnsConnectionError as exc:
-            cause = exc.__cause__ if exc.__cause__ is not None else exc.__context__
-            if isinstance(cause, ssl.SSLError):
+            cause = _next_exception(exc)
+            if cause is not None and not is_network_delivery_error(cause):
                 raise cause from exc
             raise
 

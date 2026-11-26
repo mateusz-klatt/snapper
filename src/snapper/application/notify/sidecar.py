@@ -278,8 +278,8 @@ class NotifySidecar(RegisterableProcess):
         self._scope_revalidator = scope_revalidator or ScopeRevalidator(tracker=tracker)
         self._push_beta_provider = push_beta_provider
         self._clock: Callable[[], datetime] = lambda: datetime.now(UTC)
-        self._outage_started_at: datetime | None = None
-        self._outage_delayed_delivery_ids: set[str] = set()
+        self._outage_started_at: dict[str, datetime] = {}
+        self._outage_delayed_delivery_ids: dict[str, set[str]] = {}
         self._portfolio_drift_recovery_scanner = (
             portfolio_drift_recovery_scanner
             if portfolio_drift_recovery_scanner is not None
@@ -741,9 +741,10 @@ class NotifySidecar(RegisterableProcess):
                 pid=target.delivery_public_id,
             )
             return
-        send_now = self._clock()
-        if await self._cancel_if_scope_revoked(target.delivery_public_id, target.event, send_now):
+        scope_now = self._clock()
+        if await self._cancel_if_scope_revoked(target.delivery_public_id, target.event, scope_now):
             return
+        send_now = self._clock()
         if await self._expire_if_past_deadline(
             target.delivery_public_id,
             target.prior_error_reason,
@@ -789,7 +790,7 @@ class NotifySidecar(RegisterableProcess):
             err=error_reason,
         )
         if is_network:
-            self._record_outage_delay(target.delivery_public_id, now)
+            self._record_outage_delay(target.device["env"], target.delivery_public_id, now)
             await self._schedule_network_retry_or_fail(target, attempt_number, error_reason, now)
             return
         await self._schedule_retry_or_fail(target, attempt_number, error_reason, now)
@@ -855,7 +856,9 @@ class NotifySidecar(RegisterableProcess):
                 session_id=sid,
                 sequence_id=seq,
             )
-            await self._maybe_log_outage_recovery(target.delivery_public_id, now)
+            await self._maybe_log_outage_recovery(
+                target.device["env"], target.delivery_public_id, now
+            )
             return
         if result.status == "unregistered":
             await self._repo.mark_delivery_unregistered(
@@ -1001,35 +1004,33 @@ class NotifySidecar(RegisterableProcess):
             sequence_id=self._tracker.next_sequence(_ZMQ_STREAM),
         )
 
-    def _record_outage_delay(self, delivery_public_id: str, now: datetime) -> None:
-        """Record one delivery delayed by an active network outage.
+    def _record_outage_delay(self, env: str, delivery_public_id: str, now: datetime) -> None:
+        """Record one delivery delayed by an active network outage in ``env``.
 
-        Outage state is tracked process-wide across APNs ``sandbox`` and
-        ``prod`` environments rather than per environment.
+        Outage state is tracked per APNs environment (``sandbox`` vs ``prod``)
+        rather than shared process-wide.
         """
-        if self._outage_started_at is None:
-            self._outage_started_at = now
-        self._outage_delayed_delivery_ids.add(delivery_public_id)
+        if env not in self._outage_started_at:
+            self._outage_started_at[env] = now
+        self._outage_delayed_delivery_ids.setdefault(env, set()).add(delivery_public_id)
 
     async def _maybe_log_outage_recovery(
-        self, recovered_delivery_public_id: str, now: datetime
+        self, env: str, recovered_delivery_public_id: str, now: datetime
     ) -> None:
-        """Log one recovery summary and reschedule delayed backlog for the next tick.
+        """Log one recovery summary for ``env`` and expedite its delayed backlog.
 
-        Because outage tracking is shared process-wide across APNs
-        environments, the first successful send in either ``sandbox`` or
-        ``prod`` closes the shared outage window and expedites all queued
-        deliveries in the delayed set.
+        Because outage tracking is scoped per APNs environment, the first
+        successful send in ``env`` closes only that environment's outage window
+        and expedites only queued deliveries delayed in ``env``.
         """
-        if self._outage_started_at is None:
+        started_at = self._outage_started_at.pop(env, None)
+        if started_at is None:
             return
-        delayed_ids = sorted(self._outage_delayed_delivery_ids)
-        started_at = self._outage_started_at
-        self._outage_started_at = None
-        self._outage_delayed_delivery_ids.clear()
+        delayed_ids = sorted(self._outage_delayed_delivery_ids.pop(env, set()))
         logger.warning(
-            "sidecar: {count} deliveries delayed by an outage between {t1} and {t2}",
+            "sidecar: {count} deliveries delayed by an outage in env={env} between {t1} and {t2}",
             count=len(delayed_ids),
+            env=env,
             t1=started_at.isoformat(),
             t2=now.isoformat(),
         )

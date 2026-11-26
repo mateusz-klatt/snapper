@@ -458,6 +458,49 @@ class TestNetworkDeliveryErrorClassification:
         httpx_ssl.__cause__ = inner_http
         assert is_network_delivery_error(httpx_ssl) is False
 
+    def test_transient_ssl_drop_errors_classified_network_and_permanent_ssl_false(self) -> None:
+        """SSL connection drops retry while certificate/config SSL faults stay non-network.
+
+        Given: Transient SSL drop subclasses (``SSLEOFError``,
+            ``SSLZeroReturnError``, ``SSLSyscallError``, ``SSLWantReadError``,
+            ``SSLWantWriteError``) and permanent SSL errors
+            (``SSLCertVerificationError``, bare config ``SSLError``), both
+            directly and wrapped in ``httpx.ConnectError`` or
+            ``MaxAttemptsExceeded``.
+        When: ``is_network_delivery_error`` classifies each exception chain.
+        Then: Transient drop subclasses return ``True`` and permanent TLS/cert
+            faults return ``False``.
+        """
+        for transient in (
+            ssl.SSLEOFError("EOF occurred in violation of protocol"),
+            ssl.SSLZeroReturnError("TLS/SSL connection has been closed"),
+            ssl.SSLSyscallError(errno.ECONNRESET, "syscall failure"),
+            ssl.SSLWantReadError("want read"),
+            ssl.SSLWantWriteError("want write"),
+        ):
+            assert is_network_delivery_error(transient) is True
+            wrapped_http = httpx.ConnectError("tls eof")
+            wrapped_http.__cause__ = transient
+            assert is_network_delivery_error(wrapped_http) is True
+            wrapped_apns = ApnsMaxAttemptsExceeded()
+            wrapped_apns.__cause__ = transient
+            assert is_network_delivery_error(wrapped_apns) is True
+
+        for permanent in (
+            ssl.SSLCertVerificationError(1, "certificate verify failed"),
+            ssl.SSLError(1, "WRONG_VERSION_NUMBER"),
+        ):
+            assert is_network_delivery_error(permanent) is False
+            wrapped_http = httpx.ConnectError("tls config failed")
+            wrapped_http.__cause__ = permanent
+            assert is_network_delivery_error(wrapped_http) is False
+            wrapped_args_http = httpx.ConnectError("tls config args")
+            wrapped_args_http.__cause__ = RuntimeError("tls config args", permanent)
+            assert is_network_delivery_error(wrapped_args_http) is False
+            wrapped_apns = ApnsMaxAttemptsExceeded()
+            wrapped_apns.__cause__ = permanent
+            assert is_network_delivery_error(wrapped_apns) is False
+
     def test_suppress_context_stops_chain_walk(self) -> None:
         """``raise ... from None`` stops context inspection at the outer exception.
 
@@ -734,6 +777,147 @@ class TestProtocolTimeoutSlotSafety:
                 payload={"aps": {"alert": {"title": "t", "body": "b"}}},
                 apns_topic="ie.klatt.snapper",
             )
+        sandbox_client.pool.close()
+        prod_client.pool.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "protocol_cls",
+        [_TimeoutSafeDevelopmentClientProtocol, _TimeoutSafeProductionClientProtocol],
+        ids=["sandbox-protocol", "production-protocol"],
+    )
+    async def test_empty_body_non_200_stream_ended_fails_future_and_releases_slot(
+        self,
+        protocol_cls: type[_TimeoutSafeProtocolMixin],
+    ) -> None:
+        """Bodyless 503 ``StreamEnded`` resolves the request with a network error.
+
+        Given: A real timeout-safe APNs HTTP/2 protocol with
+            ``MAX_CONCURRENT_STREAMS=1``.
+        When: The server ends one stream with HTTP ``503`` and no ``DATA``
+            frame, and ends a second stream with HTTP ``503`` plus an empty-
+            reason JSON payload ``{}``.
+        Then: Both calls resolve promptly with ``ApnsConnectionClosed``
+            (classified as a network outage error), clean up internal request
+            maps, restore the stream slot to capacity ``1``, and allow a
+            subsequent HTTP ``200`` send to succeed.
+        """
+        loop = asyncio.get_running_loop()
+        protocol, transport, server = _connected_h2_pair(
+            protocol_cls, loop, max_concurrent_streams=1
+        )
+
+        req_empty = _request("notif-503-empty")
+        task_empty = asyncio.create_task(protocol.send_notification(req_empty))
+        await asyncio.sleep(0)
+        events_empty = server.receive_data(bytes(transport.written))
+        transport.written.clear()
+        stream_empty = next(e.stream_id for e in events_empty if isinstance(e, RequestReceived))
+        server.send_headers(
+            stream_empty,
+            [(":status", "503"), ("apns-id", "notif-503-empty")],
+            end_stream=True,
+        )
+        protocol.data_received(server.data_to_send())
+
+        with pytest.raises(ApnsConnectionClosed) as exc_info:
+            await asyncio.wait_for(task_empty, timeout=0.5)
+        assert is_network_delivery_error(exc_info.value) is True
+        assert protocol.free_channels._value == 1
+        assert "notif-503-empty" not in protocol.requests
+        assert stream_empty not in protocol.request_streams
+        assert "notif-503-empty" not in protocol.request_statuses
+
+        req_blank_json = _request("notif-503-blank-json")
+        task_blank = asyncio.create_task(protocol.send_notification(req_blank_json))
+        await asyncio.sleep(0)
+        events_blank = server.receive_data(bytes(transport.written))
+        transport.written.clear()
+        stream_blank = next(e.stream_id for e in events_blank if isinstance(e, RequestReceived))
+        server.send_headers(
+            stream_blank,
+            [(":status", "503"), ("apns-id", "notif-503-blank-json")],
+        )
+        server.send_data(stream_blank, b"{}", end_stream=True)
+        protocol.data_received(server.data_to_send())
+
+        with pytest.raises(ApnsConnectionClosed) as blank_exc_info:
+            await asyncio.wait_for(task_blank, timeout=0.5)
+        assert is_network_delivery_error(blank_exc_info.value) is True
+        assert protocol.free_channels._value == 1
+
+        req_ok = _request("notif-after-503")
+        task_ok = asyncio.create_task(protocol.send_notification(req_ok))
+        await asyncio.sleep(0)
+        events_ok = server.receive_data(bytes(transport.written))
+        transport.written.clear()
+        stream_ok = next(e.stream_id for e in events_ok if isinstance(e, RequestReceived))
+        server.send_headers(
+            stream_ok,
+            [(":status", "200"), ("apns-id", "notif-after-503")],
+            end_stream=True,
+        )
+        protocol.data_received(server.data_to_send())
+        result_ok = await asyncio.wait_for(task_ok, timeout=0.5)
+        assert result_ok.status == "200"
+        assert protocol.free_channels._value == 1
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_hardened_pool_surfaces_non_transient_connect_errors_and_retries_ssl_drops(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-transient connect errors bypass pool retries while SSL drops retry normally.
+
+        Given: A real ``ApnsClientPool`` with ``max_connection_attempts=3``
+            and a bare ``ApnsConnectionError`` case on ``acquire``.
+        When: ``sandbox`` fails connection setup with ``ValueError``,
+            ``prod`` fails connection setup with transient ``ssl.SSLEOFError``,
+            and bare ``APNsKeyConnectionPool.acquire`` raises an uncaused
+            ``ApnsConnectionError``.
+        Then: ``sandbox`` propagates ``ValueError`` after one attempt without
+            wrapping in ``MaxAttemptsExceeded``, ``prod`` exhausts retries into
+            ``MaxAttemptsExceeded`` wrapping a transient SSL drop, and the bare
+            ``ApnsConnectionError`` re-raises unchanged.
+        """
+        pool = build_apns_client_pool(_config(environment="sandbox_and_production"))
+        sandbox_client = pool._select_client("sandbox")
+        prod_client = pool._select_client("prod")
+        sandbox_client.pool.max_connection_attempts = 3
+        prod_client.pool.max_connection_attempts = 2
+        monkeypatch.setattr("aioapns.connection.asyncio.sleep", AsyncMock())
+
+        sandbox_connect = AsyncMock(side_effect=ValueError("invalid APNs signing key"))
+        sandbox_client.pool.create_connection = sandbox_connect
+        with pytest.raises(ValueError, match="invalid APNs signing key"):
+            await pool.send(
+                env="sandbox",
+                device_token="a" * 64,
+                payload={"aps": {"alert": {"title": "t", "body": "b"}}},
+                apns_topic="ie.klatt.snapper",
+            )
+        assert sandbox_connect.await_count == 1
+
+        prod_connect = AsyncMock(side_effect=ssl.SSLEOFError("EOF occurred in violation"))
+        prod_client.pool.create_connection = prod_connect
+        with pytest.raises(ApnsMaxAttemptsExceeded):
+            await pool.send(
+                env="prod",
+                device_token="a" * 64,
+                payload={"aps": {"alert": {"title": "t", "body": "b"}}},
+                apns_topic="ie.klatt.snapper",
+            )
+        assert prod_connect.await_count == 2
+
+        monkeypatch.setattr(
+            APNsKeyConnectionPool,
+            "acquire",
+            AsyncMock(side_effect=ApnsConnectionError()),
+        )
+        with pytest.raises(ApnsConnectionError):
+            await sandbox_client.pool.acquire()
+
         sandbox_client.pool.close()
         prod_client.pool.close()
 
