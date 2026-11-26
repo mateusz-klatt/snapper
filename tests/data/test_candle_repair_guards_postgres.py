@@ -369,8 +369,8 @@ async def test_voted_zero_replaced_between_preflight_and_lock_is_skipped_on_post
 class _FetchValConnection(Protocol):
     """Typed protocol for an asyncpg raw connection executing EXPLAIN queries."""
 
-    async def fetchval(self, query: str, *args: object) -> str:
-        """Execute a parameterized scalar SQL query and return its string payload."""
+    async def fetchval(self, query: str, *args: object) -> object:
+        """Execute a parameterized scalar SQL query and return its decoded payload."""
         ...
 
 
@@ -426,7 +426,7 @@ async def _run_fenced_explain(
         driver = cast(_FetchValConnection, raw_conn.driver_connection)
         raw_json = await driver.fetchval(f"EXPLAIN (ANALYZE, FORMAT JSON) {sql}", *params)
         await session.rollback()
-    parsed: object = json.loads(raw_json)
+    parsed: object = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
     assert isinstance(parsed, list) and parsed
     top_entry: object = parsed[0]
     assert isinstance(top_entry, Mapping)
