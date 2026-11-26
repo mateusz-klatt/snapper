@@ -12,6 +12,7 @@ from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -23,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import snapper.data.repository as repository_module
 from scripts.repair_kraken_candles import archive_instruments
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
@@ -1618,3 +1620,36 @@ async def test_multi_day_missing_insert_and_replay_respects_inclusive_open_at_bo
             ).all()
         )
     assert (_OTHER_INSTRUMENT, live_batch_second["open_at"]) in {tuple(key) for key in updated_keys}
+
+
+def test_instant_span_orders_aware_values_by_instant_across_dst_fall_back() -> None:
+    """Bounds derived from a DST-ambiguous batch must cover every key instant.
+
+    Given: Two aware ``open_at`` values sharing one America/New_York tzinfo across the fall-back hour.
+    When: The batch span is computed for an inclusive ``BETWEEN`` bound.
+    Then: The span runs from the earlier UTC instant to the later one, not by wall time.
+    """
+    new_york = ZoneInfo("America/New_York")
+    first_pass = datetime(2026, 11, 1, 1, 50, tzinfo=new_york, fold=0)
+    second_pass = datetime(2026, 11, 1, 1, 10, tzinfo=new_york, fold=1)
+    assert min(first_pass, second_pass) == second_pass
+
+    earliest, latest = repository_module._instant_span([second_pass, first_pass])
+
+    assert earliest == datetime(2026, 11, 1, 5, 50, tzinfo=UTC)
+    assert latest == datetime(2026, 11, 1, 6, 10, tzinfo=UTC)
+    assert earliest <= first_pass.astimezone(UTC) <= latest
+    assert earliest <= second_pass.astimezone(UTC) <= latest
+
+
+def test_instant_span_compares_naive_values_as_given() -> None:
+    """Naive SQLite ``open_at`` values keep their plain ordering.
+
+    Given: Two naive ``open_at`` values.
+    When: The batch span is computed.
+    Then: The earlier and later values are returned unchanged.
+    """
+    earlier = datetime(2026, 11, 1, 5, 0)
+    later = datetime(2026, 11, 1, 6, 0)
+
+    assert repository_module._instant_span([later, earlier]) == (earlier, later)

@@ -651,6 +651,28 @@ _HUMAN_DESK_MEMBER_ROLE_VALUES: Final[tuple[str, ...]] = tuple(
 )
 
 
+def _instant_span(moments: Sequence[datetime]) -> tuple[datetime, datetime]:
+    """Return the earliest and latest instants of a non-empty batch of ``open_at`` values.
+
+    Python orders aware datetimes that share one ``tzinfo`` object by wall time
+    and ignores ``utcoffset`` and ``fold``, while PostgreSQL compares instants.
+    Converting every aware value to UTC first keeps a range bound derived from
+    the batch a superset of its exact natural keys across a DST transition, so
+    the bound can only prune partitions and never drop a matching row. Naive
+    values (SQLite) are compared as given.
+
+    Args:
+        moments: Non-empty ``open_at`` values from validated candle keys.
+
+    Returns:
+        ``(earliest, latest)`` instants for an inclusive ``BETWEEN`` bound.
+    """
+    instants = [
+        moment.astimezone(UTC) if moment.tzinfo is not None else moment for moment in moments
+    ]
+    return min(instants), max(instants)
+
+
 def _is_human_viewer_role(role: str) -> bool:
     """Return whether a persisted role is the mutable human desk-member class.
 
@@ -13988,11 +14010,11 @@ class SQLAlchemyRepository(Repository):
         """
         instruments = sorted({row["instrument_public_id"] for row in rows})
         timeframes = sorted({row["timeframe"] for row in rows})
-        open_times = [row["open_at"] for row in rows]
+        earliest, latest = _instant_span([row["open_at"] for row in rows])
         return (
             self._candle_instrument_membership(instruments),
             Candle.timeframe.in_(timeframes),
-            Candle.open_at.between(min(open_times), max(open_times)),
+            Candle.open_at.between(earliest, latest),
         )
 
     @staticmethod
@@ -14005,8 +14027,8 @@ class SQLAlchemyRepository(Repository):
         Returns:
             ``open_at BETWEEN min AND max`` filter clause for daily partition pruning.
         """
-        open_times = [key[2] for key in keys]
-        return Candle.open_at.between(min(open_times), max(open_times))
+        earliest, latest = _instant_span([key[2] for key in keys])
+        return Candle.open_at.between(earliest, latest)
 
     async def _filter_missing_candle_rows(
         self, session: AsyncSession, rows: list[CandleUpsertRow]
