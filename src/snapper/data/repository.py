@@ -651,6 +651,28 @@ _HUMAN_DESK_MEMBER_ROLE_VALUES: Final[tuple[str, ...]] = tuple(
 )
 
 
+def _instant_span(moments: Sequence[datetime]) -> tuple[datetime, datetime]:
+    """Return the earliest and latest instants of a non-empty batch of ``open_at`` values.
+
+    Python orders aware datetimes that share one ``tzinfo`` object by wall time
+    and ignores ``utcoffset`` and ``fold``, while PostgreSQL compares instants.
+    Converting every aware value to UTC first keeps a range bound derived from
+    the batch a superset of its exact natural keys across a DST transition, so
+    the bound can only prune partitions and never drop a matching row. Naive
+    values (SQLite) are compared as given.
+
+    Args:
+        moments: Non-empty ``open_at`` values from validated candle keys.
+
+    Returns:
+        ``(earliest, latest)`` instants for an inclusive ``BETWEEN`` bound.
+    """
+    instants = [
+        moment.astimezone(UTC) if moment.tzinfo is not None else moment for moment in moments
+    ]
+    return min(instants), max(instants)
+
+
 def _is_human_viewer_role(role: str) -> bool:
     """Return whether a persisted role is the mutable human desk-member class.
 
@@ -4497,12 +4519,20 @@ _CANDLE_VERSION_KEY_FIELDS: Final[tuple[str, ...]] = (
 _CANDLE_KEY_BATCH: Final[int] = 500
 """Most candle version keys bound into one statement."""
 
+_CANDLE_PLANNER_LOCAL_SQL: Final[str] = (
+    "SELECT set_config('jit', 'off', true), "
+    "set_config('plan_cache_mode', 'force_custom_plan', true)"
+)
+"""Disable JIT and force custom partition-pruning plans for the current transaction."""
+
 _CANDLE_FENCE_LOCK_TIMEOUT_SQL: Final[str] = (
     "SELECT set_config('lock_timeout', CASE WHEN current_setting('lock_timeout')::interval = "
     "interval '0' OR current_setting('lock_timeout')::interval > interval '1 second' "
-    "THEN '1s' ELSE current_setting('lock_timeout') END, true)"
+    "THEN '1s' ELSE current_setting('lock_timeout') END, true), "
+    "set_config('jit', 'off', true), "
+    "set_config('plan_cache_mode', 'force_custom_plan', true)"
 )
-"""Bound the candle writer fence's lock wait to at most one second, for this transaction."""
+"""Bound the candle writer fence's lock wait and force partition-pruned plans without JIT."""
 
 
 def _candle_version_key_columns() -> tuple[ColumnElement[object], ...]:
@@ -13961,15 +13991,56 @@ class SQLAlchemyRepository(Repository):
             )
         return normalized
 
+    def _candle_batch_bounds(
+        self, rows: Sequence[CandleUpsertRow]
+    ) -> tuple[ColumnElement[bool], ...]:
+        """Bound all-history candle lookups to the batch's instruments, timeframes and open span.
+
+        PostgreSQL partitions ``candles`` daily by ``open_at`` and indexes
+        every version by ``(instrument_public_id, open_at)``. Supplying explicit
+        scalar and range predicates alongside CTE joins or row-constructor ``IN``
+        lists enables plan-time partition pruning and scoped leaf index reads
+        without altering which rows match.
+
+        Args:
+            rows: Non-empty candle rows sharing validated natural-key columns.
+
+        Returns:
+            Instrument membership, timeframe membership and ``open_at`` range filters.
+        """
+        instruments = sorted({row["instrument_public_id"] for row in rows})
+        timeframes = sorted({row["timeframe"] for row in rows})
+        earliest, latest = _instant_span([row["open_at"] for row in rows])
+        return (
+            self._candle_instrument_membership(instruments),
+            Candle.timeframe.in_(timeframes),
+            Candle.open_at.between(earliest, latest),
+        )
+
     @staticmethod
+    def _candle_open_at_bounds(keys: Sequence[_CandleNaturalKey]) -> ColumnElement[bool]:
+        """Bound natural-key reads to the batch's inclusive ``open_at`` span.
+
+        Args:
+            keys: Non-empty natural keys ``(instrument_public_id, timeframe, open_at)``.
+
+        Returns:
+            ``open_at BETWEEN min AND max`` filter clause for daily partition pruning.
+        """
+        earliest, latest = _instant_span([key[2] for key in keys])
+        return Candle.open_at.between(earliest, latest)
+
     async def _filter_missing_candle_rows(
-        session: AsyncSession, rows: list[CandleUpsertRow]
+        self, session: AsyncSession, rows: list[CandleUpsertRow]
     ) -> list[CandleUpsertRow]:
         """Check exact natural keys across every historical version without a writer fence."""
-        keys = [SQLAlchemyRepository._candle_natural_key(row) for row in rows]
+        if self.dialect_name == "postgresql":
+            await session.execute(text(_CANDLE_PLANNER_LOCAL_SQL))
+        keys = [self._candle_natural_key(row) for row in rows]
         result = await session.execute(
             select(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).where(
-                tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(keys)
+                tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(keys),
+                *self._candle_batch_bounds(rows),
             )
         )
         present = set(result.all())
@@ -13980,13 +14051,28 @@ class SQLAlchemyRepository(Repository):
     ) -> list[CandleUpsertRow]:
         """Atomically insert at most 720 absent complete native one-minute candles.
 
-        All inputs are validated before opening the write transaction. Existing
-        natural keys are checked across every knowledge version, without an
-        author-time or sentinel filter. PostgreSQL serializes the short batch
-        against all candle writers and partition maintenance under a recursive
-        relation lock with at most a one-second acquisition wait. SQLite takes
-        its existing empty-update writer reservation before evaluating absence.
-        No existing row is updated, closed, deleted or broadcast.
+        All inputs are validated before opening the write transaction, and
+        owned calls run a lock-free preflight first so replays never acquire
+        a table lock. Existing natural keys are checked across every knowledge
+        version, without an author-time or sentinel filter.
+
+        PostgreSQL retains ``SHARE ROW EXCLUSIVE`` with at most a one-second
+        acquisition wait rather than weakening to ``ROW EXCLUSIVE``, adding
+        advisory locks or locking only touched day partitions: the partial
+        active unique index covers only open-ended rows (not closed-only
+        history), live writers (``upsert_candles``) and catchup share today's
+        partition under recursive ``ROW EXCLUSIVE`` locking (so weakening to
+        ``ROW EXCLUSIVE`` turns concurrent races into batch-aborting or
+        live-row-dropping ``23505`` errors and stops canonical identity lookups
+        from waiting for uncommitted inserts), and per-key advisory locks
+        cannot safely serialize multi-call caller sessions or 1,608-instrument
+        snapshot reads without deadlock risk. Instead, lock hold time is kept
+        minimal by completing validation and lock-free presence filtering before
+        locking and bounding the final ``NOT EXISTS`` check with disabled JIT
+        and forced custom plans so PostgreSQL prunes unrelated daily leaves at
+        plan time. SQLite takes its existing empty-update writer reservation
+        before evaluating absence. No existing row is updated, closed, deleted
+        or broadcast.
 
         Args:
             rows: Complete native minute rows stamped at actual acquisition.
@@ -14138,6 +14224,7 @@ class SQLAlchemyRepository(Repository):
         result = await session.execute(
             select(Candle.__table__).where(
                 natural_key.in_(keys),
+                cls._candle_open_at_bounds(keys),
                 Candle.known_to == KNOWN_TO_MAX,
                 Candle.source == "synthesized",
                 Candle.volume == 0,
@@ -14155,9 +14242,11 @@ class SQLAlchemyRepository(Repository):
         ]
         if not targets:
             return []
+        target_keys = [cls._candle_natural_key(row) for row, _ in targets]
         protected = await session.execute(
             select(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).where(
-                natural_key.in_([cls._candle_natural_key(row) for row, _ in targets]),
+                natural_key.in_(target_keys),
+                cls._candle_open_at_bounds(target_keys),
                 or_(
                     Candle.source != "synthesized",
                     Candle.volume != 0,
@@ -14424,7 +14513,15 @@ class SQLAlchemyRepository(Repository):
         *,
         lock_mode: Literal["ROW EXCLUSIVE", "SHARE ROW EXCLUSIVE"] = "SHARE ROW EXCLUSIVE",
     ) -> list[CandleUpsertRow]:
-        """Serialize absent-key proof and insert-only writes in one short transaction."""
+        """Prepare the pruned set-based INSERT before fencing, then execute it under the lock.
+
+        Live catchup callers keep the default ``SHARE ROW EXCLUSIVE`` fence so
+        concurrent ``upsert_candles`` writers (which hold ``ROW EXCLUSIVE``) and
+        ``get_canonical_candle_public_id`` lookups serialize cleanly instead of
+        colliding on ``uq_candle_itf_open`` or reading uncommitted absence.
+        Statement construction happens prior to acquiring the lock so the hold
+        covers only the partition-pruned ``INSERT ... SELECT ... WHERE NOT EXISTS``.
+        """
         statement = self._missing_candle_batch_insert_statement(rows)
         await self._begin_candle_reconciliation_write(
             session, sqlite_write_lock=False, lock_mode=lock_mode
@@ -14436,7 +14533,13 @@ class SQLAlchemyRepository(Repository):
         return [row for row in rows if self._candle_natural_key(row) in inserted]
 
     def _missing_candle_batch_insert_statement(self, rows: list[CandleUpsertRow]) -> Insert:
-        """Insert an entire validated batch with one authoritative all-history absence proof."""
+        """Insert an entire validated batch with one partition-pruned all-history absence proof.
+
+        Adding the batch's distinct instruments, timeframes and ``open_at``
+        bounds to ``NOT EXISTS`` does not change which rows match the CTE join,
+        while allowing PostgreSQL to prune unrelated daily partitions at plan
+        time and restrict leaf scans to the candidate instruments.
+        """
         values: list[dict[str, object]] = [dict(row) for row in rows]
         columns = list(values[0])
         if self.dialect_name == "postgresql":
@@ -14463,6 +14566,7 @@ class SQLAlchemyRepository(Repository):
             Candle.instrument_public_id == candidates.c.instrument_public_id,
             Candle.timeframe == candidates.c.timeframe,
             Candle.open_at == candidates.c.open_at,
+            *self._candle_batch_bounds(rows),
         )
         source = select(*(candidates.c[name] for name in columns)).where(absent)
         return (
@@ -14478,7 +14582,7 @@ class SQLAlchemyRepository(Repository):
         sqlite_write_lock: bool,
         lock_mode: Literal["ROW EXCLUSIVE", "SHARE ROW EXCLUSIVE"] = "SHARE ROW EXCLUSIVE",
     ) -> None:
-        """Fence all concurrent candle writers before any historical ownership read."""
+        """Fence all concurrent candle writers after configuring local lock and planner bounds."""
         if self.dialect_name == "postgresql":
             isolation = (await session.execute(text("SHOW transaction_isolation"))).scalar_one()
             if isolation != "read committed":
@@ -14888,13 +14992,15 @@ class SQLAlchemyRepository(Repository):
         keys = list(dict.fromkeys(cls._candle_natural_key(row) for row in rows))
         latest: dict[_CandleNaturalKey, datetime] = {}
         for offset in range(0, len(keys), _CANDLE_LOOKUP_CHUNK_SIZE):
+            key_chunk = keys[offset : offset + _CANDLE_LOOKUP_CHUNK_SIZE]
             result = await session.execute(
                 select(
                     Candle.instrument_public_id, Candle.timeframe, Candle.open_at, Candle.timestamp
                 ).where(
                     tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(
-                        keys[offset : offset + _CANDLE_LOOKUP_CHUNK_SIZE]
+                        key_chunk
                     ),
+                    cls._candle_open_at_bounds(key_chunk),
                     Candle.known_to == KNOWN_TO_MAX,
                 )
             )
@@ -14992,6 +15098,7 @@ class SQLAlchemyRepository(Repository):
                     tuple_(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).in_(
                         key_chunk
                     ),
+                    cls._candle_open_at_bounds(key_chunk),
                     Candle.timestamp <= max_timestamp,
                     Candle.known_to > min_timestamp,
                 )

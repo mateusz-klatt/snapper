@@ -1389,9 +1389,13 @@ including recovery after an unknown commit acknowledgement.
 
 Each missing-only transaction repeats its authoritative all-history absence proof
 in one set-based `INSERT ... SELECT ... RETURNING`. PostgreSQL uses typed arrays
-with `unnest` and retains the recursive `SHARE ROW EXCLUSIVE` fence, READ COMMITTED
-requirement and bounded lock timeout. SQLite uses typed candidate values and its
-existing empty-update writer reservation so caller rollback remains effective.
+with `unnest`, bounds the absence check to the batch's instruments, timeframes
+and `open_at` range, disables JIT and forces custom plans before locking so
+daily partitions prune at plan time, and retains the recursive
+`SHARE ROW EXCLUSIVE` fence, READ COMMITTED requirement and bounded lock timeout
+to serialize against live `upsert_candles` writers and canonical identity
+lookups. SQLite uses typed candidate values and its existing empty-update writer
+reservation so caller rollback remains effective.
 Catchup explicitly defers while live writes are queued, in flight or recovering,
 then retries on its bounded scheduler cadence. A catchup insert or correction
 that hits a lock timeout (SQLSTATE 55P03), usually on its writer fence, is

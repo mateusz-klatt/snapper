@@ -12,6 +12,7 @@ from typing import Literal
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -23,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import snapper.data.repository as repository_module
 from scripts.repair_kraken_candles import archive_instruments
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
@@ -389,10 +391,52 @@ async def test_postgres_serialization_commands_precede_insert_receipt_without_co
         commands = [str(call.args[0]) for call in session.execute.await_args_list]
         assert commands[0] == "SHOW transaction_isolation"
         assert "current_setting('lock_timeout')" in commands[1]
+        assert "set_config('jit', 'off', true)" in commands[1]
+        assert "set_config('plan_cache_mode', 'force_custom_plan', true)" in commands[1]
         assert "SHARE ROW EXCLUSIVE" in commands[2]
         assert "INSERT INTO candles" in commands[3] and "NOT (EXISTS" in commands[3]
         assert "UPDATE " not in commands[3]
         session.commit.assert_not_awaited()
+    finally:
+        await repo.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_postgres_missing_candle_statement_and_preflight_include_pruning_bounds() -> None:
+    """Given a Postgres dialect repository, when compiling missing-candle preflight and insert statements across days and instruments, then planner JIT/generic-plan guards precede bounded queries."""
+    repo = _PostgresDialectRepository("sqlite+aiosqlite:///:memory:")
+    first = _row(0)
+    second = _row(1440)
+    second["instrument_public_id"] = _OTHER_INSTRUMENT
+    second["timeframe"] = "5m"
+    session = AsyncMock(spec=AsyncSession)
+    existing_result = MagicMock()
+    existing_result.all.return_value = [(_INSTRUMENT, "1m", _OPEN)]
+    session.execute.side_effect = [MagicMock(), existing_result]
+    try:
+        compiled_insert = str(
+            repo._missing_candle_batch_insert_statement([first, second]).compile(
+                dialect=postgresql.dialect()
+            )
+        )
+        assert "INSERT INTO candles" in compiled_insert
+        assert "NOT (EXISTS" in compiled_insert
+        assert "= ANY (candle_instrument_ids)" in compiled_insert or "ANY" in compiled_insert
+        assert "candles.timeframe IN" in compiled_insert
+        assert "candles.open_at BETWEEN" in compiled_insert
+        missing = await repo._filter_missing_candle_rows(
+            cast(AsyncSession, session), [first, second]
+        )
+        assert missing == [second]
+        assert len(session.execute.await_args_list) == 2
+        planner_sql = str(session.execute.await_args_list[0].args[0])
+        assert "set_config('jit', 'off', true)" in planner_sql
+        assert "set_config('plan_cache_mode', 'force_custom_plan', true)" in planner_sql
+        compiled_preflight = str(
+            session.execute.await_args_list[1].args[0].compile(dialect=postgresql.dialect())
+        )
+        assert "candles.open_at BETWEEN" in compiled_preflight
+        assert "candles.timeframe IN" in compiled_preflight
     finally:
         await repo.engine.dispose()
 
@@ -1511,3 +1555,101 @@ async def test_preflight_empty_and_invalid_suffix_never_open_a_session(
     with pytest.raises(ValueError, match="720"):
         await repository.filter_missing_candles([_row(offset) for offset in range(721)])
     session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_multi_day_missing_insert_and_replay_respects_inclusive_open_at_bounds(
+    repository: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given multi-day and multi-instrument candles spanning boundary timestamps, when inserting missing candles and replaying the batch, then only missing keys are inserted once and replays skip the write fence."""
+    outside_before = _row(-60)
+    min_existing = _row(0)
+    gap_mid = _row(60)
+    max_existing = _row(1440)
+    outside_after = _row(2880)
+    other_instrument_gap = _row(1440)
+    other_instrument_gap["instrument_public_id"] = _OTHER_INSTRUMENT
+    await repository.upsert_candles([outside_before, min_existing, max_existing, outside_after])
+
+    inserted = await repository.insert_missing_candles(
+        [min_existing, gap_mid, max_existing, other_instrument_gap]
+    )
+    assert len(inserted) == 2
+
+    def fail_on_fence(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("unexpected writer fence on empty preflight replay")
+
+    monkeypatch.setattr(repository, "_begin_candle_reconciliation_write", fail_on_fence)
+    replayed = await repository.insert_missing_candles(
+        [min_existing, gap_mid, max_existing, other_instrument_gap]
+    )
+    assert replayed == []
+
+    async with repository.session() as session:
+        active_keys = list(
+            (
+                await session.execute(
+                    select(Candle.instrument_public_id, Candle.timeframe, Candle.open_at).where(
+                        Candle.known_to == KNOWN_TO_MAX
+                    )
+                )
+            ).all()
+        )
+    assert sorted(tuple(key) for key in active_keys) == sorted(
+        [
+            (_INSTRUMENT, "1m", outside_before["open_at"]),
+            (_INSTRUMENT, "1m", min_existing["open_at"]),
+            (_INSTRUMENT, "1m", gap_mid["open_at"]),
+            (_INSTRUMENT, "1m", max_existing["open_at"]),
+            (_INSTRUMENT, "1m", outside_after["open_at"]),
+            (_OTHER_INSTRUMENT, "1m", other_instrument_gap["open_at"]),
+        ]
+    )
+
+    live_batch_second = _row(1500)
+    live_batch_second["instrument_public_id"] = _OTHER_INSTRUMENT
+    await repository.upsert_candles([min_existing, live_batch_second])
+    async with repository.session() as session:
+        updated_keys = list(
+            (
+                await session.execute(
+                    select(Candle.instrument_public_id, Candle.open_at).where(
+                        Candle.known_to == KNOWN_TO_MAX
+                    )
+                )
+            ).all()
+        )
+    assert (_OTHER_INSTRUMENT, live_batch_second["open_at"]) in {tuple(key) for key in updated_keys}
+
+
+def test_instant_span_orders_aware_values_by_instant_across_dst_fall_back() -> None:
+    """Bounds derived from a DST-ambiguous batch must cover every key instant.
+
+    Given: Two aware ``open_at`` values sharing one America/New_York tzinfo across the fall-back hour.
+    When: The batch span is computed for an inclusive ``BETWEEN`` bound.
+    Then: The span runs from the earlier UTC instant to the later one, not by wall time.
+    """
+    new_york = ZoneInfo("America/New_York")
+    first_pass = datetime(2026, 11, 1, 1, 50, tzinfo=new_york, fold=0)
+    second_pass = datetime(2026, 11, 1, 1, 10, tzinfo=new_york, fold=1)
+    assert min(first_pass, second_pass) == second_pass
+
+    earliest, latest = repository_module._instant_span([second_pass, first_pass])
+
+    assert earliest == datetime(2026, 11, 1, 5, 50, tzinfo=UTC)
+    assert latest == datetime(2026, 11, 1, 6, 10, tzinfo=UTC)
+    assert earliest <= first_pass.astimezone(UTC) <= latest
+    assert earliest <= second_pass.astimezone(UTC) <= latest
+
+
+def test_instant_span_compares_naive_values_as_given() -> None:
+    """Naive SQLite ``open_at`` values keep their plain ordering.
+
+    Given: Two naive ``open_at`` values.
+    When: The batch span is computed.
+    Then: The earlier and later values are returned unchanged.
+    """
+    earlier = datetime(2026, 11, 1, 5, 0)
+    later = datetime(2026, 11, 1, 6, 0)
+
+    assert repository_module._instant_span([later, earlier]) == (earlier, later)
