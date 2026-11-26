@@ -375,6 +375,21 @@ class _TimeoutSafeProtocolMixin(APNsTLSClientProtocol):
     disconnect callbacks, cleans up stream mappings on ``StreamEnded``, and
     resets the stream + releases the slot once if cancelled before
     ``StreamEnded`` arrives.
+
+    Acquire-to-registration window safety (aioapns 4.0): ``APNs.send_notification``
+    delegates to ``APNsBaseConnectionPool.send_notification``, which acquires a
+    connection via ``await self.acquire()`` and calls
+    ``await connection.send_notification(request)``. Inside
+    ``APNsBaseClientProtocol.send_notification``, once
+    ``await self.free_channels.acquire()`` returns ``stream_id``, there is no
+    ``await`` before ``self.request_streams[stream_id] = request.notification_id``:
+    header construction (including ``auth_provider.get_header()``),
+    ``conn.send_headers``, ``json.dumps``, ``conn.send_data``, ``flush``
+    (``refresh_inactivity_timer`` and ``transport.write``), creating
+    ``future_response``, and populating ``requests`` and ``request_streams`` are
+    all synchronous. Because asyncio only delivers ``CancelledError`` at ``await``
+    suspension points, cancellation cannot happen between acquiring the stream
+    slot and recording ``stream_id`` in ``request_streams``.
     """
 
     def _prune_done_requests(self) -> None:

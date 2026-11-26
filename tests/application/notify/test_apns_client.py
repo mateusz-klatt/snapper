@@ -10,6 +10,7 @@ Apple's HTTP/2 stack.
 
 import asyncio
 import errno
+import inspect
 import socket
 import ssl
 from unittest.mock import AsyncMock
@@ -17,9 +18,13 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
+from aioapns import APNs as _AioApns
 from aioapns.common import NotificationRequest
 from aioapns.common import NotificationResult
 from aioapns.common import PushType
+from aioapns.connection import APNsDevelopmentClientProtocol
+from aioapns.connection import APNsKeyConnectionPool
+from aioapns.connection import APNsProductionClientProtocol
 from aioapns.exceptions import ConnectionClosed as ApnsConnectionClosed
 from aioapns.exceptions import ConnectionError as ApnsConnectionError
 from aioapns.exceptions import MaxAttemptsExceeded as ApnsMaxAttemptsExceeded
@@ -731,3 +736,66 @@ class TestProtocolTimeoutSlotSafety:
             )
         sandbox_client.pool.close()
         prod_client.pool.close()
+
+
+class TestAioApnsInternalContract:
+    """Guard private ``aioapns`` attributes and methods relied on by our wrappers."""
+
+    @pytest.mark.asyncio
+    async def test_installed_aioapns_protocol_and_pool_expose_wrapped_internals(self) -> None:
+        """Fail loudly if an ``aioapns`` upgrade renames or removes wrapped internals.
+
+        Given: Real installed ``APNsDevelopmentClientProtocol``,
+            ``APNsProductionClientProtocol``, and ``aioapns.APNs`` instances
+            constructed without mocks on the running event loop.
+        When: Inspecting every private attribute and overridden/super-called
+            method used by ``_TimeoutSafeProtocolMixin`` and
+            ``_HardenedKeyConnectionPool``.
+        Then: All required attributes, nested channel/conn methods, and
+            protocol/pool methods exist with their expected callability.
+        """
+        loop = asyncio.get_running_loop()
+        for protocol_cls in (APNsDevelopmentClientProtocol, APNsProductionClientProtocol):
+            protocol = protocol_cls("ie.klatt.snapper", loop=loop)
+            for attr_name in ("requests", "request_streams", "request_statuses"):
+                assert isinstance(getattr(protocol, attr_name), dict)
+            assert hasattr(protocol, "transport")
+            assert callable(protocol.free_channels.acquire)
+            assert callable(protocol.free_channels.release)
+            assert callable(protocol.conn.reset_stream)
+            assert callable(protocol.conn.data_to_send)
+            assert inspect.iscoroutinefunction(protocol.send_notification)
+            for method_name in (
+                "on_response_received",
+                "on_data_received",
+                "on_stream_ended",
+                "connection_lost",
+                "close",
+                "flush",
+            ):
+                assert callable(getattr(protocol_cls, method_name))
+
+        client = _AioApns(
+            key="fake-key",
+            key_id="KEYID",
+            team_id="TEAMID",
+            topic="ie.klatt.snapper",
+            use_sandbox=True,
+        )
+        assert isinstance(client.pool, APNsKeyConnectionPool)
+        for pool_attr in (
+            "protocol_class",
+            "key",
+            "key_id",
+            "team_id",
+            "apns_topic",
+            "max_connections",
+            "max_connection_attempts",
+            "ssl_context",
+            "proxy_host",
+            "proxy_port",
+        ):
+            assert hasattr(client.pool, pool_attr)
+        assert inspect.iscoroutinefunction(client.pool.acquire)
+        assert inspect.iscoroutinefunction(client.pool.create_connection)
+        client.pool.close()
