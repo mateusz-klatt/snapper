@@ -539,6 +539,7 @@ from snapper.data.repository_types import SynthesizedRebuildOutcome
 from snapper.data.repository_types import SynthesizedRebuildResult
 from snapper.data.repository_types import TickRow
 from snapper.data.repository_types import TickUpsertRow
+from snapper.data.repository_types import TradeCommandCasOptions
 from snapper.data.repository_types import TradeCommandDispatchUpdate
 from snapper.data.repository_types import TradeCommandInsertRow
 from snapper.data.repository_types import TradeCommandRow
@@ -5993,6 +5994,28 @@ class Repository(ABC):
         Args:
             command_public_id: UUID7 of the ``trade_commands`` row.
             as_of: Point-in-time for temporal query.
+        """
+        ...
+
+    @abstractmethod
+    async def get_undispatched_commands(
+        self,
+        as_of: datetime,
+        limit: int = 10,
+        offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
+    ) -> list[TradeCommandRow]:
+        """Return undispatched created trade commands ordered for outbox delivery.
+
+        Args:
+            as_of: Temporal visibility cutoff for the command itself.
+            limit: Maximum number of eligible rows to return.
+            offset: Optional row offset for callers not using keyset paging.
+            after: Optional exclusive ``(created_at, public_id, id)`` keyset cursor.
+
+        Returns:
+            Ordered list of eligible ``TradeCommandRow`` dictionaries.
         """
         ...
 
@@ -28090,6 +28113,7 @@ class SQLAlchemyRepository(Repository):
         sequence_id: int,
         terminal_at: datetime | None = None,
         last_error: str | None = None,
+        **options: Unpack[TradeCommandCasOptions],
     ) -> bool:
         """SCD2 compare-and-swap for a trade command status transition.
 
@@ -28103,11 +28127,15 @@ class SQLAlchemyRepository(Repository):
         its current ``dispatched`` status and the CAS returns ``False`` rather
         than locking the historical ``created`` row and inserting a duplicate
         active successor. The paired-execution guard scanner uses it to cancel
-        a HELD ``created`` command of a broken assembling group. Returns
-        ``True`` iff the transition was applied.
+        a HELD ``created`` command of a broken assembling group, and the outbox
+        dispatcher uses it for ``created -> created`` failure tracking so a
+        concurrently terminalized row can never be resurrected. Accepts
+        ``attempt_count`` via ``options`` (``None`` / omitted preserves
+        ``existing.attempt_count``). Returns ``True`` iff the transition was
+        applied.
 
         Thin wrapper over :meth:`advance_trade_command_lifecycle` keeping the
-        original call shape (no ack/exchange-id overrides) for the outbox TTL
+        original call shape (no ack/exchange-id overrides) for the outbox
         and guard-scanner callers.
         """
         return await self.advance_trade_command_lifecycle(
@@ -28119,6 +28147,7 @@ class SQLAlchemyRepository(Repository):
             sequence_id=sequence_id,
             terminal_at=terminal_at,
             last_error=last_error,
+            **options,
         )
 
     async def advance_trade_command_lifecycle(
@@ -28135,6 +28164,7 @@ class SQLAlchemyRepository(Repository):
         terminal_at: datetime | None = None,
         last_error: str | None = None,
         clear_terminal_at: bool = False,
+        **options: Unpack[TradeCommandCasOptions],
     ) -> bool:
         """SCD2 CAS advancing a command with venue-evidenced lifecycle fields.
 
@@ -28152,9 +28182,11 @@ class SQLAlchemyRepository(Repository):
         ``rejected -> accepted``); ``last_error`` is written verbatim
         (``None`` CLEARS a previous error — an advance to a healthy
         lifecycle state supersedes stale dispatch errors, mirroring
-        ``bulk_dispatch_trade_commands``). Returns ``True`` iff the
-        transition was applied.
+        ``bulk_dispatch_trade_commands``); optional ``attempt_count``
+        overrides ``existing.attempt_count`` when non-None. Returns ``True``
+        iff the transition was applied.
         """
+        attempt_count = options.get("attempt_count")
         async with self.session() as s:
             existing = (
                 (
@@ -28187,7 +28219,9 @@ class SQLAlchemyRepository(Repository):
                 TradeCommand(
                     **self._trade_command_carry_kwargs(existing),
                     status=new_status,
-                    attempt_count=existing.attempt_count,
+                    attempt_count=(
+                        attempt_count if attempt_count is not None else existing.attempt_count
+                    ),
                     last_error=last_error,
                     dispatched_at=existing.dispatched_at,
                     acked_at=acked_at if acked_at is not None else existing.acked_at,
@@ -28289,25 +28323,41 @@ class SQLAlchemyRepository(Repository):
         as_of: datetime,
         limit: int = 10,
         offset: int = 0,
+        *,
+        after: tuple[datetime, str, int] | None = None,
     ) -> list[TradeCommandRow]:
         """Return trade commands with status='created' for outbox dispatch.
 
-        When ``offset > 0``, the query skips the first ``offset`` rows. Used by
-        :meth:`OutboxDispatcher._fetch_owned_batch` when multi-instance
-        shard ownership filtering is active. Held id-less cancels persist as
-        ``awaiting_target`` and are never fetched by this query.
-        Ordering is ``(created_at, id)`` for deterministic pagination
-        plan-service dispatch inserts multiple commands within a single
-        ``now`` tick (see ``application/plans/service.py``) so ties on
-        ``created_at`` are realistic. Without the ``id`` tie-breaker
-        ``OFFSET`` pagination could skip or duplicate rows across pages
-        → double-dispatch. Exact command material barriers are excluded before
-        pagination regardless of their event watermark or temporal close.
+        When ``after`` is provided, applies keyset filtering strictly past the
+        ``(created_at, public_id, id)`` tuple so intervening dispatches,
+        expiries, or cancel-guard retirements between page reads cannot shift
+        offsets and skip a backing-off head row. When ``offset > 0``, the
+        query skips the first ``offset`` rows for callers not using keyset
+        paging. Held id-less cancels persist as ``awaiting_target`` and are
+        never fetched by this query.
+        Ordering is ``(created_at, public_id, id)`` for stable enqueue order
+        and deterministic pagination: plan-service dispatch inserts multiple
+        commands within a single ``now`` tick (see
+        ``application/plans/service.py``) so ties on ``created_at`` are
+        realistic, and SCD2 failure versions allocate a new physical ``id`` so
+        ordering only by ``(created_at, id)`` would demote a retried command
+        behind a same-``created_at`` peer. Immutable ``public_id`` (UUIDv7)
+        survives every SCD2 close-and-insert, whereas ``(session_id,
+        sequence_id)`` is overwritten by SCD2 writers and scoped per producer
+        stream. Residual tie risk: Python's ``uuid.uuid7()`` is RFC 9562
+        Method-1 monotonic within a single process within a millisecond, not
+        across independent producer processes or caller-supplied
+        ``created_at`` ticks separated from ``uuid7()`` minting, so
+        same-millisecond cross-process ties still order arbitrarily by each
+        process's random Method-1 counter bits while ``id`` breaks any remaining
+        tie deterministically. Exact command material barriers are excluded
+        before pagination regardless of their event watermark or temporal close.
 
         Args:
             as_of: Temporal visibility cutoff for the command itself.
             limit: Maximum number of eligible rows.
             offset: Number of eligible rows skipped before selection.
+            after: Optional exclusive ``(created_at, public_id, id)`` keyset cursor.
 
         Returns:
             Dispatch candidates excluding every exact-scope material barrier.
@@ -28344,16 +28394,39 @@ class SQLAlchemyRepository(Repository):
                 )
             ),
         )
+        filters: list[ColumnElement[bool]] = [
+            TradeCommand.status == "created",
+            *where_active(TradeCommand, as_of),
+            dispatchable_paired_gate,
+            ~material_barrier,
+        ]
+        if after is not None:
+            after_created_at, after_public_id, after_id = after
+            filters.append(
+                tuple_(
+                    TradeCommand.created_at,
+                    TradeCommand.public_id,
+                    TradeCommand.id,
+                )
+                > tuple_(
+                    bindparam(
+                        "after_created_at",
+                        after_created_at,
+                        type_=TradeCommand.created_at.type,
+                    ),
+                    bindparam(
+                        "after_public_id",
+                        after_public_id,
+                        type_=TradeCommand.public_id.type,
+                    ),
+                    bindparam("after_id", after_id, type_=TradeCommand.id.type),
+                )
+            )
         async with self.session() as s:
             result = await s.execute(
                 select(TradeCommand)
-                .where(
-                    TradeCommand.status == "created",
-                    *where_active(TradeCommand, as_of),
-                    dispatchable_paired_gate,
-                    ~material_barrier,
-                )
-                .order_by(TradeCommand.created_at, TradeCommand.id)
+                .where(*filters)
+                .order_by(TradeCommand.created_at, TradeCommand.public_id, TradeCommand.id)
                 .offset(offset)
                 .limit(limit)
             )
@@ -28408,6 +28481,7 @@ class SQLAlchemyRepository(Repository):
     def _trade_command_to_row(cmd: TradeCommand) -> TradeCommandRow:
         """Project a TradeCommand ORM row into the TradeCommandRow TypedDict shape."""
         return {
+            "id": cmd.id,
             "public_id": cmd.public_id,
             "timestamp": cmd.timestamp,
             "session_id": cmd.session_id,

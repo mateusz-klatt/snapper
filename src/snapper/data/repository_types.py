@@ -2223,6 +2223,7 @@ class SettingRow(TypedDict):
 class TradeCommandRow(TypedDict):
     """Row dict returned by trade command queries."""
 
+    id: NotRequired[int]
     public_id: str
     timestamp: datetime
     session_id: str
@@ -2283,6 +2284,17 @@ class TradeCommandDispatchUpdate(TypedDict):
     sequence_id: int
     dispatched_at: datetime
     attempt_count: int
+
+
+class TradeCommandCasOptions(TypedDict, total=False):
+    """Optional field overrides for trade-command CAS transitions.
+
+    Passed via ``Unpack`` so :meth:`SQLAlchemyRepository.cas_trade_command_status`
+    and :meth:`SQLAlchemyRepository.advance_trade_command_lifecycle` can carry
+    an explicit ``attempt_count`` without widening their positional signatures.
+    """
+
+    attempt_count: int | None
 
 
 class UserTradingCapsRow(TypedDict):

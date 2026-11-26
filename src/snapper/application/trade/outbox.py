@@ -9,10 +9,14 @@ Standalone dispatcher coroutine, wired into trade runtime.
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Awaitable
 from collections.abc import Callable
+from dataclasses import dataclass
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
+from typing import Final
 
 from loguru import logger
 
@@ -36,6 +40,100 @@ client_order_id is the ORIGINAL order's — the submit-evidence probe
 would false-positive on it.
 """
 
+_RETRY_BACKOFF_BASE_S: Final[float] = 0.25
+"""Initial per-command retry delay in seconds after a dispatch failure."""
+
+_RETRY_BACKOFF_FACTOR: Final[int] = 2
+"""Exponential multiplier applied to each consecutive command failure."""
+
+_RETRY_BACKOFF_TTL_CAP_S: Final[float] = 5.0
+"""Maximum retry delay in seconds for TTL-bound commands, well below the 30 s TTL."""
+
+_RETRY_BACKOFF_CAP_S: Final[float] = 60.0
+"""Maximum retry delay in seconds for non-TTL command types."""
+
+_RETRY_ERROR_RELOG_INTERVAL_S: Final[float] = 300.0
+"""Seconds of continuous failure between repeated ERROR logs for the same command."""
+
+_RETRY_STALE_PRUNE_S: Final[float] = 300.0
+"""Seconds since last fetch sighting after which a retry entry is pruned."""
+
+_SHARD_SKIP_CAP_MULTIPLIER: Final[int] = 10
+"""Multiplier on ``max_scan_rows`` capping non-stale shard-deferred skips."""
+
+
+@dataclass(frozen=True, slots=True)
+class _CommandRetryState:
+    """Per-command retry backoff and error-logging cadence state.
+
+    Attributes:
+        failures: Consecutive failure count for this command.
+        next_at: Monotonic timestamp when the command is next eligible.
+        first_failed_at: Monotonic timestamp of the initial failure in the streak.
+        last_error_logged_at: Monotonic timestamp of the most recent ERROR log.
+        last_seen: Monotonic timestamp when the command last appeared in a fetch page.
+        blocks_shard: Whether later rows on the same shard wait behind this command.
+    """
+
+    failures: int
+    next_at: float
+    first_failed_at: float
+    last_error_logged_at: float
+    last_seen: float
+    blocks_shard: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class _FetchedBatch:
+    """Owned commands split between normal dispatch and stale shard-deferred expiry.
+
+    Attributes:
+        dispatch: Eligible non-deferred commands to run through full dispatch.
+        expire_only: Stale expirable rows deferred only by shard blocking.
+    """
+
+    dispatch: list[TradeCommandRow]
+    expire_only: list[TradeCommandRow]
+
+
+@dataclass(slots=True)
+class _ScanState:
+    """Mutable accumulator and scan-ceiling counters for one paginated poll.
+
+    Attributes:
+        dispatch: Eligible rows queued for dispatch up to ``batch_size``.
+        expire_only: Stale shard-deferred expirable rows queued for expiry only.
+        deferred_shards: Shard keys already deferred in fetch order this cycle.
+        seen_public_ids: Public IDs already processed across keyset pages.
+        now: Current UTC wall clock used to evaluate dispatch TTL staleness.
+        now_mono: Current monotonic clock reading in seconds.
+        considered: Rows counted against ``max_scan_rows``.
+        shard_skipped: Non-stale shard-deferred rows counted against the skip ceiling.
+        stop_reason: Cap reason when pagination terminates early, or ``None``.
+    """
+
+    dispatch: list[TradeCommandRow]
+    expire_only: list[TradeCommandRow]
+    deferred_shards: set[str]
+    seen_public_ids: set[str]
+    now: datetime
+    now_mono: float
+    considered: int = 0
+    shard_skipped: int = 0
+    stop_reason: str | None = None
+
+
+def _keyset_cursor(cmd: TradeCommandRow) -> tuple[datetime, str, int]:
+    """Build the ``(created_at, public_id, id)`` cursor tuple, failing loudly if ``id`` is missing.
+
+    Args:
+        cmd: Last command row returned by a repository keyset page.
+
+    Returns:
+        Strict ``(created_at, public_id, id)`` keyset cursor tuple.
+    """
+    return (cmd["created_at"], cmd["public_id"], cmd["id"])
+
 
 class OutboxDispatcher:
     """Polls TradeCommand table and publishes undispatched commands to ZMQ.
@@ -48,9 +146,46 @@ class OutboxDispatcher:
     every coordinator's OutboxDispatcher receives every ``created``
     row on a poll. The ``ownership`` kwarg filters rows in Python so
     each dispatcher only publishes its own shards. Scans paginate via
-    the repository ``offset`` parameter up to ``max_scan_rows`` to
-    avoid pathological starvation when foreign-owner rows dominate
-    the backlog.
+    the repository keyset cursor ``after=(created_at, public_id, id)``
+    rather than ``offset`` so concurrent status transitions between
+    pages cannot shift rows and skip a backing-off shard blocker.
+
+    Failing commands back off exponentially per ``public_id`` starting at
+    0.25 s (factor 2), capped at 5 s for TTL-bound commands (``create``,
+    ``submit``) and 60 s for non-TTL commands. Unresolved cancels remain
+    quiet per-tick holds rather than failures. Per-shard FIFO defers
+    later expirable rows (``create``, ``submit``) on the same ``shard_key``
+    in fetch order whenever an earlier shard-blocking row on that shard is
+    backing off, preventing a later submit from overtaking a pending
+    command on that shard while letting unrelated shards keep flowing.
+    Non-expirable rows (``cancel`` and others) are deferred only by their
+    own retry entry: a failing head must never block a safety cancel of an
+    independent live order (a cancel whose target is unpublished is already
+    held cleanly by :class:`CancelTargetUnresolvedError`). Stale expirable
+    rows deferred only behind a blocked shard (not by their own retry entry)
+    move into an expire-only pass executed after committing any successful
+    dispatches; that pass runs material consistency checks before
+    :meth:`_expire_if_stale` without publishing, and if durable submit
+    evidence prevents expiry it schedules a TTL-capped shard-blocking retry
+    backoff with INFO/WARNING cadence logging so evidence is not re-probed
+    every poll tick. Expiry is terminal and publishes nothing, so shard
+    order does not matter for it, whereas rows deferred by their own retry
+    entry are re-checked (including material consistency and TTL) when due.
+
+    Pagination bounds scan work with two caps when ``max_scan_rows`` is
+    set: ``max_scan_rows`` counts considered rows (dispatch candidates,
+    expire-only rows, own-retry skips, and foreign-shard skips), while
+    non-stale rows skipped only because their shard is blocked count toward
+    a separate ``10 * max_scan_rows`` ceiling so a backed-off non-TTL head
+    cannot starve healthy shards (both remain unbounded when
+    ``max_scan_rows`` is ``None``). Known limit: with the dispatch TTL
+    disabled, a stuck shard head plus more than ``10 * max_scan_rows``
+    blocked followers can still hide later rows on other shards, because the
+    keyset cursor restarts on every poll; with TTL enabled, stale followers
+    drain via expiry. A create held by the durable material barrier backs off
+    without blocking its shard: the barrier runs before TTL expiry, so such
+    a hold can persist indefinitely, and later commands on the shard never
+    depend on a create that cannot be published.
 
     Args:
         repository: Database repository for reading/updating commands.
@@ -61,9 +196,11 @@ class OutboxDispatcher:
         ownership: shard-ownership filter. ``None`` skips
             filtering.
         max_scan_rows: Operator-tunable cap on rows scanned per poll
-            when filtering by ownership. ``None`` = unbounded.
-            Default in production is wired from
+            when filtering by ownership or skipping deferred rows.
+            ``None`` = unbounded. Default in production is wired from
             ``AppSettings.coordinator_outbox_max_scan_rows`` (1000).
+        dispatch_ttl_s: Max age in seconds before TTL-bound commands expire.
+        expire_fn: Async callback invoked after a command expires via CAS.
     """
 
     def __init__(
@@ -107,6 +244,8 @@ class OutboxDispatcher:
         self._expire_fn = expire_fn
         self._wake = asyncio.Event()
         self._running = False
+        self._retry: dict[str, _CommandRetryState] = {}
+        self._tick_blocked_shards: set[str] = set()
 
     def notify(self) -> None:
         """Signal the dispatcher that a new command was written.
@@ -141,97 +280,352 @@ class OutboxDispatcher:
         finally:
             self._running = False
 
-    def _filter_owned_rows(
-        self,
-        page: list[TradeCommandRow],
-        ownership: ShardOwnership,
-        owned: list[TradeCommandRow],
-    ) -> None:
-        """Append rows from ``page`` owned by ``ownership`` to ``owned``.
+    def _touch_seen_rows(self, page: list[TradeCommandRow], now_mono: float) -> None:
+        """Refresh ``last_seen`` for retry entries appearing in a fetched page.
 
-        Stops once ``owned`` has reached ``batch_size``. Extracted from
-        :meth:`_fetch_owned_batch` to keep the paging loop's cognitive
-        complexity under the repo threshold.
+        Args:
+            page: Page of undispatched command rows returned by the repository.
+            now_mono: Current monotonic clock reading in seconds.
         """
+        if not self._retry:
+            return
         for cmd in page:
-            if ownership.owns(cmd["shard_key"]):
-                owned.append(cmd)
-                if len(owned) >= self._batch_size:
-                    return
+            public_id = cmd["public_id"]
+            existing = self._retry.get(public_id)
+            if existing is not None:
+                self._retry[public_id] = replace(existing, last_seen=now_mono)
 
-    async def _fetch_owned_batch(self, now: datetime) -> list[TradeCommandRow]:
-        """Fetch the next batch of commands this coordinator owns.
+    def _prune_stale_retries(self, now_mono: float) -> None:
+        """Drop retry entries not seen in fetched pages within the prune window.
 
-        When ``self._ownership`` is ``None``
-        this is a straight pass-through to
-        :meth:`Repository.get_undispatched_commands` with ``limit=batch_size``.
-        When ``self._ownership`` is set, the method pages through the
-        ``status='created'`` set with a larger page size, filters in
-        Python, and stops when it has collected ``batch_size`` owned
-        rows OR the DB set is exhausted OR ``max_scan_rows`` is
-        reached. The cap prevents pathological starvation when a
-        foreign owner's backlog dominates the head of the queue; a
-        WARN log surfaces the hit so operators can raise the cap or
-        investigate skew.
+        Args:
+            now_mono: Current monotonic clock reading in seconds.
+        """
+        stale_ids = [
+            public_id
+            for public_id, entry in self._retry.items()
+            if (now_mono - entry.last_seen) > _RETRY_STALE_PRUNE_S
+        ]
+        for public_id in stale_ids:
+            del self._retry[public_id]
+
+    def _is_stale_expirable(self, cmd: TradeCommandRow, now: datetime) -> bool:
+        """Return whether an expirable row exceeds the enabled dispatch TTL.
+
+        Args:
+            cmd: Expirable candidate command row.
+            now: Current UTC timestamp for age evaluation.
 
         Returns:
-            Up to ``batch_size`` rows owned by this coordinator.
+            True when ``dispatch_ttl_s`` is positive and ``cmd`` is older than it.
         """
-        if self._ownership is None:
-            return await self._repo.get_undispatched_commands(as_of=now, limit=self._batch_size)
-        owned: list[TradeCommandRow] = []
-        offset = 0
-        page_size = max(self._batch_size * 4, 20)
+        ttl = self._dispatch_ttl_s
+        if ttl is None or ttl <= 0:
+            return False
+        return (now - cmd["created_at"]).total_seconds() > ttl
+
+    def _classify_owned_row(self, cmd: TradeCommandRow, state: _ScanState) -> bool:
+        """Route one owned row into dispatch, expire-only, or deferred skip.
+
+        Rows deferred by their own retry entry stay skipped (including stale
+        ones, which re-check TTL when due) and count toward ``max_scan_rows``.
+        Expirable rows deferred only behind a shard-blocking peer move into
+        ``expire_only`` when stale (counting toward ``max_scan_rows``) or
+        increment ``shard_skipped`` when non-stale.
+
+        Args:
+            cmd: Owned command row from the current keyset page.
+            state: Mutable scan accumulator and counters.
+
+        Returns:
+            True when ``cmd`` was appended to ``state.dispatch``; False otherwise.
+        """
+        shard_key = cmd["shard_key"]
+        entry = self._retry.get(cmd["public_id"])
+        if entry is not None and entry.next_at > state.now_mono:
+            if entry.blocks_shard:
+                state.deferred_shards.add(shard_key)
+            state.considered += 1
+            return False
+        if cmd["command_type"] in _EXPIRABLE_COMMAND_TYPES and shard_key in state.deferred_shards:
+            if self._is_stale_expirable(cmd, state.now):
+                state.expire_only.append(cmd)
+                state.considered += 1
+            else:
+                state.shard_skipped += 1
+            return False
+        state.dispatch.append(cmd)
+        state.considered += 1
+        return True
+
+    def _filter_owned_rows(self, page: list[TradeCommandRow], state: _ScanState) -> None:
+        """Filter one keyset page into dispatch and expire-only lists within caps.
+
+        Deduplicates by ``public_id`` across pages (keeping the first
+        occurrence). Stops immediately once ``dispatch`` reaches
+        ``batch_size``, ``considered`` reaches ``max_scan_rows``, or
+        ``shard_skipped`` reaches ``10 * max_scan_rows``.
+
+        Args:
+            page: Current repository page of undispatched commands.
+            state: Mutable scan accumulator and ceiling counters.
+        """
         max_scan = self._max_scan_rows
-        while len(owned) < self._batch_size:
+        shard_skip_limit = None if max_scan is None else max_scan * _SHARD_SKIP_CAP_MULTIPLIER
+        for cmd in page:
+            public_id = cmd["public_id"]
+            if public_id in state.seen_public_ids:
+                continue
+            state.seen_public_ids.add(public_id)
+            if self._ownership is not None and not self._ownership.owns(cmd["shard_key"]):
+                state.considered += 1
+            elif self._classify_owned_row(cmd, state):
+                if len(state.dispatch) >= self._batch_size:
+                    return
+            if max_scan is not None and state.considered >= max_scan:
+                state.stop_reason = "scan"
+                return
+            if shard_skip_limit is not None and state.shard_skipped >= shard_skip_limit:
+                state.stop_reason = "shard_skip"
+                return
+
+    def _log_scan_cap_warning(self, state: _ScanState) -> None:
+        """Emit a warning when pagination halts on a configured scan ceiling.
+
+        Args:
+            state: Completed scan state carrying ``stop_reason`` and counts.
+        """
+        max_scan = self._max_scan_rows
+        if state.stop_reason == "shard_skip" and max_scan is not None:
+            ceiling = max_scan * _SHARD_SKIP_CAP_MULTIPLIER
+            logger.warning(
+                "OutboxDispatcher: scan reached shard-skip ceiling {} "
+                "(10 * max_scan_rows={}) with only {} owned rows found; partial batch.",
+                ceiling,
+                max_scan,
+                len(state.dispatch),
+            )
+            return
+        logger.warning(
+            "OutboxDispatcher: scan reached max_scan_rows={} with only "
+            "{} owned rows found; partial batch. Consider raising the "
+            "cap or investigating shard skew.",
+            max_scan,
+            len(state.dispatch),
+        )
+
+    async def _fetch_owned_batch(self, now: datetime) -> _FetchedBatch:
+        """Fetch the next dispatch and expire-only batches owned by this instance.
+
+        When ``self._ownership`` is ``None`` and no retry entry is currently
+        deferred, this is a straight pass-through to
+        :meth:`Repository.get_undispatched_commands` with ``limit=batch_size``.
+        Otherwise, the method pages by keyset ``after=(created_at, public_id,
+        id)`` (never ``offset``), requires ``id`` on the cursor row (failing
+        loudly with :class:`KeyError` if omitted), deduplicates repeated
+        ``public_id`` rows keeping the first occurrence, applies ownership and
+        per-shard FIFO deferral filtering, routes stale shard-blocked expirable
+        rows to ``expire_only``, and stops when ``dispatch`` collects
+        ``batch_size`` rows, the DB set is exhausted, considered rows reach
+        ``max_scan_rows``, or non-stale shard-blocked skips reach
+        ``10 * max_scan_rows`` (both caps remain unbounded when
+        ``max_scan_rows`` is ``None``). Known limit: with dispatch TTL
+        disabled, a stuck shard head plus more than ``10 * max_scan_rows``
+        blocked followers hides later shards because each poll restarts from
+        the beginning of the queue; with TTL enabled, stale followers drain
+        by expiry.
+
+        Args:
+            now: Temporal visibility cutoff passed as ``as_of``.
+
+        Returns:
+            :class:`_FetchedBatch` holding up to ``batch_size`` dispatchable
+            rows plus any stale shard-deferred rows to expire.
+        """
+        now_mono = time.monotonic()
+        has_deferred = any(entry.next_at > now_mono for entry in self._retry.values())
+        if self._ownership is None and not has_deferred:
+            page = await self._repo.get_undispatched_commands(as_of=now, limit=self._batch_size)
+            self._touch_seen_rows(page, now_mono)
+            self._prune_stale_retries(now_mono)
+            return _FetchedBatch(dispatch=page, expire_only=[])
+        state = _ScanState(
+            dispatch=[],
+            expire_only=[],
+            deferred_shards=set(),
+            seen_public_ids=set(),
+            now=now,
+            now_mono=now_mono,
+        )
+        after: tuple[datetime, str, int] | None = None
+        page_size = max(self._batch_size * 4, 20)
+        while len(state.dispatch) < self._batch_size:
             page = await self._repo.get_undispatched_commands(
-                as_of=now, limit=page_size, offset=offset
+                as_of=now, limit=page_size, after=after
             )
             if not page:
                 break
-            self._filter_owned_rows(page, self._ownership, owned)
-            offset += len(page)
-            if max_scan is not None and offset >= max_scan and len(owned) < self._batch_size:
-                logger.warning(
-                    "OutboxDispatcher: scan reached max_scan_rows={} with only "
-                    "{} owned rows found; partial batch. Consider raising the "
-                    "cap or investigating shard skew.",
-                    max_scan,
-                    len(owned),
-                )
+            self._touch_seen_rows(page, now_mono)
+            self._filter_owned_rows(page, state)
+            if state.stop_reason is not None:
+                self._log_scan_cap_warning(state)
                 break
-        return owned
+            after = _keyset_cursor(page[-1])
+        self._prune_stale_retries(now_mono)
+        return _FetchedBatch(dispatch=state.dispatch, expire_only=state.expire_only)
 
-    async def _expire_if_stale(self, cmd: TradeCommandRow) -> bool:
+    def _schedule_retry_and_log(
+        self,
+        cmd: TradeCommandRow,
+        *,
+        message: str,
+        reason: str,
+        blocks_shard: bool = True,
+        level: str = "exception",
+    ) -> None:
+        """Schedule exponential per-command backoff and emit cadence-bounded logs.
+
+        Logs at ``level`` (``"exception"``, ``"error"``, or ``"info"``) on the
+        initial entry and whenever 300 s elapse since the prior primary log;
+        logs a single-line WARNING with ``public_id``, attempt count, and next
+        delay in between.
+
+        Args:
+            cmd: Command entering or extending per-command backoff.
+            message: Primary message emitted when the 300 s cadence fires.
+            reason: Short single-line summary used in intermediate WARNING logs.
+            blocks_shard: Whether later rows on the same shard wait behind this command.
+            level: Loguru level name for the primary 300 s cadence log.
+        """
+        now_mono = time.monotonic()
+        public_id = cmd["public_id"]
+        prev = self._retry.get(public_id)
+        if prev is None:
+            failures = 1
+            first_failed_at = now_mono
+            should_log_primary = True
+            last_error_logged_at = now_mono
+        else:
+            failures = prev.failures + 1
+            first_failed_at = prev.first_failed_at
+            should_log_primary = (
+                now_mono - prev.last_error_logged_at
+            ) >= _RETRY_ERROR_RELOG_INTERVAL_S
+            last_error_logged_at = now_mono if should_log_primary else prev.last_error_logged_at
+        cap = (
+            _RETRY_BACKOFF_TTL_CAP_S
+            if cmd["command_type"] in _EXPIRABLE_COMMAND_TYPES
+            else _RETRY_BACKOFF_CAP_S
+        )
+        delay = min(_RETRY_BACKOFF_BASE_S * (_RETRY_BACKOFF_FACTOR ** min(failures - 1, 30)), cap)
+        if blocks_shard:
+            self._tick_blocked_shards.add(cmd["shard_key"])
+        self._retry[public_id] = _CommandRetryState(
+            failures=failures,
+            next_at=now_mono + delay,
+            first_failed_at=first_failed_at,
+            last_error_logged_at=last_error_logged_at,
+            last_seen=now_mono,
+            blocks_shard=blocks_shard,
+        )
+        if not should_log_primary:
+            logger.warning(
+                "OutboxDispatcher: command {} {} (attempt={}, next_delay={:.2f}s)",
+                public_id,
+                reason,
+                failures,
+                delay,
+            )
+            return
+        if level == "exception":
+            logger.exception("{} (attempt={}, next_delay={:.2f}s)", message, failures, delay)
+        elif level == "info":
+            logger.info("{} (attempt={}, next_delay={:.2f}s)", message, failures, delay)
+        else:
+            logger.error("{} (attempt={}, next_delay={:.2f}s)", message, failures, delay)
+
+    def _record_retry_failure(
+        self,
+        cmd: TradeCommandRow,
+        *,
+        error_message: str,
+        reason: str,
+        include_traceback: bool,
+        blocks_shard: bool = True,
+    ) -> None:
+        """Schedule exponential per-command backoff and emit ERROR/WARNING cadence logs.
+
+        Args:
+            cmd: Command whose dispatch, barrier, or TTL step failed.
+            error_message: Message used when emitting an ERROR log.
+            reason: Short single-line summary used in WARNING logs.
+            include_traceback: Whether ERROR logs attach the active traceback.
+            blocks_shard: Whether later rows on the same shard wait behind this command.
+        """
+        level = "exception" if include_traceback else "error"
+        self._schedule_retry_and_log(
+            cmd,
+            message=error_message,
+            reason=reason,
+            blocks_shard=blocks_shard,
+            level=level,
+        )
+
+    async def _invoke_expire_callback(self, cmd: TradeCommandRow) -> None:
+        """Invoke the configured expiry release callback, logging CRITICAL on failure.
+
+        Args:
+            cmd: Command that transitioned to EXPIRED via CAS.
+        """
+        if self._expire_fn is None:
+            return
+        try:
+            await self._expire_fn(cmd)
+        except Exception:
+            logger.critical(
+                f"OutboxDispatcher: expiry release callback failed for "
+                f"{cmd['public_id']} AFTER the EXPIRED transition — engine intent "
+                f"self-heals via its in-flight timeout valve and the paired-group "
+                f"deadlines cover the leg, but verify shard "
+                f"{cmd['shard_key']} manually"
+            )
+
+    async def _expire_if_stale(
+        self,
+        cmd: TradeCommandRow,
+        *,
+        publish_on_evidence: bool = True,
+    ) -> bool:
         """Expire a stale create/submit command instead of dispatching it.
 
         Returns True when the command was handled here (expired, lost
-        the expiry race, or left for retry on an error) and must NOT be
-        published this cycle; False when it should dispatch normally.
+        the expiry race, or deferred with backoff on probe/CAS error)
+        and must NOT be published this cycle; False when it did not expire.
 
         Decision table:
 
-        - TTL disabled, non-expirable command type, or fresh → publish.
-        - Stale WITH durable submit evidence → publish anyway with a
-          WARN: the coordinator crashed after publishing but before the
-          CREATED→DISPATCHED commit, so the order may be live — expiring
-          would fabricate a terminal state for it (exactly the
-          false-reject failure the UNKNOWN state exists to prevent).
-          The executor's duplicate-submit guard absorbs the re-publish
-          and the normal bulk path performs the missing transition.
+        - TTL disabled, non-expirable command type, or fresh → do not expire.
+        - Stale WITH durable submit evidence → do not expire: when called on
+          the dispatch path (``publish_on_evidence=True``), publish anyway
+          with a WARN so the executor's duplicate-submit guard absorbs the
+          replay; when called on the expire-only path, callers schedule a
+          shard-blocking backoff instead of publishing behind a shard head.
         - Stale without evidence → CAS CREATED→EXPIRED (race-safe
           against concurrent dispatchers and the guard scanner's
-          CREATED→CANCELLED); only the CAS winner invokes ``expire_fn``
-          so the engine releases its in-flight intent exactly once.
-        - Probe/CAS failure → defer the row to the next 50ms tick
-          (logged); publishing a known-stale order on a DB blip would
-          defeat the gate.
+          CREATED→CANCELLED), clearing any retry state; only the CAS
+          winner invokes ``expire_fn`` so the engine releases its
+          in-flight intent exactly once.
+        - Probe/CAS failure → schedule per-command backoff and defer
+          (logged with ERROR/WARNING cadence); publishing a known-stale
+          order on a DB blip would defeat the gate.
 
         Args:
             cmd: Candidate command row from the fetched batch.
+            publish_on_evidence: Whether returning False on submit evidence
+                will immediately publish the command for executor dedup.
 
         Returns:
-            True when the row must be skipped by the publish loop.
+            True when the row was handled here (expired, lost race, or probe error).
         """
         ttl = self._dispatch_ttl_s
         if ttl is None or ttl <= 0:
@@ -244,12 +638,13 @@ class OutboxDispatcher:
             return False
         try:
             if await self._repo.has_order_submit_evidence(cmd["client_order_id"]):
-                logger.warning(
-                    f"OutboxDispatcher: command {cmd['public_id']} is stale "
-                    f"(age {age_s:.1f}s > TTL {ttl:.1f}s) but durable submit evidence "
-                    f"exists — publishing for the executor guard to dedup instead of "
-                    f"expiring a possibly-live order"
-                )
+                if publish_on_evidence:
+                    logger.warning(
+                        f"OutboxDispatcher: command {cmd['public_id']} is stale "
+                        f"(age {age_s:.1f}s > TTL {ttl:.1f}s) but durable submit evidence "
+                        f"exists — publishing for the executor guard to dedup instead of "
+                        f"expiring a possibly-live order"
+                    )
                 return False
             won = await self._repo.cas_trade_command_status(
                 public_id=cmd["public_id"],
@@ -262,11 +657,17 @@ class OutboxDispatcher:
                 last_error=f"expired by outbox dispatch TTL (age {age_s:.1f}s > {ttl:.1f}s)",
             )
         except Exception:
-            logger.exception(
-                f"OutboxDispatcher: TTL handling failed for {cmd['public_id']} — "
-                f"deferring the stale row to the next tick rather than publishing it"
+            self._record_retry_failure(
+                cmd,
+                error_message=(
+                    f"OutboxDispatcher: TTL handling failed for {cmd['public_id']} — "
+                    "deferring the stale row rather than publishing it"
+                ),
+                reason="TTL handling failed",
+                include_traceback=True,
             )
             return True
+        self._retry.pop(cmd["public_id"], None)
         if not won:
             logger.info(
                 f"OutboxDispatcher: lost the expiry race for {cmd['public_id']} "
@@ -277,32 +678,37 @@ class OutboxDispatcher:
             f"OutboxDispatcher: EXPIRED stale command {cmd['public_id']} "
             f"({cmd['client_order_id']}, age {age_s:.1f}s > TTL {ttl:.1f}s) — never published"
         )
-        if self._expire_fn is not None:
-            try:
-                await self._expire_fn(cmd)
-            except Exception:
-                logger.critical(
-                    f"OutboxDispatcher: expiry release callback failed for "
-                    f"{cmd['public_id']} AFTER the EXPIRED transition — engine intent "
-                    f"self-heals via its in-flight timeout valve and the paired-group "
-                    f"deadlines cover the leg, but verify shard "
-                    f"{cmd['shard_key']} manually"
-                )
+        await self._invoke_expire_callback(cmd)
         return True
 
     async def _material_permits_dispatch(self, command: TradeCommandRow) -> bool:
-        """Skip a durably blocked logical CREATE while retaining healthy batch peers.
+        """Hold a durably blocked logical CREATE with backoff while retaining healthy peers.
 
         Proof/storage failures propagate out of the dispatcher instead of
-        creating retry versions or repeatedly logging every fifty milliseconds.
-        Cancels remain available; all execution CREATE intents require proof.
+        creating retry versions or backing off. Cancels remain available;
+        all execution CREATE intents require proof.
+
+        Args:
+            command: Candidate command row to verify before expiry/publish.
+
+        Returns:
+            True when dispatch may proceed; False when held by a material barrier.
         """
         if command["command_type"] not in _EXPIRABLE_COMMAND_TYPES:
             return True
         try:
             await self._repo.require_consistent_trade_command_material(command["public_id"])
         except TradeCommandMaterialChangedError as exc:
-            logger.error("OutboxDispatcher: CREATE held by durable material barrier: {}", exc)
+            self._record_retry_failure(
+                command,
+                error_message=(
+                    f"OutboxDispatcher: CREATE held by durable material barrier "
+                    f"({command['public_id']}): {exc}"
+                ),
+                reason="held by durable material barrier",
+                include_traceback=False,
+                blocks_shard=False,
+            )
             return False
         return True
 
@@ -325,6 +731,9 @@ class OutboxDispatcher:
     async def _dispatch_command(self, cmd: TradeCommandRow) -> TradeCommandDispatchUpdate | None:
         """Publish or hold one command and return its dispatch update on success.
 
+        Keeps check order: material consistency, then TTL expiry, then publish.
+        Removes any tracked retry entry when a dispatch update is produced.
+
         Args:
             cmd: Candidate command from the current undispatched batch.
 
@@ -339,10 +748,16 @@ class OutboxDispatcher:
             if not await self._publish_or_hold(cmd):
                 return None
         except Exception:
-            logger.exception(f"OutboxDispatcher: failed to dispatch command {cmd['public_id']}")
+            self._record_retry_failure(
+                cmd,
+                error_message=f"OutboxDispatcher: failed to dispatch command {cmd['public_id']}",
+                reason="dispatch failed",
+                include_traceback=True,
+            )
             try:
-                await self._repo.update_trade_command_status(
+                won = await self._repo.cas_trade_command_status(
                     public_id=cmd["public_id"],
+                    expected_status=TradeCommandStatusEnum.CREATED,
                     new_status=TradeCommandStatusEnum.CREATED,
                     bus_time=datetime.now(UTC),
                     session_id=cmd["session_id"],
@@ -354,7 +769,15 @@ class OutboxDispatcher:
                 logger.exception(
                     f"OutboxDispatcher: failed to update command {cmd['public_id']} status"
                 )
+            else:
+                if not won:
+                    self._retry.pop(cmd["public_id"], None)
+                    logger.info(
+                        f"OutboxDispatcher: command {cmd['public_id']} moved concurrently "
+                        "before failure update; cleared retry state"
+                    )
             return None
+        self._retry.pop(cmd["public_id"], None)
         bus_time = datetime.now(UTC)
         return TradeCommandDispatchUpdate(
             public_id=cmd["public_id"],
@@ -365,30 +788,72 @@ class OutboxDispatcher:
             attempt_count=cmd["attempt_count"] + 1,
         )
 
-    async def _dispatch_batch(self) -> None:
-        """Fetch one batch of undispatched commands, publish, and bulk-dispatch."""
-        now = datetime.now(UTC)
-        commands = await self._fetch_owned_batch(now)
-        if not commands:
+    async def _handle_expire_only(self, cmd: TradeCommandRow) -> None:
+        """Verify material consistency then expire a stale shard-deferred row without publishing.
+
+        Args:
+            cmd: Stale expirable row deferred solely behind a shard blocker.
+        """
+        if not await self._material_permits_dispatch(cmd):
             return
+        if await self._expire_if_stale(cmd, publish_on_evidence=False):
+            return
+        self._schedule_retry_and_log(
+            cmd,
+            message=(
+                f"OutboxDispatcher: command {cmd['public_id']} "
+                "stale with submit evidence; waiting behind shard head"
+            ),
+            reason="stale with submit evidence; waiting behind shard head",
+            blocks_shard=True,
+            level="info",
+        )
+
+    async def _dispatch_batch(self) -> None:
+        """Fetch one batch of undispatched commands, publish, commit, and expire stale peers.
+
+        Per-shard FIFO for expirable commands (``create``, ``submit``) also
+        holds inside the batch: once a command fails in a way that blocks its
+        shard, later expirable commands on that shard are skipped for the rest
+        of this tick and deferred on subsequent fetches behind the failing
+        command. Non-expirable commands (``cancel`` and others) are never
+        skipped behind a shard-blocking peer. Successful dispatches commit
+        first so the replay window stays narrow, and only then do stale
+        shard-deferred expirable rows run material consistency checks followed
+        by :meth:`_expire_if_stale` (never publishing; durable submit evidence
+        records a shard-blocking backoff instead of hot-loop probing).
+        Material-barrier holds and unresolved-cancel holds do not block the
+        shard.
+        """
+        now = datetime.now(UTC)
+        batch = await self._fetch_owned_batch(now)
+        if not batch.dispatch and not batch.expire_only:
+            return
+        self._tick_blocked_shards.clear()
         success_updates: list[TradeCommandDispatchUpdate] = []
-        for cmd in commands:
+        for cmd in batch.dispatch:
+            if (
+                cmd["command_type"] in _EXPIRABLE_COMMAND_TYPES
+                and cmd["shard_key"] in self._tick_blocked_shards
+            ):
+                continue
             update = await self._dispatch_command(cmd)
             if update is not None:
                 success_updates.append(update)
-        if not success_updates:
-            return
-        try:
-            await self._repo.bulk_dispatch_trade_commands(success_updates)
-            for update in success_updates:
-                logger.debug(f"OutboxDispatcher: dispatched command {update['public_id']}")
-        except Exception:
-            logger.exception(
-                "OutboxDispatcher: bulk dispatch DB write failed for "
-                f"{len(success_updates)} published commands — rows remain 'created' "
-                "and WILL re-publish on the next tick; the executor-side "
-                "duplicate-submit guard is the dedup boundary"
-            )
+        if success_updates:
+            try:
+                await self._repo.bulk_dispatch_trade_commands(success_updates)
+                for update in success_updates:
+                    logger.debug(f"OutboxDispatcher: dispatched command {update['public_id']}")
+            except Exception:
+                logger.exception(
+                    "OutboxDispatcher: bulk dispatch DB write failed for "
+                    f"{len(success_updates)} published commands — rows remain 'created' "
+                    "and WILL re-publish on the next tick; the executor-side "
+                    "duplicate-submit guard is the dedup boundary"
+                )
+        for cmd in batch.expire_only:
+            await self._handle_expire_only(cmd)
 
     def stop(self) -> None:
         """Signal the dispatcher to stop on next cycle."""
