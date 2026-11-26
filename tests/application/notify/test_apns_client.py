@@ -44,6 +44,7 @@ from snapper.application.notify.apns_client import _TimeoutSafeProtocolMixin
 from snapper.application.notify.apns_client import build_apns_client_pool
 from snapper.application.notify.apns_client import is_network_delivery_error
 from snapper.application.notify.apns_config import ApnsConfig
+from snapper.core.json_types import JsonObject
 
 
 def _config(environment: str = "sandbox_and_production") -> ApnsConfig:
@@ -574,6 +575,16 @@ def _request(notification_id: str) -> NotificationRequest:
     )
 
 
+async def _receive_h2_requests(
+    transport: _FakeH2Transport, server: H2Connection
+) -> list[RequestReceived]:
+    """Yield one event-loop turn and parse outbound HTTP/2 requests."""
+    await asyncio.sleep(0)
+    events = server.receive_data(bytes(transport.written))
+    transport.written.clear()
+    return [e for e in events if isinstance(e, RequestReceived)]
+
+
 class TestProtocolTimeoutSlotSafety:
     """Timeout-safe protocol prevents late-frame InvalidStateError and stream leaks."""
 
@@ -758,13 +769,14 @@ class TestProtocolTimeoutSlotSafety:
         sandbox_client.pool.create_connection = AsyncMock(
             side_effect=ssl.SSLCertVerificationError(1, "certificate verify failed")
         )
-        with pytest.raises(ssl.SSLCertVerificationError):
+        with pytest.raises(ssl.SSLCertVerificationError) as ssl_exc_info:
             await pool.send(
                 env="sandbox",
                 device_token="a" * 64,
                 payload={"aps": {"alert": {"title": "t", "body": "b"}}},
                 apns_topic="ie.klatt.snapper",
             )
+        assert is_network_delivery_error(ssl_exc_info.value) is False
 
         prod_client.pool.max_connection_attempts = 1
         prod_client.pool.create_connection = AsyncMock(
@@ -786,80 +798,142 @@ class TestProtocolTimeoutSlotSafety:
         [_TimeoutSafeDevelopmentClientProtocol, _TimeoutSafeProductionClientProtocol],
         ids=["sandbox-protocol", "production-protocol"],
     )
-    async def test_empty_body_non_200_stream_ended_fails_future_and_releases_slot(
+    async def test_empty_body_non_200_stream_ended_resolves_single_post_and_classifies(
         self,
         protocol_cls: type[_TimeoutSafeProtocolMixin],
     ) -> None:
-        """Bodyless 503 ``StreamEnded`` resolves the request with a network error.
+        """Bodyless non-200 ``StreamEnded`` resolves on a single POST with status classification.
 
-        Given: A real timeout-safe APNs HTTP/2 protocol with
-            ``MAX_CONCURRENT_STREAMS=1``.
-        When: The server ends one stream with HTTP ``503`` and no ``DATA``
-            frame, and ends a second stream with HTTP ``503`` plus an empty-
-            reason JSON payload ``{}``.
-        Then: Both calls resolve promptly with ``ApnsConnectionClosed``
-            (classified as a network outage error), clean up internal request
-            maps, restore the stream slot to capacity ``1``, and allow a
-            subsequent HTTP ``200`` send to succeed.
+        Given: A real ``ApnsClientPool`` wired to a real timeout-safe HTTP/2
+            protocol with ``MAX_CONCURRENT_STREAMS=1`` and ``max_connection_attempts=3``.
+        When: The server completes a ``503`` stream and a ``403`` stream with
+            no ``DATA`` frame, then completes a normal ``200`` send.
+        Then: Bodyless ``503`` and ``403`` execute a single POST without pool
+            retries and map to ``server_error`` (attempt-limited 5xx) and
+            ``other`` (4xx) with description ``"empty response body"``, stream
+            capacity stays ``1``, and the subsequent ``200`` succeeds.
         """
         loop = asyncio.get_running_loop()
         protocol, transport, server = _connected_h2_pair(
             protocol_cls, loop, max_concurrent_streams=1
         )
+        env = "sandbox" if protocol_cls is _TimeoutSafeDevelopmentClientProtocol else "prod"
+        pool = build_apns_client_pool(
+            _config(environment="sandbox" if env == "sandbox" else "production")
+        )
+        raw_client = pool._select_client(env)
+        raw_client.pool.max_connection_attempts = 3
+        raw_client.pool.create_connection = AsyncMock(return_value=protocol)
+        payload: JsonObject = {"aps": {"alert": {"title": "t", "body": "b"}}}
 
-        req_empty = _request("notif-503-empty")
-        task_empty = asyncio.create_task(protocol.send_notification(req_empty))
-        await asyncio.sleep(0)
-        events_empty = server.receive_data(bytes(transport.written))
-        transport.written.clear()
-        stream_empty = next(e.stream_id for e in events_empty if isinstance(e, RequestReceived))
+        task_503 = asyncio.create_task(
+            pool.send(
+                env=env, device_token="a" * 64, payload=payload, apns_topic="ie.klatt.snapper"
+            )
+        )
+        requests_503 = await _receive_h2_requests(transport, server)
+        assert len(requests_503) == 1
+        apns_id_503 = dict(requests_503[0].headers)[b"apns-id"].decode("utf8")
         server.send_headers(
-            stream_empty,
-            [(":status", "503"), ("apns-id", "notif-503-empty")],
+            requests_503[0].stream_id,
+            [(":status", "503"), ("apns-id", apns_id_503)],
             end_stream=True,
         )
         protocol.data_received(server.data_to_send())
-
-        with pytest.raises(ApnsConnectionClosed) as exc_info:
-            await asyncio.wait_for(task_empty, timeout=0.5)
-        assert is_network_delivery_error(exc_info.value) is True
-        assert protocol.free_channels._value == 1
-        assert "notif-503-empty" not in protocol.requests
-        assert stream_empty not in protocol.request_streams
-        assert "notif-503-empty" not in protocol.request_statuses
-
-        req_blank_json = _request("notif-503-blank-json")
-        task_blank = asyncio.create_task(protocol.send_notification(req_blank_json))
-        await asyncio.sleep(0)
-        events_blank = server.receive_data(bytes(transport.written))
-        transport.written.clear()
-        stream_blank = next(e.stream_id for e in events_blank if isinstance(e, RequestReceived))
-        server.send_headers(
-            stream_blank,
-            [(":status", "503"), ("apns-id", "notif-503-blank-json")],
+        res_503 = await asyncio.wait_for(task_503, timeout=0.5)
+        assert await _receive_h2_requests(transport, server) == []
+        assert (res_503.status_code, res_503.status, res_503.apns_id, res_503.description) == (
+            503,
+            "server_error",
+            apns_id_503,
+            "empty response body",
         )
+        assert raw_client.pool.create_connection.await_count == 1
+        assert protocol.free_channels._value == 1
+        assert apns_id_503 not in protocol.requests
+        assert requests_503[0].stream_id not in protocol.request_streams
+        assert apns_id_503 not in protocol.request_statuses
+
+        task_403 = asyncio.create_task(
+            pool.send(
+                env=env, device_token="a" * 64, payload=payload, apns_topic="ie.klatt.snapper"
+            )
+        )
+        requests_403 = await _receive_h2_requests(transport, server)
+        assert len(requests_403) == 1
+        apns_id_403 = dict(requests_403[0].headers)[b"apns-id"].decode("utf8")
+        server.send_headers(
+            requests_403[0].stream_id,
+            [(":status", "403"), ("apns-id", apns_id_403)],
+            end_stream=True,
+        )
+        protocol.data_received(server.data_to_send())
+        res_403 = await asyncio.wait_for(task_403, timeout=0.5)
+        assert (res_403.status_code, res_403.status, res_403.apns_id, res_403.description) == (
+            403,
+            "other",
+            apns_id_403,
+            "empty response body",
+        )
+        assert protocol.free_channels._value == 1
+
+        res_ok_task = asyncio.create_task(
+            pool.send(
+                env=env, device_token="a" * 64, payload=payload, apns_topic="ie.klatt.snapper"
+            )
+        )
+        requests_ok = await _receive_h2_requests(transport, server)
+        assert len(requests_ok) == 1
+        apns_id_ok = dict(requests_ok[0].headers)[b"apns-id"].decode("utf8")
+        server.send_headers(
+            requests_ok[0].stream_id, [(":status", "200"), ("apns-id", apns_id_ok)], end_stream=True
+        )
+        protocol.data_received(server.data_to_send())
+        res_ok = await asyncio.wait_for(res_ok_task, timeout=0.5)
+        assert (res_ok.status_code, res_ok.status, protocol.free_channels._value) == (
+            200,
+            "success",
+            1,
+        )
+        raw_client.pool.close()
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_blank_json_503_resolves_and_statusless_stream_end_fails(self) -> None:
+        """Blank JSON non-200 bodies resolve cleanly; statusless stream ends fail as network.
+
+        Given: A real ``_TimeoutSafeDevelopmentClientProtocol`` with ``MAX_CONCURRENT_STREAMS=1``.
+        When: One stream returns ``503`` with JSON ``{}`` (empty reason) and a
+            second stream ends via ``on_stream_ended`` without response headers.
+        Then: The blank-JSON ``503`` maps to ``server_error`` with description
+            ``"empty response body"``, the statusless stream end fails with
+            ``ApnsConnectionClosed``, and stream capacity returns to ``1``.
+        """
+        loop = asyncio.get_running_loop()
+        protocol, transport, server = _connected_h2_pair(
+            _TimeoutSafeDevelopmentClientProtocol, loop, max_concurrent_streams=1
+        )
+        task_blank = asyncio.create_task(protocol.send_notification(_request("notif-503-blank")))
+        stream_blank = (await _receive_h2_requests(transport, server))[0].stream_id
+        server.send_headers(stream_blank, [(":status", "503"), ("apns-id", "notif-503-blank")])
         server.send_data(stream_blank, b"{}", end_stream=True)
         protocol.data_received(server.data_to_send())
-
-        with pytest.raises(ApnsConnectionClosed) as blank_exc_info:
-            await asyncio.wait_for(task_blank, timeout=0.5)
-        assert is_network_delivery_error(blank_exc_info.value) is True
+        mapped_blank = _map_result(await asyncio.wait_for(task_blank, timeout=0.5))
+        assert (mapped_blank.status_code, mapped_blank.status, mapped_blank.description) == (
+            503,
+            "server_error",
+            "empty response body",
+        )
         assert protocol.free_channels._value == 1
 
-        req_ok = _request("notif-after-503")
-        task_ok = asyncio.create_task(protocol.send_notification(req_ok))
-        await asyncio.sleep(0)
-        events_ok = server.receive_data(bytes(transport.written))
-        transport.written.clear()
-        stream_ok = next(e.stream_id for e in events_ok if isinstance(e, RequestReceived))
-        server.send_headers(
-            stream_ok,
-            [(":status", "200"), ("apns-id", "notif-after-503")],
-            end_stream=True,
+        task_statusless = asyncio.create_task(
+            protocol.send_notification(_request("notif-statusless"))
         )
-        protocol.data_received(server.data_to_send())
-        result_ok = await asyncio.wait_for(task_ok, timeout=0.5)
-        assert result_ok.status == "200"
+        stream_statusless = (await _receive_h2_requests(transport, server))[0].stream_id
+        protocol.on_stream_ended(stream_statusless)
+        with pytest.raises(ApnsConnectionClosed) as statusless_exc:
+            await asyncio.wait_for(task_statusless, timeout=0.5)
+        assert is_network_delivery_error(statusless_exc.value) is True
         assert protocol.free_channels._value == 1
         protocol.connection_lost(None)
 
@@ -868,17 +942,20 @@ class TestProtocolTimeoutSlotSafety:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Non-transient connect errors bypass pool retries while SSL drops retry normally.
+        """Non-transient connect errors never chain ``ApnsConnectionError``; SSL drops retry.
 
         Given: A real ``ApnsClientPool`` with ``max_connection_attempts=3``
             and a bare ``ApnsConnectionError`` case on ``acquire``.
-        When: ``sandbox`` fails connection setup with ``ValueError``,
-            ``prod`` fails connection setup with transient ``ssl.SSLEOFError``,
-            and bare ``APNsKeyConnectionPool.acquire`` raises an uncaused
-            ``ApnsConnectionError``.
-        Then: ``sandbox`` propagates ``ValueError`` after one attempt without
-            wrapping in ``MaxAttemptsExceeded``, ``prod`` exhausts retries into
-            ``MaxAttemptsExceeded`` wrapping a transient SSL drop, and the bare
+        When: ``sandbox`` raises a ``ValueError`` (with an original
+            ``KeyError`` cause and without one), ``prod`` raises transient
+            ``ssl.SSLEOFError``, and bare ``APNsKeyConnectionPool.acquire``
+            raises an uncaused ``ApnsConnectionError``.
+        Then: ``sandbox`` propagates ``ValueError`` after one attempt with
+            ``is_network_delivery_error(raised) is False`` (preserving its
+            original cause without chaining ``ApnsConnectionError``), ``prod``
+            exhausts attempts into ``MaxAttemptsExceeded`` with
+            ``is_network_delivery_error(raised) is True`` (as well as
+            ``is_network_delivery_error(SSLEOFError) is True``), and bare
             ``ApnsConnectionError`` re-raises unchanged.
         """
         pool = build_apns_client_pool(_config(environment="sandbox_and_production"))
@@ -888,9 +965,12 @@ class TestProtocolTimeoutSlotSafety:
         prod_client.pool.max_connection_attempts = 2
         monkeypatch.setattr("aioapns.connection.asyncio.sleep", AsyncMock())
 
-        sandbox_connect = AsyncMock(side_effect=ValueError("invalid APNs signing key"))
+        original_cause = KeyError("bad key")
+        setup_err = ValueError("invalid APNs signing key")
+        setup_err.__cause__ = original_cause
+        sandbox_connect = AsyncMock(side_effect=setup_err)
         sandbox_client.pool.create_connection = sandbox_connect
-        with pytest.raises(ValueError, match="invalid APNs signing key"):
+        with pytest.raises(ValueError, match="invalid APNs signing key") as val_exc_info:
             await pool.send(
                 env="sandbox",
                 device_token="a" * 64,
@@ -898,10 +978,28 @@ class TestProtocolTimeoutSlotSafety:
                 apns_topic="ie.klatt.snapper",
             )
         assert sandbox_connect.await_count == 1
+        assert is_network_delivery_error(val_exc_info.value) is False
+        assert val_exc_info.value.__cause__ is original_cause
+        assert val_exc_info.value.__suppress_context__ is True
 
-        prod_connect = AsyncMock(side_effect=ssl.SSLEOFError("EOF occurred in violation"))
+        bare_connect = AsyncMock(side_effect=ValueError("missing PEM header"))
+        sandbox_client.pool.create_connection = bare_connect
+        with pytest.raises(ValueError, match="missing PEM header") as bare_exc_info:
+            await pool.send(
+                env="sandbox",
+                device_token="a" * 64,
+                payload={"aps": {"alert": {"title": "t", "body": "b"}}},
+                apns_topic="ie.klatt.snapper",
+            )
+        assert is_network_delivery_error(bare_exc_info.value) is False
+        assert bare_exc_info.value.__cause__ is None
+        assert bare_exc_info.value.__suppress_context__ is True
+
+        eof_err = ssl.SSLEOFError("EOF occurred in violation")
+        assert is_network_delivery_error(eof_err) is True
+        prod_connect = AsyncMock(side_effect=eof_err)
         prod_client.pool.create_connection = prod_connect
-        with pytest.raises(ApnsMaxAttemptsExceeded):
+        with pytest.raises(ApnsMaxAttemptsExceeded) as eof_exc_info:
             await pool.send(
                 env="prod",
                 device_token="a" * 64,
@@ -909,6 +1007,7 @@ class TestProtocolTimeoutSlotSafety:
                 apns_topic="ie.klatt.snapper",
             )
         assert prod_connect.await_count == 2
+        assert is_network_delivery_error(eof_exc_info.value) is True
 
         monkeypatch.setattr(
             APNsKeyConnectionPool,

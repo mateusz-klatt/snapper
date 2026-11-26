@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from loguru import logger
 from sqlalchemy import select
 
 from snapper.api.schemas.android_devices import AndroidPushConfiguration
@@ -24,6 +25,7 @@ from snapper.application.notify.fcm_delivery import FcmDeliveryService
 from snapper.application.notify.push_beta import PushBetaConfig
 from snapper.application.notify.scope_revalidation import ScopeRevalidator
 from snapper.application.notify.sidecar import NotifySidecar
+from snapper.data.android_devices import AndroidDeliveryResult
 from snapper.data.android_devices import RegistrationWrite
 from snapper.data.android_devices import registration_revision
 from snapper.data.models import KNOWN_TO_MAX
@@ -650,3 +652,80 @@ async def test_real_sidecar_fcm_only_fanout_and_retry_never_enter_apns(
     assert event is not None
     await sidecar._attempt_once(row["public_id"], device, event, _NOW)
     assert sender.send.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fcm_rejected_retry_schedule_reapplies_once_on_stale_clock_rollback(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Stale clock rollback during FCM retry rescheduling re-applies backoff once.
+
+    Given: An active Android binding where attempt 1 starts at ``_NOW + 10s``
+        and the service clock rolls back to ``_NOW + 5s`` when persisting retry.
+    When: ``fanout`` handles a transient ``retry`` response.
+    Then: The initial rejected schedule write re-reads the unscheduled active
+        row, logs at INFO, and re-applies once with ``max(clock(), active_ts)``
+        so ``next_attempt_at`` is persisted rather than left NULL.
+    """
+    service, sender = await _service(repo)
+    service.clock = lambda: _NOW + timedelta(seconds=5)
+    sender.send.return_value = FcmSendResult("retry", "provider_unavailable")
+    event = await _event(repo)
+
+    info_logs: list[str] = []
+    handler_id = logger.add(info_logs.append, level="INFO")
+    try:
+        await service.fanout(event, _NOW + timedelta(seconds=10), None)
+    finally:
+        logger.remove(handler_id)
+
+    row = await _delivery(repo)
+    assert row.status == "queued"
+    assert row.attempt_count == 1
+    assert row.timestamp == _NOW + timedelta(seconds=10)
+    assert row.next_attempt_at == _NOW + timedelta(seconds=65)
+    assert any("reapplying rejected retry schedule" in msg for msg in info_logs)
+
+
+@pytest.mark.asyncio
+async def test_fcm_rejected_retry_schedule_skips_reapply_on_lost_race(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Concurrent delivery completion during FCM send skips schedule re-apply.
+
+    Given: An Android delivery where a competing transition marks the row
+        ``sent`` before the in-flight ``retry`` result reaches ``_retry``.
+    When: ``update_delivery_retry_schedule`` rejects the retry write.
+    Then: Re-reading finds the terminal ``sent`` version, logs at INFO, and
+        does not overwrite it.
+    """
+    service, sender = await _service(repo)
+    event = await _event(repo)
+
+    async def complete_concurrently(
+        _fid: str, hint: FcmHint, _admitted: Callable[[], Awaitable[bool]]
+    ) -> FcmSendResult:
+        """Resolve the queued row before returning a stale retry outcome."""
+        assert hint.alert_public_id == event["public_id"]
+        current = await _delivery(repo)
+        await repo.finish_android_delivery(
+            current.public_id,
+            AndroidDeliveryResult("sent", 1, receipt="race-winner"),
+            RegistrationWrite(_OWNER, str(uuid4()), 99, _NOW + timedelta(seconds=15)),
+        )
+        return FcmSendResult("retry", "provider_unavailable")
+
+    sender.send.side_effect = complete_concurrently
+    service.clock = lambda: _NOW + timedelta(seconds=5)
+    info_logs: list[str] = []
+    handler_id = logger.add(info_logs.append, level="INFO")
+    try:
+        await service.fanout(event, _NOW + timedelta(seconds=10), None)
+    finally:
+        logger.remove(handler_id)
+
+    row = await _delivery(repo)
+    assert row.status == "sent"
+    assert row.provider_receipt == "race-winner"
+    assert row.next_attempt_at is None
+    assert any("skipping rejected retry schedule after lost race" in msg for msg in info_logs)

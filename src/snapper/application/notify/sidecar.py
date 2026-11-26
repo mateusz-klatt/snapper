@@ -50,6 +50,8 @@ from snapper.application.notify.fcm_delivery import FcmDeliveryService
 from snapper.application.notify.portfolio_drift_paging import PORTFOLIO_DRIFT_ALERT_TYPE
 from snapper.application.notify.portfolio_drift_recovery import PortfolioDriftRecoveryScanner
 from snapper.application.notify.push_beta import PushBetaConfig
+from snapper.application.notify.retry_schedule import RetryScheduleUpdate
+from snapper.application.notify.retry_schedule import persist_retry_schedule
 from snapper.application.notify.routing import allows_device_alert
 from snapper.application.notify.routing import route_alert_to_devices
 from snapper.application.notify.rules.base import RuleRegistry
@@ -994,14 +996,20 @@ class NotifySidecar(RegisterableProcess):
     ) -> None:
         """Commit an updated ``next_attempt_at`` on the queued delivery row."""
         bounded_reason = error_reason[:_MAX_ERROR_REASON_LEN] if error_reason is not None else None
-        await self._repo.update_delivery_retry_schedule(
-            delivery_public_id,
-            attempt_count=attempt_number,
-            next_attempt_at=next_attempt_at,
-            error_reason=bounded_reason,
-            transition_at=now,
-            session_id=self._tracker.session_id,
-            sequence_id=self._tracker.next_sequence(_ZMQ_STREAM),
+        await persist_retry_schedule(
+            self._repo,
+            RetryScheduleUpdate(
+                delivery_public_id=delivery_public_id,
+                attempt_count=attempt_number,
+                next_attempt_at=next_attempt_at,
+                error_reason=bounded_reason,
+                transition_at=now,
+            ),
+            clock=self._clock,
+            allocate_write=lambda: (
+                self._tracker.session_id,
+                self._tracker.next_sequence(_ZMQ_STREAM),
+            ),
         )
 
     def _record_outage_delay(self, env: str, delivery_public_id: str, now: datetime) -> None:

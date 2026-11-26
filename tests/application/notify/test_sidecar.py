@@ -3339,3 +3339,99 @@ class TestReviewRegressionFixes:
         assert expedited["next_attempt_at"] == current_now
         assert sidecar._outage_started_at == {}
         assert sidecar._outage_delayed_delivery_ids == {}
+
+    @pytest.mark.asyncio
+    async def test_apns_rejected_schedule_reapplies_once_on_stale_clock_rollback(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A stale-timestamp schedule refusal re-applies once while unscheduled on same attempt.
+
+        Given: A queued APNs delivery whose active version bumped to
+            ``attempt_count == 1`` at ``_ts(10)`` with ``next_attempt_at=None``.
+        When: ``_persist_retry_schedule`` is called with a rolled-back ``now=_ts(5)``
+            while the sidecar clock reads ``_ts(8)``.
+        Then: The rejected initial write re-reads the active version, logs at
+            INFO, and retries once using ``max(_ts(8), _ts(10)) = _ts(10)``,
+            persisting ``next_attempt_at=_ts(15)``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        assert (
+            await repo.begin_delivery_attempt(
+                delivery_pid, transition_at=_ts(10), session_id="s", sequence_id=1
+            )
+            == 1
+        )
+        sidecar, _ = _make_sidecar(repo, clock=lambda: _ts(8))
+        info_logs: list[str] = []
+        handler_id = logger.add(info_logs.append, level="INFO")
+        try:
+            await sidecar._persist_retry_schedule(delivery_pid, 1, _ts(15), "server_error", _ts(5))
+        finally:
+            logger.remove(handler_id)
+
+        updated = await repo.get_delivery_by_public_id(delivery_pid)
+        assert updated is not None
+        assert updated["status"] == "queued"
+        assert updated["attempt_count"] == 1
+        assert updated["timestamp"] == _ts(10)
+        assert updated["next_attempt_at"] == _ts(15)
+        assert updated["error_reason"] == "server_error"
+        assert any("reapplying rejected retry schedule" in msg for msg in info_logs)
+
+    @pytest.mark.asyncio
+    async def test_apns_rejected_schedule_skips_reapply_on_lost_race(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A schedule refusal lost to a concurrent attempt logs INFO and does not overwrite.
+
+        Given: A queued APNs delivery originally at ``attempt_count == 1`` whose
+            active version has already advanced to ``attempt_count == 2``.
+        When: The stale attempt-1 writer calls ``_persist_retry_schedule``.
+        Then: Re-reading sees ``attempt_count == 2 != 1``, logs at INFO, skips
+            the re-apply write, and leaves ``attempt_count == 2`` with
+            ``next_attempt_at=None``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        assert (
+            await repo.begin_delivery_attempt(
+                delivery_pid, transition_at=_ts(10), session_id="s1", sequence_id=1
+            )
+            == 1
+        )
+        assert (
+            await repo.begin_delivery_attempt(
+                delivery_pid, transition_at=_ts(11), session_id="s2", sequence_id=2
+            )
+            == 2
+        )
+        sidecar, _ = _make_sidecar(repo, clock=lambda: _ts(12))
+        info_logs: list[str] = []
+        handler_id = logger.add(info_logs.append, level="INFO")
+        try:
+            await sidecar._persist_retry_schedule(delivery_pid, 1, _ts(20), "server_error", _ts(5))
+        finally:
+            logger.remove(handler_id)
+
+        current = await repo.get_delivery_by_public_id(delivery_pid)
+        assert current is not None
+        assert current["attempt_count"] == 2
+        assert current["next_attempt_at"] is None
+        assert any("skipping rejected retry schedule after lost race" in msg for msg in info_logs)

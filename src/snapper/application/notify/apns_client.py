@@ -454,18 +454,27 @@ class _TimeoutSafeProtocolMixin(APNsTLSClientProtocol):
         super().on_data_received(raw_data, stream_id)
 
     def on_stream_ended(self, stream_id: int) -> None:
-        """Fail unresolved bodyless responses cleanly before releasing the slot."""
+        """Resolve bodyless responses cleanly before releasing the stream slot."""
         self._prune_done_requests()
         notification_id = self.request_streams.pop(stream_id, None)
         if notification_id is not None:
-            status = self.request_statuses.pop(notification_id, "unknown")
+            status = self.request_statuses.pop(notification_id, None)
             pending_future = self.requests.get(notification_id)
             if pending_future is not None:
-                pending_future.set_exception(
-                    ApnsConnectionClosed(
-                        f"APNs stream {stream_id} ended without response body (status={status})"
+                if status:
+                    pending_future.set_result(
+                        NotificationResult(
+                            notification_id=notification_id,
+                            status=status,
+                            description="empty response body",
+                        )
                     )
-                )
+                else:
+                    pending_future.set_exception(
+                        ApnsConnectionClosed(
+                            f"APNs stream {stream_id} ended without response headers"
+                        )
+                    )
                 self.requests.pop(notification_id, None)
         super().on_stream_ended(stream_id)
 
@@ -491,13 +500,13 @@ class _HardenedKeyConnectionPool(APNsKeyConnectionPool):
     """Key-auth APNs connection pool that propagates non-network connect failures."""
 
     async def acquire(self) -> APNsBaseClientProtocol:
-        """Surface non-network connect causes instead of retrying into ``MaxAttemptsExceeded``."""
+        """Surface non-network connect causes without chaining ``ApnsConnectionError``."""
         try:
             return await super().acquire()
         except ApnsConnectionError as exc:
             cause = _next_exception(exc)
             if cause is not None and not is_network_delivery_error(cause):
-                raise cause from exc
+                raise cause from _next_exception(cause)
             raise
 
 

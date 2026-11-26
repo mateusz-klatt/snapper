@@ -10,6 +10,8 @@ from snapper.application.notify.fcm_client import FcmClient
 from snapper.application.notify.fcm_client import FcmHint
 from snapper.application.notify.fcm_client import FcmSendResult
 from snapper.application.notify.push_beta import PushBetaConfig
+from snapper.application.notify.retry_schedule import RetryScheduleUpdate
+from snapper.application.notify.retry_schedule import persist_retry_schedule
 from snapper.application.notify.routing import allows_device_alert
 from snapper.application.notify.scope_revalidation import ScopeRevalidator
 from snapper.data.android_devices import AndroidDeliveryResult
@@ -225,15 +227,20 @@ class FcmDeliveryService:
         if count >= 3 or expiry is None or next_at >= expiry:
             await self._failed(row, "retry_exhausted_or_expired", now)
             return
-        write = self._write(now)
-        await self.repo.update_delivery_retry_schedule(
-            row["public_id"],
-            attempt_count=count,
-            next_attempt_at=next_at,
-            error_reason=result.reason,
-            transition_at=now,
-            session_id=write.session_id,
-            sequence_id=write.sequence_id,
+        await persist_retry_schedule(
+            self.repo,
+            RetryScheduleUpdate(
+                delivery_public_id=row["public_id"],
+                attempt_count=count,
+                next_attempt_at=next_at,
+                error_reason=result.reason,
+                transition_at=now,
+            ),
+            clock=self.clock,
+            allocate_write=lambda: (
+                self.tracker.session_id,
+                self.tracker.next_sequence("sidecar.notify.fcm"),
+            ),
         )
 
     async def _failed(self, row: AlertDeliveryRow, reason: str, now: datetime) -> None:
