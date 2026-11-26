@@ -1,5 +1,6 @@
 """Tests for WebSocket token service and errors."""
 
+import threading
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -392,3 +393,294 @@ def test_ws_token_store_queried_expired_token_is_removed_after_bounded_cleanup()
 
     assert store.is_used("queried-token", now_ts=200) is False
     assert "queried-token" not in store._used_tokens
+
+
+def test_ws_token_store_consume_first_succeeds_second_fails() -> None:
+    """Verify WsTokenStore.consume succeeds once and rejects replay without mutating state.
+
+    Given: An empty WsTokenStore,
+    When: consume is called twice for the same unexpired JTI,
+    Then: The first call returns True and the second returns False without altering state.
+    """
+    store = WsTokenStore()
+    assert store.consume("token-1", exp=200, now_ts=100) is True
+    assert store.is_used("token-1", now_ts=100) is True
+    assert store.consume("token-1", exp=300, now_ts=100) is False
+    assert store._used_tokens["token-1"] == 200
+    assert len(store._expiry_heap) == 1
+
+
+def test_ws_token_store_consume_allows_reconsumption_after_expiry() -> None:
+    """Verify WsTokenStore.consume treats expired entries as unused.
+
+    Given: A JTI previously consumed with an expiration at or before now_ts,
+    When: consume is called again once expired,
+    Then: The expired entry is treated as unused and consume returns True.
+    """
+    store = WsTokenStore()
+    assert store.consume("token-1", exp=100, now_ts=50) is True
+    assert store.consume("token-1", exp=300, now_ts=100) is True
+    assert store.is_used("token-1", now_ts=150) is True
+    assert store.is_used("token-1", now_ts=300) is False
+
+
+def test_ws_token_store_consume_cleanup_is_bounded() -> None:
+    """Verify WsTokenStore.consume performs bounded cleanup and handles expired queued JTI.
+
+    Given: More expired entries than a single cleanup batch plus an expired target JTI,
+    When: consume is called for the expired target JTI,
+    Then: Cleanup stays bounded, the target JTI is re-consumed, and expired leftovers remain.
+    """
+    store = WsTokenStore()
+    for index in range(100):
+        store.mark_used(f"expired-{index}", exp=index)
+    store.mark_used("queried-token", exp=150)
+
+    assert store.consume("queried-token", exp=500, now_ts=200) is True
+    assert store._used_tokens["queried-token"] == 500
+    remaining_expired = [jti for jti, exp in store._used_tokens.items() if exp <= 200]
+    assert remaining_expired
+
+
+def test_ws_token_store_consume_is_atomic_across_threads() -> None:
+    """Verify concurrent WsTokenStore.consume calls allow only one winner.
+
+    Given: Multiple threads synchronized at a barrier targeting the same JTI,
+    When: All threads invoke consume simultaneously,
+    Then: Exactly one thread receives True and all others receive False.
+    """
+    store = WsTokenStore()
+    thread_count = 16
+    barrier = threading.Barrier(thread_count)
+    outcomes: list[bool] = []
+    errors: list[BaseException] = []
+    results_lock = threading.Lock()
+
+    def worker() -> None:
+        try:
+            barrier.wait(timeout=5)
+            accepted = store.consume("race-jti", exp=500, now_ts=100)
+            with results_lock:
+                outcomes.append(accepted)
+        except BaseException as exc:
+            with results_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert errors == []
+    assert len(outcomes) == thread_count
+    assert outcomes.count(True) == 1
+    assert outcomes.count(False) == thread_count - 1
+    assert len(store._expiry_heap) == 1
+
+
+def test_verify_and_consume_valid_token_and_rejects_replay() -> None:
+    """Verify verify_and_consume validates claims and consumes atomically.
+
+    Given: A newly generated valid WS token,
+    When: verify_and_consume is called twice with matching subject and session hash,
+    Then: The first call returns the payload and the second raises WsTokenAlreadyUsedError.
+    """
+    service = WsTokenService()
+    mock_settings_service = Mock(spec=SettingsService)
+    service.set_settings_service(mock_settings_service)
+    user_id = "test_user"
+    session_id = "test_session"
+    result = service.generate(user_id=user_id, session_id=session_id)
+    sid_hash = compute_sid_hash(session_id)
+
+    payload = service.verify_and_consume(
+        result.token,
+        expected_sub=user_id,
+        expected_sid_hash=sid_hash,
+    )
+    assert payload.sub == user_id
+    assert payload.sid_hash == sid_hash
+    assert payload.purpose == "ws_connect"
+    assert payload.jti == result.payload.jti
+
+    with pytest.raises(WsTokenAlreadyUsedError, match="ws_token_already_used"):
+        service.verify_and_consume(
+            result.token,
+            expected_sub=user_id,
+            expected_sid_hash=sid_hash,
+        )
+    with pytest.raises(WsTokenAlreadyUsedError, match="ws_token_already_used"):
+        service.verify(
+            result.token,
+            expected_sub=user_id,
+            expected_sid_hash=sid_hash,
+        )
+
+
+def test_verify_remains_non_consuming() -> None:
+    """Verify verify keeps its non-consuming contract alongside verify_and_consume.
+
+    Given: A newly generated valid WS token,
+    When: verify is called twice before verify_and_consume,
+    Then: Both verify calls succeed, verify_and_consume succeeds once, and replay then fails.
+    """
+    service = WsTokenService()
+    mock_settings_service = Mock(spec=SettingsService)
+    service.set_settings_service(mock_settings_service)
+    user_id = "test_user"
+    session_id = "test_session"
+    result = service.generate(user_id=user_id, session_id=session_id)
+    sid_hash = compute_sid_hash(session_id)
+
+    first = service.verify(result.token, expected_sub=user_id, expected_sid_hash=sid_hash)
+    second = service.verify(result.token, expected_sub=user_id, expected_sid_hash=sid_hash)
+    assert first.jti == second.jti == result.payload.jti
+
+    consumed = service.verify_and_consume(
+        result.token,
+        expected_sub=user_id,
+        expected_sid_hash=sid_hash,
+    )
+    assert consumed.jti == result.payload.jti
+    with pytest.raises(WsTokenAlreadyUsedError, match="ws_token_already_used"):
+        service.verify_and_consume(
+            result.token,
+            expected_sub=user_id,
+            expected_sid_hash=sid_hash,
+        )
+
+
+def test_verify_and_consume_raises_validation_errors_without_consuming() -> None:
+    """Verify verify_and_consume raises all validation errors without marking used.
+
+    Given: Tokens with invalid signature, expired timestamp, wrong purpose, wrong sub, or wrong sid,
+    When: verify_and_consume is called for each error case,
+    Then: Each matching WsTokenError is raised and valid tokens remain unconsumed.
+    """
+    service = WsTokenService()
+    mock_settings_service = Mock(spec=SettingsService)
+    service.set_settings_service(mock_settings_service)
+    sid_hash = compute_sid_hash("session1")
+
+    with pytest.raises(WsTokenError, match="invalid_ws_token"):
+        service.verify_and_consume(
+            "invalid.token.here",
+            expected_sub="user1",
+            expected_sid_hash=sid_hash,
+        )
+
+    past_time = datetime.now(UTC) - timedelta(hours=1)
+    with patch.object(service, "_now", return_value=past_time):
+        expired_result = service.generate(user_id="user1", session_id="session1")
+    with pytest.raises(WsTokenError, match="invalid_ws_token"):
+        service.verify_and_consume(
+            expired_result.token,
+            expected_sub="user1",
+            expected_sid_hash=sid_hash,
+        )
+
+    valid_result = service.generate(user_id="user1", session_id="session1")
+    expired_payload = valid_result.payload.model_copy(
+        update={"exp": int(service._now().timestamp()) - 10}
+    )
+    with (
+        patch(
+            "snapper.api.auth.services.ws_token_service.jwt.decode",
+            return_value=expired_payload.model_dump(),
+        ),
+        pytest.raises(WsTokenError, match="ws_token_expired"),
+    ):
+        service.verify_and_consume(
+            valid_result.token,
+            expected_sub="user1",
+            expected_sid_hash=sid_hash,
+        )
+
+    tampered_payload = valid_result.payload.model_copy(update={"purpose": "unexpected"})
+    tampered_token = jwt.encode(
+        tampered_payload.model_dump(
+            exclude={"public_id", "timestamp", "session_id", "sequence_id", "type"},
+        ),
+        service.settings.auth_secret_key,
+        algorithm=service.settings.auth_algorithm,
+    )
+    with pytest.raises(WsTokenError, match="invalid_ws_token_purpose"):
+        service.verify_and_consume(
+            tampered_token,
+            expected_sub="user1",
+            expected_sid_hash=sid_hash,
+        )
+
+    with pytest.raises(WsTokenError, match="ws_token_subject_mismatch"):
+        service.verify_and_consume(
+            valid_result.token,
+            expected_sub="different_user",
+            expected_sid_hash=sid_hash,
+        )
+
+    with pytest.raises(WsTokenError, match="ws_token_session_mismatch"):
+        service.verify_and_consume(
+            valid_result.token,
+            expected_sub="user1",
+            expected_sid_hash=compute_sid_hash("different_session"),
+        )
+
+    accepted = service.verify_and_consume(
+        valid_result.token,
+        expected_sub="user1",
+        expected_sid_hash=sid_hash,
+    )
+    assert accepted.jti == valid_result.payload.jti
+
+
+def test_verify_and_consume_is_atomic_across_threads() -> None:
+    """Verify concurrent WsTokenService.verify_and_consume calls allow one winner.
+
+    Given: A valid generated WS token and N threads waiting on a barrier,
+    When: All threads call verify_and_consume concurrently,
+    Then: Exactly one thread receives the payload and N-1 raise WsTokenAlreadyUsedError.
+    """
+    service = WsTokenService()
+    mock_settings_service = Mock(spec=SettingsService)
+    service.set_settings_service(mock_settings_service)
+    user_id = "race_user"
+    session_id = "race_session"
+    result = service.generate(user_id=user_id, session_id=session_id)
+    sid_hash = compute_sid_hash(session_id)
+
+    thread_count = 12
+    barrier = threading.Barrier(thread_count)
+    success_jtis: list[str] = []
+    replay_errors: list[WsTokenAlreadyUsedError] = []
+    unexpected_errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        try:
+            barrier.wait(timeout=5)
+            payload = service.verify_and_consume(
+                result.token,
+                expected_sub=user_id,
+                expected_sid_hash=sid_hash,
+            )
+            with lock:
+                success_jtis.append(payload.jti)
+        except WsTokenAlreadyUsedError as exc:
+            with lock:
+                replay_errors.append(exc)
+        except BaseException as exc:
+            with lock:
+                unexpected_errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert unexpected_errors == []
+    assert success_jtis == [result.payload.jti]
+    assert len(replay_errors) == thread_count - 1

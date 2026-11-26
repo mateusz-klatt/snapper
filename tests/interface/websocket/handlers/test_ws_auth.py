@@ -35,6 +35,7 @@ from snapper.api.auth.schemas.ws_token import WsTokenPayload
 from snapper.api.auth.services.ws_token_service import WsTokenService
 from snapper.api.auth.services.ws_token_service import compute_sid_hash
 from snapper.api.auth.services.ws_token_service import get_ws_token_service
+from snapper.application.services.settings import SettingsService
 from snapper.auth import routes
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
@@ -1463,7 +1464,7 @@ async def test_handshake_invalid_ws_token() -> None:
         )
         with patch("snapper.server.authenticated_websocket.get_ws_token_service") as mock_token_svc:
             mock_token_service = MagicMock()
-            mock_token_service.verify.side_effect = WsTokenError("Invalid token")
+            mock_token_service.verify_and_consume.side_effect = WsTokenError("Invalid token")
             mock_token_svc.return_value = mock_token_service
             endpoint = router.routes[0].endpoint
             await endpoint(websocket)
@@ -1528,7 +1529,7 @@ async def test_bridge_creation_when_manager_zmq_bridge_is_none() -> None:
         mock_auth.return_value = mock_auth_manager
         with patch("snapper.server.authenticated_websocket.get_ws_token_service") as mock_token_svc:
             mock_token_service = MagicMock()
-            mock_token_service.verify.return_value = ws_payload
+            mock_token_service.verify_and_consume.return_value = ws_payload
             mock_token_svc.return_value = mock_token_service
             with patch(
                 "snapper.server.authenticated_websocket.get_allowed_topics_for_role"
@@ -1576,7 +1577,7 @@ async def test_websocket_endpoint_handles_unexpected_exception() -> None:
         mock_auth.return_value = mock_auth_manager
         with patch("snapper.server.authenticated_websocket.get_ws_token_service") as mock_token_svc:
             mock_token_service = MagicMock()
-            mock_token_service.verify.return_value = ws_payload
+            mock_token_service.verify_and_consume.return_value = ws_payload
             mock_token_svc.return_value = mock_token_service
             manager = ConnectionManagerStub()
             router = create_authenticated_websocket_router(manager)
@@ -1830,6 +1831,7 @@ class TokenServiceStub:
     def __init__(self) -> None:
         """Initialize the instance."""
         self.verify_handler: Any | None = None
+        self.consumed: list[Any] = []
         self.marked: list[Any] = []
 
     def verify(self, token: str, *, expected_sub: str, expected_sid_hash: str) -> Any:
@@ -1839,6 +1841,16 @@ class TokenServiceStub:
         if isinstance(self.verify_handler, Exception):
             raise self.verify_handler
         return SimpleNamespace(exp=int(datetime.now(UTC).timestamp()))
+
+    def verify_and_consume(self, token: str, *, expected_sub: str, expected_sid_hash: str) -> Any:
+        """Verify and consume token and return payload."""
+        payload = self.verify(
+            token,
+            expected_sub=expected_sub,
+            expected_sid_hash=expected_sid_hash,
+        )
+        self.consumed.append(payload)
+        return payload
 
     def mark_used(self, payload: Any) -> None:
         """Mark token payload as used."""
@@ -2242,7 +2254,8 @@ async def test_ws_endpoint_success_and_reauth_flow(
     assert any(msg for msg in websocket.sent if "auth_complete" in msg)
     assert any(msg for msg in websocket.sent if "reauth_ok" in msg)
     assert auth_stub.updated
-    assert token_stub.marked
+    assert len(token_stub.consumed) == 2
+    assert not token_stub.marked
     assert websocket.accepted
     assert auth_stub.disconnect_calls
 
@@ -2620,6 +2633,7 @@ def mock_ws_auth_manager() -> MagicMock:
 def mock_ws_token_service() -> MagicMock:
     """Provide mock WebSocket token service."""
     service = MagicMock()
+    service.verify_and_consume = MagicMock()
     service.verify = MagicMock()
     service.mark_used = MagicMock()
     return service
@@ -2946,12 +2960,15 @@ class TestAuthenticateWebsocket:
                 "ws_token": "already-used-token",
             }
         )
-        mock_ws_token_service.verify.side_effect = WsTokenAlreadyUsedError("Token replay")
+        mock_ws_token_service.verify_and_consume.side_effect = WsTokenAlreadyUsedError(
+            "Token replay"
+        )
         result = await authenticate_websocket(
             mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker, MagicMock()
         )
         assert result.success is False
         mock_websocket.close.assert_called_with(code=4401, reason="ws_token replay")
+        mock_ws_token_service.mark_used.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ws_token_invalid(
@@ -2985,12 +3002,13 @@ class TestAuthenticateWebsocket:
                 "ws_token": "invalid-token",
             }
         )
-        mock_ws_token_service.verify.side_effect = WsTokenError("Invalid token")
+        mock_ws_token_service.verify_and_consume.side_effect = WsTokenError("Invalid token")
         result = await authenticate_websocket(
             mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker, MagicMock()
         )
         assert result.success is False
         mock_websocket.close.assert_called_with(code=4401, reason="Invalid ws_token")
+        mock_ws_token_service.mark_used.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_successful_authentication(
@@ -3007,7 +3025,7 @@ class TestAuthenticateWebsocket:
 
         Given: Valid session and valid ws_token,
         When: Completing authentication,
-        Then: Returns success with user, payload and tasks.
+        Then: Verifies and consumes atomically without calling mark_used separately.
         """
         mock_ws_auth_manager.verify_session_cookie = AsyncMock(
             return_value=(
@@ -3025,7 +3043,7 @@ class TestAuthenticateWebsocket:
                 "ws_token": "valid-token",
             }
         )
-        mock_ws_token_service.verify.return_value = mock_ws_payload
+        mock_ws_token_service.verify_and_consume.return_value = mock_ws_payload
         result = await authenticate_websocket(
             mock_websocket, mock_ws_auth_manager, mock_ws_token_service, tracker, MagicMock()
         )
@@ -3034,7 +3052,13 @@ class TestAuthenticateWebsocket:
         assert result.ws_payload == mock_ws_payload
         assert result.warn_task is not None
         assert result.hard_task is not None
-        mock_ws_token_service.mark_used.assert_called_once_with(mock_ws_payload)
+        mock_ws_token_service.verify_and_consume.assert_called_once_with(
+            "valid-token",
+            expected_sub=mock_user.username,
+            expected_sid_hash=compute_sid_hash(mock_token_data.sid),
+        )
+        mock_ws_token_service.verify.assert_not_called()
+        mock_ws_token_service.mark_used.assert_not_called()
         mock_ws_auth_manager.register_connection.assert_called_once()
         result.warn_task.cancel()
         result.hard_task.cancel()
@@ -3042,6 +3066,60 @@ class TestAuthenticateWebsocket:
             await result.warn_task
         with contextlib.suppress(asyncio.CancelledError):
             await result.hard_task
+
+    @pytest.mark.asyncio
+    async def test_real_service_replay_closes_with_4401(
+        self,
+        mock_websocket: MagicMock,
+        mock_ws_auth_manager: MagicMock,
+        mock_user: AuthPrincipal,
+        tracker: SequenceTracker,
+    ) -> None:
+        """Authenticate consumes token on first use and closes replay with 4401.
+
+        Given: A real WsTokenService and a newly generated ws_token,
+        When: authenticate_websocket runs twice with the same ws_token,
+        Then: First succeeds without mark_used and second closes with 4401 ws_token replay.
+        """
+        WsTokenService.clear_instance()
+        real_service = WsTokenService()
+        real_service.set_settings_service(MagicMock(spec=SettingsService))
+        token_data = SimpleNamespace(sid="session-id-123")
+        issued = real_service.generate(user_id=mock_user.username, session_id=token_data.sid)
+        auth_payload = json.dumps(
+            {
+                "type": "authenticate",
+                "session_id": "",
+                "sequence_id": 0,
+                "public_id": "test",
+                "timestamp": "2024-01-01T00:00:00Z",
+                "ws_token": issued.token,
+            }
+        )
+        mock_ws_auth_manager.verify_session_cookie = AsyncMock(return_value=(mock_user, token_data))
+        mock_websocket.receive_text.return_value = auth_payload
+
+        with patch.object(real_service, "mark_used", wraps=real_service.mark_used) as mark_spy:
+            first_result = await authenticate_websocket(
+                mock_websocket, mock_ws_auth_manager, real_service, tracker, MagicMock()
+            )
+            assert first_result.success is True
+            assert first_result.warn_task is not None
+            assert first_result.hard_task is not None
+            mark_spy.assert_not_called()
+            first_result.warn_task.cancel()
+            first_result.hard_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await first_result.warn_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await first_result.hard_task
+
+            second_result = await authenticate_websocket(
+                mock_websocket, mock_ws_auth_manager, real_service, tracker, MagicMock()
+            )
+            assert second_result.success is False
+            mock_websocket.close.assert_called_with(code=4401, reason="ws_token replay")
+            mark_spy.assert_not_called()
 
 
 class TestHandleReauth:
@@ -3106,7 +3184,7 @@ class TestHandleReauth:
         state = MagicMock()
         state.session_id = "session-123"
         mock_ws_auth_manager.get_state.return_value = state
-        mock_ws_token_service.verify.side_effect = WsTokenAlreadyUsedError("Replay")
+        mock_ws_token_service.verify_and_consume.side_effect = WsTokenAlreadyUsedError("Replay")
         result = await handle_reauth(
             mock_websocket,
             message,
@@ -3117,6 +3195,7 @@ class TestHandleReauth:
         )
         assert result is False
         mock_websocket.close.assert_called_with(code=4401, reason="ws_token replay")
+        mock_ws_token_service.mark_used.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_invalid_ws_token(
@@ -3143,7 +3222,7 @@ class TestHandleReauth:
         state = MagicMock()
         state.session_id = "session-123"
         mock_ws_auth_manager.get_state.return_value = state
-        mock_ws_token_service.verify.side_effect = WsTokenError("Invalid")
+        mock_ws_token_service.verify_and_consume.side_effect = WsTokenError("Invalid")
         result = await handle_reauth(
             mock_websocket,
             message,
@@ -3154,6 +3233,7 @@ class TestHandleReauth:
         )
         assert result is False
         mock_websocket.close.assert_called_with(code=4401, reason="Invalid ws_token")
+        mock_ws_token_service.mark_used.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_successful_reauth(
@@ -3169,7 +3249,7 @@ class TestHandleReauth:
 
         Given: Session state and valid new ws_token,
         When: Handling reauth request,
-        Then: Updates state and sends reauth_ok message.
+        Then: Verifies and consumes atomically without calling mark_used separately.
         """
         message = WSReauthRequest(
             session_id="",
@@ -3181,7 +3261,7 @@ class TestHandleReauth:
         state = MagicMock()
         state.session_id = "session-123"
         mock_ws_auth_manager.get_state.return_value = state
-        mock_ws_token_service.verify.return_value = mock_ws_payload
+        mock_ws_token_service.verify_and_consume.return_value = mock_ws_payload
         result = await handle_reauth(
             mock_websocket,
             message,
@@ -3191,11 +3271,84 @@ class TestHandleReauth:
             tracker,
         )
         assert result is True
-        mock_ws_token_service.mark_used.assert_called_once_with(mock_ws_payload)
+        mock_ws_token_service.verify_and_consume.assert_called_once_with(
+            "new-valid-token",
+            expected_sub=mock_user.username,
+            expected_sid_hash=compute_sid_hash(state.session_id),
+        )
+        mock_ws_token_service.verify.assert_not_called()
+        mock_ws_token_service.mark_used.assert_not_called()
         mock_ws_auth_manager.update_ws_token_state.assert_called_once()
+        kwargs = mock_ws_auth_manager.update_ws_token_state.call_args.kwargs
+        kwargs["warn_task"].cancel()
+        kwargs["hard_task"].cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await kwargs["warn_task"]
+        with contextlib.suppress(asyncio.CancelledError):
+            await kwargs["hard_task"]
         calls = mock_websocket.send_text.call_args_list
         reauth_ok_sent = any('"type":"reauth_ok"' in call[0][0] for call in calls)
         assert reauth_ok_sent
+
+    @pytest.mark.asyncio
+    async def test_real_service_reauth_replay_closes_with_4401(
+        self,
+        mock_websocket: MagicMock,
+        mock_user: AuthPrincipal,
+        mock_ws_auth_manager: MagicMock,
+        tracker: SequenceTracker,
+    ) -> None:
+        """Reauth consumes token on first use and closes replay with 4401.
+
+        Given: A real WsTokenService, active session state, and a newly generated ws_token,
+        When: handle_reauth runs twice with the same ws_token,
+        Then: First succeeds without mark_used and second closes with 4401 ws_token replay.
+        """
+        WsTokenService.clear_instance()
+        real_service = WsTokenService()
+        real_service.set_settings_service(MagicMock(spec=SettingsService))
+        state = MagicMock()
+        state.session_id = "session-123"
+        mock_ws_auth_manager.get_state.return_value = state
+        issued = real_service.generate(user_id=mock_user.username, session_id=state.session_id)
+        message = WSReauthRequest(
+            session_id="",
+            sequence_id=0,
+            public_id="test",
+            timestamp=datetime(2024, 1, 1, tzinfo=UTC),
+            ws_token=issued.token,
+        )
+
+        with patch.object(real_service, "mark_used", wraps=real_service.mark_used) as mark_spy:
+            first_result = await handle_reauth(
+                mock_websocket,
+                message,
+                mock_user,
+                mock_ws_auth_manager,
+                real_service,
+                tracker,
+            )
+            assert first_result is True
+            mark_spy.assert_not_called()
+            kwargs = mock_ws_auth_manager.update_ws_token_state.call_args.kwargs
+            kwargs["warn_task"].cancel()
+            kwargs["hard_task"].cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await kwargs["warn_task"]
+            with contextlib.suppress(asyncio.CancelledError):
+                await kwargs["hard_task"]
+
+            second_result = await handle_reauth(
+                mock_websocket,
+                message,
+                mock_user,
+                mock_ws_auth_manager,
+                real_service,
+                tracker,
+            )
+            assert second_result is False
+            mock_websocket.close.assert_called_with(code=4401, reason="ws_token replay")
+            mark_spy.assert_not_called()
 
 
 class TestAuthHandlerConstants:

@@ -162,13 +162,13 @@ async def authenticate_websocket(
        (— checks ``user_active_tokens`` +
        SCD2-active ``users.is_active``).
     2. Request ws_token from client.
-    3. Verify ws_token against session.
+    3. Verify and consume ws_token atomically against session.
     4. Create deadline tasks and register connection.
 
     Args:
         websocket: The WebSocket connection to authenticate.
         ws_auth_manager: Manager for WebSocket authentication state.
-        ws_token_service: Service for verifying ws_tokens.
+        ws_token_service: Service for verifying and consuming ws_tokens.
         tracker: Sequence tracker for stamping outbound messages.
         repository: Active :class:`Repository` threaded through to
             the DB-backed verify path.
@@ -227,7 +227,7 @@ async def authenticate_websocket(
         return AuthResult(success=False)
     ws_token_value = auth_message.ws_token
     try:
-        ws_payload = ws_token_service.verify(
+        ws_payload = ws_token_service.verify_and_consume(
             ws_token_value,
             expected_sub=user.username,
             expected_sid_hash=expected_sid_hash,
@@ -252,7 +252,6 @@ async def authenticate_websocket(
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Invalid ws_token")
         return AuthResult(success=False)
-    ws_token_service.mark_used(ws_payload)
     warn_task, hard_task = create_deadline_tasks(websocket, ws_payload.exp, tracker)
     ws_auth_manager.register_connection(
         websocket,
@@ -281,15 +280,15 @@ async def handle_reauth(
 ) -> bool:
     """Handle re-authentication request for existing connection.
 
-    Verifies the new ws_token, cancels old deadline tasks, and
-    creates new ones with the updated expiration.
+    Verifies and atomically consumes the new ws_token, cancels old deadline
+    tasks, and creates new ones with the updated expiration.
 
     Args:
         websocket: The WebSocket connection.
         message: Re-authentication request with new ws_token.
         user: Current authenticated user profile.
         ws_auth_manager: Manager for WebSocket authentication state.
-        ws_token_service: Service for verifying ws_tokens.
+        ws_token_service: Service for verifying and consuming ws_tokens.
         tracker: Sequence tracker for stamping outbound messages.
 
     Returns:
@@ -309,7 +308,7 @@ async def handle_reauth(
         return False
     expected_hash = compute_sid_hash(state.session_id)
     try:
-        new_payload = ws_token_service.verify(
+        new_payload = ws_token_service.verify_and_consume(
             ws_token_candidate,
             expected_sub=user.username,
             expected_sid_hash=expected_hash,
@@ -334,7 +333,6 @@ async def handle_reauth(
         await websocket.send_text(auth_failed.model_dump_json())
         await websocket.close(code=4401, reason="Invalid ws_token")
         return False
-    ws_token_service.mark_used(new_payload)
     warn_task, hard_task = create_deadline_tasks(websocket, new_payload.exp, tracker)
     ws_auth_manager.update_ws_token_state(
         websocket,
