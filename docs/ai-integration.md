@@ -5,7 +5,9 @@ Snapper exposes a **Model Context Protocol (MCP)** endpoint at
 can authenticate with a long-lived AI delegate or researcher access JWT
 and call a permission-filtered set of trading and market-data tools. The surface is
 vendor-neutral — no Anthropic or OpenAI SDK is bundled in Snapper
-core.
+core. Browser-hosted web assistants (such as Claude.ai and ChatGPT) can
+also connect over HTTPS using OAuth 2.1 — see
+[Web AI connectors (OAuth)](#web-ai-connectors-oauth).
 
 This doc covers:
 
@@ -20,6 +22,7 @@ This doc covers:
 9. [Rate limits](#rate-limits)
 10. [Error catalog](#error-catalog)
 11. [Security model](#security-model)
+12. [Web AI connectors (OAuth)](#web-ai-connectors-oauth)
 
 ---
 
@@ -995,6 +998,244 @@ The MCP endpoint uses Model Context Protocol's Streamable HTTP
 transport. No cookies, no CSRF on MCP calls (bearer header bypass).
 Every tool call opens a sub-request inside the same
 bearer-authenticated HTTP connection.
+
+---
+
+## Web AI connectors (OAuth)
+
+Browser-hosted AI assistants connect to Snapper over HTTPS using the
+Streamable HTTP MCP endpoint at `https://<your-snapper-host>/api/mcp`
+(not a WebSocket). On a public deployment, both the protected resource
+URL (`MCP_PUBLIC_RESOURCE_URL`) and the OAuth authorization server
+issuer (`MCP_OAUTH_ISSUER`) are `https://<your-snapper-host>/api/mcp`
+(with no trailing slash).
+
+Snapper acts as an **OAuth 2.1** authorization server (`S256` PKCE only;
+confidential clients using `client_secret_basic` or
+`client_secret_post`) with RFC 9728 protected-resource discovery,
+RFC 8414 authorization-server discovery, RFC 9207 `iss` responses, and
+RFC 7009 revocation. **Dynamic client registration is disabled by
+design:** `/api/mcp/register` always returns `404`, and setting
+`MCP_OAUTH_DCR_ENABLED=true` fails startup. Operators pre-register each
+web assistant with `snapper mcp-oauth provision-client`. See
+[MCP OAuth Authorization Server](api.md#mcp-oauth-authorization-server)
+for the HTTP and consent API details.
+
+### Read-only scope and exposed tools
+
+Web OAuth connectors are **read-only**. Provisioning and runtime
+authorization accept `snapper.read` (required) and optionally
+`offline_access` (for refresh tokens). Every `/api/mcp` request
+intersects the granted OAuth scopes (`TOOL_OAUTH_SCOPES` in
+`src/snapper/mcp/oauth/scopes.py`) with the bound `ai_delegate`'s
+effective Snapper permissions (`MCP_TOOL_VISIBILITY_POLICY` in
+`src/snapper/mcp/tool_catalog.py`):
+
+| Tool | Permission | Read-only data returned |
+| ---- | ---------- | ----------------------- |
+| `list_instruments` | `read:market_data` | Sorted native symbols for an exchange |
+| `get_order_instrument` | `read:market_data` | Catalog UUID, sizing rules, and order constraints |
+| `get_ohlcv` | `read:market_data` | Historical or latest OHLCV candles (`1m`, `5m`, `15m`, `1h`, `4h`, `1d`) |
+| `list_positions` | `read:positions` | Active positions across accessible wallets |
+| `get_position_cycle` | `read:positions` | Open-to-close audit trail for a position cycle |
+| `list_orders` | `read:orders` | Paged order history across accessible wallets |
+| `get_order_status` | `read:orders` | Single-order state and execution history |
+| `list_recent_signals` | `read:signals` | Strategy signals fired after a UTC `since` timestamp |
+| `get_ai_review_aftermath` | `read:signals` | Terminal CONSULT review aftermath (requires an active scope grant for that wallet and instrument) |
+| `get_latest_research` | `read:market_views` | Latest eligible market-view artifact and citations |
+
+Write and decision tools (`submit_manual_order`, `cancel_order`,
+`submit_ai_review_decision`, `submit_market_view`) are not exposed to
+web OAuth connectors. `list_venue_account_states` is also excluded
+because it requires `snapper.account.read` (outside the `snapper.read`
+ceiling) and `read:account_state`. See
+[Available tools](#available-tools) for argument contracts and response
+envelopes.
+
+### Operator prerequisites
+
+1. **Apply database migration `0052`** (`snapper db-upgrade`) before
+    provisioning clients or enabling OAuth.
+2. **Expose Snapper over HTTPS** at `https://<your-snapper-host>/api/mcp`.
+    Client provisioning requires HTTPS redirect URIs (HTTP is accepted
+    only for loopback hosts `localhost`, `127.0.0.1`, and `[::1]`).
+3. **Enable OAuth in `.env`** and restart the API server (leave
+    `MCP_OAUTH_DCR_ENABLED=false`; setting it to `true` fails startup).
+4. **Keep `ai_integration_enabled` enabled** in the database settings
+    (defaults to `true`; see [Feature flag](#feature-flag)).
+5. **Sign in with `manage:ai_integration`** when approving consent. The
+    consent page (`/oauth/authorize`) requires an active Snapper browser
+    cookie session belonging to a user with `manage:ai_integration` (such
+    as `operator` or `admin`) and an accessible operator membership.
+6. **Pre-register one confidential client per assistant** after copying
+    the exact callback / redirect URI shown in the assistant's connector
+    settings rather than guessing it (Snapper compares redirect URIs
+    verbatim without normalization).
+
+Required `.env` variables:
+
+```bash
+MCP_OAUTH_ENABLED=true
+MCP_PUBLIC_RESOURCE_URL=https://<your-snapper-host>/api/mcp
+MCP_OAUTH_ISSUER=https://<your-snapper-host>/api/mcp
+```
+
+Optional token and artifact lifetimes default to
+`MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS=900` (15 minutes),
+`MCP_OAUTH_REFRESH_TOKEN_TTL_DAYS=90` (90 days),
+`MCP_OAUTH_CODE_TTL_SECONDS=120`, and
+`MCP_OAUTH_REQUEST_TTL_SECONDS=300`.
+
+Provision a confidential client per assistant:
+
+```bash
+snapper mcp-oauth provision-client \
+    --name "Claude.ai" \
+    --redirect-uri "<exact-redirect-uri-from-assistant>"
+```
+
+Save the printed `client_id` and `client_secret` immediately; the raw
+secret is shown once and stored only as a bcrypt hash. See
+[`mcp-oauth provision-client`](cli.md#mcp-oauth-provision-client) for
+`--auth-method` (`client_secret_basic` default, or `client_secret_post`)
+and `--scope` flags.
+
+### Connecting Claude.ai and ChatGPT
+
+Exact button and field labels vary by assistant plan and UI version, but
+the connection flow is the same:
+
+1. Open the assistant's connectors or apps settings and start creating a
+    custom remote MCP connector or app.
+2. Copy the OAuth callback / redirect URI shown by the assistant and
+    ensure a dedicated Snapper OAuth client is provisioned for that exact
+    URI (one client per assistant).
+3. Set the MCP server URL to `https://<your-snapper-host>/api/mcp` and
+    select OAuth authentication.
+4. Enter the `client_id` and `client_secret` from `provision-client` in
+    the assistant's OAuth client fields (often under advanced or OAuth
+    settings).
+5. Save and connect. Your browser opens Snapper's consent page
+    (`/oauth/authorize`). Sign in if prompted, check the client name,
+    requested scopes (`snapper.read` and optionally `offline_access`),
+    and resource URL, choose the operator binding, and approve.
+
+Assistant-specific notes:
+
+- **Claude.ai** — Add a custom connector pointing at
+    `https://<your-snapper-host>/api/mcp` using OAuth and its dedicated
+    provisioned client. Once active, live calls to read-only tools such as
+    `get_ohlcv`, `list_positions`, `list_orders`, `list_recent_signals`,
+    and `list_instruments` return data from your accessible wallets and
+    markets.
+- **ChatGPT** — Enable developer mode if required, add a custom app or
+    connector at `https://<your-snapper-host>/api/mcp` with OAuth
+    authentication and its dedicated provisioned client, then complete the
+    browser consent redirect. Provision with
+    `--auth-method client_secret_post` if your client sends credentials in
+    the form body instead of HTTP Basic auth.
+
+### Gemini status
+
+**Gemini web** (`gemini.google.com`) currently presents only a curated
+catalog on its Connectors page, with no option to add a custom remote
+MCP server. Gemini users who want Snapper access should use **Gemini
+CLI** or another MCP-capable local client authenticated with an AI
+delegate Bearer token — see
+[Creating an AI delegate](#creating-an-ai-delegate) and
+[Client configuration examples](#client-configuration-examples) above.
+(Note that `snapper-mcp integrate` wires the seven CLIs listed there;
+other MCP-capable CLIs such as Gemini CLI configure a delegate Bearer
+token or bridge entry directly.)
+
+### Reviewing and revoking access
+
+- **Assistant disconnect (RFC 7009)** — Disconnecting the connector in
+    Claude.ai or ChatGPT (or calling `POST /api/mcp/revoke` as the
+    authenticated client) with either a live access token or refresh
+    token revokes the entire `oauth_grants` row and all attached refresh
+    families immediately.
+- **Delegate inventory and kill switch** — Every approved OAuth grant
+    binds an `ai_delegate` user visible in Snapper's AI Integration page
+    and via `GET /api/ai-delegates` (scoped by your integration or read
+    permissions; see [Creating an AI delegate](#creating-an-ai-delegate)).
+    Deactivating that delegate via
+    `POST /api/ai-delegates/{delegate_public_id}/deactivate` (see
+    [Kill switch + deactivation](#kill-switch--deactivation) and
+    [Inventory-based revocation](#inventory-based-revocation)),
+    deactivating or deleting the grant owner, or detaching the owner
+    from the bound operator desk atomically revokes the matching
+    `oauth_grants` row and all of its refresh tokens. Because `/api/mcp`
+    re-verifies the grant live without caching on every request, access
+    stops on the next call — and reactivating the user or re-attaching
+    the desk does not restore a revoked grant.
+
+### Troubleshooting
+
+- **`404` on OAuth discovery or `/api/mcp/authorize`, `/api/mcp/token`,
+    `/api/mcp/revoke`, `/api/mcp-oauth/consent*`** —
+    `MCP_OAUTH_ENABLED` is `false` (default). Set
+    `MCP_OAUTH_ENABLED=true` and restart the API server. Note that
+    `/api/mcp/register` and `/.well-known/openid-configuration*` always
+    return `404` by design.
+- **`400` directly from `/api/mcp/authorize` (no redirect)** — Unknown
+    `client_id`, a `redirect_uri` that does not match a registered URI
+    byte-for-byte, omitted `redirect_uri` when multiple URIs are
+    registered, or a repeated query parameter. Copy the exact callback
+    URL from the assistant and provision with that exact
+    `--redirect-uri`.
+- **`invalid_target`** — The `resource` parameter does not match
+    `MCP_PUBLIC_RESOURCE_URL` exactly (for example, a trailing slash
+    `/api/mcp/`, mismatched host, or missing `resource` on token
+    exchange/refresh). Keep `MCP_PUBLIC_RESOURCE_URL`,
+    `MCP_OAUTH_ISSUER`, and the assistant URL identical with no trailing
+    slash.
+- **`invalid_scope`** — `scope` was omitted, empty, contained only
+    `offline_access` without `snapper.read`, or exceeded
+    `snapper.read` / `offline_access` or the client's `--scope` ceiling.
+- **Connected, but no tools appear or tool calls fail** — Check that
+    `ai_integration_enabled` is `true` (when `false`, metadata still
+    returns `200`, while `/api/mcp` returns `503 feature_disabled`,
+    `/api/mcp/authorize` redirects with `temporarily_unavailable`, and
+    `/api/mcp/token` returns `503 temporarily_unavailable`; see
+    [Feature flag](#feature-flag)). Also verify the approving owner is
+    active, retains `manage:ai_integration`, and holds an operator
+    membership with active wallet/instrument scope grants. A
+    `405 method_not_allowed` on `GET /api/mcp` is expected: Snapper
+    disables standalone SSE `GET` streams so proxies do not stall `POST`
+    calls.
+- **`401` after token rotation, secret change, or `MASTER_PASSWORD`
+    rotation** — `401 invalid_client` on `/api/mcp/token` or
+    `/api/mcp/revoke` indicates mismatched client credentials, wrong
+    auth method (`client_secret_basic` vs `client_secret_post`), or
+    sending both Basic and form credentials; provision a new client and
+    update the assistant because secrets cannot be recovered or rotated
+    in place. `401 invalid_token` on `/api/mcp` indicates an expired
+    access token, a revoked grant (including refresh replay), or a
+    `MASTER_PASSWORD` rotation; disconnect and re-authorize.
+- **Consent errors (`403 consent_access_denied`,
+    `409 grant_replacement_required`)** — `403` means the browser user
+    lacks `manage:ai_integration`, lacks the selected operator
+    membership, or hit the 5-active-delegate cap (deactivate an unused
+    delegate first). `409` means an active grant exists for the same
+    `(owner, operator, client_id)` with a different resource or scope
+    set; confirm replacement or revoke the prior delegate first.
+
+### Security notes
+
+- **Secrets are shown once:** `client_secret` is stored only as a
+    bcrypt hash and cannot be re-displayed after `provision-client`.
+- **One client per assistant:** Provision separate credentials for
+    Claude.ai and ChatGPT so each has its own callback URI, consent
+    label, and revocation boundary.
+- **Refresh replay revokes the grant:** Reusing a consumed refresh token
+    immediately revokes the entire `oauth_grants` row and every refresh
+    family attached to it (`invalid_grant`), requiring re-consent.
+- **Live checks and log redaction:** Every `/api/mcp` call verifies the
+    client, grant, owner, operator, delegate, and scopes live without
+    caching; OAuth responses set `Cache-Control: no-store`,
+    `Pragma: no-cache`, and `Referrer-Policy: no-referrer`, and omit
+    sensitive credentials from control-table payloads and server logs.
 
 ---
 
