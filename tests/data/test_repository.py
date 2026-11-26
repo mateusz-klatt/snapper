@@ -58,6 +58,7 @@ from snapper.data.models import Symbol
 from snapper.data.models import SymbolAlias
 from snapper.data.models import Tick
 from snapper.data.models import Trade
+from snapper.data.models import TradeCommand
 from snapper.data.models import TradeProjectionCheckpoint
 from snapper.data.models import VenueFeeSchedule
 from snapper.data.models import Wallet
@@ -10434,6 +10435,104 @@ async def test_get_undispatched_commands_stable_across_same_created_at(
 
 
 @pytest.mark.asyncio
+async def test_get_undispatched_commands_preserves_order_after_failure_version(
+    tmp_path: Path,
+) -> None:
+    """Retry failure SCD2 versions keep the original enqueue order on tied created_at.
+
+    Given: Two same-shard commands A then B inserted with equal ``created_at`` in SQLite,
+    When: Command A records a publish failure via ``cas_trade_command_status`` (creating
+        a new physical SCD2 row whose autoincrement ``id`` exceeds B's),
+    Then: ``get_undispatched_commands`` still returns A before B and reflects A's
+        bumped ``attempt_count`` and ``last_error``.
+    """
+    db_path = tmp_path / "stable_retry_order.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    try:
+        tied_now = datetime.now(UTC)
+        id_a, pid_a = await r.insert_trade_command(
+            {
+                "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+                "command_type": "submit",
+                "shard_key": "kraken.BTC-USD.live",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "engine-buy",
+                "client_order_id": "cid-retry-a",
+                "venue_client_id": "vcid-retry-a",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "created",
+                "created_at": tied_now,
+                "correlation_id": "corr-retry-a",
+                "session_id": "s1",
+                "sequence_id": 1,
+                "timestamp": tied_now,
+            }
+        )
+        id_b, pid_b = await r.insert_trade_command(
+            {
+                "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+                "command_type": "submit",
+                "shard_key": "kraken.BTC-USD.live",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "engine-buy",
+                "client_order_id": "cid-retry-b",
+                "venue_client_id": "vcid-retry-b",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "created",
+                "created_at": tied_now,
+                "correlation_id": "corr-retry-b",
+                "session_id": "s1",
+                "sequence_id": 2,
+                "timestamp": tied_now,
+            }
+        )
+        assert id_a < id_b
+        assert pid_a < pid_b
+
+        t1 = tied_now + timedelta(milliseconds=100)
+        won = await r.cas_trade_command_status(
+            public_id=pid_a,
+            expected_status="created",
+            new_status="created",
+            bus_time=t1,
+            session_id="s1",
+            sequence_id=3,
+            attempt_count=1,
+            last_error="dispatch failed",
+        )
+        assert won is True
+
+        async with r.session() as session:
+            active_id_a = (
+                await session.execute(
+                    _sa_select(TradeCommand.id).where(
+                        TradeCommand.public_id == pid_a,
+                        TradeCommand.known_to == KNOWN_TO_MAX,
+                    )
+                )
+            ).scalar_one()
+        assert active_id_a > id_b
+
+        rows = await r.get_undispatched_commands(as_of=t1, limit=10)
+        assert [row["public_id"] for row in rows] == [pid_a, pid_b]
+        assert rows[0]["attempt_count"] == 1
+        assert rows[0]["last_error"] == "dispatch failed"
+    finally:
+        await r.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_get_undispatched_commands_offset_skips_rows(tmp_path: Path) -> None:
     """``offset=N`` skips the first N ``status='created'`` rows."""
     db_path = tmp_path / "offset.db"
@@ -11477,6 +11576,102 @@ async def test_bulk_dispatch_skips_concurrently_expired_command(tmp_path: Path) 
     active = await r.get_active_commands_for_shard("kraken.BTC-USD.live", later)
     assert active == []
     assert await r.get_undispatched_commands(as_of=later, limit=10) == []
+
+
+@pytest.mark.asyncio
+async def test_cas_trade_command_status_updates_attempt_and_refuses_moved_row(
+    tmp_path: Path,
+) -> None:
+    """CAS created->created bumps attempt_count and refuses to resurrect moved rows.
+
+    Given: A created trade command in SQLite,
+    When: cas_trade_command_status runs created->created with attempt_count=2, then
+        the command expires and another created->created CAS runs,
+    Then: The first CAS updates attempt_count and last_error while keeping status
+        created, and the second CAS returns False without resurrecting expired state.
+    """
+    db_path = tmp_path / "cmd_cas_attempt.db"
+    r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
+    await r.create_all()
+    try:
+        now = datetime.now(UTC)
+        _, pid = await r.insert_trade_command(
+            {
+                "wallet_public_id": "01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
+                "command_type": "submit",
+                "shard_key": "kraken.BTC-USD.live",
+                "exchange": "kraken",
+                "instrument": "BTC-USD",
+                "mode": "live",
+                "strategy_id": "engine-buy",
+                "client_order_id": "cid-cas-attempt",
+                "venue_client_id": "cid-cas-attempt",
+                "side": "buy",
+                "order_type": "market",
+                "quantity": 0.5,
+                "price": None,
+                "status": "created",
+                "created_at": now,
+                "correlation_id": "corr-cas-attempt",
+                "session_id": "s1",
+                "sequence_id": 1,
+                "timestamp": now,
+            }
+        )
+        t1 = now + timedelta(milliseconds=250)
+        assert (
+            await r.cas_trade_command_status(
+                public_id=pid,
+                expected_status="created",
+                new_status="created",
+                bus_time=t1,
+                session_id="s1",
+                sequence_id=2,
+                attempt_count=2,
+                last_error="dispatch failed",
+            )
+            is True
+        )
+        row = await r.get_trade_command_by_public_id(pid, as_of=t1)
+        assert row is not None
+        assert row["status"] == "created"
+        assert row["attempt_count"] == 2
+        assert row["last_error"] == "dispatch failed"
+
+        t2 = now + timedelta(seconds=1)
+        assert (
+            await r.cas_trade_command_status(
+                public_id=pid,
+                expected_status="created",
+                new_status="expired",
+                bus_time=t2,
+                session_id="s1",
+                sequence_id=3,
+                terminal_at=t2,
+                last_error="expired",
+            )
+            is True
+        )
+        t3 = now + timedelta(seconds=2)
+        assert (
+            await r.cas_trade_command_status(
+                public_id=pid,
+                expected_status="created",
+                new_status="created",
+                bus_time=t3,
+                session_id="s1",
+                sequence_id=4,
+                attempt_count=3,
+                last_error="dispatch failed",
+            )
+            is False
+        )
+        final_row = await r.get_trade_command_by_public_id(pid, as_of=t3)
+        assert final_row is not None
+        assert final_row["status"] == "expired"
+        assert final_row["attempt_count"] == 2
+    finally:
+        await r.engine.dispose()
 
 
 @pytest.mark.asyncio

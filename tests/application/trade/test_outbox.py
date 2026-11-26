@@ -105,6 +105,7 @@ async def test_dispatch_publishes_and_updates_status() -> None:
         return []
 
     repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+    repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
     publish_fn = AsyncMock()
@@ -120,6 +121,7 @@ async def test_dispatch_publishes_and_updates_status() -> None:
     await _run_briefly()
     publish_fn.assert_called_once_with(cmd)
     repo.bulk_dispatch_trade_commands.assert_called()
+    repo.cas_trade_command_status.assert_not_called()
     repo.update_trade_command_status.assert_not_called()
     success_arg = repo.bulk_dispatch_trade_commands.call_args_list[0].args[0]
     assert len(success_arg) == 1
@@ -129,11 +131,11 @@ async def test_dispatch_publishes_and_updates_status() -> None:
 
 @pytest.mark.asyncio
 async def test_dispatch_handles_publish_failure() -> None:
-    """Dispatcher handles publish failure by keeping command as created.
+    """Dispatcher handles publish failure by CAS-updating created attempt metadata.
 
     Given: a repository returning one command and publish_fn that raises,
     When: the dispatcher runs one cycle,
-    Then: update_trade_command_status is called with status='created' and incremented attempt.
+    Then: cas_trade_command_status is called from created to created with incremented attempt.
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
@@ -147,6 +149,7 @@ async def test_dispatch_handles_publish_failure() -> None:
         return []
 
     repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+    repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
 
@@ -154,15 +157,17 @@ async def test_dispatch_handles_publish_failure() -> None:
 
     async def _run_briefly() -> None:
         task = asyncio.create_task(dispatcher.run())
-        await _wait_until(lambda: repo.update_trade_command_status.await_count >= 1)
+        await _wait_until(lambda: repo.cas_trade_command_status.await_count >= 1)
         dispatcher.stop()
         await task
 
     await _run_briefly()
-    call_kwargs = repo.update_trade_command_status.call_args_list[0].kwargs
-    assert call_kwargs["new_status"] == "created"
+    call_kwargs = repo.cas_trade_command_status.call_args_list[0].kwargs
+    assert call_kwargs["expected_status"] == TradeCommandStatusEnum.CREATED
+    assert call_kwargs["new_status"] == TradeCommandStatusEnum.CREATED
     assert call_kwargs["attempt_count"] == 1
     assert call_kwargs["last_error"] == "dispatch failed"
+    repo.update_trade_command_status.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -181,6 +186,7 @@ async def test_dispatch_holds_unresolved_cancel_without_status_mutation() -> Non
     await dispatcher._dispatch_batch()
 
     repo.bulk_dispatch_trade_commands.assert_not_awaited()
+    repo.cas_trade_command_status.assert_not_awaited()
     repo.update_trade_command_status.assert_not_awaited()
 
 
@@ -484,6 +490,7 @@ async def test_no_publish_fn_skips_publish() -> None:
         return []
 
     repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+    repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
 
@@ -495,6 +502,7 @@ async def test_no_publish_fn_skips_publish() -> None:
     await task
 
     repo.bulk_dispatch_trade_commands.assert_called()
+    repo.cas_trade_command_status.assert_not_called()
     repo.update_trade_command_status.assert_not_called()
     success_arg = repo.bulk_dispatch_trade_commands.call_args_list[0].args[0]
     assert len(success_arg) == 1
@@ -528,7 +536,7 @@ async def test_dispatch_post_publish_db_failure_no_revert() -> None:
     Given: a repository where publish succeeds but bulk DB write raises,
     When: the dispatcher runs one cycle,
     Then: the command is NOT reverted to 'created' (prevents replay) —
-    update_trade_command_status is NEVER called on the success path.
+    status CAS/update is NEVER called on the success path.
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
@@ -542,6 +550,7 @@ async def test_dispatch_post_publish_db_failure_no_revert() -> None:
         return []
 
     repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+    repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     repo.bulk_dispatch_trade_commands = AsyncMock(side_effect=RuntimeError("DB down"))
     publish_fn = AsyncMock()
@@ -555,14 +564,15 @@ async def test_dispatch_post_publish_db_failure_no_revert() -> None:
 
     publish_fn.assert_called_once()
     repo.bulk_dispatch_trade_commands.assert_called_once()
+    repo.cas_trade_command_status.assert_not_called()
     repo.update_trade_command_status.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_dispatch_revert_db_failure_logged() -> None:
-    """Dispatcher handles revert DB failure without crashing.
+    """Dispatcher handles failure-CAS DB exception without crashing.
 
-    Given: a repository where publish fails AND status revert also fails,
+    Given: a repository where publish fails AND cas_trade_command_status raises,
     When: the dispatcher runs one cycle,
     Then: no exception propagates (both failures logged).
     """
@@ -578,13 +588,13 @@ async def test_dispatch_revert_db_failure_logged() -> None:
         return []
 
     repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
-    repo.update_trade_command_status = AsyncMock(side_effect=RuntimeError("DB down"))
+    repo.cas_trade_command_status = AsyncMock(side_effect=RuntimeError("DB down"))
     publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
 
     dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn, poll_interval=0.01)
 
     task = asyncio.create_task(dispatcher.run())
-    await _wait_until(lambda: repo.update_trade_command_status.await_count >= 1)
+    await _wait_until(lambda: repo.cas_trade_command_status.await_count >= 1)
     dispatcher.stop()
     await task
 
@@ -954,13 +964,13 @@ class TestOutboxRetryBackoff:
         for attempt, delay in enumerate(expected_delays, start=1):
             await dispatcher._dispatch_batch()
             assert publish_fn.await_count == attempt
-            assert repo.update_trade_command_status.await_count == attempt
+            assert repo.cas_trade_command_status.await_count == attempt
             assert dispatcher._retry["cmd-ttl-cap"].failures == attempt
             assert dispatcher._retry["cmd-ttl-cap"].next_at == pytest.approx(clock.now + delay)
             clock.advance(delay - 0.01)
             await dispatcher._dispatch_batch()
             assert publish_fn.await_count == attempt
-            assert repo.update_trade_command_status.await_count == attempt
+            assert repo.cas_trade_command_status.await_count == attempt
             clock.advance(0.01)
 
     @pytest.mark.asyncio
@@ -982,7 +992,7 @@ class TestOutboxRetryBackoff:
         expected_delays = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
         for attempt, delay in enumerate(expected_delays, start=1):
             await dispatcher._dispatch_batch()
-            assert repo.update_trade_command_status.await_count == attempt
+            assert repo.cas_trade_command_status.await_count == attempt
             assert dispatcher._retry["cmd-cancel-cap"].next_at == pytest.approx(clock.now + delay)
             clock.advance(delay)
 
@@ -1171,16 +1181,17 @@ class TestOutboxRetryBackoff:
         assert published == ["eth-1", "sol-1"]
 
     @pytest.mark.asyncio
-    async def test_per_shard_fifo_defers_later_submit_and_cancel_across_pages(
+    async def test_per_shard_fifo_defers_later_submits_but_lets_cancels_flow_across_pages(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A deferred row defers every later command on its shard across fetch pages.
+        """A deferred row defers later expirable peers across pages while cancels flow.
 
-        Given: A failing BTC row followed by twenty same-shard submits and a later
-            same-shard cancel spanning two fetch pages before an ETH row,
+        Given: A failing BTC submit followed by twenty same-shard submits, a
+            same-shard cancel on page two, and an ETH submit,
         When: A batch runs during the BTC backoff window and then again once due,
-        Then: Same-shard submits and cancels stay deferred across pages while ETH
-            dispatches, and once due the fast path resumes without offset paging.
+        Then: Same-shard submits stay deferred across pages while the same-shard
+            cancel and ETH submit dispatch, and once due the fast path resumes
+            without offset paging.
         """
         clock = _install_clock(monkeypatch, initial=0.0)
         btc_head = _make_backoff_row(
@@ -1203,24 +1214,23 @@ class TestOutboxRetryBackoff:
 
         clock.advance(0.05)
         btc_followers = [
-            _make_backoff_row(
-                f"btc-{i}",
-                command_type="cancel" if i % 2 == 0 else "submit",
-                shard_key="kraken.BTC-USD.live",
-            )
-            for i in range(1, 22)
+            _make_backoff_row(f"btc-{i}", command_type="submit", shard_key="kraken.BTC-USD.live")
+            for i in range(1, 21)
         ]
+        btc_cancel = _make_backoff_row(
+            "btc-cancel", command_type="cancel", shard_key="kraken.BTC-USD.live"
+        )
         eth_row = _make_backoff_row("eth-1", command_type="submit", shard_key="kraken.ETH-USD.live")
-        queue[0] = [btc_head, *btc_followers, eth_row]
+        queue[0] = [btc_head, *btc_followers, btc_cancel, eth_row]
         await dispatcher._dispatch_batch()
-        assert published == ["eth-1"]
+        assert published == ["btc-cancel", "eth-1"]
 
         clock.advance(0.20)
         fail_btc_head = False
         queue[0] = [btc_head]
         repo.get_undispatched_commands.reset_mock()
         await dispatcher._dispatch_batch()
-        assert published == ["eth-1", "btc-0"]
+        assert published == ["btc-cancel", "eth-1", "btc-0"]
         assert repo.get_undispatched_commands.await_args is not None
         assert "offset" not in repo.get_undispatched_commands.await_args.kwargs
 
@@ -1307,18 +1317,20 @@ class TestOutboxRetryBackoff:
         assert published == ["eth-a", "btc-a", "btc-b"]
 
     @pytest.mark.asyncio
-    async def test_repeat_failure_after_backoff_still_holds_later_same_shard_rows(
+    async def test_repeat_failure_after_backoff_holds_submits_not_cancels(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A command failing again once due keeps its later shard peers waiting.
+        """Repeat failure keeps later submits waiting in-tick while cancels dispatch.
 
-        Given: A BTC submit already backing off and a later BTC cancel,
-        When: The submit comes due together with the cancel and fails again,
-        Then: The cancel is not published in that tick.
+        Given: A BTC submit already backing off, a later BTC submit, and a later
+            BTC cancel,
+        When: All three appear together once due and the head fails again,
+        Then: The later submit is skipped in that tick while the cancel dispatches.
         """
         clock = _install_clock(monkeypatch, initial=0.0)
         first = _make_backoff_row("btc-a", command_type="submit")
-        later = _make_backoff_row("btc-cancel", command_type="cancel")
+        later_submit = _make_backoff_row("btc-b", command_type="submit")
+        later_cancel = _make_backoff_row("btc-cancel", command_type="cancel")
         queue: list[list[TradeCommandRow]] = [[first]]
         repo = _make_queue_repo(queue)
         published: list[str] = []
@@ -1332,9 +1344,9 @@ class TestOutboxRetryBackoff:
         await dispatcher._dispatch_batch()
 
         clock.advance(0.30)
-        queue[0] = [first, later]
+        queue[0] = [first, later_submit, later_cancel]
         await dispatcher._dispatch_batch()
-        assert published == []
+        assert published == ["btc-cancel"]
 
     @pytest.mark.asyncio
     async def test_ttl_expiry_during_backoff_expires_without_publishing(
@@ -1380,7 +1392,12 @@ class TestOutboxRetryBackoff:
         wall_now[0] = base_time + timedelta(seconds=30.5)
         await dispatcher._dispatch_batch()
         assert publish_fn.await_count == 1
-        repo.cas_trade_command_status.assert_awaited_once()
+        assert repo.cas_trade_command_status.await_count == 2
+        assert repo.cas_trade_command_status.await_args is not None
+        assert (
+            repo.cas_trade_command_status.await_args.kwargs["new_status"]
+            == TradeCommandStatusEnum.EXPIRED
+        )
         expire_fn.assert_awaited_once_with(cmd)
         assert "cmd-ttl-expire" not in dispatcher._retry
 
@@ -1536,7 +1553,7 @@ class TestOutboxRetryBackoff:
             _make_backoff_row(f"foreign-{i}", shard_key="kraken.FOREIGN.live") for i in range(18)
         ]
         mine_follow = _make_backoff_row(
-            "mine-follow", command_type="cancel", shard_key="kraken.MINE1.live"
+            "mine-follow", command_type="submit", shard_key="kraken.MINE1.live"
         )
         mine_two_a = _make_backoff_row("mine-2a", shard_key="kraken.MINE2.live")
         mine_two_b = _make_backoff_row("mine-2b", shard_key="kraken.MINE2.live")
@@ -1556,4 +1573,168 @@ class TestOutboxRetryBackoff:
         assert published == ["mine-2a", "mine-2b"]
         assert any(
             entry.level == "WARNING" and "max_scan_rows=40" in entry.message for entry in logs
+        )
+
+    @pytest.mark.asyncio
+    async def test_failing_create_does_not_block_cancels_while_failing_cancel_defers_itself(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancels flow past failing creates and defer only via their own retry state.
+
+        Given: A failing create, a later same-shard create, an independent live
+            cancel, an unpublished-target cancel, and a failing cancel on the same shard,
+        When: Batches run in the failing tick and during the retry backoff window,
+        Then: The independent cancel dispatches both in-tick and on next fetch, the
+            unresolved cancel stays held without retry churn, the failing cancel
+            defers only via its own retry entry, and the later create stays blocked.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        head_create = _make_backoff_row("btc-create-1", command_type="create")
+        later_create = _make_backoff_row("btc-create-2", command_type="create")
+        live_cancel = _make_backoff_row("btc-cancel-live", command_type="cancel")
+        held_cancel = _make_backoff_row("btc-cancel-held", command_type="cancel")
+        failing_cancel = _make_backoff_row("btc-cancel-fail", command_type="cancel")
+        queue: list[list[TradeCommandRow]] = [
+            [head_create, later_create, live_cancel, held_cancel, failing_cancel]
+        ]
+        repo = _make_queue_repo(queue)
+        published: list[str] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            pid = cmd["public_id"]
+            if pid in ("btc-create-1", "btc-cancel-fail"):
+                raise RuntimeError("ZMQ down")
+            if pid == "btc-cancel-held":
+                raise CancelTargetUnresolvedError("target unpublished")
+            published.append(pid)
+
+        dispatcher = OutboxDispatcher(
+            repository=repo, publish_fn=AsyncMock(side_effect=_publish), batch_size=5
+        )
+        await dispatcher._dispatch_batch()
+        assert published == ["btc-cancel-live"]
+        assert "btc-cancel-held" not in dispatcher._retry
+        assert "btc-cancel-fail" in dispatcher._retry
+
+        clock.advance(0.05)
+        second_live_cancel = _make_backoff_row("btc-cancel-live-2", command_type="cancel")
+        queue[0] = [head_create, later_create, held_cancel, failing_cancel, second_live_cancel]
+        await dispatcher._dispatch_batch()
+        assert published == ["btc-cancel-live", "btc-cancel-live-2"]
+        assert repo.cas_trade_command_status.await_count == 2
+
+        clock.advance(0.20)
+        queue[0] = [failing_cancel, later_create]
+        await dispatcher._dispatch_batch()
+        assert published == ["btc-cancel-live", "btc-cancel-live-2"]
+
+    @pytest.mark.asyncio
+    async def test_paging_dedupes_duplicate_public_id_keeping_first_occurrence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """OFFSET paging deduplicates repeated rows by public_id, keeping the first.
+
+        Given: A mocked repository whose second OFFSET page repeats a row from the
+            first page because of concurrent inserts, with distinct ``last_error``
+            markers on the two copies,
+        When: The paging path runs a batch of three commands,
+        Then: The repeated command is published exactly once using its first copy.
+        """
+        _install_clock(monkeypatch, initial=0.0)
+        row_first = _make_backoff_row("dup-1", shard_key="kraken.MINE.live")
+        row_first["last_error"] = "first-copy"
+        row_second = _make_backoff_row("dup-1", shard_key="kraken.MINE.live")
+        row_second["last_error"] = "second-copy"
+        next_row = _make_backoff_row("own-2", shard_key="kraken.MINE.live")
+        foreign = [
+            _make_backoff_row(f"foreign-{i}", shard_key="kraken.FOREIGN.live") for i in range(19)
+        ]
+        pages = [[*foreign, row_first], [row_second, next_row], []]
+        page_index = 0
+        repo = _make_queue_repo([[]])
+
+        async def _paged(
+            as_of: datetime, limit: int = 10, offset: int = 0
+        ) -> list[TradeCommandRow]:
+            nonlocal page_index
+            result = pages[page_index]
+            page_index += 1
+            return result
+
+        repo.get_undispatched_commands = AsyncMock(side_effect=_paged)
+        published_rows: list[TradeCommandRow] = []
+
+        async def _publish(cmd: TradeCommandRow) -> None:
+            published_rows.append(cmd)
+
+        ownership = MagicMock()
+        ownership.owns.side_effect = lambda shard_key: shard_key == "kraken.MINE.live"
+        dispatcher = OutboxDispatcher(
+            repository=repo,
+            publish_fn=AsyncMock(side_effect=_publish),
+            batch_size=3,
+            ownership=ownership,
+        )
+        await dispatcher._dispatch_batch()
+        assert [row["public_id"] for row in published_rows] == ["dup-1", "own-2"]
+        assert published_rows[0]["last_error"] == "first-copy"
+
+    @pytest.mark.asyncio
+    async def test_publish_failure_cas_lost_drops_retry_and_logs_info(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Losing the CREATED->CREATED failure CAS drops retry state and logs INFO.
+
+        Given: A command that fails publish after a concurrent actor already moved
+            its status so cas_trade_command_status returns False,
+        When: The dispatch batch handles the publish failure,
+        Then: The retry entry is cleared and an INFO log notes the concurrent move.
+        """
+        _install_clock(monkeypatch, initial=0.0)
+        cmd = _make_backoff_row("cmd-cas-lost", command_type="submit")
+        repo = _make_queue_repo([[cmd]])
+        repo.cas_trade_command_status = AsyncMock(return_value=False)
+        publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn)
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+        finally:
+            logger.remove(handler_id)
+        assert "cmd-cas-lost" not in dispatcher._retry
+        assert any(
+            entry.level == "INFO"
+            and "cmd-cas-lost" in entry.message
+            and "concurrently" in entry.message
+            for entry in logs
+        )
+
+    @pytest.mark.asyncio
+    async def test_publish_failure_cas_error_logs_exception_and_keeps_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raising failure CAS logs the exception and retains per-command backoff.
+
+        Given: A command whose publish fails and whose failure CAS raises a DB error,
+        When: The dispatch batch handles the failure,
+        Then: The CAS error is logged with traceback and the retry entry stays active.
+        """
+        _install_clock(monkeypatch, initial=0.0)
+        cmd = _make_backoff_row("cmd-cas-err", command_type="submit")
+        repo = _make_queue_repo([[cmd]])
+        repo.cas_trade_command_status = AsyncMock(side_effect=RuntimeError("DB blip"))
+        publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn)
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+        finally:
+            logger.remove(handler_id)
+        assert "cmd-cas-err" in dispatcher._retry
+        assert any(
+            entry.level == "ERROR"
+            and entry.has_exception
+            and "cmd-cas-err" in entry.message
+            and "status" in entry.message
+            for entry in logs
         )

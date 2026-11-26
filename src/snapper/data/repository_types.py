@@ -2285,6 +2285,17 @@ class TradeCommandDispatchUpdate(TypedDict):
     attempt_count: int
 
 
+class TradeCommandCasOptions(TypedDict, total=False):
+    """Optional field overrides for trade-command CAS transitions.
+
+    Passed via ``Unpack`` so :meth:`SQLAlchemyRepository.cas_trade_command_status`
+    and :meth:`SQLAlchemyRepository.advance_trade_command_lifecycle` can carry
+    an explicit ``attempt_count`` without widening their positional signatures.
+    """
+
+    attempt_count: int | None
+
+
 class UserTradingCapsRow(TypedDict):
     """Active per-user trading-caps row projection.
 

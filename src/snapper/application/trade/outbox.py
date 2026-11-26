@@ -98,17 +98,21 @@ class OutboxDispatcher:
     Failing commands back off exponentially per ``public_id`` starting at
     0.25 s (factor 2), capped at 5 s for TTL-bound commands (``create``,
     ``submit``) and 60 s for non-TTL commands. Unresolved cancels remain
-    quiet per-tick holds rather than failures. Per-shard FIFO is kept by
-    deferring every later row on the same ``shard_key`` in fetch order
-    whenever an earlier row on that shard is backing off, preventing a
-    later cancel or submit from overtaking a pending command on that
-    shard while letting unrelated shards keep flowing. Its cost is that a
-    stuck non-TTL command blocks only its own shard, capped at 60 s per
-    retry and re-logging an ERROR every 5 minutes. A create held by the
-    durable material barrier backs off without blocking its shard: the
-    barrier runs before TTL expiry, so such a hold can persist
-    indefinitely, and later commands on the shard never depend on a
-    create that cannot be published.
+    quiet per-tick holds rather than failures. Per-shard FIFO defers
+    later expirable rows (``create``, ``submit``) on the same ``shard_key``
+    in fetch order whenever an earlier shard-blocking row on that shard is
+    backing off, preventing a later submit from overtaking a pending
+    command on that shard while letting unrelated shards keep flowing.
+    Non-expirable rows (``cancel`` and others) are deferred only by their
+    own retry entry: a failing head must never block a safety cancel of an
+    independent live order (a cancel whose target is unpublished is already
+    held cleanly by :class:`CancelTargetUnresolvedError`). Its cost is that
+    a stuck non-TTL command blocks later expirable commands on its own
+    shard, capped at 60 s per retry and re-logging an ERROR every 5
+    minutes. A create held by the durable material barrier backs off
+    without blocking its shard: the barrier runs before TTL expiry, so such
+    a hold can persist indefinitely, and later commands on the shard never
+    depend on a create that cannot be published.
 
     Args:
         repository: Database repository for reading/updating commands.
@@ -240,6 +244,11 @@ class OutboxDispatcher:
     ) -> bool:
         """Return whether a row is backing off or queued behind a deferred shard peer.
 
+        Only expirable command types (``create``, ``submit``) wait behind a
+        deferred peer on the same shard; non-expirable rows such as cancels
+        are deferred only by their own retry entry so a failing head never
+        blocks a safety cancel of an independent live order.
+
         Args:
             cmd: Candidate command row from the current fetch page.
             deferred_shards: Shard keys already deferred in fetch order this cycle.
@@ -249,7 +258,7 @@ class OutboxDispatcher:
             True when ``cmd`` must be deferred; False when eligible for dispatch.
         """
         shard_key = cmd["shard_key"]
-        if shard_key in deferred_shards:
+        if cmd["command_type"] in _EXPIRABLE_COMMAND_TYPES and shard_key in deferred_shards:
             return True
         entry = self._retry.get(cmd["public_id"])
         if entry is not None and entry.next_at > now_mono:
@@ -263,23 +272,32 @@ class OutboxDispatcher:
         page: list[TradeCommandRow],
         owned: list[TradeCommandRow],
         deferred_shards: set[str],
+        seen_public_ids: set[str],
         now_mono: float,
     ) -> None:
         """Append eligible, non-deferred rows from ``page`` to ``owned``.
 
-        Stops once ``owned`` has reached ``batch_size``. When ``self._ownership``
-        is set, foreign-shard rows are skipped; any row whose retry timer has
-        not expired defers itself and every subsequent row on the same
-        ``shard_key`` across pages in fetch order.
+        Stops once ``owned`` has reached ``batch_size``. Deduplicates by
+        ``public_id`` across pages (keeping the first occurrence) so OFFSET
+        shifts under concurrent inserts cannot publish a command twice. When
+        ``self._ownership`` is set, foreign-shard rows are skipped; any row
+        whose retry timer has not expired defers itself and every
+        subsequent expirable row on the same ``shard_key`` across pages in
+        fetch order when ``blocks_shard`` is set.
 
         Args:
             page: Current repository page of undispatched commands.
             owned: Accumulator list receiving eligible rows up to ``batch_size``.
             deferred_shards: Mutable set of shard keys deferred in fetch order.
+            seen_public_ids: Mutable set of ``public_id`` values seen this poll.
             now_mono: Current monotonic clock reading in seconds.
         """
         ownership = self._ownership
         for cmd in page:
+            public_id = cmd["public_id"]
+            if public_id in seen_public_ids:
+                continue
+            seen_public_ids.add(public_id)
             if ownership is not None and not ownership.owns(cmd["shard_key"]):
                 continue
             if self._is_row_deferred(cmd, deferred_shards, now_mono):
@@ -295,10 +313,13 @@ class OutboxDispatcher:
         deferred, this is a straight pass-through to
         :meth:`Repository.get_undispatched_commands` with ``limit=batch_size``.
         Otherwise, the method pages through the ``status='created'`` set with
-        a larger page size, applies ownership (when configured) and per-shard
-        FIFO deferral filtering in Python, and stops when it has collected
-        ``batch_size`` rows OR the DB set is exhausted OR ``max_scan_rows`` is
-        reached.
+        a larger page size, deduplicates repeated ``public_id`` rows across
+        OFFSET pages (keeping the first occurrence), applies ownership (when
+        configured) and per-shard FIFO deferral filtering in Python, and stops
+        when it has collected ``batch_size`` rows OR the DB set is exhausted OR
+        ``max_scan_rows`` is reached. With cancels exempt and creates TTL-bound,
+        deferred rows counting toward ``max_scan_rows`` can delay other shards
+        only until the head expires or recovers.
 
         Args:
             now: Temporal visibility cutoff passed as ``as_of``.
@@ -316,6 +337,7 @@ class OutboxDispatcher:
             return page
         owned: list[TradeCommandRow] = []
         deferred_shards: set[str] = set()
+        seen_public_ids: set[str] = set()
         offset = 0
         page_size = max(self._batch_size * 4, 20)
         max_scan = self._max_scan_rows
@@ -326,7 +348,7 @@ class OutboxDispatcher:
             if not page:
                 break
             self._touch_seen_rows(page, now_mono)
-            self._filter_owned_rows(page, owned, deferred_shards, now_mono)
+            self._filter_owned_rows(page, owned, deferred_shards, seen_public_ids, now_mono)
             offset += len(page)
             if max_scan is not None and offset >= max_scan and len(owned) < self._batch_size:
                 logger.warning(
@@ -587,8 +609,9 @@ class OutboxDispatcher:
                 include_traceback=True,
             )
             try:
-                await self._repo.update_trade_command_status(
+                won = await self._repo.cas_trade_command_status(
                     public_id=cmd["public_id"],
+                    expected_status=TradeCommandStatusEnum.CREATED,
                     new_status=TradeCommandStatusEnum.CREATED,
                     bus_time=datetime.now(UTC),
                     session_id=cmd["session_id"],
@@ -600,6 +623,13 @@ class OutboxDispatcher:
                 logger.exception(
                     f"OutboxDispatcher: failed to update command {cmd['public_id']} status"
                 )
+            else:
+                if not won:
+                    self._retry.pop(cmd["public_id"], None)
+                    logger.info(
+                        f"OutboxDispatcher: command {cmd['public_id']} moved concurrently "
+                        "before failure update; cleared retry state"
+                    )
             return None
         self._retry.pop(cmd["public_id"], None)
         bus_time = datetime.now(UTC)
@@ -615,11 +645,13 @@ class OutboxDispatcher:
     async def _dispatch_batch(self) -> None:
         """Fetch one batch of undispatched commands, publish, and bulk-dispatch.
 
-        Per-shard FIFO also holds inside the batch: once a command fails in a
-        way that blocks its shard, later commands on that shard are skipped for
-        the rest of this tick. They return on the next fetch, where the fetch
-        filter defers them behind the failing command. Material-barrier holds
-        and unresolved-cancel holds do not block the shard.
+        Per-shard FIFO for expirable commands (``create``, ``submit``) also
+        holds inside the batch: once a command fails in a way that blocks its
+        shard, later expirable commands on that shard are skipped for the rest
+        of this tick and deferred on subsequent fetches behind the failing
+        command. Non-expirable commands (``cancel`` and others) are never
+        skipped behind a shard-blocking peer. Material-barrier holds and
+        unresolved-cancel holds do not block the shard.
         """
         now = datetime.now(UTC)
         commands = await self._fetch_owned_batch(now)
@@ -628,7 +660,10 @@ class OutboxDispatcher:
         self._tick_blocked_shards.clear()
         success_updates: list[TradeCommandDispatchUpdate] = []
         for cmd in commands:
-            if cmd["shard_key"] in self._tick_blocked_shards:
+            if (
+                cmd["command_type"] in _EXPIRABLE_COMMAND_TYPES
+                and cmd["shard_key"] in self._tick_blocked_shards
+            ):
                 continue
             update = await self._dispatch_command(cmd)
             if update is not None:
