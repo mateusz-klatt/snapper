@@ -4247,6 +4247,18 @@ class AlertDeliveryInsertRow(TypedDict, total=False):
     created_at: datetime
 
 
+class AlertDeliveryRetryScheduleWrite(TypedDict):
+    """Retry schedule and SCD2 write metadata for an existing delivery attempt."""
+
+    public_id: str
+    attempt_count: int
+    next_attempt_at: datetime | None
+    error_reason: str | None
+    transition_at: datetime
+    session_id: str
+    sequence_id: int
+
+
 class AlertDeliveryRow(TypedDict):
     """Row dict for list_queued_deliveries_all and related delivery reads.
 
