@@ -1,17 +1,13 @@
-"""Meta-audit — ``datetime.now(UTC)`` confined to entry boundaries in sidecar.
+"""Meta-audit — the sidecar reads wall-clock time only through its injectable clock.
 
-Invariant: one ``now`` per logical operation, minted at the entry
-boundary and threaded through every helper / repository call. The
-sidecar's three entry boundaries are:
-
-- ``NotifySidecar.start`` -> pre-drain now.
-- ``NotifySidecar._receive_loop`` -> per-received-message now.
-- ``NotifySidecar._process_retry_queue_loop`` -> per-tick now.
-
-Every other helper takes ``now: datetime`` as an argument and must
-not mint a fresh timestamp internally. A new caller that sneaks in
-an inline ``datetime.now(...)`` inside a helper is caught here at
-make-check time rather than during review.
+Invariant: ``NotifySidecar`` never calls ``datetime.now(...)`` inline.
+The single call lives in ``__init__`` as the default of the injectable
+``self._clock``. Every timestamp is sampled through ``self._clock()``
+so tests can drive time deterministically. Expiry, backoff and SCD2
+writes sample a fresh instant immediately before each send or write
+rather than reusing a tick-wide value that a long tick would make
+stale. A helper that sneaks in an inline ``datetime.now(...)`` would
+bypass the injected clock and is caught here at make-check time.
 """
 
 import ast
@@ -26,13 +22,7 @@ SIDECAR_FILE = (
     / "sidecar.py"
 )
 
-ALLOWED_ENTRY_BOUNDARIES: frozenset[str] = frozenset(
-    {
-        "start",
-        "_receive_loop",
-        "_process_retry_queue_loop",
-    }
-)
+ALLOWED_ENTRY_BOUNDARIES: frozenset[str] = frozenset({"__init__"})
 
 
 def _is_datetime_now_call(node: ast.AST) -> bool:
@@ -64,14 +54,14 @@ def _enclosing_function_name(tree: ast.AST, target: ast.AST) -> str | None:
 
 
 def test_datetime_now_only_at_entry_boundaries() -> None:
-    """Only startup, receive and retry entry boundaries may call ``datetime.now``.
+    """Only the injectable clock default in ``__init__`` may call ``datetime.now``.
 
     Given: the sidecar source file,
     When: every ``datetime.now(...)`` call's enclosing function name
         is resolved via AST walk,
-    Then: the enclosing function is always one of the allowed entry
-        boundary methods. Any other call site is a regression —
-        the helper should accept ``now: datetime`` as a parameter.
+    Then: the enclosing function is always ``__init__``, where the
+        default ``self._clock`` is built. Any other call site is a
+        regression; the helper should sample ``self._clock()`` instead.
     """
     tree = ast.parse(SIDECAR_FILE.read_text(encoding="utf-8"))
     offending: list[str] = []
@@ -85,8 +75,7 @@ def test_datetime_now_only_at_entry_boundaries() -> None:
         if func_name not in ALLOWED_ENTRY_BOUNDARIES:
             offending.append(func_name)
     assert not offending, (
-        "datetime.now(...) used outside the allowed entry boundaries "
+        "datetime.now(...) used outside the injectable clock default "
         f"({sorted(ALLOWED_ENTRY_BOUNDARIES)}): {sorted(set(offending))}. "
-        "Mint one now at the "
-        "entry boundary and thread it through helpers as a parameter."
+        "Sample self._clock() instead so the injected clock stays authoritative."
     )
