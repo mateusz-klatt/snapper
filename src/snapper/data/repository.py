@@ -386,6 +386,7 @@ from snapper.data.repository_types import AiReviewInsertRow
 from snapper.data.repository_types import AiReviewPositionCycleTransitionRow
 from snapper.data.repository_types import AiReviewRow
 from snapper.data.repository_types import AlertDeliveryInsertRow
+from snapper.data.repository_types import AlertDeliveryRetryScheduleWrite
 from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
@@ -797,12 +798,13 @@ class _FillFinancingEvidence:
 
 @dataclass(frozen=True, slots=True)
 class _DeliveryAttemptTransition:
-    """Counter operation and timestamp guard for closing a delivery version."""
+    """Counter operation and preconditions for closing a delivery version."""
 
     expected_count: int | None = None
     increment: bool = False
     provider_receipt: str | None = None
     reject_stale_timestamp: bool = False
+    require_unscheduled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -10462,6 +10464,13 @@ class Repository(ABC):
         terminal, the active ``attempt_count`` differs, or a competing writer
         closes the selected version first.
         """
+        ...
+
+    @abstractmethod
+    async def reapply_unscheduled_delivery_retry_schedule(
+        self, write: AlertDeliveryRetryScheduleWrite
+    ) -> bool:
+        """Write a retry schedule only if the expected queued attempt is still unscheduled."""
         ...
 
     @abstractmethod
@@ -40709,10 +40718,12 @@ class SQLAlchemyRepository(Repository):
         """Close the selected queued version and commit its successor.
 
         Return the committed attempt count, or None when the delivery is
-        absent, terminal, at a different expected count, rejected as a stale
-        retry-schedule write, or another writer closes the selected version
-        first. The conditional UPDATE identifies that exact version; a losing
-        writer never inserts a successor. Unless ``reject_stale_timestamp``
+        absent, terminal, at a different expected count, already scheduled
+        when an unscheduled attempt is required, rejected as a stale retry
+        write, or another writer closes the selected version first. The
+        schedule is immutable on that version and the conditional UPDATE
+        identifies it by ID; a losing writer never inserts a successor.
+        Unless ``reject_stale_timestamp``
         is set, effective ``transition_at`` is clamped to
         ``max(transition_at, existing.timestamp)`` so a lagging caller clock
         cannot close a newer version before its start timestamp.
@@ -40737,6 +40748,8 @@ class SQLAlchemyRepository(Repository):
                 attempt.expected_count is not None
                 and existing.attempt_count != attempt.expected_count
             ):
+                return None
+            if attempt.require_unscheduled and existing.next_attempt_at is not None:
                 return None
             effective_transition_at = self._resolve_delivery_transition_time(
                 existing, transition_at, attempt
@@ -40918,18 +40931,42 @@ class SQLAlchemyRepository(Repository):
         (return False without writing) if ``transition_at`` precedes the active
         version's ``timestamp``, the count mismatches, or another writer wins.
         """
-        committed_count = await self._scd2_transition_delivery(
-            public_id,
-            "queued",
-            transition_at=transition_at,
-            session_id=session_id,
-            sequence_id=sequence_id,
-            error_reason=error_reason,
-            attempt=_DeliveryAttemptTransition(
-                expected_count=attempt_count,
-                reject_stale_timestamp=True,
+        return await self._write_delivery_retry_schedule(
+            AlertDeliveryRetryScheduleWrite(
+                public_id=public_id,
+                attempt_count=attempt_count,
+                next_attempt_at=next_attempt_at,
+                error_reason=error_reason,
+                transition_at=transition_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
             ),
-            next_attempt_at_override=next_attempt_at,
+            require_unscheduled=False,
+        )
+
+    async def reapply_unscheduled_delivery_retry_schedule(
+        self, write: AlertDeliveryRetryScheduleWrite
+    ) -> bool:
+        """Write a retry schedule only if the expected queued attempt is still unscheduled."""
+        return await self._write_delivery_retry_schedule(write, require_unscheduled=True)
+
+    async def _write_delivery_retry_schedule(
+        self, write: AlertDeliveryRetryScheduleWrite, *, require_unscheduled: bool
+    ) -> bool:
+        """Close the selected retry version with the caller's schedule precondition."""
+        committed_count = await self._scd2_transition_delivery(
+            write["public_id"],
+            "queued",
+            transition_at=write["transition_at"],
+            session_id=write["session_id"],
+            sequence_id=write["sequence_id"],
+            error_reason=write["error_reason"],
+            attempt=_DeliveryAttemptTransition(
+                expected_count=write["attempt_count"],
+                reject_stale_timestamp=True,
+                require_unscheduled=require_unscheduled,
+            ),
+            next_attempt_at_override=write["next_attempt_at"],
         )
         return committed_count is not None
 

@@ -11,10 +11,13 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from snapper.application.notify.retry_schedule import RetryScheduleUpdate
+from snapper.application.notify.retry_schedule import persist_retry_schedule
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AlertDelivery
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import AlertDeliveryInsertRow
+from snapper.data.repository_types import AlertDeliveryRow
 
 
 def _at(minutes: int = 0) -> datetime:
@@ -340,3 +343,64 @@ async def test_retry_schedule_rejects_stale_transition_at_and_accepts_non_stale(
     assert rows[3].next_attempt_at == _at(30)
     assert rows[3].error_reason == "delayed-later"
     assert rows[3].last_attempt_at == _at(12)
+
+
+@pytest.mark.asyncio
+async def test_retry_schedule_reapply_preserves_competing_schedule(
+    repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep a schedule committed between the helper's read and reapply.
+
+    Given: The first retry schedule write uses an older timestamp than the active attempt.
+    When: Another writer schedules that attempt after the helper reads the unscheduled row.
+    Then: The reapply refuses to replace the winner and leaves its version active.
+    """
+    public_id = await _seed(repo)
+    assert (
+        await repo.begin_delivery_attempt(
+            public_id, transition_at=_at(10), session_id="worker", sequence_id=2
+        )
+        == 1
+    )
+    get_delivery = repo.get_delivery_by_public_id
+
+    async def read_then_schedule(delivery_id: str) -> AlertDeliveryRow | None:
+        """Return the preceding snapshot after committing a schedule in a new transaction."""
+        active = await get_delivery(delivery_id)
+        assert active is not None
+        assert active["next_attempt_at"] is None
+        assert await repo.update_delivery_retry_schedule(
+            delivery_id,
+            attempt_count=1,
+            next_attempt_at=_at(20),
+            error_reason="winner",
+            transition_at=_at(11),
+            session_id="winner",
+            sequence_id=3,
+        )
+        return active
+
+    monkeypatch.setattr(repo, "get_delivery_by_public_id", read_then_schedule)
+    recovery_writes = iter([("recovery", 4), ("recovery", 5)])
+    result = await persist_retry_schedule(
+        repo,
+        RetryScheduleUpdate(
+            delivery_public_id=public_id,
+            attempt_count=1,
+            next_attempt_at=_at(30),
+            error_reason="stale-delayed",
+            transition_at=_at(3),
+        ),
+        clock=lambda: _at(12),
+        allocate_write=lambda: next(recovery_writes),
+    )
+
+    assert result is False
+    rows = await _history(repo, public_id)
+    assert [row.timestamp for row in rows] == [_at(), _at(10), _at(11)]
+    assert [row.known_to for row in rows] == [_at(10), _at(11), KNOWN_TO_MAX]
+    assert [row.attempt_count for row in rows] == [0, 1, 1]
+    assert rows[-1].status == "queued"
+    assert rows[-1].session_id == "winner"
+    assert rows[-1].next_attempt_at == _at(20)
+    assert rows[-1].error_reason == "winner"

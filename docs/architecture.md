@@ -1676,8 +1676,10 @@ writer that replaces the selected version before its conditional close prevents
 that allocation from admitting a send.
 Retry scheduling preserves the committed counter and requires the caller's
 attempt number to match the active row. A delayed result from an older attempt
-therefore cannot overwrite a newer attempt's retry schedule. These guards do
-not provide exclusive ownership of an in-flight send or exactly-once delivery.
+therefore cannot overwrite a newer attempt's retry schedule. Reapplying a schedule
+after a stale timestamp requires the selected attempt to still be unscheduled
+when its version is closed. These guards do not provide exclusive ownership of
+an in-flight send or exactly-once delivery.
 
 Android outbox rows additionally retain immutable registration/configuration/binding
 IDs and an expiry fixed at allocation plus 24 hours. Fresh user, registration,

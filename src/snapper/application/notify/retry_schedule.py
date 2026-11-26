@@ -7,6 +7,7 @@ from datetime import datetime
 from loguru import logger
 
 from snapper.data.repository import Repository
+from snapper.data.repository_types import AlertDeliveryRetryScheduleWrite
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,8 +35,9 @@ async def persist_retry_schedule(
     clock rollback) from a lost concurrent transition. If the active row is still
     ``queued``, at ``update.attempt_count``, and still unscheduled
     (``next_attempt_at`` is ``None``), retries the schedule write once with
-    ``transition_at = max(clock(), active["timestamp"])``. Otherwise logs at INFO
-    and treats the refusal as a lost race.
+    ``transition_at = max(clock(), active["timestamp"])``. The repository
+    requires the selected version to still be unscheduled when applying that
+    write. Otherwise the helper logs that the initial refusal was a lost race.
 
     Args:
         repo: Notification outbox repository.
@@ -76,14 +78,16 @@ async def persist_retry_schedule(
             retry_ts=retry_transition_at.isoformat(),
         )
         retry_session_id, retry_sequence_id = allocate_write()
-        return await repo.update_delivery_retry_schedule(
-            update.delivery_public_id,
-            attempt_count=update.attempt_count,
-            next_attempt_at=update.next_attempt_at,
-            error_reason=update.error_reason,
-            transition_at=retry_transition_at,
-            session_id=retry_session_id,
-            sequence_id=retry_sequence_id,
+        return await repo.reapply_unscheduled_delivery_retry_schedule(
+            AlertDeliveryRetryScheduleWrite(
+                public_id=update.delivery_public_id,
+                attempt_count=update.attempt_count,
+                next_attempt_at=update.next_attempt_at,
+                error_reason=update.error_reason,
+                transition_at=retry_transition_at,
+                session_id=retry_session_id,
+                sequence_id=retry_sequence_id,
+            )
         )
     active_status = "missing" if active is None else active["status"]
     logger.info(
