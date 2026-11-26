@@ -32,12 +32,14 @@ transitions do not provide exclusive or exactly-once APNs delivery.
 
 import asyncio
 import contextlib
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from itertools import count
 from uuid import uuid7
 
 from loguru import logger
@@ -79,6 +81,7 @@ _BACKOFF_BASE_S = 30.0
 _BACKOFF_CAP_S = 300.0
 _NETWORK_BACKOFF_CAP_S = 900.0
 _DEFAULT_DELIVERY_TTL = timedelta(hours=6)
+_MAX_OUTAGE_EXPEDITE_IDS = 256
 _APNS_SEND_TIMEOUT_S = 30.0
 _MAX_ERROR_REASON_LEN = 200
 _THROTTLED_RETRY_DEFAULT_S = 60.0
@@ -96,6 +99,23 @@ class _DeliveryTarget:
     expires_at: datetime | None = None
     created_at: datetime | None = None
     prior_error_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _OutageDelay:
+    """The committed attempt and expiry of a delivery delayed by a network error."""
+
+    attempt_count: int
+    deadline: datetime
+
+
+@dataclass(slots=True)
+class _OutageWindow:
+    """One APNs environment's observed outage and bounded recovery backlog."""
+
+    started_at: datetime
+    start_sequence: int
+    delayed: dict[str, _OutageDelay] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,8 +300,9 @@ class NotifySidecar(RegisterableProcess):
         self._scope_revalidator = scope_revalidator or ScopeRevalidator(tracker=tracker)
         self._push_beta_provider = push_beta_provider
         self._clock: Callable[[], datetime] = lambda: datetime.now(UTC)
-        self._outage_started_at: dict[str, datetime] = {}
-        self._outage_delayed_delivery_ids: dict[str, set[str]] = {}
+        self._apns_outcome_sequence = count()
+        self._outage_windows: dict[str, _OutageWindow] = {}
+        self._outage_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._portfolio_drift_recovery_scanner = (
             portfolio_drift_recovery_scanner
             if portfolio_drift_recovery_scanner is not None
@@ -792,7 +813,6 @@ class NotifySidecar(RegisterableProcess):
             err=error_reason,
         )
         if is_network:
-            self._record_outage_delay(target.device["env"], target.delivery_public_id, now)
             await self._schedule_network_retry_or_fail(target, attempt_number, error_reason, now)
             return
         await self._schedule_retry_or_fail(target, attempt_number, error_reason, now)
@@ -851,6 +871,7 @@ class NotifySidecar(RegisterableProcess):
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
         if result.status == "success":
+            outcome_sequence = next(self._apns_outcome_sequence)
             await self._repo.mark_delivery_sent(
                 target.delivery_public_id,
                 apns_id=result.apns_id,
@@ -859,7 +880,7 @@ class NotifySidecar(RegisterableProcess):
                 sequence_id=seq,
             )
             await self._maybe_log_outage_recovery(
-                target.device["env"], target.delivery_public_id, now
+                target.device["env"], target.delivery_public_id, now, outcome_sequence
             )
             return
         if result.status == "unregistered":
@@ -942,20 +963,30 @@ class NotifySidecar(RegisterableProcess):
         error_reason: str,
         now: datetime,
     ) -> None:
-        """Retry a network-class outage failure with 15 min cap until TTL expires."""
-        deadline = await self._resolve_delivery_deadline(target, now)
-        if now >= deadline:
-            await self._fail_expired_delivery(target.delivery_public_id, error_reason, now)
-            return
-        backoff_s = _backoff_seconds(attempt_number, cap_s=_NETWORK_BACKOFF_CAP_S)
-        next_attempt_at = min(now + timedelta(seconds=backoff_s), deadline)
-        await self._persist_retry_schedule(
-            target.delivery_public_id,
-            attempt_number,
-            next_attempt_at,
-            error_reason,
-            now,
-        )
+        """Persist network backoff and register it before recovery can take the backlog."""
+        env = target.device["env"]
+        outcome_sequence = next(self._apns_outcome_sequence)
+        async with self._outage_locks[env]:
+            deadline = await self._resolve_delivery_deadline(target, now)
+            if now >= deadline:
+                await self._fail_expired_delivery(target.delivery_public_id, error_reason, now)
+                return
+            backoff_s = _backoff_seconds(attempt_number, cap_s=_NETWORK_BACKOFF_CAP_S)
+            next_attempt_at = min(now + timedelta(seconds=backoff_s), deadline)
+            if await self._persist_retry_schedule(
+                target.delivery_public_id,
+                attempt_number,
+                next_attempt_at,
+                error_reason,
+                now,
+            ):
+                self._record_outage_delay(
+                    env,
+                    target.delivery_public_id,
+                    now,
+                    _OutageDelay(attempt_number, deadline),
+                    outcome_sequence,
+                )
 
     async def _resolve_delivery_deadline(self, target: _DeliveryTarget, now: datetime) -> datetime:
         """Return the outage-retry expiration deadline for ``target``.
@@ -993,10 +1024,10 @@ class NotifySidecar(RegisterableProcess):
         next_attempt_at: datetime,
         error_reason: str | None,
         now: datetime,
-    ) -> None:
-        """Commit an updated ``next_attempt_at`` on the queued delivery row."""
+    ) -> bool:
+        """Return whether the queued delivery's retry schedule was committed."""
         bounded_reason = error_reason[:_MAX_ERROR_REASON_LEN] if error_reason is not None else None
-        await persist_retry_schedule(
+        return await persist_retry_schedule(
             self._repo,
             RetryScheduleUpdate(
                 delivery_public_id=delivery_public_id,
@@ -1012,18 +1043,29 @@ class NotifySidecar(RegisterableProcess):
             ),
         )
 
-    def _record_outage_delay(self, env: str, delivery_public_id: str, now: datetime) -> None:
-        """Record one delivery delayed by an active network outage in ``env``.
+    def _record_outage_delay(
+        self,
+        env: str,
+        delivery_public_id: str,
+        now: datetime,
+        delay: _OutageDelay,
+        outcome_sequence: int,
+    ) -> None:
+        """Keep only the most recent delays in the recovery backlog.
 
-        Outage state is tracked per APNs environment (``sandbox`` vs ``prod``)
-        rather than shared process-wide.
+        Older deliveries continue on their persisted retry schedules.
         """
-        if env not in self._outage_started_at:
-            self._outage_started_at[env] = now
-        self._outage_delayed_delivery_ids.setdefault(env, set()).add(delivery_public_id)
+        window = self._outage_windows.get(env)
+        if window is None:
+            window = self._outage_windows[env] = _OutageWindow(now, outcome_sequence)
+        delayed = window.delayed
+        delayed.pop(delivery_public_id, None)
+        delayed[delivery_public_id] = delay
+        if len(delayed) > _MAX_OUTAGE_EXPEDITE_IDS:
+            del delayed[next(iter(delayed))]
 
     async def _maybe_log_outage_recovery(
-        self, env: str, recovered_delivery_public_id: str, now: datetime
+        self, env: str, recovered_delivery_public_id: str, now: datetime, outcome_sequence: int
     ) -> None:
         """Log one recovery summary for ``env`` and expedite its delayed backlog.
 
@@ -1031,32 +1073,35 @@ class NotifySidecar(RegisterableProcess):
         successful send in ``env`` closes only that environment's outage window
         and expedites only queued deliveries delayed in ``env``.
         """
-        started_at = self._outage_started_at.pop(env, None)
-        if started_at is None:
-            return
-        delayed_ids = sorted(self._outage_delayed_delivery_ids.pop(env, set()))
+        async with self._outage_locks[env]:
+            window = self._outage_windows.get(env)
+            if window is None or window.start_sequence > outcome_sequence:
+                return
+            del self._outage_windows[env]
+        cutoff = self._clock()
+        delayed = {pid: delay for pid, delay in window.delayed.items() if delay.deadline > cutoff}
         logger.warning(
-            "sidecar: {count} deliveries delayed by an outage in env={env} between {t1} and {t2}",
-            count=len(delayed_ids),
+            "sidecar: {count} deliveries delayed by an outage in env={env}"
+            " (started_at={t1}, recovered_at={t2}, tracked for recovery)",
+            count=len(delayed),
             env=env,
-            t1=started_at.isoformat(),
+            t1=window.started_at.isoformat(),
             t2=now.isoformat(),
         )
-        await self._expedite_outage_backlog(delayed_ids, recovered_delivery_public_id, now)
+        await self._expedite_outage_backlog(delayed, recovered_delivery_public_id)
 
     async def _expedite_outage_backlog(
         self,
-        delayed_ids: list[str],
+        delayed: dict[str, _OutageDelay],
         recovered_delivery_public_id: str,
-        now: datetime,
     ) -> None:
-        """Set ``next_attempt_at`` to a fresh UTC time on still-queued outage rows."""
-        _ = now
-        for pid in delayed_ids:
+        """Advance still-queued retries for the attempt that saw the outage."""
+        for pid in sorted(delayed):
             if pid == recovered_delivery_public_id:
                 continue
             row = await self._repo.get_delivery_by_public_id(pid)
-            if row is None or row["status"] != "queued":
+            attempt_count = delayed[pid].attempt_count
+            if row is None or row["status"] != "queued" or row["attempt_count"] != attempt_count:
                 continue
             write_now = self._clock()
             next_attempt = row.get("next_attempt_at")
@@ -1064,10 +1109,10 @@ class NotifySidecar(RegisterableProcess):
                 continue
             await self._persist_retry_schedule(
                 pid,
-                row["attempt_count"],
+                attempt_count,
                 write_now,
                 row.get("error_reason"),
-                write_now,
+                max(write_now, row["timestamp"]),
             )
 
     async def _drain_outbox(self, now: datetime) -> None:

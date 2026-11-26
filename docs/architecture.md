@@ -1632,10 +1632,17 @@ before the response returns, the delivery stays `queued` and a subsequent retry
 can duplicate the push (collapsed per `thread_key` via `apns-collapse-id` when
 present). Batch-prefetched devices and preferences during one drain or retry
 tick have bounded staleness up to the tick's processing length, and outage
-window tracking is scoped per APNs environment (`sandbox` vs `prod`) so recovery
-in one environment expedites only that environment's delayed
-backlog. Startup outbox drain honours persisted `next_attempt_at` backoff while
-expiring APNs rows past TTL independently of whether an APNs sender is enabled.
+window tracking is scoped per APNs environment (`sandbox` vs `prod`). Recovery
+waits for in-flight retry scheduling in that environment before taking the
+backlog. Provider outcomes are ordered by observation in the sidecar, so a
+wall-clock adjustment cannot cause a later success to be ignored. Advancing
+retries on recovery is best-effort. It retains the 256 most recently delayed
+deliveries in each environment and skips expired entries. Recovery advances
+only the attempt that saw an outage, preserving backoff from later attempts.
+Other deliveries keep their persisted schedule, which can be an expiry check
+when the backoff reaches the TTL. Startup outbox drain honours persisted
+`next_attempt_at` backoff while expiring APNs rows past TTL independently of
+whether an APNs sender is enabled.
 The same process owns a guarded periodic recovery
 scanner for sentinel-current open portfolio-drift episodes. An eager pass
 at startup and later

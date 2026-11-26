@@ -18,6 +18,7 @@ import socket
 import ssl
 from dataclasses import dataclass
 from typing import Final
+from typing import NoReturn
 
 import httpx
 from aioapns import APNs as _AioApns
@@ -496,6 +497,11 @@ class _TimeoutSafeProductionClientProtocol(_TimeoutSafeProtocolMixin, APNsProduc
     """Production APNs HTTP/2 protocol with timeout-safe stream slot cleanup."""
 
 
+def _raise_with_previous_cause(cause: BaseException, previous_cause: BaseException) -> NoReturn:
+    """Reraise the connect failure with its original cause and hide the APNs wrapper."""
+    raise cause from previous_cause
+
+
 class _HardenedKeyConnectionPool(APNsKeyConnectionPool):
     """Key-auth APNs connection pool that propagates non-network connect failures."""
 
@@ -509,7 +515,7 @@ class _HardenedKeyConnectionPool(APNsKeyConnectionPool):
                 previous_cause = _next_exception(cause)
                 if previous_cause is None:
                     raise cause from None
-                raise cause from previous_cause
+                _raise_with_previous_cause(cause, previous_cause)
             raise
 
 
