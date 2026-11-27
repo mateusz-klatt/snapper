@@ -1,5 +1,6 @@
 """Classify upstream outages at the market-data publisher's connect boundary."""
 
+import asyncio
 import errno
 import socket
 import ssl
@@ -11,6 +12,10 @@ import requests
 
 from snapper.core.process_exit import UpstreamUnavailableError
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
+from snapper.infrastructure.network.egress_context import resolve_egress_traffic
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
+from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
 
 _UPSTREAM_HTTP_STATUSES = frozenset({502, 503, 504})
 _NETWORK_ERRNOS = frozenset(
@@ -125,7 +130,10 @@ def _is_upstream_unavailable(error: BaseException) -> bool:
 
 
 async def connect_publisher_exchange(client: ExchangeClientBase) -> None:
-    """Connect a market-data publisher to its upstream during startup.
+    """Connect a market-data publisher, waiting in-process for public VPN egress.
+
+    Route exhaustion is retried without leaving this process. Upstream
+    network failures retain their existing supervisor backoff.
 
     Args:
         client: The publisher's exchange client.
@@ -134,9 +142,19 @@ async def connect_publisher_exchange(client: ExchangeClientBase) -> None:
         UpstreamUnavailableError: The venue or proxy could not be reached.
         Exception: Other startup connection errors propagate unchanged.
     """
-    try:
-        await client.connect()
-    except Exception as error:
-        if _is_upstream_unavailable(error):
-            raise UpstreamUnavailableError(str(error)) from error
-        raise
+    while True:
+        try:
+            await client.connect()
+            return
+        except AllRoutesQuarantinedError:
+            exchange, traffic_class = resolve_egress_traffic()
+            if traffic_class == "private":
+                raise
+            earliest = public_egress_pool(get_egress_pool()).earliest_release_in_seconds(
+                exchange=exchange, traffic_class="public"
+            )
+            await asyncio.sleep(max(earliest or 0.0, 1.0))
+        except Exception as error:
+            if _is_upstream_unavailable(error):
+                raise UpstreamUnavailableError(str(error)) from error
+            raise

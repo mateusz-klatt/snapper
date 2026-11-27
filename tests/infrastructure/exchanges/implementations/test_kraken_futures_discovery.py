@@ -28,10 +28,16 @@ from snapper.infrastructure.network.egress_pool import reset_egress_pool
 
 @pytest.fixture
 def public_pool() -> Generator[EgressPool]:
-    """Use one real direct public route without performing any network I/O."""
+    """Use one real SOCKS public route without performing any network I/O."""
     reset_egress_pool()
     pool = configure_egress_pool(
-        EgressPoolConfig(enabled=True, routes=[RouteConfig(id="default", kind="direct")])
+        EgressPoolConfig(
+            enabled=True,
+            routes=[
+                RouteConfig(id="default", kind="direct"),
+                RouteConfig(id="vpn", kind="socks5", proxy_url="socks5h://egress:1081"),
+            ],
+        )
     )
     assert pool is not None
     yield pool
@@ -284,7 +290,7 @@ async def test_cancelled_discovery_keeps_session_until_real_worker_terminal(
     load.assert_called_once_with()
     backoff.assert_not_awaited()
     assert events.index("worker-terminal") < events.index("session-close")
-    assert public_pool.status_snapshot().routes[0].in_use_count == 0
+    assert public_pool.status_snapshot().routes[1].in_use_count == 0
     assert client._rest_pool_closed
 
 
@@ -351,7 +357,7 @@ async def test_ambiguous_submit_keeps_session_until_actual_routed_worker_termina
             await future
         client._shutdown_rest_pool()
     close.assert_called_once_with()
-    assert public_pool.status_snapshot().routes[0].in_use_count == 0
+    assert public_pool.status_snapshot().routes[1].in_use_count == 0
 
 
 async def test_late_callback_after_ambiguous_submit_cannot_start_sdk_or_route(
@@ -425,7 +431,7 @@ async def test_completed_public_503_retries_through_installed_ccxt_and_real_rout
         status = next(statuses)
         observed.append(status)
         assert method == "GET"
-        assert public_pool.status_snapshot().routes[0].in_use_count == 1
+        assert public_pool.status_snapshot().routes[1].in_use_count == 1
         return _response(method, url, status)
 
     monkeypatch.setattr(client._ccxt_client.session, "request", request)
@@ -437,7 +443,7 @@ async def test_completed_public_503_retries_through_installed_ccxt_and_real_rout
         assert reserve.call_count == 2
         assert record.call_count == 2
         assert client._market_client is not None
-        assert public_pool.status_snapshot().routes[0].in_use_count == 0
+        assert public_pool.status_snapshot().routes[1].in_use_count == 0
     finally:
         await client.disconnect()
 
@@ -462,7 +468,7 @@ async def test_other_completed_http_statuses_are_never_retried(
             await client.connect()
         request.assert_called_once()
         backoff.assert_not_awaited()
-        assert public_pool.status_snapshot().routes[0].in_use_count == 0
+        assert public_pool.status_snapshot().routes[1].in_use_count == 0
         assert client._rest_pool_closed
     finally:
         await client.disconnect()
@@ -485,7 +491,7 @@ async def test_three_terminal_503_attempts_exhaust_with_balanced_routes_and_capp
 
     async def backoff(delay: float) -> None:
         """Observe released routing between completed worker attempts."""
-        assert public_pool.status_snapshot().routes[0].in_use_count == 0
+        assert public_pool.status_snapshot().routes[1].in_use_count == 0
         delays.append(delay)
 
     monkeypatch.setattr(client._ccxt_client.session, "request", request)
@@ -499,7 +505,7 @@ async def test_three_terminal_503_attempts_exhaust_with_balanced_routes_and_capp
         assert delays == [1.0, 2.0]
         assert client._ccxt_client.options.get("maxRetriesOnFailure") == native_retries
         assert client._ccxt_client.timeout == 30000
-        assert public_pool.status_snapshot().routes[0].in_use_count == 0
+        assert public_pool.status_snapshot().routes[1].in_use_count == 0
         assert client._rest_pool_closed
     finally:
         await client.disconnect()
@@ -521,7 +527,7 @@ async def test_cancellation_during_backoff_starts_no_new_discovery(
 
     async def backoff(_delay: float) -> None:
         """Hold retry admission outside all worker and route ownership."""
-        assert public_pool.status_snapshot().routes[0].in_use_count == 0
+        assert public_pool.status_snapshot().routes[1].in_use_count == 0
         backoff_started.set()
         await asyncio.Event().wait()
 
@@ -535,7 +541,7 @@ async def test_cancellation_during_backoff_starts_no_new_discovery(
         await connect
     request.assert_called_once()
     close.assert_called_once_with()
-    assert public_pool.status_snapshot().routes[0].in_use_count == 0
+    assert public_pool.status_snapshot().routes[1].in_use_count == 0
     assert client._rest_pool_closed
 
 
@@ -560,7 +566,7 @@ async def test_exception_text_cannot_authorize_retry_without_completed_http_503(
         await client.connect()
     load.assert_called_once_with()
     backoff.assert_not_awaited()
-    assert public_pool.status_snapshot().routes[0].in_use_count == 0
+    assert public_pool.status_snapshot().routes[1].in_use_count == 0
     assert client._rest_pool_closed
 
 
@@ -593,7 +599,7 @@ async def test_503_without_actual_get_request_is_not_retried(
         await client.connect()
     call.assert_called_once()
     backoff.assert_not_awaited()
-    assert public_pool.status_snapshot().routes[0].in_use_count == 0
+    assert public_pool.status_snapshot().routes[1].in_use_count == 0
 
 
 async def test_dispatcher_503_without_started_public_worker_cannot_retry() -> None:
@@ -639,12 +645,12 @@ async def test_discovery_can_succeed_on_its_last_bounded_503_attempt(
         """Supply exactly the finite public response sequence."""
         status = next(statuses)
         observed.append(status)
-        assert public_pool.status_snapshot().routes[0].in_use_count == 1
+        assert public_pool.status_snapshot().routes[1].in_use_count == 1
         return _response(method, url, status)
 
     async def backoff(delay: float) -> None:
         """Assert the previous worker released its complete public route."""
-        assert public_pool.status_snapshot().routes[0].in_use_count == 0
+        assert public_pool.status_snapshot().routes[1].in_use_count == 0
         delays.append(delay)
 
     monkeypatch.setattr(client._ccxt_client.session, "request", request)
@@ -654,7 +660,7 @@ async def test_discovery_can_succeed_on_its_last_bounded_503_attempt(
         assert observed == [503, 503, 200]
         assert delays == [1.0, 2.0]
         assert client._market_client is not None
-        assert public_pool.status_snapshot().routes[0].in_use_count == 0
+        assert public_pool.status_snapshot().routes[1].in_use_count == 0
     finally:
         await client.disconnect()
 
@@ -685,7 +691,7 @@ async def test_http_error_context_without_response_never_authorizes_retry(
         await client.connect()
     load.assert_called_once_with()
     backoff.assert_not_awaited()
-    assert public_pool.status_snapshot().routes[0].in_use_count == 0
+    assert public_pool.status_snapshot().routes[1].in_use_count == 0
 
 
 async def test_cancel_before_route_admission_fences_late_real_worker_callback(

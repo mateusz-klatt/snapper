@@ -24,6 +24,7 @@ from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
 from snapper.infrastructure.market_data.base import MarketSnapshotUpdaterService
+from snapper.infrastructure.market_data.base import run_public_snapshot_with_egress
 from snapper.utils.logging import set_log_context
 
 EXCHANGE_NAME = "kraken"
@@ -211,7 +212,7 @@ def run_snapshot_update() -> None:
     async snapshot collection.
     """
     set_log_context("snap:kraken")
-    asyncio.run(_async_update_snapshots())
+    asyncio.run(run_public_snapshot_with_egress(EXCHANGE_NAME, _async_update_snapshots))
 
 
 async def _async_update_snapshots() -> None:

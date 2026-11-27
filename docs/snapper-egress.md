@@ -63,15 +63,16 @@ Kraken WS handshakes go through the `EgressPool`
 (`socks5h://snapper-egress:<port>`) inside the feed-publisher
 subprocesses of the **snapper-feed** container (the API profile
 excludes market-data publishers; the FEED profile runs only them).
-Each publisher process builds its own process-local pool at start,
-gated on the `feed_egress_enabled` DB setting (default **off** —
-publishers dial direct until the gate is flipped). The API process also
-initializes its own process-local pool from `egress_pool`; API-side Kraken
-public REST reads may route through that pool even when `feed_egress_enabled`
-is false, because the gate applies only to feed-publisher subprocess pools.
-The pool reserves a route per Kraken WS handshake. A route is quarantined — and
-the next handshake fails over to an alternate (or the direct fallback) —
-on any of the `QuarantineReason` values: `http-429` (a handshake 429
+Set `feed_egress_enabled=true` so each publisher loads its own pool at
+startup. The API also loads a process-local pool for routed Kraken REST.
+A missing or disabled pool leaves the public Kraken and Walutomat routes
+unavailable by default. Kraken WebSocket reconnects and publisher startup
+wait for a VPN. One-shot and other public REST callers receive a typed
+refusal. An explicit dev-only opt-in is available through the standalone
+DB setting `public_direct_allowed`. Production never sets this.
+The pool reserves a route per Kraken WS handshake. After a route is
+quarantined, the next handshake uses another VPN or waits. Quarantine
+reasons include: `http-429` (a handshake 429
 carrying a positive numeric `Retry-After` header; a 429 without one
 does not quarantine the route),
 `close-1015` (Cloudflare close frame), `http-connect-error` (REST
@@ -180,26 +181,19 @@ fallback only when no healthy direct route exists** — so executor (order)
 traffic CAN ride a SOCKS5 tunnel when configured, even though private
 traffic normally goes direct (see *Public vs private traffic* below).
 It is validated at config-load: when set, it MUST reference an existing
-route id, otherwise `EgressPoolConfig` rejects the pool. Its
-`allowed_exchanges` is **ignored** on the private fallback path (the
-route may be publicly pinned to one exchange while still serving as the
-private fallback for another). Kraken authenticated REST wires this
-route for private executor REST reads.
+route id, otherwise `EgressPoolConfig` rejects the pool. The route
+serves private traffic only, and private selection ignores its
+`allowed_exchanges`. Kraken authenticated REST uses this route for
+private executor REST reads.
 
-**Priority semantics:** `EgressPool.reserve()` sorts by
-`(priority, in_use_count)` and picks the **lowest** number first.
-For SOCKS5 to actually win selection, its priority MUST be less
-than the `default` route's priority. Bootstrap configurations
-that ship `default: priority=0` and a new tunnel at
-`priority=10` would silently keep using direct egress because
-`0 < 10`. Set the direct route to a high number (e.g. `100`)
-when you want it to act as fallback only. Keep at least one enabled
-direct route whenever `egress_pool.enabled=true`; current schema does
-not support disabling direct fallback for an enabled pool.
+**Priority semantics.** Public selection ranks eligible healthy SOCKS5 routes by
+`(priority, in_use_count)` within the preferred exchange scope, with the
+lowest values first. Keep an enabled direct route for private traffic
+whenever `egress_pool.enabled=true`.
 
-### Per-exchange routing — pinning a tunnel to one exchange
+### Per-exchange routing
 
-To restrict a SOCKS5 route to specific exchanges, add an
+To prefer a SOCKS5 route for specific exchanges, add an
 `allowed_exchanges` field listing the exchange names (matching
 `ExchangeEnum` *values* — `"walutomat"`, `"kraken"`,
 `"kraken_futures"`, `"kraken_equities"`, `"polygon"`, `"paper"`):
@@ -214,22 +208,13 @@ To restrict a SOCKS5 route to specific exchanges, add an
 }
 ```
 
-A non-empty `allowed_exchanges` restricts the pool: when
-`pool.reserve(exchange=...)` is called with an exchange name not in
-the list, this route is filtered out before the
-`(priority, in_use_count)` sort. An empty `allowed_exchanges`
-(the default) means the route serves any exchange — the
-back-compatible path for existing pool entries.
-
-**The direct fallback path IGNORES `allowed_exchanges` by design.**
-When every preferred route is quarantined, `EgressPool` returns the
-direct route as a last resort regardless of any exchange pin. If you
-want SOCKS routes preferred for a specific exchange, pin those routes
-with `allowed_exchanges` and give the direct route a worse priority;
-current schema does not support per-exchange denial of direct fallback.
-Unknown exchange names (typos) are rejected by `EgressPoolConfig` at
-config-load time, so a `"krakeen"` typo never silently makes a route
-unreachable.
+An empty `allowed_exchanges` marks the route as preferred for all exchanges.
+Public traffic ranks those routes together with routes pinned to that exchange.
+If they are all unavailable, the pool ranks the remaining healthy public
+VPNs and logs a warning with the requesting exchange and selected route.
+The configured private fallback stays outside public selection and release
+timing, even when its `allowed_exchanges` matches. Config validation
+rejects unknown exchange names.
 
 ### Public vs private traffic
 
@@ -237,30 +222,20 @@ Routing depends on the reservation's **traffic class**
 (`TrafficClass = Literal["public", "private"]`, defaulting to
 `"public"`):
 
-- **Public** market-data traffic (Kraken WS publishers and other
-  feeds) routes over the VPN/SOCKS5 tunnels by the public selection
-  path — the `(priority, in_use_count)` sort honouring each route's
-  `allowed_exchanges` allow-list, with the direct route as fallback.
-- **Private** executor (order) traffic is routed **direct-first**.
-  Executors wrap their work in
-  `egress_identity(traffic_class="private", owner="executor")`, and the
-  pool routes `traffic_class="private"` through a separate selection
-  path (`_pick_private_locked`) that prefers a healthy `direct` route
-  regardless of route priority and ignores `allowed_exchanges`,
-  bypassing the public sort entirely. When direct is unavailable and
-  `private_fallback_route_id` is configured, private idempotent REST reads
-  and the next private WebSocket reconnect can ride that fallback route.
-  Private mutations remain direct-only. Kraken authenticated REST ops are
-  tagged the same way.
-
-In short: **public = VPN/SOCKS5 preferred** (priority + allow-list, with
-direct fallback), **private = direct-first**. A healthy direct route always
-wins for private traffic; `private_fallback_route_id` is used only when
-direct is unavailable, and private mutations remain direct-only.
-Private executor WebSocket direct connect errors briefly quarantine the direct
-route for about 15 seconds so the next reconnect can use the configured private
-fallback. Public direct routes are not quarantined on connect errors; proxy
-routes quarantine for about 30 seconds.
+- **Public** market data uses the public VPN/SOCKS5 selector. When every
+  eligible VPN is unavailable, both values of `on_all_quarantined` produce
+  a typed refusal by default. With the dev-only opt-in, a new reservation
+  can use the host's direct route and the pool warns on its first use per
+  exchange during the episode.
+  Kraken WS sleeps until the next public quarantine release with a one-second
+  minimum. The pool logs each exchange's wait start and end at WARNING and
+  includes the elapsed and cumulative wait seconds at the end.
+- **Private** executor traffic is direct-first. Executors set
+  `egress_identity(traffic_class="private", owner="executor")`. A
+  healthy direct route wins, followed by the configured private fallback.
+  Kraken private REST mutations stay on the direct-only path. A private
+  WS connect error briefly quarantines direct so a subsequent reconnect
+  can use a configured private fallback.
 
 Then enable the feed gate (DB setting `feed_egress_enabled=true`) if
 not already on, and restart both the API and the feed tier — the feed
@@ -273,15 +248,42 @@ docker compose restart snapper snapper-feed
 The process-local egress preflight validates each SOCKS5 route before
 installing the pool: it checks that `python-socks` is importable,
 resolves the proxy host, opens the proxy port, and sends a SOCKS5
-NO_AUTH greeting. A route that fails preflight is auto-disabled in that
-process's effective config, so restart every process that should use
-the updated route set.
+NO_AUTH greeting. Missing `python-socks` or an unusable proxy host or port
+disables the affected route for that process. DNS, TCP, and greeting
+failures leave the route enabled and quarantine it for 30 seconds from pool
+installation. Feed callers can try the route again when that deadline expires.
 
 The orchestrator logs:
 
 ```
 egress_pool: configured with 2 route(s), on_all_quarantined=wait
 ```
+
+## Deploy ordering and one-shot snapshots
+
+Recreate `snapper-egress` first. Probe `/ready-public` from the sidecar
+before recreating `snapper-feed` and `snapper-strategies`.
+
+```sh
+docker compose exec snapper-egress \
+  python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/ready-public', timeout=2).read().decode())"
+```
+
+Expect HTTP 200 with the ID of a running SOCKS5 tunnel whose WireGuard
+peer handshook within the last 180 seconds. HTTP 503 means no running
+tunnel meets that condition. Compose still uses `/ready` as the
+sidecar's bootstrap check. Waiting for public readiness reduces the feed
+gap. If a feed starts before the listener is ready, its initially
+quarantined routes become eligible for retry without a feed restart.
+
+The `update-kraken-market-snapshot`, `update-kraken-futures-market-snapshot`,
+`update-kraken-equities-market-snapshot` and
+`update-walutomat-market-snapshot` commands load `egress_pool` from the
+settings database in their own process, including when invoked with
+`docker compose run snapper <command>`. Each selects its own venue's
+public scope independently of `feed_egress_enabled`. A missing or exhausted
+pool at startup gives a clear error and a nonzero exit by default. Dev
+snapshot commands honor the same explicit direct opt-in as publishers.
 
 ## Verification
 
@@ -353,13 +355,9 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
    in a fresh `docker compose exec` interpreter returns `None`, and
    quarantining inside the API process would not touch the publisher
    pools, so a REPL-based quarantine cannot exercise the failover.
-   Instead, steer by configuration: give the direct route the worst
-   priority in the `egress_pool` setting, make sure
-   `feed_egress_enabled=true`, then
-   restart snapper-feed and observe the next handshake. The publisher
-   log line should show the tunnel route id; Cloudflare's view of the
-   source IP should match the VPN exit. Restore the normal direct-route
-   priority when done.
+   Enable `feed_egress_enabled`, recreate the feed after public readiness,
+   and check for `traffic_class=public` and `route_kind=socks5` in the
+   publisher's route-selection log. The source IP should match the VPN exit.
 
 7. **Stable tick flow?**
 
@@ -433,8 +431,7 @@ egress_pool: configured with 2 route(s), on_all_quarantined=wait
   alternate).
 - WS connect-error failover (`ws-connect-error`): the dead proxy route is
   quarantined ~30 s on a connect timeout/refused/blackhole, so the next
-  reconnect rides an alternate route (or the direct fallback) instead of
-  re-dialing the dead tunnel.
+  reconnect tries an alternate VPN or waits until a route can be tried again.
 - Tunnel handshake age: WireGuard re-keys every 2 minutes; if `wg
   show <iface> latest-handshakes` returns > 180 s ago, the peer is
   unreachable. The backend also surfaces the latest handshake from

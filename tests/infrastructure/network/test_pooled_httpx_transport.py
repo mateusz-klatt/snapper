@@ -26,8 +26,10 @@ import pytest
 from loguru import logger
 
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
+from snapper.infrastructure.network.egress_pool import EgressPool
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
 from snapper.infrastructure.network.egress_reservation import EgressReservation
@@ -36,7 +38,7 @@ from snapper.infrastructure.network.pooled_httpx_transport import _HTTP_CONNECT_
 from snapper.infrastructure.network.pooled_httpx_transport import PooledAsyncTransport
 
 
-class _FakeTransport:
+class _FakeTransport(httpx.AsyncBaseTransport):
     """Stand-in for :class:`httpx.AsyncHTTPTransport` used by tests.
 
     Captures construction kwargs + records each request it handles
@@ -116,17 +118,25 @@ class TestPooledAsyncTransport:
         return quarantine_calls
 
     @pytest.mark.asyncio
-    async def test_pool_disabled_uses_direct_transport_without_reservation(self) -> None:
+    @pytest.mark.parametrize("installed_empty", [False, True])
+    async def test_pool_disabled_uses_direct_transport_without_reservation(
+        self, installed_empty: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Spec — when the pool is None or empty, fall through to a direct transport.
 
         Given ``get_egress_pool()`` returns None (singleton uninitialised),
-        When a request is handled,
+        When a private request is handled,
         Then the underlying transport is built with ``proxy=None``
         and the request is forwarded — no ``pool.reserve`` call
         because there is no pool to reserve from.
         """
+        pool = EgressPool(EgressPoolConfig()) if installed_empty else None
+        monkeypatch.setattr(
+            "snapper.infrastructure.network.pooled_httpx_transport.get_egress_pool",
+            lambda: pool,
+        )
         factory = _RecordingFactory()
-        transport = PooledAsyncTransport(transport_factory=factory)
+        transport = PooledAsyncTransport(traffic_class="private", transport_factory=factory)
 
         response = await transport.handle_async_request(self._make_request())
 
@@ -298,7 +308,7 @@ class TestPooledAsyncTransport:
         assert pool is not None
 
         factory = _RecordingFactory()
-        transport = PooledAsyncTransport(transport_factory=factory)
+        transport = PooledAsyncTransport(traffic_class="private", transport_factory=factory)
 
         await transport.handle_async_request(self._make_request())
         await transport.handle_async_request(self._make_request())
@@ -317,8 +327,7 @@ class TestPooledAsyncTransport:
         When a request is handled,
         Then the SOCKS5 route is marked quarantined for
         ``_HTTP_CONNECT_ERROR_QUARANTINE_S`` seconds, the exception
-        propagates, and the reservation is released so a subsequent
-        request hits the direct fallback.
+        propagates and the reservation is released.
         """
         routes = [
             RouteConfig(id="default", kind="direct", priority=100),
@@ -505,7 +514,7 @@ class TestPooledAsyncTransport:
 
         read_err = httpx.ReadError("simulated read failure")
         factory = _RecordingFactory(side_effect=read_err)
-        transport = PooledAsyncTransport(transport_factory=factory)
+        transport = PooledAsyncTransport(traffic_class="private", transport_factory=factory)
 
         read_error_request = self._make_request()
         with pytest.raises(httpx.ReadError, match="simulated read failure"):
@@ -526,7 +535,8 @@ class TestPooledAsyncTransport:
         cleared so a subsequent ``aclose`` is a no-op.
         """
         routes = [
-            RouteConfig(id="default", kind="direct", priority=10),
+            RouteConfig(id="default", kind="direct", priority=100),
+            RouteConfig(id="wg-ie-1", kind="socks5", proxy_url="socks5h://egress:1081"),
             RouteConfig(
                 id="wg-pl-1",
                 kind="socks5",
@@ -543,7 +553,7 @@ class TestPooledAsyncTransport:
         transport = PooledAsyncTransport(transport_factory=factory)
 
         await transport.handle_async_request(self._make_request())
-        pool._quarantine_route("default", datetime.now(UTC) + timedelta(seconds=600), "http-429")
+        pool._quarantine_route("wg-ie-1", datetime.now(UTC) + timedelta(seconds=600), "http-429")
         await transport.handle_async_request(self._make_request())
 
         assert len(factory.created) == 2
@@ -615,3 +625,31 @@ class TestWalutomatPublisherPattern:
 
         assert mock_publisher._get_exchange_name.call_count == 2
         not_awaited.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["direct-only", "empty", "disabled"])
+async def test_public_httpx_refusal_never_builds_a_direct_transport(
+    state: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The transport factory is never invoked when public VPN egress is absent."""
+    pool: EgressPool | None = None
+    if state == "empty":
+        pool = EgressPool(EgressPoolConfig())
+    elif state == "direct-only":
+        routes = [RouteConfig(id="default", kind="direct")]
+        pool = EgressPool(EgressPoolConfig(enabled=True, routes=routes))
+    monkeypatch.setattr(
+        "snapper.infrastructure.network.pooled_httpx_transport.get_egress_pool",
+        lambda: pool,
+    )
+    await _assert_public_httpx_refusal()
+
+
+async def _assert_public_httpx_refusal() -> None:
+    """Verify the public request is refused before a transport is built."""
+    factory = _RecordingFactory()
+    transport = PooledAsyncTransport(traffic_class="public", transport_factory=factory)
+    with pytest.raises(AllRoutesQuarantinedError, match="no public VPN route available"):
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com/ticker"))
+    assert factory.calls == []

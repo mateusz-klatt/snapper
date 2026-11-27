@@ -16,28 +16,26 @@ The transport:
 4. Forwards the request.
 5. On ``httpx.ConnectError`` / ``ConnectTimeout``: quarantines the
    borrowed route with ``reason="http-connect-error"`` then re-raises,
-   so the next request reserves a fresh route (failover to ``default``
-   direct when every SOCKS5 route is quarantined). On
+   so the next request can reserve another eligible route. On
    ``httpx.ProxyError``: quarantines the borrowed route with
    ``reason="http-proxy-error"`` (kept distinct because ``ProxyError``
    covers both proxy-handshake/unreachability failures and proxy-to-target
    dial failures) then re-raises.
 6. Releases the reservation in ``finally``.
 
-Pool-disabled path (``get_egress_pool()`` returns ``None`` or empty):
-forward to the cached direct transport — no reservation, no
-failover, identical to a bare ``httpx.AsyncClient`` on the host's
-default route. Preserves byte-for-byte behaviour when the operator
-runs without the sidecar.
+With the pool disabled, private requests use the cached direct transport.
+Public requests need a configured VPN route before a transport can be built.
 """
 
-from typing import Any
+from typing import Protocol
 
 import httpx
 from loguru import logger
 
-from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_context import TrafficClass
+from snapper.infrastructure.network.egress_context import resolve_egress_traffic
 from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
 
 _HTTP_CONNECT_ERROR_QUARANTINE_S: float = 60.0
 """Quarantine duration (seconds) for an egress route that failed a connect attempt.
@@ -46,6 +44,14 @@ Mirrors ``_CLOSE_1015_QUARANTINE_S`` in the Spot shim — long enough
 to take a single-PoP outage out of the rotation, short enough to let
 a transient DNS/connect blip recover before the next request cycle.
 """
+
+
+class _TransportFactory(Protocol):
+    """Build an HTTP transport for a reserved route."""
+
+    def __call__(self, *, proxy: str | None) -> httpx.AsyncBaseTransport:
+        """Create the transport using the given proxy URL."""
+        ...
 
 
 class PooledAsyncTransport(httpx.AsyncBaseTransport):
@@ -67,7 +73,8 @@ class PooledAsyncTransport(httpx.AsyncBaseTransport):
         self,
         *,
         default_exchange_tag: str = "walutomat",
-        transport_factory: Any | None = None,
+        traffic_class: TrafficClass | None = None,
+        transport_factory: _TransportFactory | None = None,
     ) -> None:
         """Initialise the transport.
 
@@ -78,13 +85,16 @@ class PooledAsyncTransport(httpx.AsyncBaseTransport):
                 even when invoked outside a publisher's ContextVar
                 span (e.g. one-shot CLI tooling that hits Walutomat
                 without spawning the full publisher).
+            traffic_class: Explicit class for a dedicated transport. When omitted,
+                use the current egress identity or the public default.
             transport_factory: Override for the underlying
                 ``httpx.AsyncHTTPTransport`` constructor. Tests
                 inject a fake factory; production keeps the default
                 (``httpx.AsyncHTTPTransport``).
         """
         self._default_exchange_tag = default_exchange_tag
-        self._transport_factory: Any = transport_factory or httpx.AsyncHTTPTransport
+        self._traffic_class = traffic_class
+        self._transport_factory: _TransportFactory = transport_factory or httpx.AsyncHTTPTransport
         self._transports: dict[str | None, httpx.AsyncBaseTransport] = {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -99,7 +109,8 @@ class PooledAsyncTransport(httpx.AsyncBaseTransport):
         Raises:
             httpx.ConnectError: Re-raised after the borrowed route
                 is quarantined so the caller's retry hits a fresh
-                route (or the direct fallback).
+                route.
+            AllRoutesQuarantinedError: The pool has no eligible route.
             httpx.ConnectTimeout: Same handling as ``ConnectError``.
             httpx.ProxyError: Re-raised after the borrowed route is
                 quarantined with ``reason="http-proxy-error"`` so a
@@ -109,23 +120,24 @@ class PooledAsyncTransport(httpx.AsyncBaseTransport):
                 transport propagates unchanged. The reservation is
                 still released in the ``finally`` block.
         """
+        exchange_name, scoped_class = resolve_egress_traffic(self._default_exchange_tag)
+        traffic_class = self._traffic_class or scoped_class
         pool = get_egress_pool()
-        if pool is None or pool.size() == 0:
+        if traffic_class != "private":
+            pool = public_egress_pool(pool)
+        if pool is None or (traffic_class == "private" and pool.size() == 0):
             direct_transport = self._get_or_create_transport(None)
             return await direct_transport.handle_async_request(request)
 
-        publisher = _CURRENT_PUBLISHER.get()
-        exchange_name = (
-            publisher._get_exchange_name() if publisher is not None else self._default_exchange_tag
-        )
         reservation = pool.reserve(
             exchange=exchange_name,
             purpose="http",
+            traffic_class=traffic_class,
             target_host=request.url.host,
             connection_kind="rest",
         )
-        transport = self._get_or_create_transport(reservation.proxy_url)
         try:
+            transport = self._get_or_create_transport(reservation.proxy_url)
             return await transport.handle_async_request(request)
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             reservation.quarantine(

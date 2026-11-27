@@ -9,7 +9,7 @@ Ties together the per-tunnel pieces:
 * ``load_declared_tunnels(service)`` (settings → validated
   descriptors + decrypted keys).
 
-The orchestrator runs three HTTP endpoints on port 8081 for
+The orchestrator exposes these HTTP endpoints on port 8081 for
 operator + Compose healthcheck observability:
 
 * ``GET /ready``   — 200 once bootstrap completes (Compose
@@ -17,6 +17,7 @@ operator + Compose healthcheck observability:
   NOT block snapper-api startup).
 * ``GET /tunnels`` — JSON ``{tunnel_id: {status, reason}}`` for the
   operator dashboard.
+* ``GET /ready-public`` — 200 when a running tunnel has a recent WireGuard handshake.
 * ``GET /readyz``  — 200 only when EVERY declared tunnel is up; 503
   with a ``failed`` array otherwise. Available for stricter Compose
   configs that prefer hard-fail semantics.
@@ -32,6 +33,9 @@ import signal
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
 from typing import Final
 
 import zmq.asyncio
@@ -43,6 +47,7 @@ from snapper.infrastructure.network import wg_control
 from snapper.infrastructure.network.egress_transfer_observability import EgressTransferPublisher
 from snapper.infrastructure.network.egress_transfer_stats import EgressTransferSampler
 from snapper.infrastructure.network.egress_transfer_stats import EgressTransferTunnel
+from snapper.infrastructure.network.egress_transfer_stats import read_wg_transfer_counters
 from snapper.infrastructure.network.egress_tunnel_models import LoadedTunnel
 from snapper.infrastructure.network.egress_tunnel_models import LoadResult
 from snapper.infrastructure.network.egress_tunnel_models import TunnelLoadFailure
@@ -53,7 +58,7 @@ from snapper.messaging.infrastructure.publisher import build_audit_publisher
 from snapper.messaging.infrastructure.publisher import shutdown_audit_publisher
 
 _HEALTHCHECK_PORT: Final[int] = 8081
-"""Port the orchestrator binds the /ready / /tunnels / /readyz endpoints to."""
+"""Port the orchestrator binds its readiness and tunnel status endpoints to."""
 
 _HEALTHCHECK_HOST: Final[str] = "0.0.0.0"
 """Host the healthcheck app binds to.
@@ -74,6 +79,10 @@ dictionaries with typed keys. Using it eliminates the
 
 _MIN_TRANSFER_INTERVAL_SECONDS: Final[float] = 0.001
 """Minimum transfer sample cadence in seconds."""
+
+
+_PUBLIC_HANDSHAKE_MAX_AGE = timedelta(seconds=180)
+"""Maximum age of a WireGuard handshake used as a public readiness signal."""
 
 
 @dataclass
@@ -142,7 +151,7 @@ async def run_sidecar(
          * ``Socks5Server.start()`` — bind on the Docker network.
        Per-tunnel failures are caught and turned into ``_FailedTunnel``
        entries on the shared state so the orchestrator stays alive.
-    3. Start aiohttp app exposing /ready, /tunnels, /readyz.
+    3. Start aiohttp app exposing /ready, /ready-public, /tunnels, /readyz.
     4. Wait for ``shutdown_event`` (set by the SIGTERM/SIGINT
        handlers wired in ``snapper.egress.__main__``).
     5. Reverse the bring-up: stop each Socks5Server, then bring
@@ -394,13 +403,14 @@ async def _start_healthcheck_app(
     host: str,
     port: int,
 ) -> web.AppRunner:
-    """Start the aiohttp app with /ready, /tunnels, /readyz routes.
+    """Start the aiohttp app with readiness and tunnel status routes.
 
     Returns the ``AppRunner`` so the caller can ``await
     runner.cleanup()`` on shutdown.
     """
     app = web.Application()
     app.router.add_get("/ready", _handle_ready)
+    app.router.add_get("/ready-public", _handle_ready_public)
     app.router.add_get("/tunnels", _handle_tunnels)
     app.router.add_get("/readyz", _handle_readyz)
     app[_STATE_KEY] = state
@@ -433,6 +443,23 @@ async def _handle_ready(request: web.Request) -> web.Response:
         },
         status=200,
     )
+
+
+async def _handle_ready_public(request: web.Request) -> web.Response:
+    """Report whether a running SOCKS5 tunnel has a recent WireGuard handshake."""
+    state = request.app[_STATE_KEY]
+    cutoff = datetime.now(UTC) - _PUBLIC_HANDSHAKE_MAX_AGE
+    for running in state.running:
+        descriptor = running.loaded.descriptor
+        try:
+            counters = await asyncio.to_thread(read_wg_transfer_counters, descriptor.interface)
+        except OSError:
+            logger.warning("sidecar: could not read public handshake for {}", descriptor.id)
+            continue
+        handshake = counters.latest_handshake_at if counters is not None else None
+        if handshake is not None and handshake >= cutoff:
+            return web.json_response({"ready": True, "tunnel_id": descriptor.id})
+    return web.json_response({"ready": False}, status=503)
 
 
 async def _handle_tunnels(request: web.Request) -> web.Response:

@@ -21,6 +21,7 @@ from loguru import logger
 
 import snapper.infrastructure.exchanges._subscription_health as health_mod
 import snapper.infrastructure.exchanges.implementations.kraken_futures as mod
+from snapper.infrastructure.exchanges import kraken_rest_egress
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges.adapters.kraken_futures import parse_kraken_futures_trade
@@ -48,6 +49,9 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _enqueue_or_drop_oldest
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _timeframe_to_seconds
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _tracker_feed_key
+from snapper.infrastructure.network.egress_models import EgressPoolConfig
+from snapper.infrastructure.network.egress_models import RouteConfig
+from snapper.infrastructure.network.egress_pool import EgressPool
 
 _REAL_ASYNCIO_SLEEP = asyncio.sleep
 
@@ -7572,3 +7576,19 @@ class TestTriggerOrderTransportContracts:
         dispatch.assert_not_awaited()
         persist.assert_not_awaited()
         record_rest.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def _stub_public_vpn_for_mocked_kraken_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give mocked SDK calls a VPN reservation while preserving explicit pool cases."""
+    fallback_pool = EgressPool(
+        EgressPoolConfig(
+            routes=[RouteConfig(id="test-vpn", kind="socks5", proxy_url="socks5h://egress:1081")]
+        )
+    )
+
+    def public_pool(configured: EgressPool | None) -> EgressPool:
+        """Prefer the real pool when the test installed one."""
+        return configured if configured is not None else fallback_pool
+
+    monkeypatch.setattr(kraken_rest_egress, "public_egress_pool", public_pool)

@@ -80,12 +80,14 @@ provision it through the supported user administration API.
     [market persistence configuration](docs/configuration.md#market-persist-policy)
     for the scheduling and historical repair boundaries
 - **Egress routing** — Per-venue VPN egress routing via the WireGuard/SOCKS5
-    `snapper-egress` sidecar. `feed_egress_enabled` gates feed-publisher
-    pools; the API process initializes its own pool from `egress_pool`, so
-    API-side Kraken public REST reads may route through it independently.
+    `snapper-egress` sidecar. `feed_egress_enabled` loads publisher VPN
+    routes. The API process loads its own pool from `egress_pool` for
+    Kraken public REST. Public callers wait or receive a refusal by default
+    when their pool has no usable public VPN. The direct opt-in is for dev
+    hosts only.
     Private/executor traffic stays direct-first, with
-    `private_fallback_route_id` used only when direct is unavailable; private
-    mutations remain direct-only
+    `private_fallback_route_id` used only when direct is unavailable. Kraken
+    private mutations remain direct-only
 - **Symbol correlation** — Underlying asset model linking instruments across
     exchanges (e.g., SPY, ESM6-CME, SPYX-USD-PERP all map to S&P 500).
     YAML-driven pattern matching, front-month rollover, contract ladder API

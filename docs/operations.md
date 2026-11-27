@@ -310,8 +310,8 @@ at-most-once ZMQ bus:
   backend and feed keep running, and consults in flight time out and
   retry on the next window.
 - `docker compose restart snapper-egress` — tunnel-routed public feeds
-  fail closed to quarantine semantics (see egress runbook) until the
-  sidecar is healthy again.
+  wait for a usable VPN route. Confirm public readiness via the egress
+  runbook before recreating the feed and strategies.
 - `docker compose restart snapper-notify` — alert evaluation and configured
   APNs/Android delivery pause for the restart window; the outbox drain on the next
   start recovers queued deliveries, and rule dedup windows persist in
@@ -448,8 +448,8 @@ settings row. Reconnect recovery rebuilds the SDK client and replays
 Snapper's stable subscription cache with a freshly minted token. Although
 Kraken exposes `GetWebSocketsToken` under `/0/private/`, Snapper treats this
 read-only market-data session credential as public Equities feed traffic for
-egress routing so it shares the auth WebSocket source IP. If feed egress is
-off or no pool is configured, the mint remains direct.
+egress routing so it can share the auth WebSocket source IP. The token mint
+follows the same public egress policy as the WebSocket.
 
 ## Market diagnostics
 
@@ -1041,11 +1041,9 @@ restores it, and measures candle-freshness recovery against the SLA. Only :443
 is dropped, so the ZMQ bus and DB writes keep working — the outage is
 market-data only (order execution, a separate container, is unaffected).
 
-It targets the feed's own netns because the runtime image has no `iptables`
-(`docker exec <feed> iptables` fails). This matches the default direct-feed
-path (`feed_egress_enabled=false`). If feed egress is enabled, publishers
-connect to `snapper-egress` SOCKS ports instead, so drop the SOCKS/egress path
-rather than feed-container `:443`.
+The harness targets the feed's own network namespace because the runtime
+image lacks `iptables`. To exercise a tunnel-routed Kraken feed, target
+the connections to `snapper-egress` SOCKS ports.
 Restore is safety-critical and proven, not best-effort: every step is
 exit-code-checked, the helper runs a prebuilt `snapper-fault-helper` image (no
 package install while the link is down), removal is proven with `iptables -C`,
@@ -1074,36 +1072,35 @@ duration.
 
 ### Egress routing for feeds (`feed_egress_enabled`)
 
-By default the feed publishers connect **directly** to the exchanges and do
-not initialize an egress pool in their own processes. Set the
-`feed_egress_enabled` setting to enable per-publisher egress routing: each
-feed subprocess then initializes its own process-local egress pool at
-startup, so the Kraken connect shim and Walutomat's pooled HTTP transport
-route through the configured tunnels (per-exchange pins apply; direct stays
-the fallback).
+Set `feed_egress_enabled=true` to load the configured VPN routes in
+each feed publisher subprocess. The public Kraken WebSocket and REST
+paths and Walutomat HTTP polling require a public VPN route by default.
+The configured `private_fallback_route_id` is reserved for private traffic.
+With the pool disabled or unavailable, public feeds wait in process.
 
-This is gated off by default because routing live market data through shared
-VPN IPs changes latency and can make Kraken/Cloudflare throttle the feed
-differently than the host IP. Roll it out cautiously:
+1. Recreate `snapper-egress` and wait for HTTP 200 from `/ready-public`.
+2. Recreate `snapper-feed` and `snapper-strategies` after public readiness.
+3. In `snapper-feed`, confirm `ss -tnp` shows connections to the sidecar's
+    SOCKS ports. Check `traffic_class=public` selections and the public VPN
+    wait logs when investigating feed gaps.
 
-1. Set `feed_egress_enabled=true` and restart the feed (the setting is read at
-    publisher startup, not live).
-2. In `snapper-feed`, confirm `ss -tnp` shows connections to
-    `snapper-egress:1081-1085` (SOCKS) rather than direct exchange `:443`.
-3. Compare candle freshness, tick/trade lag, and dark-instrument counts to the
-    direct baseline; watch the reconnect logs for throttling/close codes.
-4. Revert instantly by setting `feed_egress_enabled=false` and restarting the
-    feed.
+This order reduces the feed gap. A feed that starts while the sidecar is
+coming up can still recover in process. Transient startup probe failures
+quarantine the affected VPN routes for 30 seconds, then the feed retries.
 
-With routing enabled, a TCP/SOCKS connect-level failure through a proxy
-route — timeout, connection refused, or a tunnel that went dark —
-quarantines that route for 30 s (`_WS_CONNECT_ERROR_QUARANTINE_S`), so
-the next reconnect fails over to another tunnel or the direct fallback
-instead of re-dialing the dead route. Public direct routes are not
-quarantined: a connect error with no proxy means the exchange or the
-local uplink is down, not the route. Private executor WebSocket direct
-connect errors are the exception: direct is quarantined briefly
-(~15 s) so the next reconnect can use `private_fallback_route_id`.
+See the [egress runbook](snapper-egress.md#deploy-ordering-and-one-shot-snapshots)
+for the readiness probe and one-shot snapshot behavior.
+
+#### Dev-only public direct access
+
+**Production never sets this.** On a dev host, set the standalone DB
+setting `public_direct_allowed` to the JSON boolean `true` and restart
+the processes that should use it. The default is `false`. If there is
+no usable public VPN, a new public reservation can then go direct from
+the host's own IP, even with an absent, invalid, or disabled pool.
+Each opted-in process warns at startup and logs a warning per exchange
+when a new fallback episode first uses direct. An available public VPN
+takes precedence on the next reservation.
 
 ### Spot candle source (`spot_candle_source`)
 

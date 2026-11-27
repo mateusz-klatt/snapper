@@ -540,8 +540,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             return
         self._producer_stall_warned_at = now
         logger.warning(
-            "kraken publisher: trade-built candle producer is alive but its last tick "
-            "is {}s old",
+            "kraken publisher: trade-built candle producer is alive but its last tick is {}s old",
             age,
         )
 
@@ -1418,6 +1417,11 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         finally:
             _CURRENT_PUBLISHER.reset(token)
 
+    def _on_sdk_reconnect_wait(self) -> None:
+        """Fence candle completion as soon as the SDK starts waiting to reconnect."""
+        self._suspend_candle_synthesis_across_break()
+        self._mark_minute_feed_break()
+
     def _on_sdk_reconnect_attempt(self) -> None:
         """Hook called by the patched SDK reconnect path on every attempt.
 
@@ -1446,8 +1450,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         the socket returns: the resulting hole in the 1m plane is the correct
         record that we were not listening.
         """
-        self._suspend_candle_synthesis_across_break()
-        self._mark_minute_feed_break()
+        self._on_sdk_reconnect_wait()
         now = time.monotonic()
         self._reconnect_timestamps.append(now)
         cutoff = now - _RECONNECT_WINDOW_S

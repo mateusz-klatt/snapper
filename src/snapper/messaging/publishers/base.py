@@ -73,6 +73,7 @@ from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleMark
 from snapper.infrastructure.network.egress_observability import EgressSnapshotPublisher
 from snapper.infrastructure.network.egress_observability import resolve_egress_container_id
 from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import initialize_public_egress_policy
 from snapper.infrastructure.network.egress_pool import safely_initialize_egress_pool
 from snapper.infrastructure.symbols.functions import get_market_data_capability_exclusions
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
@@ -1148,14 +1149,14 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         logger.debug("{}: market-data-excluded symbols: {}", exchange_name, excluded)
 
     async def _maybe_init_egress_pool(self, settings_service: SettingsService) -> None:
-        """Initialize the egress pool in this publisher process when enabled.
+        """Load public policy and initialize publisher VPN routes when enabled.
 
         The egress pool is a process-local singleton; the API/coordinator
         process initializes its own, but feed publishers run in separate
         subprocesses, so each must initialize the pool here for the Kraken
         connect shim and Walutomat's pooled HTTP transport to route through the
-        configured tunnels. Gated on ``feed_egress_enabled`` (default off);
-        when off the feeds keep their direct-to-exchange connections.
+        configured tunnels. The dev-only public direct opt-in is loaded
+        independently of ``feed_egress_enabled``.
 
         Args:
             settings_service: The publisher's initialized settings service.
@@ -1164,12 +1165,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             None.
         """
         if not self.settings.feed_egress_enabled:
+            initialize_public_egress_policy(settings_service)
             return
         await safely_initialize_egress_pool(settings_service)
         logger.info(
             f"{self._get_process_name()}: egress pool initialization attempted "
-            "(feed_egress_enabled) — confirm routing via `ss` (a malformed/absent "
-            "egress_pool setting leaves the pool empty and feeds stay direct)"
+            "(feed_egress_enabled) — confirm public VPN routing via `ss`"
         )
 
     def _start_egress_snapshot_publisher(self, process_name: str) -> None:

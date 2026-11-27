@@ -59,6 +59,7 @@ from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_observability import EGRESS_SNAPSHOT_TOPIC
 from snapper.infrastructure.network.egress_observability import EgressSnapshotPublisher
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -1753,7 +1754,7 @@ async def test_maybe_init_egress_pool_when_enabled(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.asyncio
 async def test_maybe_init_egress_pool_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default-off gate leaves feeds on their direct connections.
+    """The default-off gate skips VPN pool initialization.
 
     Given: A publisher whose feed_egress_enabled is False,
     When: _maybe_init_egress_pool runs,
@@ -1765,8 +1766,27 @@ async def test_maybe_init_egress_pool_when_disabled(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         "snapper.messaging.publishers.base.safely_initialize_egress_pool", init_mock
     )
-    await pub._maybe_init_egress_pool(MagicMock())
+    service = MagicMock()
+    await pub._maybe_init_egress_pool(service)
     init_mock.assert_not_called()
+    service.get_setting.assert_called_once_with("public_direct_allowed")
+
+
+@pytest.mark.asyncio
+async def test_feed_loads_dev_direct_policy_with_vpn_pool_gate_off() -> None:
+    """The standalone opt-in takes effect in a feed without VPN initialization."""
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.settings = SimpleNamespace(feed_egress_enabled=False)
+    service = MagicMock()
+    service.get_setting.side_effect = {"public_direct_allowed": True}.get
+    try:
+        await pub._maybe_init_egress_pool(service)
+        reservation = public_egress_pool(None).reserve(exchange="kraken", purpose="http")
+        assert reservation.route_id == "public-dev-direct"
+        assert reservation.proxy_url is None
+        reservation.release()
+    finally:
+        reset_egress_pool()
 
 
 @pytest.mark.asyncio

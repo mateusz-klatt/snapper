@@ -24,8 +24,12 @@ import os
 import socket
 import threading
 from collections import OrderedDict
+from collections.abc import Collection
+from collections.abc import Sequence
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
+from time import monotonic
 from typing import Final
 from typing import Literal
 from urllib.parse import urlsplit
@@ -55,6 +59,10 @@ _PYTHON_SOCKS_WARNING_LOGGED: list[bool] = [False]
 _MAX_REST_HOSTS_PER_ROUTE = 16
 _HOST_FORBIDDEN_CHARS = frozenset("/\\?#@")
 ConnectionKey = tuple[str, TrafficClass, ConnectionKind, str]
+_PreflightDisposition = Literal["keep", "disable", "quarantine"]
+
+_PREFLIGHT_QUARANTINE_S: Final[float] = 30.0
+"""Initial retry delay for a transient startup failure, matching WS connect failures."""
 
 
 def normalize_egress_target_host(target_host: str | None) -> str | None:
@@ -96,6 +104,17 @@ def _connection_kind_for_purpose(purpose: Literal["websocket", "http"]) -> Conne
     return "rest"
 
 
+def _new_public_direct_state(route_ids: Collection[str]) -> RouteState:
+    """Create a dev direct route with its own counters and quarantine state."""
+    base = "public-dev-direct"
+    route_id = base
+    suffix = 0
+    while route_id in route_ids:
+        suffix += 1
+        route_id = f"{base}-{suffix}"
+    return RouteState(config=RouteConfig(id=route_id, kind="direct"), enabled=True)
+
+
 class EgressPool(EgressPoolBase):
     """Process-wide registry of egress routes with quarantine state.
 
@@ -108,29 +127,36 @@ class EgressPool(EgressPoolBase):
     shortened by a subsequent shorter retry_after.
     """
 
-    def __init__(self, config: EgressPoolConfig) -> None:
+    def __init__(self, config: EgressPoolConfig, *, public_direct_allowed: bool = False) -> None:
         """Build the pool from a validated config.
 
         Args:
             config: The top-level ``EgressPoolConfig`` payload, already
-                validated by Pydantic. ``initialize_egress_pool`` may
-                have set ``RouteConfig.enabled=False`` on routes that
-                failed preflight; the caller is responsible for
-                producing the final config object.
+                validated by Pydantic. Startup preflight may disable
+                routes with permanent configuration errors.
+            public_direct_allowed: Explicit dev-host permission to use a
+                separate direct route when public VPNs are unavailable.
         """
         self._config = config
         self._lock = threading.RLock()
         self._states: dict[str, RouteState] = {
             route.id: RouteState(config=route, enabled=route.enabled) for route in config.routes
         }
+        self._public_direct: RouteState | None = None
+        if public_direct_allowed:
+            self._public_direct = _new_public_direct_state(self._states.keys())
+            self._states[self._public_direct.config.id] = self._public_direct
+        self._public_direct_episodes: set[str] = set()
+        self._public_wait_started: dict[str, float] = {}
+        self._public_wait_seconds: dict[str, float] = {}
         self._active_reservations: dict[str, dict[tuple[str, TrafficClass], int]] = {
-            route.id: {} for route in config.routes
+            route_id: {} for route_id in self._states
         }
         self._active_connection_counts: dict[str, dict[ConnectionKey, int]] = {
-            route.id: {} for route in config.routes
+            route_id: {} for route_id in self._states
         }
         self._rest_last_seen: dict[str, OrderedDict[ConnectionKey, datetime]] = {
-            route.id: OrderedDict() for route in config.routes
+            route_id: OrderedDict() for route_id in self._states
         }
 
     def size(self) -> int:
@@ -143,42 +169,29 @@ class EgressPool(EgressPoolBase):
             return sum(1 for s in self._states.values() if s.enabled)
 
     def has_available(self, exchange: str | None = None, traffic_class: str = "public") -> bool:
-        """Return True if any route is enabled, not quarantined, and serves ``exchange``.
+        """Report whether the requested traffic class can reserve a healthy route.
 
-        Args:
-            exchange: When set, only consider routes whose
-                ``allowed_exchanges`` is empty or contains this name.
-                When ``None`` (legacy callers / observability code),
-                every enabled+healthy route counts regardless of
-                ``allowed_exchanges``. Callers that gate
-                retry timing on per-exchange availability (e.g. the
-                Kraken connect shim's ``_patched_get_reconnect_wait``)
-                MUST pass the exchange so a Walutomat-pinned route
-                cannot falsely look healthy to Kraken.
-            traffic_class: ``"public"`` keeps the legacy exchange
-                allow-list policy. ``"private"`` considers only a
-                healthy direct route or the configured private fallback
-                route. Any other value is treated as ``"public"``.
-
-        Returns:
-            ``True`` when at least one matching route is enabled and
-            either never quarantined or its quarantine deadline is
-            already in the past. ``False`` when every matching route
-            is still inside its quarantine window — or when no route
-            serves ``exchange`` at all.
+        Public traffic can use healthy public VPNs or its explicitly enabled
+        dev fallback. A public exchange name identifies the wait episode.
+        Private availability follows the direct and private fallback policy.
         """
         now = datetime.now(UTC)
-        effective_traffic_class: TrafficClass = (
-            "private" if traffic_class == "private" else "public"
-        )
         with self._lock:
-            if effective_traffic_class == "private":
+            if traffic_class == "private":
                 return self._pick_private_locked(now) is not None
-            return any(
-                self._is_available_locked(s, now)
-                and (exchange is None or self._exchange_allows_locked(s, exchange))
-                for s in self._states.values()
+            vpn_available = any(
+                self._is_public_vpn(state) and self._is_available_locked(state, now)
+                for state in self._states.values()
             )
+            available = vpn_available or self._available_public_direct_locked(now) is not None
+            if exchange is not None:
+                if vpn_available:
+                    self._public_direct_episodes.discard(exchange)
+                if available:
+                    self._finish_public_wait_locked(exchange)
+                else:
+                    self._begin_public_wait_locked(exchange)
+            return available
 
     def earliest_release_in_seconds(
         self, exchange: str | None = None, traffic_class: str = "public"
@@ -186,19 +199,11 @@ class EgressPool(EgressPoolBase):
         """Minimum seconds until any quarantine deadline expires.
 
         Args:
-            exchange: When set, only consider routes whose
-                ``allowed_exchanges`` is empty or contains this name.
-                Mirrors :meth:`has_available` — callers gating retry
-                wait on per-exchange release time MUST pass the
-                exchange so the deadline reflects an
-                exchange-eligible release, not a release for a
-                differently-pinned route.
-            traffic_class: ``"public"`` keeps the legacy exchange
-                allow-list policy. ``"private"`` considers only
-                direct routes and the configured private fallback
-                route, bypassing that fallback route's
-                ``allowed_exchanges``. Any other value is treated as
-                ``"public"``.
+            exchange: Exchange requesting the retry deadline. Any eligible
+                public VPN can end the wait.
+            traffic_class: Private considers enabled direct routes and the
+                configured private fallback. Public considers public VPN routes
+                and the dev direct route when enabled.
 
         Returns:
             ``None`` if no matching route is currently quarantined.
@@ -218,7 +223,7 @@ class EgressPool(EgressPoolBase):
                     for s in self._states.values()
                     if s.enabled
                     and s.quarantine_until is not None
-                    and (s.config.kind == "direct" or s.config.id == fallback_route_id)
+                    and (self._is_private_direct(s) or s.config.id == fallback_route_id)
                 ]
             else:
                 deadlines = [
@@ -226,7 +231,7 @@ class EgressPool(EgressPoolBase):
                     for s in self._states.values()
                     if s.enabled
                     and s.quarantine_until is not None
-                    and (exchange is None or self._exchange_allows_locked(s, exchange))
+                    and (self._is_public_vpn(s) or s is self._public_direct)
                 ]
         if not deadlines:
             return None
@@ -248,22 +253,13 @@ class EgressPool(EgressPoolBase):
     ) -> EgressReservation:
         """Pick the best route and return a borrowed handle.
 
-        Selection policy:
-
-        * If ``preferred_route`` is supplied AND that route is
-          available, pick it.
-        * Otherwise pick the lowest ``(priority, in_use_count)``
-          tuple among available routes.
-        * If no route is available:
-            - ``on_all_quarantined == "wait"`` (default): fall back
-              to the first enabled direct route (always exists per
-              ``EgressPoolConfig`` validation). The selection's
-              ``is_fallback`` flag is set so the patched
-              ``__get_reconnect_wait`` knows to translate this into
-              a single long sleep via
-              ``earliest_release_in_seconds()``.
-            - ``on_all_quarantined == "raise"``: raise
-              ``AllRoutesQuarantinedError``.
+        Public selection uses healthy VPN routes outside the private fallback.
+        A healthy preferred VPN
+        wins when allowed for the exchange. Otherwise allowed VPNs are ranked
+        by ``(priority, in_use_count)``. If none are available, rank any healthy
+        eligible VPN by the same rule and log the pin override. If no eligible
+        VPN is available, use the dev direct route when allowed and healthy.
+        Otherwise raise under either ``on_all_quarantined`` policy.
 
         Private selection policy:
 
@@ -275,13 +271,12 @@ class EgressPool(EgressPoolBase):
 
         Args:
             exchange: The exchange name used to filter routes by
-                ``RouteConfig.allowed_exchanges``. Routes with an
-                empty allow-list serve any exchange.
+                ``RouteConfig.allowed_exchanges`` when ranking public routes.
             purpose: ``"websocket"`` or ``"http"``; included in
                 route-exhaustion error messages.
             preferred_route: Optional route id hint.
-            traffic_class: ``"public"`` uses the legacy exchange
-                allow-list policy. ``"private"`` uses the direct
+            traffic_class: ``"public"`` uses public VPN routes and the opt-in dev fallback.
+                ``"private"`` uses the direct
                 then configured fallback policy. Any other value is
                 treated as ``"public"``.
             target_host: Parsed target hostname for read-only observability.
@@ -293,8 +288,8 @@ class EgressPool(EgressPoolBase):
             ``in_use_count`` already incremented.
 
         Raises:
-            AllRoutesQuarantinedError: When no route is available
-                and ``on_all_quarantined == "raise"``.
+            AllRoutesQuarantinedError: When the corresponding policy
+                provides no route.
         """
         now = datetime.now(UTC)
         effective_traffic_class: TrafficClass = (
@@ -304,22 +299,12 @@ class EgressPool(EgressPoolBase):
         normalized_host = normalize_egress_target_host(target_host)
         with self._lock:
             selection = self._pick_locked(preferred_route, exchange, now, effective_traffic_class)
-            if selection is None:
-                if self._config.on_all_quarantined == "raise":
-                    raise AllRoutesQuarantinedError(
-                        f"all egress routes quarantined "
-                        f"(exchange={exchange}, traffic_class={effective_traffic_class}, "
-                        f"purpose={purpose})"
-                    )
-                fallback = self._fallback_direct_locked()
-                if fallback is None:
-                    raise AllRoutesQuarantinedError(
-                        f"all egress routes quarantined and no direct "
-                        f"fallback available "
-                        f"(exchange={exchange}, traffic_class={effective_traffic_class}, "
-                        f"purpose={purpose})"
-                    )
-                selection = RouteSelection(state=fallback, is_fallback=True)
+            if effective_traffic_class == "public":
+                selection = self._complete_public_selection_locked(
+                    selection, exchange, purpose, now
+                )
+            elif selection is None:
+                selection = self._exhausted_private_selection_locked(exchange, purpose)
             selection.state.in_use_count += 1
             selection.state.last_pick_at = now
             route_config = selection.state.config
@@ -359,6 +344,78 @@ class EgressPool(EgressPoolBase):
             connection_kind=effective_connection_kind,
             target_host=normalized_host,
         )
+
+    def _begin_public_wait_locked(self, exchange: str) -> None:
+        """Start one wait episode per exchange, including concurrent callers."""
+        if exchange not in self._public_wait_started:
+            self._public_wait_started[exchange] = monotonic()
+            logger.warning("egress_pool: public VPN wait started exchange={}", exchange)
+
+    def _available_public_direct_locked(self, now: datetime) -> RouteState | None:
+        """Return the dedicated dev direct route when it can be used."""
+        direct = self._public_direct
+        if direct is not None and self._is_available_locked(direct, now):
+            return direct
+        return None
+
+    def _complete_public_selection_locked(
+        self,
+        vpn: RouteSelection | None,
+        exchange: str,
+        purpose: Literal["websocket", "http"],
+        now: datetime,
+    ) -> RouteSelection:
+        """Resolve public exhaustion and log the first direct reservation in an episode."""
+        if vpn is not None:
+            self._public_direct_episodes.discard(exchange)
+            self._finish_public_wait_locked(exchange)
+            return vpn
+        direct = self._available_public_direct_locked(now)
+        if direct is None:
+            self._begin_public_wait_locked(exchange)
+            raise AllRoutesQuarantinedError(
+                f"no public VPN route available (exchange={exchange}, purpose={purpose})"
+            )
+        self._finish_public_wait_locked(exchange)
+        if exchange not in self._public_direct_episodes:
+            self._public_direct_episodes.add(exchange)
+            logger.warning(
+                "egress_pool: public direct fallback exchange={} route_id={}. "
+                "public market data may leave from the host's own IP",
+                exchange,
+                direct.config.id,
+            )
+        return RouteSelection(state=direct, is_fallback=True)
+
+    def _finish_public_wait_locked(self, exchange: str) -> None:
+        """Record elapsed and cumulative wait seconds when a VPN becomes usable."""
+        started = self._public_wait_started.pop(exchange, None)
+        if started is None:
+            return
+        elapsed = monotonic() - started
+        total = self._public_wait_seconds.get(exchange, 0.0) + elapsed
+        self._public_wait_seconds[exchange] = total
+        logger.warning(
+            "egress_pool: public VPN wait ended exchange={} wait_seconds={} "
+            "public_vpn_wait_seconds_total={}",
+            exchange,
+            elapsed,
+            total,
+        )
+
+    def _exhausted_private_selection_locked(
+        self, exchange: str, purpose: Literal["websocket", "http"]
+    ) -> RouteSelection:
+        """Apply the private all-quarantined policy with the pool lock held."""
+        scope = f"(exchange={exchange}, traffic_class=private, purpose={purpose})"
+        if self._config.on_all_quarantined == "raise":
+            raise AllRoutesQuarantinedError(f"all egress routes quarantined {scope}")
+        fallback = self._fallback_direct_locked()
+        if fallback is None:
+            raise AllRoutesQuarantinedError(
+                f"all egress routes quarantined and no direct fallback available {scope}"
+            )
+        return RouteSelection(state=fallback, is_fallback=True)
 
     def reserve_private_direct(
         self,
@@ -586,11 +643,9 @@ class EgressPool(EgressPoolBase):
 
         The reason-specific timestamp markers are recorded only for the cause
         they name: ``http-429`` sets ``last_handshake_429_at`` and ``close-1015``
-        sets ``last_close_1015_at``. Connect- and proxy-level reasons
-        (``http-connect-error``, ``http-proxy-error``, ``ws-connect-error``)
-        only advance ``quarantine_until`` so a SOCKS or proxy failure is not
-        mis-reported to operators as a Cloudflare 1015 close; their cause is
-        carried by the quarantine log line.
+        sets ``last_close_1015_at``. Startup preflight, connect, and proxy
+        failures only advance ``quarantine_until``. The failure logs
+        carry the cause.
         """
         with self._lock:
             state = self._states.get(route_id)
@@ -789,36 +844,45 @@ class EgressPool(EgressPoolBase):
         now: datetime,
         traffic_class: TrafficClass,
     ) -> RouteSelection | None:
-        """Return the best available route for this exchange or None.
-
-        Filters by ``allowed_exchanges`` so routes pinned to specific
-        exchanges (e.g. ``["walutomat"]``) are skipped when the caller
-        is reserving for a different exchange. ``allowed_exchanges=()``
-        means the route serves any exchange (back-compatible default).
-        Private traffic bypasses this public policy and delegates to
-        :meth:`_pick_private_locked`.
-
-        Pool lock MUST be held.
-        """
+        """Pick a route with the pool lock held, preferring allowed VPNs for public."""
         if traffic_class == "private":
             return self._pick_private_locked(now)
-        if preferred_route is not None:
-            preferred = self._states.get(preferred_route)
-            if (
-                preferred is not None
-                and self._is_available_locked(preferred, now)
-                and self._exchange_allows_locked(preferred, exchange)
-            ):
-                return RouteSelection(state=preferred, is_fallback=False)
         available = [
-            s
-            for s in self._states.values()
-            if self._is_available_locked(s, now) and self._exchange_allows_locked(s, exchange)
+            state
+            for state in self._states.values()
+            if self._is_public_vpn(state) and self._is_available_locked(state, now)
         ]
         if not available:
             return None
-        available.sort(key=lambda s: (s.config.priority, s.in_use_count))
-        return RouteSelection(state=available[0], is_fallback=False)
+        preferred = next((state for state in available if state.config.id == preferred_route), None)
+        if preferred is not None and self._exchange_allows_locked(preferred, exchange):
+            return RouteSelection(state=preferred, is_fallback=False)
+        pick = min(
+            available,
+            key=lambda state: (
+                not self._exchange_allows_locked(state, exchange),
+                state.config.priority,
+                state.in_use_count,
+            ),
+        )
+        if not self._exchange_allows_locked(pick, exchange):
+            logger.warning(
+                "egress_pool: using unpinned public VPN route exchange={} route_id={}",
+                exchange,
+                pick.config.id,
+            )
+        return RouteSelection(state=pick, is_fallback=False)
+
+    def _is_public_vpn(self, state: RouteState) -> bool:
+        """Identify VPN routes eligible for public selection and retry timing."""
+        return (
+            state.config.kind == "socks5"
+            and state.config.id != self._config.private_fallback_route_id
+        )
+
+    def _is_private_direct(self, state: RouteState) -> bool:
+        """Identify configured direct routes, excluding the dedicated dev route."""
+        return state.config.kind == "direct" and state is not self._public_direct
 
     def _pick_private_locked(self, now: datetime) -> RouteSelection | None:
         """Return the private direct route or configured fallback route.
@@ -826,9 +890,7 @@ class EgressPool(EgressPoolBase):
         Private executor traffic is deliberately narrower than public
         routing: a healthy direct route wins regardless of priority, and
         the configured private fallback is considered only when direct is
-        unavailable. The fallback route's ``allowed_exchanges`` is ignored
-        because it may be publicly pinned to Walutomat while serving as the
-        private Kraken fallback.
+        unavailable. The private fallback ignores ``allowed_exchanges``.
 
         Args:
             now: Current UTC timestamp used for quarantine checks.
@@ -838,7 +900,7 @@ class EgressPool(EgressPoolBase):
             available.
         """
         for state in self._states.values():
-            if state.config.kind == "direct" and self._is_available_locked(state, now):
+            if self._is_private_direct(state) and self._is_available_locked(state, now):
                 return RouteSelection(state=state, is_fallback=False)
         fallback_route_id = self._config.private_fallback_route_id
         if fallback_route_id is None:
@@ -853,7 +915,7 @@ class EgressPool(EgressPoolBase):
         """Return True if ``state``'s ``allowed_exchanges`` permits ``exchange``.
 
         Empty ``allowed_exchanges`` (the back-compatible default) means
-        the route serves any exchange. Non-empty means strict allow-list.
+        the route serves any exchange. Non-empty means preferred exchanges.
 
         Pool lock MUST be held (called only from ``_pick_locked``).
         """
@@ -866,7 +928,7 @@ class EgressPool(EgressPoolBase):
         Pool lock MUST be held.
         """
         for state in self._states.values():
-            if state.enabled and state.config.kind == "direct":
+            if state.enabled and self._is_private_direct(state):
                 return state
         return None
 
@@ -882,7 +944,40 @@ identity is the source of truth read by ``get_egress_pool``.
 """
 
 
-def configure_egress_pool(config: EgressPoolConfig) -> EgressPool | None:
+_EMPTY_PUBLIC_POOL = EgressPool(EgressPoolConfig())
+"""Refuse public reservations and track waiting when no pool is configured."""
+
+_UNPOOLED_PUBLIC_HOLDER: list[EgressPool] = [_EMPTY_PUBLIC_POOL]
+"""Process-local public routing when there is no configured VPN pool."""
+
+
+def initialize_public_egress_policy(settings_service: SettingsService) -> bool:
+    """Load the dev-only opt-in independently of the configured VPN pool."""
+    allowed = settings_service.get_setting("public_direct_allowed") is True
+    _UNPOOLED_PUBLIC_HOLDER[0] = (
+        EgressPool(EgressPoolConfig(), public_direct_allowed=True)
+        if allowed
+        else _EMPTY_PUBLIC_POOL
+    )
+    if allowed:
+        logger.warning(
+            "egress_pool: dev-only public_direct_allowed=true. "
+            "public market data may leave from the host's own IP"
+        )
+    return allowed
+
+
+def public_egress_pool(pool: EgressPool | None) -> EgressPool:
+    """Resolve the configured pool or the process's unpooled public policy."""
+    return pool if pool is not None else _UNPOOLED_PUBLIC_HOLDER[0]
+
+
+def configure_egress_pool(
+    config: EgressPoolConfig,
+    *,
+    initial_quarantine_route_ids: Sequence[str] = (),
+    public_direct_allowed: bool = False,
+) -> EgressPool | None:
     """Install the module-level singleton from a validated config.
 
     Idempotent. If ``config.enabled is False``, clears the singleton
@@ -891,6 +986,9 @@ def configure_egress_pool(config: EgressPoolConfig) -> EgressPool | None:
 
     Args:
         config: The validated config to install.
+        initial_quarantine_route_ids: Enabled routes with transient preflight
+            failures. Their retry deadlines start when the pool is installed.
+        public_direct_allowed: Whether public traffic can use the dev fallback.
 
     Returns:
         The new ``EgressPool`` instance, or ``None`` when disabled.
@@ -899,7 +997,10 @@ def configure_egress_pool(config: EgressPoolConfig) -> EgressPool | None:
         _POOL_HOLDER[0] = None
         logger.info("egress_pool: disabled")
         return None
-    pool = EgressPool(config)
+    pool = EgressPool(config, public_direct_allowed=public_direct_allowed)
+    deadline = datetime.now(UTC) + timedelta(seconds=_PREFLIGHT_QUARANTINE_S)
+    for route_id in initial_quarantine_route_ids:
+        pool._quarantine_route(route_id, deadline, "preflight-connect-error")
     _POOL_HOLDER[0] = pool
     logger.info(
         "egress_pool: configured with {} route(s), on_all_quarantined={}",
@@ -924,6 +1025,7 @@ def get_egress_pool() -> EgressPool | None:
 def reset_egress_pool() -> None:
     """Clear the singleton. Test fixture only."""
     _POOL_HOLDER[0] = None
+    _UNPOOLED_PUBLIC_HOLDER[0] = _EMPTY_PUBLIC_POOL
     _PYTHON_SOCKS_WARNING_LOGGED[0] = False
 
 
@@ -932,39 +1034,20 @@ async def initialize_egress_pool(
 ) -> EgressPool | None:
     """Async preflight + configure the pool from the ``egress_pool`` setting.
 
-    Invoked from the FastAPI lifespan AFTER ``_initialize_settings_service``
-    and BEFORE publishers come up. The preflight runs DNS lookups
-    and SOCKS5 listener probes asynchronously so the event loop is
-    not blocked.
-
-    The preflight:
-
-    1. Reads the setting from the sync cache via
-       ``settings_service.get_setting("egress_pool")``.
-    2. Parses ``dict | str | None`` defensively (``JsonValue`` may be
-       either depending on how the row was loaded).
-    3. Validates via ``EgressPoolConfig.model_validate``. On any
-       parse or validation error, logs + returns ``None``
-       (disabled-equivalent).
-    4. Checks ``importlib.util.find_spec("python_socks")``; when
-       missing AND any SOCKS5 route is present, those routes are
-       auto-disabled with a single throttled warning.
-    5. For each SOCKS5 route, awaits
-       ``loop.getaddrinfo(host, None)`` and opens a short
-       TCP/SOCKS5 NO_AUTH greeting probe. Routes that fail DNS, have
-       no ``proxy_url`` or port, or fail the greeting are
-       auto-disabled in the effective config copy.
-    6. Calls ``configure_egress_pool(effective_config)`` to install
-       the singleton.
+    Validate the cached setting and probe SOCKS5 routes asynchronously.
+    Missing dependencies and unusable proxy URLs disable affected routes.
+    DNS, TCP, and SOCKS5 greeting failures seed an initial quarantine so
+    callers can retry after the deadline using the installed pool.
 
     Args:
         settings_service: The initialized ``SettingsService`` whose
             cache holds the ``egress_pool`` setting.
 
     Returns:
-        The new ``EgressPool`` instance, or ``None`` if disabled /
-        malformed / preflight reduced the config to a no-op.
+        The new ``EgressPool`` instance, or ``None`` for an absent, invalid,
+        or disabled setting.
     """
+    public_direct_allowed = initialize_public_egress_policy(settings_service)
     raw = settings_service.get_setting("egress_pool")
     if raw is None:
         logger.info("egress_pool: setting not present — disabled")
@@ -980,23 +1063,21 @@ async def initialize_egress_pool(
             exc,
         )
         return None
-    effective = await _preflight_routes(config)
-    return configure_egress_pool(effective)
+    effective, quarantine_route_ids = await _preflight_routes(config)
+    return configure_egress_pool(
+        effective,
+        initial_quarantine_route_ids=quarantine_route_ids,
+        public_direct_allowed=public_direct_allowed,
+    )
 
 
 async def safely_initialize_egress_pool(settings_service: SettingsService) -> None:
     """Run the egress-pool preflight without crashing the caller on failure.
 
-    Reads the ``egress_pool`` setting, validates the schema, resolves SOCKS5
-    DNS, verifies SOCKS5 listener handshakes, and installs the process-local
-    singleton. Errors (malformed JSON, Pydantic mismatch, DNS timeouts,
-    listener failures) are logged but never propagate — the pool is
-    best-effort infrastructure. This is called once per process during
-    startup (the singleton is empty beforehand), so on failure the pool stays
-    empty and the connect shim falls back to the direct path; it does not reset
-    a previously-installed pool, so it is not safe for hot-reload as written.
-    Shared by the API lifespan and the feed publisher startup so both processes
-    initialize identically.
+    The API lifespan and publisher startup call this once per process.
+    The normal initializer handles configuration errors and transient
+    connectivity failures. This wrapper logs unexpected failures and
+    preserves a previously installed pool.
 
     Args:
         settings_service: Initialized SettingsService whose cache holds the
@@ -1008,9 +1089,7 @@ async def safely_initialize_egress_pool(settings_service: SettingsService) -> No
     try:
         await initialize_egress_pool(settings_service)
     except Exception:
-        logger.exception(
-            "egress_pool: preflight failed; pool disabled and callers fall back to direct egress"
-        )
+        logger.exception("egress_pool: preflight failed; no VPN routes installed")
 
 
 def _parse_egress_pool_setting(
@@ -1044,21 +1123,8 @@ def _parse_egress_pool_setting(
     return None
 
 
-async def _preflight_routes(config: EgressPoolConfig) -> EgressPoolConfig:
-    """Validate SOCKS5 routes asynchronously and return an effective config.
-
-    Per-route checks:
-
-    * If the route is SOCKS5 and ``python-socks`` is missing, disable.
-    * If the route is SOCKS5 and DNS resolution of the proxy host
-      fails, disable.
-    * If the route is SOCKS5 and its listener does not complete the
-      SOCKS5 NO_AUTH greeting, disable.
-
-    Returns a NEW config object (does not mutate the input) with
-    ``RouteConfig.enabled`` overridden to ``False`` on routes that
-    failed preflight.
-    """
+async def _preflight_routes(config: EgressPoolConfig) -> tuple[EgressPoolConfig, list[str]]:
+    """Return the effective config and route IDs with transient preflight failures."""
     python_socks_ok = importlib.util.find_spec("python_socks") is not None
     if not python_socks_ok and not _PYTHON_SOCKS_WARNING_LOGGED[0]:
         any_socks = any(r.kind == "socks5" for r in config.routes)
@@ -1068,20 +1134,27 @@ async def _preflight_routes(config: EgressPoolConfig) -> EgressPoolConfig:
             )
             _PYTHON_SOCKS_WARNING_LOGGED[0] = True
     new_routes: list[RouteConfig] = []
+    quarantine_route_ids: list[str] = []
     loop = asyncio.get_running_loop()
     for route in config.routes:
-        new_route = await _preflight_one_route(loop, route, python_socks_ok)
+        disposition = await _preflight_one_route(loop, route, python_socks_ok)
+        new_route = route
+        if disposition == "disable":
+            new_route = route.model_copy(update={"enabled": False})
+        elif disposition == "quarantine":
+            quarantine_route_ids.append(route.id)
         new_routes.append(new_route)
-    return EgressPoolConfig(
+    effective = EgressPoolConfig(
         enabled=config.enabled,
         on_all_quarantined=config.on_all_quarantined,
         private_fallback_route_id=config.private_fallback_route_id,
         routes=new_routes,
     )
+    return effective, quarantine_route_ids
 
 
 _SOCKS5_PROBE_TIMEOUT_S: Final[float] = 2.0
-"""Per-route TCP+SOCKS5 probe timeout used during startup preflight."""
+"""Timeout for each DNS, TCP, and SOCKS5 preflight operation."""
 
 _SOCKS5_PROBE_GREETING: Final[bytes] = b"\x05\x01\x00"
 """SOCKS5 greeting: version=5, nmethods=1, methods=[NO_AUTH]."""
@@ -1094,53 +1167,42 @@ async def _preflight_one_route(
     loop: asyncio.AbstractEventLoop,
     route: RouteConfig,
     python_socks_ok: bool,
-) -> RouteConfig:
-    """Run async DNS + python-socks + SOCKS5-greeting checks for one route.
-
-    The SOCKS5 greeting probe catches absent or broken tunnel
-    listeners at startup before the first publisher dial or reconnect
-    cycle has to discover and quarantine the route.
-
-    Returns a new ``RouteConfig`` with ``enabled=False`` if the route
-    failed preflight; otherwise the input route (frozen Pydantic
-    model — return identity is safe).
-    """
+) -> _PreflightDisposition:
+    """Classify one route as unchanged, permanently disabled, or retryable."""
     if route.kind == "direct":
-        return route
+        return "keep"
     if not route.enabled:
-        return route
+        return "keep"
     if not python_socks_ok:
-        return route.model_copy(update={"enabled": False})
+        return "disable"
     if route.proxy_url is None:
-        return route.model_copy(update={"enabled": False})
+        return "disable"
     host = _extract_proxy_host(route.proxy_url)
     if host is None:
         logger.warning(
             "egress_pool: route '{}' proxy_url has no parseable host — auto-disabling",
             route.id,
         )
-        return route.model_copy(update={"enabled": False})
+        return "disable"
     port = _extract_proxy_port(route.proxy_url)
     if port is None:
         logger.warning(
             "egress_pool: route '{}' proxy_url has no parseable port — auto-disabling",
             route.id,
         )
-        return route.model_copy(update={"enabled": False})
+        return "disable"
     try:
-        await loop.getaddrinfo(host, None)
+        await asyncio.wait_for(loop.getaddrinfo(host, None), timeout=_SOCKS5_PROBE_TIMEOUT_S)
     except OSError as exc:
         logger.warning(
-            "egress_pool: route '{}' DNS lookup of {} failed — auto-disabling. error={}",
+            "egress_pool: route '{}' DNS lookup of {} failed — quarantining. error={}",
             route.id,
             host,
             exc,
         )
-        return route.model_copy(update={"enabled": False})
+        return "quarantine"
     socks5_reachable = await _probe_socks5_greeting(host, port, route.id)
-    if not socks5_reachable:
-        return route.model_copy(update={"enabled": False})
-    return route
+    return "keep" if socks5_reachable else "quarantine"
 
 
 async def _probe_socks5_greeting(host: str, port: int, route_id: str) -> bool:
@@ -1163,8 +1225,7 @@ async def _probe_socks5_greeting(host: str, port: int, route_id: str) -> bool:
         )
     except OSError as exc:
         logger.warning(
-            "egress_pool: route '{}' SOCKS5 listener unreachable at {}:{} "
-            "— auto-disabling. error={}",
+            "egress_pool: route '{}' SOCKS5 listener unreachable at {}:{} — quarantining. error={}",
             route_id,
             host,
             port,
@@ -1172,14 +1233,13 @@ async def _probe_socks5_greeting(host: str, port: int, route_id: str) -> bool:
         )
         return False
     try:
-        writer.write(_SOCKS5_PROBE_GREETING)
         try:
+            writer.write(_SOCKS5_PROBE_GREETING)
             await asyncio.wait_for(writer.drain(), timeout=_SOCKS5_PROBE_TIMEOUT_S)
             reply = await asyncio.wait_for(reader.readexactly(2), timeout=_SOCKS5_PROBE_TIMEOUT_S)
         except (OSError, asyncio.IncompleteReadError) as exc:
             logger.warning(
-                "egress_pool: route '{}' SOCKS5 greeting failed at {}:{} "
-                "— auto-disabling. error={}",
+                "egress_pool: route '{}' SOCKS5 greeting failed at {}:{} — quarantining. error={}",
                 route_id,
                 host,
                 port,
@@ -1189,7 +1249,7 @@ async def _probe_socks5_greeting(host: str, port: int, route_id: str) -> bool:
         if reply != _SOCKS5_PROBE_EXPECTED_REPLY:
             logger.warning(
                 "egress_pool: route '{}' SOCKS5 listener at {}:{} returned "
-                "unexpected greeting {!r} — auto-disabling",
+                "unexpected greeting {!r} — quarantining",
                 route_id,
                 host,
                 port,

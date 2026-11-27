@@ -28,6 +28,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
 from snapper.infrastructure.market_data.base import MarketSnapshotUpdaterService
+from snapper.infrastructure.market_data.base import run_public_snapshot_with_egress
 from snapper.infrastructure.symbols.functions import get_available_kraken_equities_symbols
 from snapper.utils.logging import set_log_context
 
@@ -262,7 +263,7 @@ def run_kraken_equities_snapshot_update() -> None:
     async snapshot collection.
     """
     set_log_context("snap:kraken_equities")
-    asyncio.run(_async_update_snapshots())
+    asyncio.run(run_public_snapshot_with_egress(EXCHANGE_NAME, _async_update_snapshots))
 
 
 async def _async_update_snapshots() -> None:

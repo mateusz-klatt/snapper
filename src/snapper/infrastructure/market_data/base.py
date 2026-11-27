@@ -13,18 +13,28 @@ The updater services are responsible for:
 
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Awaitable
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
 from loguru import logger
 from sqlalchemy import select
 
+from snapper.config.settings import get_settings
+from snapper.config.settings import get_settings_service
 from snapper.data.models import Instrument
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Symbol
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import begin_scd2_write_sync
 from snapper.data.repository import close_and_insert_sync
+from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
+from snapper.infrastructure.network.egress_context import egress_identity
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
+from snapper.infrastructure.network.egress_pool import initialize_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
+from snapper.infrastructure.network.egress_pool import reset_egress_pool
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 
@@ -225,3 +235,25 @@ class MarketSnapshotUpdaterService(ABC):
         logger.info(f"Starting {self.__class__.__name__}...")
         count = await self.update_market_snapshots()
         logger.info(f"{self.__class__.__name__} completed - updated {count} snapshots")
+
+
+async def run_public_snapshot_with_egress(
+    exchange: str, update: Callable[[], Awaitable[None]]
+) -> None:
+    """Run a one-shot snapshot with the process-local public egress policy."""
+    settings = get_settings()
+    service = await get_settings_service(settings.db_url, settings.zmq_broker_xsub)
+    try:
+        pool = public_egress_pool(await initialize_egress_pool(service))
+        if not pool.has_available(exchange=exchange, traffic_class="public"):
+            raise AllRoutesQuarantinedError(
+                f"no public VPN route available (exchange={exchange}, purpose=snapshot)"
+            )
+        apply_kraken_ws_teardown_hardening()
+        with egress_identity(
+            exchange=exchange, traffic_class="public", owner="cli", operation="snapshot"
+        ):
+            await update()
+    finally:
+        reset_egress_pool()
+        await service.shutdown()
