@@ -12,6 +12,7 @@ are mocked or swapped in per test.
 
 import asyncio
 import errno
+import inspect
 import socket
 from collections.abc import AsyncGenerator
 from collections.abc import Callable
@@ -29,6 +30,7 @@ from aioapns.common import NotificationResult
 from aioapns.exceptions import MaxAttemptsExceeded
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 
 from snapper.application.notify.apns_client import ApnsSendResult
 from snapper.application.notify.apns_client import _map_result
@@ -43,6 +45,7 @@ from snapper.application.notify.sidecar import _build_apns_payload
 from snapper.application.notify.sidecar import _DeliveryTarget
 from snapper.application.notify.sidecar import _expired_error_reason
 from snapper.application.notify.sidecar import _format_exception_reason
+from snapper.application.notify.sidecar import _is_pg_serialization_failure
 from snapper.application.notify.sidecar import _OutageDelay
 from snapper.application.notify.sidecar import _PrefetchedBatchCaches
 from snapper.application.notify.sidecar import _priority_to_apns
@@ -57,7 +60,11 @@ from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
+from snapper.data.repository_types import ApnsAdmissionCharge
 from snapper.data.repository_types import ApnsAdmissionContext
+from snapper.data.repository_types import ApnsAdmissionRefusal
+from snapper.data.repository_types import ApnsAdmissionRequest
+from snapper.data.repository_types import ApnsAdmissionResult
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import NotificationDeviceUpsertRow
 from snapper.data.repository_types import UserAlertDefaultUpsertRow
@@ -3850,17 +3857,19 @@ class TestReviewRegressionFixes:
 
 
 class TestQueuedAdmissionRecheckAndPrefetch:
-    """Pre-send admission rechecks, retry-loop policy enforcement, fallbacks, and FCM skip."""
+    """Atomic queued admission, retry-loop policy enforcement, fallbacks, and FCM skip."""
 
     @pytest.mark.asyncio
-    async def test_pre_send_recheck_blocks_deactivated_device_between_routing_and_send(
-        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    async def test_atomic_admission_blocks_deactivated_device_without_charging(
+        self, repo: SQLAlchemyRepository
     ) -> None:
-        """Deactivating a device after pre-routing stops send and marks unregistered.
+        """Deactivating a device during scope lookup stops send without charging.
 
-        Given: A queued APNs delivery whose device is active during pre-routing.
-        When: The device is deactivated immediately after ``begin_delivery_attempt``.
-        Then: ``apns.send`` is never called and the delivery becomes ``unregistered``.
+        Given: A queued APNs delivery whose device is active initially.
+        When: The device is deactivated during ``should_skip_send`` before
+            ``admit_and_charge_apns_delivery`` runs.
+        Then: ``apns.send`` is never called, the delivery becomes ``unregistered``,
+            and ``attempt_count`` stays 0.
         """
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
@@ -3873,31 +3882,23 @@ class TestQueuedAdmissionRecheckAndPrefetch:
             user_public_id=user,
         )
         sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
-        original_bump = repo.begin_delivery_attempt
 
-        async def _deactivate_after_bump(
-            public_id: str,
-            *,
-            transition_at: datetime,
-            session_id: str,
-            sequence_id: int,
-        ) -> int | None:
-            count = await original_bump(
-                public_id,
-                transition_at=transition_at,
-                session_id=session_id,
-                sequence_id=sequence_id,
-            )
+        async def _deactivate_during_scope(
+            _event: AlertEventRow, _repo: Repository, _now: datetime
+        ) -> bool:
             await repo.deactivate_notification_device_scd2(
                 device_pid,
                 reason="user_unregistered",
                 timestamp=_ts(1),
-                session_id="revoke-mid-attempt",
+                session_id="revoke-during-scope",
                 sequence_id=99,
             )
-            return count
+            return False
 
-        monkeypatch.setattr(repo, "begin_delivery_attempt", _deactivate_after_bump)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.should_skip_send = AsyncMock(
+            side_effect=_deactivate_during_scope
+        )
         row = await repo.get_delivery_by_public_id(delivery_pid)
         assert row is not None
 
@@ -3907,18 +3908,18 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         final_row = await repo.get_delivery_by_public_id(delivery_pid)
         assert final_row is not None
         assert final_row["status"] == "unregistered"
-        assert final_row["attempt_count"] == 1
+        assert final_row["attempt_count"] == 0
 
     @pytest.mark.asyncio
-    async def test_pre_send_recheck_blocks_disabled_prefs_between_routing_and_send(
-        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    async def test_atomic_admission_blocks_opt_out_during_scope_lookup_without_charging(
+        self, repo: SQLAlchemyRepository
     ) -> None:
-        """Disabling alert prefs after pre-routing stops send and cancels scope.
+        """Opt-out landing during scope lookup cancels as ``routing_suppressed`` uncharged.
 
-        Given: A queued APNs delivery admitted by pre-routing preferences.
-        When: A device preference disables the alert type right after ``begin_delivery_attempt``.
+        Given: A queued APNs delivery initially permitted by routing preferences.
+        When: A device preference disables the alert type while ``should_skip_send`` awaits.
         Then: ``apns.send`` is not called and the delivery becomes ``cancelled_scope``
-            with reason ``routing_suppressed``.
+            with reason ``routing_suppressed`` and ``attempt_count == 0``.
         """
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
@@ -3931,24 +3932,13 @@ class TestQueuedAdmissionRecheckAndPrefetch:
             user_public_id=user,
         )
         sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
-        original_bump = repo.begin_delivery_attempt
 
-        async def _disable_pref_after_bump(
-            public_id: str,
-            *,
-            transition_at: datetime,
-            session_id: str,
-            sequence_id: int,
-        ) -> int | None:
-            count = await original_bump(
-                public_id,
-                transition_at=transition_at,
-                session_id=session_id,
-                sequence_id=sequence_id,
-            )
+        async def _opt_out_during_scope(
+            _event: AlertEventRow, _repo: Repository, _now: datetime
+        ) -> bool:
             await repo.upsert_device_alert_pref(
                 DeviceAlertPrefUpsertRow(
-                    session_id="pref-mid-attempt",
+                    session_id="pref-during-scope",
                     sequence_id=99,
                     timestamp=_ts(1),
                     device_public_id=device_pid,
@@ -3956,9 +3946,10 @@ class TestQueuedAdmissionRecheckAndPrefetch:
                     enabled=False,
                 )
             )
-            return count
+            return False
 
-        monkeypatch.setattr(repo, "begin_delivery_attempt", _disable_pref_after_bump)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.should_skip_send = AsyncMock(side_effect=_opt_out_during_scope)
         row = await repo.get_delivery_by_public_id(delivery_pid)
         assert row is not None
 
@@ -3969,18 +3960,18 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         assert final_row is not None
         assert final_row["status"] == "cancelled_scope"
         assert final_row["error_reason"] == "routing_suppressed"
-        assert final_row["attempt_count"] == 1
+        assert final_row["attempt_count"] == 0
 
     @pytest.mark.asyncio
-    async def test_pre_send_recheck_blocks_push_beta_exclusion_at_send_time(
-        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    async def test_atomic_admission_blocks_push_beta_exclusion_without_charging(
+        self, repo: SQLAlchemyRepository
     ) -> None:
-        """Excluding the user from push-beta before send cancels without sending.
+        """Excluding the user from push-beta before atomic admission cancels uncharged.
 
-        Given: A queued APNs delivery initially admitted by the active push-beta gate.
-        When: Push-beta removes the user after ``begin_delivery_attempt`` commits.
+        Given: A queued APNs delivery initially inside the active push-beta gate.
+        When: Push-beta removes the user during ``should_skip_send`` before admission runs.
         Then: ``apns.send`` is not called and the delivery becomes ``cancelled_scope``
-            with reason ``routing_suppressed``.
+            with reason ``routing_suppressed`` and ``attempt_count == 0``.
         """
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
@@ -3995,26 +3986,16 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         beta = PushBetaConfig(enabled=True, user_public_ids=(user,))
         sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
         sidecar._push_beta_provider = lambda: beta
-        original_bump = repo.begin_delivery_attempt
 
-        async def _exclude_user_after_bump(
-            public_id: str,
-            *,
-            transition_at: datetime,
-            session_id: str,
-            sequence_id: int,
-        ) -> int | None:
+        async def _exclude_during_scope(
+            _event: AlertEventRow, _repo: Repository, _now: datetime
+        ) -> bool:
             nonlocal beta
-            count = await original_bump(
-                public_id,
-                transition_at=transition_at,
-                session_id=session_id,
-                sequence_id=sequence_id,
-            )
             beta = PushBetaConfig(enabled=True, user_public_ids=())
-            return count
+            return False
 
-        monkeypatch.setattr(repo, "begin_delivery_attempt", _exclude_user_after_bump)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.should_skip_send = AsyncMock(side_effect=_exclude_during_scope)
         row = await repo.get_delivery_by_public_id(delivery_pid)
         assert row is not None
 
@@ -4025,19 +4006,21 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         assert final_row is not None
         assert final_row["status"] == "cancelled_scope"
         assert final_row["error_reason"] == "routing_suppressed"
-        assert final_row["attempt_count"] == 1
+        assert final_row["attempt_count"] == 0
 
     @pytest.mark.asyncio
-    async def test_queued_apns_happy_path_sends_once_using_single_read_admission(
+    async def test_queued_apns_happy_path_sends_once_via_atomic_admission(
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Queued APNs happy path sends once via single-session admission reads.
+        """Queued APNs happy path sends once via one atomic admission-and-charge call.
 
-        Given: A queued APNs delivery with an active device and eligible preferences.
+        Given: A queued APNs delivery with an active device, eligible preferences,
+            and an active push-beta allowlist including the user.
         When: ``_attempt_on_queued_row`` runs.
-        Then: ``apns.send`` is awaited once, status becomes ``sent``,
-            ``get_apns_admission_context`` performs both checks (pre-routing and pre-send),
-            and legacy three-call user listing methods are never awaited.
+        Then: ``apns.send`` is awaited once, status becomes ``sent`` with
+            ``attempt_count == 1``, ``admit_and_charge_apns_delivery`` runs once,
+            and neither ``get_apns_admission_context``, ``begin_delivery_attempt``,
+            nor legacy user listing methods are awaited.
         """
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
@@ -4050,11 +4033,16 @@ class TestQueuedAdmissionRecheckAndPrefetch:
             user_public_id=user,
         )
         sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
-        admission_spy = AsyncMock(wraps=repo.get_apns_admission_context)
+        sidecar._push_beta_provider = lambda: PushBetaConfig(enabled=True, user_public_ids=(user,))
+        atomic_spy = AsyncMock(wraps=repo.admit_and_charge_apns_delivery)
+        context_spy = AsyncMock(side_effect=AssertionError("unexpected get_apns_admission_context"))
+        bump_spy = AsyncMock(side_effect=AssertionError("unexpected begin_delivery_attempt"))
         legacy_devices = AsyncMock(side_effect=AssertionError("unexpected legacy devices read"))
         legacy_prefs = AsyncMock(side_effect=AssertionError("unexpected legacy prefs read"))
         legacy_defaults = AsyncMock(side_effect=AssertionError("unexpected legacy defaults read"))
-        monkeypatch.setattr(repo, "get_apns_admission_context", admission_spy)
+        monkeypatch.setattr(repo, "admit_and_charge_apns_delivery", atomic_spy)
+        monkeypatch.setattr(repo, "get_apns_admission_context", context_spy)
+        monkeypatch.setattr(repo, "begin_delivery_attempt", bump_spy)
         monkeypatch.setattr(repo, "list_active_notification_devices_for_user", legacy_devices)
         monkeypatch.setattr(repo, "list_device_alert_prefs_for_user", legacy_prefs)
         monkeypatch.setattr(repo, "list_user_alert_defaults", legacy_defaults)
@@ -4064,7 +4052,9 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         await sidecar._attempt_on_queued_row(row, _ts(1))
 
         apns.send.assert_awaited_once()
-        assert admission_spy.await_count == 2
+        assert atomic_spy.await_count == 1
+        context_spy.assert_not_awaited()
+        bump_spy.assert_not_awaited()
         legacy_devices.assert_not_awaited()
         legacy_prefs.assert_not_awaited()
         legacy_defaults.assert_not_awaited()
@@ -4372,15 +4362,15 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         langs_spy.assert_awaited_once_with(["user-apns"])
 
     @pytest.mark.asyncio
-    async def test_pre_send_deadline_crossing_during_admission_read_expires_without_send(
+    async def test_deadline_crossing_after_atomic_charge_expires_without_send(
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A deadline passing during pre-send admission recheck expires instead of sending.
+        """A deadline passing after atomic admission-and-charge expires instead of sending.
 
         Given: A queued APNs delivery whose ``expires_at`` is ``_ts(5)`` and a clock
             initially at ``_ts(4)``.
-        When: The injected clock advances to ``_ts(6)`` inside the pre-send admission
-            recheck read after ``begin_delivery_attempt``.
+        When: ``admit_and_charge_apns_delivery`` commits attempt 1 at ``_ts(4)`` and
+            the clock advances to ``_ts(6)`` before the final deadline check.
         Then: ``apns.send`` is not called and the delivery fails as expired with
             ``attempt_count == 1``.
         """
@@ -4403,25 +4393,22 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         )
         current_now = _ts(4)
         sidecar, apns = _make_sidecar(repo, clock=lambda: current_now)
-        original_get_context = repo.get_apns_admission_context
-        admission_calls = 0
+        original_admit = repo.admit_and_charge_apns_delivery
 
-        async def _advance_clock_on_recheck(
-            user_public_id: str, device_public_id: str
-        ) -> ApnsAdmissionContext:
-            nonlocal admission_calls, current_now
-            admission_calls += 1
-            if admission_calls == 2:
-                current_now = _ts(6)
-            return await original_get_context(user_public_id, device_public_id)
+        async def _advance_clock_after_charge(
+            request: ApnsAdmissionRequest,
+        ) -> ApnsAdmissionResult:
+            nonlocal current_now
+            outcome = await original_admit(request)
+            current_now = _ts(6)
+            return outcome
 
-        monkeypatch.setattr(repo, "get_apns_admission_context", _advance_clock_on_recheck)
+        monkeypatch.setattr(repo, "admit_and_charge_apns_delivery", _advance_clock_after_charge)
         row = await repo.get_delivery_by_public_id(delivery_pid)
         assert row is not None
 
         await sidecar._attempt_on_queued_row(row, _ts(4))
 
-        assert admission_calls == 2
         apns.send.assert_not_awaited()
         final_row = await repo.get_delivery_by_public_id(delivery_pid)
         assert final_row is not None
@@ -4431,15 +4418,16 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         assert final_row["timestamp"] == _ts(6)
 
     @pytest.mark.asyncio
-    async def test_pre_send_scope_revocation_during_admission_read_cancels_without_send(
-        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    async def test_user_deactivated_cancel_before_charge_stops_without_send(
+        self, repo: SQLAlchemyRepository
     ) -> None:
-        """Scope revocation happening during pre-send admission recheck cancels without sending.
+        """A ``user_deactivated`` cancellation landing before charge prevents sending.
 
-        Given: A queued APNs delivery whose scope is valid at pre-routing and attempt bump.
-        When: The scope is revoked while the post-bump admission recheck read executes.
-        Then: The subsequent ``should_skip_send`` check cancels the delivery as
-            ``cancelled_scope`` with ``scope_revoked`` and never invokes ``apns.send``.
+        Given: A queued APNs delivery active when scope lookup starts.
+        When: ``cancel_pending_deliveries_for_user`` cancels the delivery while
+            ``should_skip_send`` awaits before ``admit_and_charge_apns_delivery``.
+        Then: Atomic admission refuses ``not_queued``, logs at INFO, never calls
+            ``apns.send``, and leaves the row ``cancelled_scope`` with ``attempt_count == 0``.
         """
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)
@@ -4452,54 +4440,105 @@ class TestQueuedAdmissionRecheckAndPrefetch:
             user_public_id=user,
         )
         sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
-        revoked = False
-        scope_calls = 0
-        admission_calls = 0
 
-        async def _should_skip_send(
+        async def _deactivate_during_scope(
             _event: AlertEventRow, _repo: Repository, _now: datetime
         ) -> bool:
-            nonlocal scope_calls
-            scope_calls += 1
-            return revoked
+            await repo.cancel_pending_deliveries_for_user(
+                user,
+                transition_at=_ts(1),
+                session_id="admin-deact",
+                sequence_id=99,
+            )
+            return False
 
         sidecar._scope_revalidator = MagicMock()
-        sidecar._scope_revalidator.should_skip_send = AsyncMock(side_effect=_should_skip_send)
-        original_get_context = repo.get_apns_admission_context
-
-        async def _revoke_scope_on_recheck(
-            user_public_id: str, device_public_id: str
-        ) -> ApnsAdmissionContext:
-            nonlocal admission_calls, revoked
-            admission_calls += 1
-            if admission_calls == 2:
-                revoked = True
-            return await original_get_context(user_public_id, device_public_id)
-
-        monkeypatch.setattr(repo, "get_apns_admission_context", _revoke_scope_on_recheck)
+        sidecar._scope_revalidator.should_skip_send = AsyncMock(
+            side_effect=_deactivate_during_scope
+        )
         row = await repo.get_delivery_by_public_id(delivery_pid)
         assert row is not None
+        info_logs: list[str] = []
+        handler_id = logger.add(info_logs.append, level="INFO")
+        try:
+            await sidecar._attempt_on_queued_row(row, _ts(1))
+        finally:
+            logger.remove(handler_id)
 
-        await sidecar._attempt_on_queued_row(row, _ts(1))
-
-        assert admission_calls == 2
-        assert scope_calls == 2
         apns.send.assert_not_awaited()
+        assert any("no longer queued at admission time" in msg for msg in info_logs)
         final_row = await repo.get_delivery_by_public_id(delivery_pid)
         assert final_row is not None
         assert final_row["status"] == "cancelled_scope"
-        assert final_row["error_reason"] == "scope_revoked"
-        assert final_row["attempt_count"] == 1
+        assert final_row["error_reason"] == "user_deactivated"
+        assert final_row["attempt_count"] == 0
 
     @pytest.mark.asyncio
-    async def test_pre_send_recheck_uses_refreshed_device_token_and_env(
+    async def test_repository_exception_during_atomic_admission_leaves_row_queued_uncharged(
         self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Device token/env refreshed before pre-send recheck is used on the APNs send.
+        """A repository error during atomic admission logs a warning and preserves queue state.
+
+        Given: A queued APNs delivery at ``attempt_count == 1`` with ``next_attempt_at=_ts(2)``.
+        When: ``admit_and_charge_apns_delivery`` raises a transient exception.
+        Then: The sidecar logs a warning, returns without raising or sending, and leaves
+            the row ``queued`` with unchanged ``attempt_count`` and ``next_attempt_at``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="seed",
+                sequence_id=2,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                attempt_count=1,
+                next_attempt_at=_ts(2),
+                expires_at=_ts(60),
+                created_at=_ts(0),
+            )
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(3))
+        monkeypatch.setattr(
+            repo,
+            "admit_and_charge_apns_delivery",
+            AsyncMock(side_effect=RuntimeError("pg serialization failure")),
+        )
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+        warnings: list[str] = []
+        info_logs: list[str] = []
+        info_id = logger.add(info_logs.append, level="INFO")
+        handler_id = logger.add(warnings.append, level="WARNING")
+        try:
+            await sidecar._attempt_on_queued_row(row, _ts(3))
+        finally:
+            logger.remove(info_id)
+            logger.remove(handler_id)
+
+        apns.send.assert_not_awaited()
+        assert any("queued APNs admission failed" in msg for msg in warnings)
+        assert not any("serialized out" in msg for msg in info_logs)
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "queued"
+        assert final_row["attempt_count"] == 1
+        assert final_row["next_attempt_at"] == _ts(2)
+
+    @pytest.mark.asyncio
+    async def test_atomic_admission_uses_refreshed_device_token_and_env(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Device token/env refreshed before atomic admission is used on the APNs send.
 
         Given: A queued APNs delivery targeting an active sandbox device with token ``a*64``.
         When: The device's active SCD2 row is refreshed with token ``b*64`` and env ``prod``
-            between pre-allocation admission and the pre-send admission recheck.
+            during ``should_skip_send`` before ``admit_and_charge_apns_delivery`` runs.
         Then: ``apns.send`` is awaited once with ``device_token='b'*64`` and ``env='prod'``
             and the delivery transitions to ``sent``.
         """
@@ -4514,21 +4553,10 @@ class TestQueuedAdmissionRecheckAndPrefetch:
             user_public_id=user,
         )
         sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
-        original_bump = repo.begin_delivery_attempt
 
-        async def _refresh_device_after_bump(
-            public_id: str,
-            *,
-            transition_at: datetime,
-            session_id: str,
-            sequence_id: int,
-        ) -> int | None:
-            count = await original_bump(
-                public_id,
-                transition_at=transition_at,
-                session_id=session_id,
-                sequence_id=sequence_id,
-            )
+        async def _refresh_device_during_scope(
+            _event: AlertEventRow, _repo: Repository, _now: datetime
+        ) -> bool:
             async with repo.session() as s:
                 existing = (
                     await s.execute(
@@ -4559,9 +4587,12 @@ class TestQueuedAdmissionRecheckAndPrefetch:
                     )
                 )
                 await s.commit()
-            return count
+            return False
 
-        monkeypatch.setattr(repo, "begin_delivery_attempt", _refresh_device_after_bump)
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.should_skip_send = AsyncMock(
+            side_effect=_refresh_device_during_scope
+        )
         row = await repo.get_delivery_by_public_id(delivery_pid)
         assert row is not None
 
@@ -4574,3 +4605,316 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         final_row = await repo.get_delivery_by_public_id(delivery_pid)
         assert final_row is not None
         assert final_row["status"] == "sent"
+
+    @pytest.mark.asyncio
+    async def test_live_fanout_path_keeps_using_bump_attempt_unchanged(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Live fan-out continues using ``begin_delivery_attempt`` without atomic queued admission.
+
+        Given: A registered active user, APNs device, and matching rule.
+        When: ``_dispatch`` runs ``_persist_and_fanout_row`` on a live event.
+        Then: ``begin_delivery_attempt`` is awaited once, ``admit_and_charge_apns_delivery``
+            is never awaited, ``apns.send`` is awaited once, and status becomes ``sent``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        await _seed_device(repo, user)
+        reg = RuleRegistry()
+        reg.register(_SingleRowRule(user_public_id=user, topic_prefix="live."))
+        sidecar, apns = _make_sidecar(repo, registry=reg, clock=lambda: _ts(1))
+        bump_spy = AsyncMock(wraps=repo.begin_delivery_attempt)
+        atomic_spy = AsyncMock(side_effect=AssertionError("unexpected atomic queued admission"))
+        monkeypatch.setattr(repo, "begin_delivery_attempt", bump_spy)
+        monkeypatch.setattr(repo, "admit_and_charge_apns_delivery", atomic_spy)
+
+        await sidecar._dispatch("live.order_fill", b"{}", _ts(1))
+
+        bump_spy.assert_awaited_once()
+        atomic_spy.assert_not_awaited()
+        apns.send.assert_awaited_once()
+        assert await repo.count_deliveries_by_status() == {"sent": 1}
+
+    @pytest.mark.asyncio
+    async def test_fcm_queued_row_leaves_apns_atomic_admission_untouched(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Queued FCM rows stay isolated from APNs atomic admission.
+
+        Given: A queued ``provider='fcm'`` delivery row and a sidecar without Android configured.
+        When: ``_attempt_on_queued_row`` processes the row.
+        Then: Neither ``admit_and_charge_apns_delivery`` nor ``apns.send`` is awaited
+            and the FCM row stays ``queued``.
+        """
+        fcm_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="seed",
+                sequence_id=1,
+                timestamp=_ts(0),
+                alert_event_public_id="evt-fcm",
+                device_public_id="dev-fcm",
+                user_public_id="user-fcm",
+                status="queued",
+                provider="fcm",
+                configuration_id="cfg-1",
+                binding_id="bind-1",
+                expires_at=_ts(60),
+                created_at=_ts(0),
+            )
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
+        atomic_spy = AsyncMock(side_effect=AssertionError("unexpected APNs admission for FCM"))
+        monkeypatch.setattr(repo, "admit_and_charge_apns_delivery", atomic_spy)
+        row = await repo.get_delivery_by_public_id(fcm_pid)
+        assert row is not None
+
+        await sidecar._attempt_on_queued_row(row, _ts(1))
+
+        atomic_spy.assert_not_awaited()
+        apns.send.assert_not_awaited()
+        after = await repo.get_delivery_by_public_id(fcm_pid)
+        assert after is not None and after["status"] == "queued"
+
+    def test_is_pg_serialization_failure_classifies_sqlstate_pgcode_and_type(self) -> None:
+        """Pure classifier detects 40001 via sqlstate, pgcode, or SerializationError name.
+
+        Given: Exceptions covering non-DBAPI errors, ``orig=None``, ``sqlstate='40001'``,
+            ``pgcode='40001'``, ``SerializationError``, and another SQLSTATE ``55P03``.
+        When: ``_is_pg_serialization_failure`` classifies each exception.
+        Then: Only the PostgreSQL serialization failures return ``True``.
+        """
+
+        class _SqlstateError(Exception):
+            def __init__(self, code: str) -> None:
+                super().__init__(code)
+                self.sqlstate = code
+
+        class _PgcodeError(Exception):
+            def __init__(self, code: str) -> None:
+                super().__init__(code)
+                self.pgcode = code
+
+        class SerializationError(Exception):
+            pass
+
+        assert _is_pg_serialization_failure(RuntimeError("boom")) is False
+        assert _is_pg_serialization_failure(DBAPIError("SELECT 1", {}, None)) is False
+        assert (
+            _is_pg_serialization_failure(DBAPIError("UPDATE", {}, _SqlstateError("40001"))) is True
+        )
+        assert _is_pg_serialization_failure(DBAPIError("UPDATE", {}, _PgcodeError("40001"))) is True
+        assert (
+            _is_pg_serialization_failure(
+                DBAPIError("UPDATE", {}, SerializationError("concurrent update"))
+            )
+            is True
+        )
+        assert (
+            _is_pg_serialization_failure(DBAPIError("UPDATE", {}, _SqlstateError("55P03"))) is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_pg_serialization_failure_during_atomic_admission_logs_info_and_leaves_row_queued(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Forced SQLSTATE 40001 during atomic admission logs INFO only and preserves queue state.
+
+        Given: A queued APNs delivery at ``attempt_count == 1`` with ``next_attempt_at=_ts(2)``.
+        When: ``admit_and_charge_apns_delivery`` raises a ``DBAPIError`` whose ``orig``
+            carries ``sqlstate='40001'``.
+        Then: The sidecar logs at INFO (zero WARNING or ERROR records), skips network
+            outage backoff and ``apns.send``, and leaves the row ``queued`` with
+            ``attempt_count == 1`` and ``next_attempt_at == _ts(2)``.
+        """
+
+        class _Sqlstate40001Error(Exception):
+            sqlstate = "40001"
+
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="seed",
+                sequence_id=2,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                attempt_count=1,
+                next_attempt_at=_ts(2),
+                expires_at=_ts(60),
+                created_at=_ts(0),
+            )
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(3))
+        monkeypatch.setattr(
+            repo,
+            "admit_and_charge_apns_delivery",
+            AsyncMock(
+                side_effect=DBAPIError("UPDATE alert_deliveries", {}, _Sqlstate40001Error("40001"))
+            ),
+        )
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+        info_logs: list[str] = []
+        warning_or_error_logs: list[str] = []
+        info_id = logger.add(info_logs.append, level="INFO")
+        warn_id = logger.add(warning_or_error_logs.append, level="WARNING")
+        try:
+            await sidecar._attempt_on_queued_row(row, _ts(3))
+        finally:
+            logger.remove(info_id)
+            logger.remove(warn_id)
+
+        apns.send.assert_not_awaited()
+        assert any("serialized out" in msg for msg in info_logs)
+        assert warning_or_error_logs == []
+        assert sidecar._outage_windows == {}
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "queued"
+        assert final_row["attempt_count"] == 1
+        assert final_row["next_attempt_at"] == _ts(2)
+
+    @pytest.mark.asyncio
+    async def test_sidecar_passes_synchronous_predicate_called_once_to_atomic_admission(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sidecar passes a pure synchronous ``admits`` callback invoked once in the repository.
+
+        Given: A queued APNs delivery with an active device and eligible preferences.
+        When: ``_attempt_on_queued_row`` invokes ``admit_and_charge_apns_delivery``.
+        Then: ``inspect.iscoroutinefunction(request.admits)`` is ``False``, the callback
+            executes synchronously once with an ``ApnsAdmissionContext`` returning a ``bool``
+            (never awaitable), and the push sends once.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
+        original_admit = repo.admit_and_charge_apns_delivery
+        predicate_calls: list[tuple[ApnsAdmissionContext, bool]] = []
+
+        async def _inspect_sync_predicate(request: ApnsAdmissionRequest) -> ApnsAdmissionResult:
+            assert inspect.iscoroutinefunction(request.admits) is False
+            original_predicate = request.admits
+
+            def _recording_predicate(ctx: ApnsAdmissionContext) -> bool:
+                admitted = original_predicate(ctx)
+                assert inspect.isawaitable(admitted) is False
+                predicate_calls.append((ctx, admitted))
+                return admitted
+
+            wrapped = ApnsAdmissionRequest(
+                delivery_public_id=request.delivery_public_id,
+                user_public_id=request.user_public_id,
+                device_public_id=request.device_public_id,
+                transition_at=request.transition_at,
+                session_id=request.session_id,
+                sequence_id=request.sequence_id,
+                admits=_recording_predicate,
+            )
+            return await original_admit(wrapped)
+
+        monkeypatch.setattr(repo, "admit_and_charge_apns_delivery", _inspect_sync_predicate)
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+
+        await sidecar._attempt_on_queued_row(row, _ts(1))
+
+        assert len(predicate_calls) == 1
+        recorded_ctx, recorded_result = predicate_calls[0]
+        assert recorded_ctx["device"] is not None
+        assert recorded_ctx["device"]["public_id"] == device_pid
+        assert recorded_result is True
+        apns.send.assert_awaited_once()
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None and final_row["status"] == "sent"
+
+    @pytest.mark.asyncio
+    async def test_post_snapshot_opt_out_allows_at_most_one_push_then_cancels_next_attempt(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An opt-out committed after snapshot allows at most one push before cancelling.
+
+        Given: A queued APNs delivery initially admitted by routing preferences.
+        When: The repository switches off the device alert preference immediately after
+            returning an admitted charge for attempt 1 (simulating a post-snapshot
+            opt-out), the first attempt sends with a retryable failure leaving the row
+            queued, and the sidecar runs the next queued attempt.
+        Then: Attempt 1 sends and charges once, attempt 2 sees the committed opt-out
+            and refuses ``routing_suppressed``, the sidecar cancels the row as
+            ``cancelled_scope`` (``routing_suppressed``), and no second send or charge
+            occurs.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        now = _ts(1)
+        retryable = ApnsSendResult(
+            status_code=500, status="server_error", apns_id="", description=""
+        )
+        sidecar, apns = _make_sidecar(repo, send_result=retryable, clock=lambda: now)
+        original_admit = repo.admit_and_charge_apns_delivery
+        outcomes: list[ApnsAdmissionResult] = []
+
+        async def _admit_then_commit_opt_out(
+            request: ApnsAdmissionRequest,
+        ) -> ApnsAdmissionResult:
+            outcome = await original_admit(request)
+            outcomes.append(outcome)
+            if len(outcomes) == 1:
+                await repo.upsert_device_alert_pref(
+                    DeviceAlertPrefUpsertRow(
+                        session_id="post-snapshot-opt-out",
+                        sequence_id=10,
+                        timestamp=now,
+                        device_public_id=device_pid,
+                        alert_type="order_fill_full",
+                        enabled=False,
+                    )
+                )
+            return outcome
+
+        monkeypatch.setattr(repo, "admit_and_charge_apns_delivery", _admit_then_commit_opt_out)
+        first_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert first_row is not None
+
+        await sidecar._attempt_on_queued_row(first_row, now)
+
+        apns.send.assert_awaited_once()
+        queued_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert queued_row is not None
+        assert queued_row["status"] == "queued"
+        assert queued_row["attempt_count"] == 1
+
+        now = _ts(2)
+        await sidecar._attempt_on_queued_row(queued_row, now)
+
+        assert len(outcomes) == 2
+        assert isinstance(outcomes[0], ApnsAdmissionCharge)
+        assert outcomes[0].attempt == 1
+        assert outcomes[1] == ApnsAdmissionRefusal(refusal="routing_suppressed")
+        apns.send.assert_awaited_once()
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "cancelled_scope"
+        assert final_row["error_reason"] == "routing_suppressed"
+        assert final_row["attempt_count"] == 1

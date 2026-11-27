@@ -6,6 +6,7 @@ with compile-time type checking — no Pydantic overhead for trusted internal
 data transfer.
 """
 
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -4151,6 +4152,45 @@ class ApnsAdmissionContext(TypedDict):
     device: NotificationDeviceRow | None
     device_prefs: list[DeviceAlertPrefRow]
     user_defaults: list[UserAlertDefaultRow]
+
+
+ApnsAdmissionRefusalCode = Literal["not_queued", "device_inactive", "routing_suppressed"]
+
+
+@dataclass(frozen=True, slots=True)
+class ApnsAdmissionRequest:
+    """Parameters and synchronous routing predicate for atomic APNs admission.
+
+    ``admits`` MUST be pure and synchronous (no I/O, no ``await``) because the
+    repository invokes it inside the admission transaction while the delivery
+    row is locked on PostgreSQL or while SQLite holds its writer lock.
+    """
+
+    delivery_public_id: str
+    user_public_id: str
+    device_public_id: str
+    transition_at: datetime
+    session_id: str
+    sequence_id: int
+    admits: Callable[[ApnsAdmissionContext], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class ApnsAdmissionCharge:
+    """Committed attempt charge and refreshed APNs device returned on admission."""
+
+    attempt: int
+    device: NotificationDeviceRow
+
+
+@dataclass(frozen=True, slots=True)
+class ApnsAdmissionRefusal:
+    """Refusal returned when atomic queued APNs admission declines to charge."""
+
+    refusal: ApnsAdmissionRefusalCode
+
+
+type ApnsAdmissionResult = ApnsAdmissionCharge | ApnsAdmissionRefusal
 
 
 class AlertListCursor(TypedDict):
