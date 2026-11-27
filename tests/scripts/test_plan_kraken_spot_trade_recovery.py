@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from scripts import plan_kraken_spot_trade_recovery as planner
+from snapper.application.updaters.historical import kraken_spot_trade_evidence
 
 _BTC = "00000000-0000-4000-8000-000000000001"
 _ETH = "00000000-0000-4000-8000-000000000002"
@@ -280,7 +281,7 @@ def test_rejects_oversize_evidence(
     Then: It refuses to compare the oversized export.
     """
     argv = _args(tmp_path, _BTC_EVIDENCE, _STORED_HEADER)
-    monkeypatch.setattr(planner, "_MAX_EVIDENCE_BYTES", 16)
+    monkeypatch.setattr(kraken_spot_trade_evidence, "_MAX_EVIDENCE_BYTES", 16)
 
     assert planner.main(argv) == 1
     output = capsys.readouterr()
