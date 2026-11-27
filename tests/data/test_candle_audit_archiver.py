@@ -22,6 +22,7 @@ from snapper.data.archiver import CandleAuditArchiver
 from snapper.data.archiver import ExportResult
 from snapper.data.archiver import _directory_fsync_supported
 from snapper.data.archiver import _fsync_directory
+from snapper.data.archiver import _fsync_directory_tree
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import Candle
@@ -1290,44 +1291,63 @@ def test_candle_audit_export_into_missing_base_fsyncs_full_chain(
         repo.dispose()
 
 
-def test_candle_audit_export_into_nested_missing_base_fsyncs_each_created_holder(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A base created several levels deep fsyncs the directory holding each new entry.
+def test_candle_audit_purge_into_missing_base_fails_closed_before_io(tmp_path: Path) -> None:
+    """A purging export refuses to start when the archive base directory does not exist.
 
     Given: A SQLite DB with a closed candle version and a base directory two
         levels below ``tmp_path`` where neither level exists yet.
-    When: ``CandleAuditArchiver(repo, nested_base).export`` creates the tree and writes.
-    Then: The fixed chain runs from the CSV parent through ``nested_base.parent``,
-        followed by ``tmp_path``, which holds the newly created top-level entry,
-        and nothing above ``tmp_path`` is touched.
+    When: ``CandleAuditArchiver(repo, nested_base).export(purge=True)`` runs.
+    Then: It raises ``ValueError`` naming the missing directory, creates nothing,
+        and purges no DB rows, so every directory a purging export creates lies
+        inside an existing, durable base.
     """
-    repo, _ = _make_db_with_candle_versions(tmp_path)
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
     day = date(2024, 1, 1)
     nested_base = tmp_path / "new1" / "new2"
-    csv_dir = nested_base / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
-    dir_sentinels = _candle_dir_sentinels(
-        csv_dir, nested_base, extra_ancestors=(tmp_path, tmp_path.parent)
-    )
-    expected_dirs = [directory for directory in dir_sentinels if directory != tmp_path.parent]
     try:
-        opened_dirs, synced_dirs, closed_dirs, _ = _install_dir_fsync_spy(
-            monkeypatch, dir_sentinels
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day, day, closed_only=True
         )
-        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+        with pytest.raises(ValueError, match="existing archive directory"):
+            CandleAuditArchiver(repo, nested_base).export(
+                timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
 
-        CandleAuditArchiver(repo, nested_base).export(
-            timeframe="1m", day_start=day, day_end=day, closed_only=True
+        assert not (tmp_path / "new1").exists()
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "1m", day, day, closed_only=True)
+            == pending
         )
-
-        assert opened_dirs == expected_dirs
-        assert synced_dirs == expected_dirs
-        assert closed_dirs == expected_dirs
-        assert tmp_path.parent not in synced_dirs
-        assert (csv_dir / "2024-01-01.csv").is_file()
     finally:
         repo.dispose()
+
+
+def test_candle_audit_fsync_chain_uses_resolved_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relative base with an absolute destination still yields the full resolved chain.
+
+    Given: A base directory configured as a relative path and a CSV parent given
+        as the equivalent absolute path.
+    When: ``_fsync_directory_tree`` runs with directory fsync supported.
+    Then: It syncs the resolved CSV parent up through the resolved ``base.parent``
+        without raising, because both paths are resolved before ``relative_to``.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rel_base" / "sub").mkdir(parents=True)
+    synced: list[Path] = []
+    monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+    monkeypatch.setattr("snapper.data.archiver._fsync_directory", synced.append)
+
+    _fsync_directory_tree((tmp_path / "rel_base" / "sub").resolve(), Path("rel_base"))
+
+    resolved_root = tmp_path.resolve()
+    assert synced == [
+        resolved_root / "rel_base" / "sub",
+        resolved_root / "rel_base",
+        resolved_root,
+    ]
 
 
 def test_candle_audit_export_with_existing_dirs_fsyncs_full_chain(
@@ -1442,12 +1462,13 @@ def test_candle_audit_rejects_out_of_base_destination_before_io(
     Given: A SQLite DB whose instrument ``exchange`` uses ``..`` traversal or whose
         resolved event path points to an absolute destination outside ``base_dir``.
     When: ``CandleAuditArchiver(repo, base_dir).export(purge=True)`` runs.
-    Then: It raises ``ValueError`` before reading existing CSVs, creating ``base_dir``,
-        writing or altering outside files, or purging any DB rows.
+    Then: It raises ``ValueError`` before reading existing CSVs, creating anything under
+        ``base_dir``, writing or altering outside files, or purging any DB rows.
     """
     repo, instrument_id = _make_db_with_candle_versions(tmp_path)
     day = date(2024, 1, 1)
     base_dir = tmp_path / "base"
+    base_dir.mkdir()
     escaped_root = tmp_path / "base_escaped"
     outside_csv = (escaped_root / "2024-01-01.csv").resolve()
     read_calls: list[Path] = []
@@ -1479,7 +1500,7 @@ def test_candle_audit_rejects_out_of_base_destination_before_io(
             )
 
         assert read_calls == []
-        assert not base_dir.exists()
+        assert list(base_dir.iterdir()) == []
         if via_resolver_absolute:
             assert outside_csv.read_text(encoding="utf-8") == "do-not-read-or-replace\n"
         else:

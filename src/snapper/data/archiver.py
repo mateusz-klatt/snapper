@@ -721,38 +721,30 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _fsync_directory_tree(target_dir: Path, base_dir: Path, created: tuple[Path, ...] = ()) -> None:
-    """Fsync ``target_dir`` up through ``base_dir.parent`` plus parents of created dirs.
+def _fsync_directory_tree(target_dir: Path, base_dir: Path) -> None:
+    """Fsync ``target_dir`` and each ancestor up to and including ``base_dir.parent``.
 
-    When directory fsync is unsupported (Windows ``os.name == "nt"``), returns
-    immediately without walking directories, so crash durability there stops
-    at the flushed and fsynced staged CSV file. On POSIX, computes walk depth
-    from ``target_dir.relative_to(base_dir).parts`` so the walk terminates by
-    construction and syncs ``target_dir``, ``base_dir``, and ``base_dir.parent``
-    unconditionally, which also covers a retry after an earlier directory
-    fsync failed. It then syncs the parent of every directory in ``created``
-    that the fixed chain does not already cover, so an output base created
-    several levels deep records each new entry in the directory holding it.
+    Both paths are resolved first, which matches what
+    :func:`_validate_archive_destination` checked, so the walk terminates by
+    construction. Purge requires ``base_dir`` to exist before the export starts
+    (see :meth:`CandleAuditArchiver.export`), so every directory a purging
+    export creates lies inside ``base_dir``, and this fixed chain makes each
+    new entry durable on every retry as well. When directory fsync is
+    unsupported (Windows ``os.name == "nt"``), returns without walking, so
+    crash durability there stops at the flushed and fsynced staged CSV file.
 
     Args:
         target_dir: Immediate parent directory of the published CSV file.
         base_dir: Configured archiver base directory.
-        created: Directories that did not exist before this publication's mkdir.
     """
     if not _directory_fsync_supported():
         return
-    steps = len(target_dir.relative_to(base_dir).parts) + 2
-    synced: list[Path] = []
-    current = target_dir
+    resolved_target = target_dir.resolve()
+    steps = len(resolved_target.relative_to(base_dir.resolve()).parts) + 2
+    current = resolved_target
     for _ in range(steps):
         _fsync_directory(current)
-        synced.append(current)
         current = current.parent
-    for directory in created:
-        holder = directory.parent
-        if holder not in synced:
-            _fsync_directory(holder)
-            synced.append(holder)
 
 
 def _validate_archive_destination(path: Path, base_dir: Path) -> None:
@@ -818,13 +810,9 @@ def _publish_candle_audit_csv(path: Path, rows: list[tuple[str, ...]], base_dir:
     inside ``base_dir`` and is not a symlink before any ``mkdir`` or write.
     Stages, flushes, and fsyncs the temporary CSV before atomic replacement,
     then calls :func:`_fsync_directory_tree` to sync ``path.parent`` through
-    ``base_dir.parent`` and the parent of every directory this call created
-    on POSIX (no-op on Windows).
+    ``base_dir.parent`` on POSIX (no-op on Windows).
     """
     _validate_archive_destination(path, base_dir)
-    created = tuple(
-        directory for directory in (path.parent, *path.parent.parents) if not directory.exists()
-    )
     path.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=path.parent, prefix=".ca-") as staging_dir:
         staged_csv = Path(staging_dir) / "archive.tmp"
@@ -832,7 +820,7 @@ def _publish_candle_audit_csv(path: Path, rows: list[tuple[str, ...]], base_dir:
         if path.is_file():
             copymode(path, staged_csv)
         staged_csv.replace(path)
-    _fsync_directory_tree(path.parent, base_dir, created)
+    _fsync_directory_tree(path.parent, base_dir)
 
 
 def _resolve_event_path(
@@ -1212,11 +1200,16 @@ class CandleAuditArchiver:
             ExportResult with file, row, and purge counts.
 
         Raises:
-            ValueError: If purge requested without closed_only or a destination
-                fails archive boundary validation.
+            ValueError: If purge requested without closed_only, purge requested
+                while the archive base directory does not exist yet, or a
+                destination fails archive boundary validation.
         """
         if purge and not closed_only:
             raise ValueError("Purge requires closed_only=True for candle audit")
+        if purge and not dry_run and not self._base_dir.is_dir():
+            raise ValueError(
+                f"Purge requires an existing archive directory: {self._base_dir} does not exist"
+            )
 
         inst_map = self._repo.get_instrument_archive_map()
         files_written = 0
