@@ -227,6 +227,7 @@ from snapper.core.market_snapshot_freshness import MAX_REFRESH_TARGETS
 from snapper.core.paired_execution import compute_paired_group_key
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.partitioning import ShardOwnershipError
+from snapper.core.process_config import PROCESS_CONFIG_PREFIX
 from snapper.core.types import TERMINAL_EXECUTION_PLAN_STATUSES
 from snapper.core.types import AllExchange
 from snapper.core.types import ExchangeEnum
@@ -3603,6 +3604,33 @@ async def begin_scd2_write(session: AsyncSession) -> None:
         raise RuntimeError("begin_scd2_write called with a SQLite transaction already in progress")
     await session.execute(text("BEGIN IMMEDIATE"))
     _mark_scd2_write_reserved(session)
+
+
+async def begin_process_config_write(session: AsyncSession) -> None:
+    """Serialize process mutations across names before reading enabled outputs."""
+    await begin_scd2_write(session)
+    if _session_dialect_name(session) == "postgresql":
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext('process_config'), hashtext('strategy'))")
+        )
+
+
+async def list_current_process_settings(session: AsyncSession) -> Sequence[Setting]:
+    """Read committed current process versions independent of the caller's clock.
+
+    Args:
+        session: Caller-owned read session or fenced process write transaction.
+
+    Returns:
+        Open-ended process settings under the literal process key prefix.
+    """
+    result = await session.scalars(
+        select(Setting).where(
+            func.substr(Setting.key, 1, len(PROCESS_CONFIG_PREFIX)) == PROCESS_CONFIG_PREFIX,
+            Setting.known_to == KNOWN_TO_MAX,
+        )
+    )
+    return result.all()
 
 
 def begin_scd2_write_sync(session: SyncSession) -> None:

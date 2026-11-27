@@ -31,6 +31,7 @@ Example:
 
 import json
 from collections.abc import Container
+from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
@@ -39,6 +40,7 @@ from typing import Annotated
 from typing import Any
 from typing import Literal
 from typing import cast
+from typing import get_args
 from uuid import uuid7
 
 from fastapi import APIRouter
@@ -101,6 +103,7 @@ from snapper.application.process_manager.strategy_scope import (
     reference_identity_params_for_registry_name,
 )
 from snapper.application.process_manager.strategy_scope import resolve_role_for_class_path
+from snapper.application.process_manager.strategy_scope import strategy_registry_name
 from snapper.auth.dependencies import enforce_permission
 from snapper.auth.dependencies import enforce_permissions
 from snapper.auth.dependencies import require_any_permission
@@ -111,6 +114,8 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import OrderExchange
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.wallet_resolution import WalletAmbiguousError
@@ -640,16 +645,12 @@ async def _classify_persisted_process_for_start(
     raw_role = persisted.get("role")
     raw_params = persisted.get("parameters")
     class_path = persisted.get("class_path")
-    persisted_template = persisted.get("template")
-    registry_name = (
-        persisted_template if isinstance(persisted_template, str) and persisted_template else name
-    )
     try:
         classification = classify_strategy_process(
             raw_role=raw_role,
             class_path=class_path,
             raw_parameters=raw_params,
-            registry_name=registry_name,
+            registry_name=strategy_registry_name(name, persisted.get("template")),
         )
     except StrategyScopeError as exc:
         raise HTTPException(
@@ -712,7 +713,7 @@ async def _classify_process_for_start(
             raw_role=config.role,
             class_path=config.class_path,
             raw_parameters=fallback_params,
-            registry_name=config.template or name,
+            registry_name=strategy_registry_name(name, config.template),
         )
     except StrategyScopeError as exc:
         raise HTTPException(status_code=400, detail=exc.detail) from exc
@@ -1193,6 +1194,8 @@ async def create_process_configuration(
         enforce_permission(user, Permission.CONFIGURE_STRATEGIES)
         if final_enabled:
             enforce_permission(user, Permission.START_STRATEGIES)
+            if base_parameters.get("exchange", "paper") != "paper":
+                await _enforce_strategy_scope(dict(base_parameters), entry.role, user, repo)
     else:
         enforce_permission(user, Permission.MANAGE_PROCESSES)
     try:
@@ -1210,6 +1213,8 @@ async def create_process_configuration(
             note=payload.note,
             template=payload.template,
         )
+    except StrategyScopeError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     sid, seq, pid, ts = _mint_provenance(http_request)
@@ -1347,11 +1352,15 @@ async def start_process(
         classification,
         raw_params,
     )
-    result = await factory.start_process_by_name(
-        name=name,
-        mode=payload.mode,
-        parameters=launch_parameters,
-    )
+    if treat_as_strategy:
+        result = await factory.start_strategy_by_name(name, payload.mode, user.operator_public_ids)
+    else:
+        result = await factory.start_process_by_name(
+            name=name,
+            mode=payload.mode,
+            parameters=launch_parameters,
+            allow_strategy=False,
+        )
     sid, seq, pid, ts = _mint_provenance(http_request)
     data = ProcessStartData(
         session_id=sid,
@@ -1440,6 +1449,20 @@ def _enforce_desired_state_permission(
     return True
 
 
+def _require_live_strategy_cap(parameters: Mapping[str, object]) -> None:
+    """Report a missing cap on a live strategy config as a state conflict."""
+    exchange = parameters.get("exchange", ExchangeEnum.PAPER)
+    if (
+        exchange in get_args(OrderExchange)
+        and exchange != ExchangeEnum.PAPER
+        and parameters.get("max_order_base_qty") is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="max_order_base_qty must be configured for a live strategy",
+        )
+
+
 async def _desired_state_values(
     config: ProcessConfigModel,
     action: ProcessDesiredStateAction,
@@ -1450,6 +1473,7 @@ async def _desired_state_values(
     """Resolve the persisted enabled flag and restart generation."""
     if action == "enable":
         if config.role is ProcessRoleEnum.STRATEGY:
+            _require_live_strategy_cap(config.parameters)
             await _enforce_strategy_scope(dict(config.parameters), config.role, principal, repo)
         return True, None
     if action == "disable":
@@ -1560,6 +1584,8 @@ async def set_process_desired_state(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Process '{name}' is not configured") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     _, coordinator, managed_remotely = _resolve_ownership(
         factory, cache, config, local_running=name in factory.started_processes
     )
@@ -1710,6 +1736,8 @@ async def update_process_scope_config(
         new_parameters["operator_public_id"] = scope.operator_public_id
     if scope.wallet_public_id is not None:
         new_parameters["wallet_public_id"] = scope.wallet_public_id
+    if scope.max_order_base_qty is not None:
+        new_parameters["max_order_base_qty"] = scope.max_order_base_qty
     if scope.reference_identity_params is not None:
         _reject_undeclared_reference_params(
             scope.reference_identity_params, config.template or name, name
@@ -1720,6 +1748,7 @@ async def update_process_scope_config(
         )
         nested.update(scope.reference_identity_params)
         new_parameters["params"] = nested
+    _require_live_strategy_cap(new_parameters)
     await _enforce_strategy_scope(dict(new_parameters), config.role, principal, repo)
     try:
         persisted = await factory.update_process_config_parameters(
@@ -1729,6 +1758,8 @@ async def update_process_scope_config(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Process '{name}' is not configured") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     sid, seq, pid, ts = _mint_provenance(http_request)
     data = ProcessConfigScopeData(
         session_id=sid,

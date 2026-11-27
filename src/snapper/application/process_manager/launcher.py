@@ -38,6 +38,7 @@ from sqlalchemy import select
 from snapper.application.process_manager.config_resolver import VALID_PROCESS_MODES
 from snapper.application.process_manager.config_resolver import get_process_configs
 from snapper.application.process_manager.config_resolver import import_process_class
+from snapper.application.process_manager.config_resolver import parse_process_config
 from snapper.application.process_manager.config_resolver import resolve_lifecycle
 from snapper.application.process_manager.config_resolver import resolve_mode
 from snapper.application.process_manager.config_resolver import resolve_parameters_schema
@@ -64,11 +65,15 @@ from snapper.application.process_manager.registry import get_registered_processe
 from snapper.application.process_manager.registry_syncer import ProcessRegistrySyncer
 from snapper.application.process_manager.run_recorder import ProcessRunRecorder
 from snapper.application.process_manager.spawner import ProcessSpawnerService
+from snapper.application.process_manager.strategy_admission import classify_process_config
+from snapper.application.process_manager.strategy_admission import live_strategy_parameters
+from snapper.application.process_manager.strategy_admission import resolve_live_strategy_start
 from snapper.application.process_manager.strategy_scope import StrategyScopeError
 from snapper.application.process_manager.strategy_scope import classify_strategy_process
 from snapper.application.process_manager.strategy_scope import (
     enforce_classified_strategy_scope_complete,
 )
+from snapper.application.process_manager.strategy_scope import strategy_registry_name
 from snapper.application.services.market_persist_policy import MarketPersistPolicy
 from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
@@ -1432,6 +1437,7 @@ class ProcessLauncherService:
         started = False
         public_id: str | None = None
         try:
+            await self._check_live_config_before_spawn(config)
             public_id = await self._try_create_run_record(config)
             logger.info(
                 f"Starting process '{config.name}' in {config.mode} mode "
@@ -1465,6 +1471,21 @@ class ProcessLauncherService:
         await self._emit_summary_snapshot()
         if config.role is ProcessRoleEnum.STRATEGY:
             await self._emit_strategy_list_snapshot()
+
+    async def _check_live_config_before_spawn(self, config: ProcessConfigModel) -> None:
+        """Reject stale or unpersisted live strategy constructor arguments."""
+        classification = classify_strategy_process(
+            raw_role=config.role,
+            class_path=config.class_path,
+            raw_parameters=config.parameters,
+            registry_name=strategy_registry_name(config.name, config.template),
+        )
+        if live_strategy_parameters(classification) is None:
+            return
+        repository = get_repository(self.settings.db_url)
+        persisted = await resolve_live_strategy_start(repository, config.name)
+        if persisted != config.parameters:
+            raise StrategyScopeError(f"Live strategy configuration changed for '{config.name}'")
 
     def autostart_includes(self, config: ProcessConfigModel) -> bool:
         """Return whether ``config`` belongs to this node's autostart profile.
@@ -1548,11 +1569,14 @@ class ProcessLauncherService:
             raw_role=config.role,
             class_path=config.class_path,
             raw_parameters=config.parameters,
-            registry_name=config.template or config.name,
+            registry_name=strategy_registry_name(config.name, config.template),
         )
         if not classification.treat_as_strategy:
             return config
         repository = get_repository(self.settings.db_url)
+        if live_strategy_parameters(classification) is not None:
+            parameters = await resolve_live_strategy_start(repository, config.name)
+            return _copy_process_config_with_parameters(config, parameters)
         scope = await enforce_classified_strategy_scope_complete(
             repository,
             classification=classification,
@@ -3429,7 +3453,7 @@ class ProcessLauncherService:
                     self._clear_watchdog_state(name)
                     return
                 try:
-                    await self.start_process(config)
+                    await self._restart_configured_process(config)
                 except Exception as exc:
                     logger.error(f"Respawn of '{name}' failed: {exc}")
                     if self._desired_state.get(name) is not _DesiredState.RUNNING:
@@ -3790,6 +3814,20 @@ class ProcessLauncherService:
             if not isinstance(e, (GeneratorExit, StopAsyncIteration, asyncio.CancelledError)):
                 logger.error(f"Error handling completion of process '{name}': {e}")
 
+    async def _restart_configured_process(self, config: ProcessConfigModel) -> None:
+        """Resolve current persisted live authorization before a watchdog respawn."""
+        classification = classify_strategy_process(
+            raw_role=config.role,
+            class_path=config.class_path,
+            raw_parameters=config.parameters,
+            registry_name=strategy_registry_name(config.name, config.template),
+        )
+        if live_strategy_parameters(classification) is not None:
+            repository = get_repository(self.settings.db_url)
+            parameters = await resolve_live_strategy_start(repository, config.name)
+            config = _copy_process_config_with_parameters(config, parameters)
+        await self.start_process(config)
+
     def _apply_overrides_to_config_dict(
         self,
         config_dict: dict[str, Any],
@@ -3895,7 +3933,13 @@ class ProcessLauncherService:
                     status=StartProcessStatusEnum.ERROR,
                     message=f"Process '{name}' not found in configuration",
                 )
-            config_dict = cast(dict[str, Any], json.loads(setting.value))
+            config_dict = parse_process_config(setting)
+            classification = classify_process_config(name, config_dict)
+            if classification.treat_as_strategy and parameters is not None:
+                return ProcessStartResult(
+                    status=StartProcessStatusEnum.ERROR,
+                    message="Strategy processes do not accept start-time parameter overrides",
+                )
             autostart_enabled = self._apply_overrides_to_config_dict(config_dict, mode, parameters)
             config = self._build_config_for_start_by_name(name, config_dict, autostart_enabled)
         return config_dict, config
@@ -4252,6 +4296,8 @@ class ProcessLauncherService:
         name: str,
         mode: ProcessMode | None = None,
         parameters: dict[str, Any] | None = None,
+        *,
+        allow_strategy: bool = True,
     ) -> ProcessStartResult:
         """Start a process by its registered name.
 
@@ -4287,6 +4333,7 @@ class ProcessLauncherService:
             name: Process name from registry.
             mode: Execution mode override (thread/process).
             parameters: Constructor parameters override for the process.
+            allow_strategy: Whether this caller can start persisted strategies.
 
         Returns:
             Typed result with operation status, message, and optional public_id.
@@ -4305,14 +4352,82 @@ class ProcessLauncherService:
         running_result = self._already_running_start_result(name)
         if running_result is not None:
             return running_result
-        loaded = await self._load_config_for_start_by_name(name, mode, parameters)
-        if isinstance(loaded, ProcessStartResult):
-            return loaded
-        config_dict, config = loaded
-        external_result = self._reject_external_process_start(name, config, config_dict)
-        if external_result is not None:
-            return external_result
+        return await self._start_configured_process(
+            name, mode, parameters, allow_strategy=allow_strategy
+        )
+
+    async def start_strategy_by_name(
+        self, name: str, mode: ProcessMode | None, operator_public_ids: list[str]
+    ) -> ProcessStartResult:
+        """Start a strategy with scope resolved from its current persisted parameters.
+
+        Args:
+            name: Persisted strategy process name.
+            mode: Optional runtime execution mode.
+            operator_public_ids: Operators the authenticated caller may act as.
+
+        Returns:
+            The result of the strategy start attempt.
+        """
+        self._terminal_no_restart_generation.pop(name, None)
+        return await self._start_configured_process(name, mode, None, operator_public_ids)
+
+    async def _start_configured_process(
+        self,
+        name: str,
+        mode: ProcessMode | None,
+        parameters: dict[str, object] | None,
+        operator_public_ids: list[str] | None = None,
+        *,
+        allow_strategy: bool = True,
+    ) -> ProcessStartResult:
+        """Load a named process and prepare its persisted strategy scope."""
+        try:
+            loaded = await self._load_config_for_start_by_name(name, mode, parameters)
+            if isinstance(loaded, ProcessStartResult):
+                return loaded
+            raw, config = loaded
+            external_result = self._reject_external_process_start(name, config, raw)
+            if external_result is not None:
+                return external_result
+            config = await self._prepare_named_strategy(
+                config, raw, operator_public_ids, allow_strategy=allow_strategy
+            )
+        except (ValueError, KeyError) as exc:
+            return ProcessStartResult(status=StartProcessStatusEnum.ERROR, message=str(exc))
         return await self._start_loaded_process_by_name(name, config)
+
+    async def _prepare_named_strategy(
+        self,
+        config: ProcessConfigModel,
+        raw: JsonObject,
+        operators: list[str] | None,
+        *,
+        allow_strategy: bool,
+    ) -> ProcessConfigModel:
+        """Resolve trusted persisted scope for an authorized named strategy start."""
+        classification = classify_process_config(config.name, raw)
+        if not classification.treat_as_strategy:
+            if operators is not None:
+                raise StrategyScopeError(f"Process '{config.name}' is no longer a strategy")
+            return config
+        if not allow_strategy:
+            raise StrategyScopeError(f"Process '{config.name}' requires a strategy start")
+        repository = get_repository(self.settings.db_url)
+        if live_strategy_parameters(classification) is not None:
+            parameters = await resolve_live_strategy_start(repository, config.name, operators)
+            return _copy_process_config_with_parameters(config, parameters)
+        if operators is None:
+            return config
+        scope = await enforce_classified_strategy_scope_complete(
+            repository,
+            classification=classification,
+            principal_operator_public_ids=operators,
+            allow_admin_lookup_without_operator=False,
+            allow_unscoped_paper=True,
+            require_operator_for_explicit_wallet=True,
+        )
+        return _copy_process_config_with_parameters(config, cast(JsonObject, scope.parameters))
 
     async def _cancel_pending_restart(self, name: str) -> None:
         """Cancel and join every pending delayed-restart task for ``name``.

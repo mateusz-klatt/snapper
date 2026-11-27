@@ -652,6 +652,7 @@ def _strategy_config(**overrides: Any) -> StrategyConfig:
         "inputs": ["market.kraken.BTC-USD.candles.1h"],
         "outputs": ["BTC-USD"],
         "exchange": "kraken",
+        "max_order_base_qty": 1.0,
         "params": {"buffer_size": 5},
     }
     base.update(overrides)
@@ -2536,6 +2537,7 @@ class TestEmitSignal:
             inputs=["market.kraken.BTC-USD.candles"],
             outputs=["BTC-USD"],
             exchange="kraken",
+            max_order_base_qty=1.0,
         )
         strategy = SimpleTestStrategy(config)
         strategy._last_data_ts = 777.7
@@ -5730,6 +5732,7 @@ def test_walutomat_accepts_fx_pairs() -> None:
         inputs=["market.walutomat.EUR-PLN.ticks"],
         outputs=["EUR-PLN"],
         exchange="walutomat",
+        max_order_base_qty=1.0,
     )
     assert config.outputs == ["EUR-PLN"]
 
@@ -5764,6 +5767,7 @@ def test_kraken_accepts_valid_symbols() -> None:
         inputs=["market.kraken.BTC-USD.candles.1h"],
         outputs=["BTC-USD"],
         exchange="kraken",
+        max_order_base_qty=1.0,
     )
     assert config.outputs == ["BTC-USD"]
 
@@ -6008,6 +6012,7 @@ def _valid_config_kwargs() -> dict[str, Any]:
         "inputs": ["market.kraken.BTC-USD.candles"],
         "outputs": ["BTC-USD"],
         "exchange": "kraken",
+        "max_order_base_qty": 1.0,
         "params": {},
     }
 
@@ -6197,6 +6202,7 @@ class TestStrategyFactory:
             inputs=["market.kraken.BTC-USD.candles.1m"],
             outputs=["BTC-USD"],
             exchange="kraken",
+            max_order_base_qty=1.0,
         )
         factory.create_strategy(config1)
         config2 = StrategyConfig(
@@ -6205,6 +6211,7 @@ class TestStrategyFactory:
             inputs=["market.kraken.BTC-USD.candles.1m"],
             outputs=["BTC-USD"],
             exchange="kraken",
+            max_order_base_qty=1.0,
         )
         with pytest.raises(
             ValueError,
@@ -6401,6 +6408,7 @@ class TestStrategyFactory:
                 inputs=["market.kraken.BTC-USD.candles.1m"],
                 outputs=["BTC-USD"],
                 exchange="kraken",
+                max_order_base_qty=1.0,
             ),
             StrategyConfig(
                 name="macd_btc_2",
@@ -6408,6 +6416,7 @@ class TestStrategyFactory:
                 inputs=["BTC-USD:15m"],
                 outputs=["BTC-USD"],
                 exchange="kraken",
+                max_order_base_qty=1.0,
             ),
             StrategyConfig(
                 name="macd_eth",
@@ -6415,6 +6424,7 @@ class TestStrategyFactory:
                 inputs=["market.kraken.ETH-USD.candles.1m"],
                 outputs=["ETH-USD"],
                 exchange="kraken",
+                max_order_base_qty=1.0,
             ),
         ]
         errors = factory.validate_no_output_conflicts(configs)

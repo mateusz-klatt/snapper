@@ -33,6 +33,7 @@ from snapper.messaging.schemas.data import ExecutionData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import SignalData
+from tests.application.engine.live_strategy_fixtures import stub_live_signal_policy
 
 _GROUP_KEY = "kraken:BTC-USD:live|kraken:ETH-USD:live"
 _BTC_SHARD = "kraken.BTC-USD.live"
@@ -344,6 +345,7 @@ async def test_second_leg_arms_group_and_notifies_outbox(
 @pytest.mark.asyncio
 async def test_on_signal_grouped_ensures_group_and_registers_leg(
     _coord: TraderCoordinator,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_on_signal on a grouped signal ensures the group and registers its leg.
 
@@ -354,6 +356,21 @@ async def test_on_signal_grouped_ensures_group_and_registers_leg(
         (not the client order id) so the outbox gate can match the leg to
         its command, with the two-leg group staying assembling (not armed).
     """
+    stub_live_signal_policy(monkeypatch)
+    monkeypatch.setattr(
+        _coord,
+        "_resolve_instrument_specs",
+        AsyncMock(
+            return_value={
+                "BTC-USD": {
+                    "public_id": "btc",
+                    "lot_size": 1e-8,
+                    "quantity_unit": "base_asset",
+                    "native_order_quantity_unit": "base_asset",
+                }
+            }
+        ),
+    )
     _coord._current_topic = "signals.kraken.BTC-USD.live"
     await _coord._on_signal(
         _standalone_signal().model_copy(

@@ -16,6 +16,7 @@ from snapper.config.app import AppSettings
 from snapper.core.partitioning import ShardOwnership
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.schemas.data import SignalData
+from tests.application.engine.live_strategy_fixtures import stub_live_signal_policy
 
 _NOW = datetime(2026, 10, 1, 12, tzinfo=UTC)
 _WALLET = "01975a8b-3c7d-7000-8000-abcdef123456"
@@ -70,6 +71,7 @@ def routing(monkeypatch: pytest.MonkeyPatch) -> _RoutingHarness:
     monkeypatch.setattr(
         "snapper.application.engine.trader.is_tradeable", lambda _symbol, _venue: True
     )
+    stub_live_signal_policy(monkeypatch)
     coordinator = TraderCoordinator()
     coordinator._current_topic = _TOPIC
     coordinator.execution_publisher = MagicMock()

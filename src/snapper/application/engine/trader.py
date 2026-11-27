@@ -32,8 +32,10 @@ from uuid import uuid7
 import zmq
 import zmq.asyncio
 from loguru import logger
+from pydantic import ValidationError
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import SQLAlchemyError
 
 from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.coordinator_lifecycle import CoordinatorLifetime
@@ -44,6 +46,8 @@ from snapper.application.engine.coordinator_lifecycle import supervise_workers
 from snapper.application.engine.guard_scanner import PairedExecutionGuardScanner
 from snapper.application.engine.rollover_certification import project_legacy_spot_rollovers
 from snapper.application.engine.service import InstrumentSpec
+from snapper.application.engine.service import InstrumentSpecMissingError
+from snapper.application.engine.service import StrategySignalOrderOptions
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.service import compute_shard_key
 from snapper.application.portfolio.fill_booking import PROJECTION_CALC_VERSION
@@ -52,12 +56,14 @@ from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.process_parameters import TraderParameters
 from snapper.application.process_manager.registry import register_process
+from snapper.application.process_manager.strategy_admission import resolve_live_signal_policy
 from snapper.application.risk.models import RiskConfigModel
 from snapper.application.risk.models import RiskEvaluator
 from snapper.application.services.settings import SettingsService
 from snapper.application.trade.cancel_target import CancelTargetIdentityReader
 from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.application.trade.cancel_target import cancel_target_exchange_order_id
+from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.command_request import order_request_from_command
 from snapper.application.trade.command_request import parse_shard_key
@@ -76,6 +82,8 @@ from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.core.paired_execution import paired_halt_reason
 from snapper.core.partitioning import ShardOwnership
+from snapper.core.partitioning import ShardOwnershipError
+from snapper.core.strategy_order_cap import LiveStrategyOrderPolicy
 from snapper.core.types import ORDER_STATUS_REASON_ADOPTED
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionMode
@@ -98,6 +106,7 @@ from snapper.data.repository_types import AccrualLedgerInsertRow
 from snapper.data.repository_types import AccrualLedgerRow
 from snapper.data.repository_types import CheckpointUpsertRow
 from snapper.data.repository_types import ExecutionRow
+from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import OrderRow
 from snapper.data.repository_types import PairedExecutionGroupInsertRow
 from snapper.data.repository_types import PairedExecutionGroupRow
@@ -130,6 +139,7 @@ from snapper.messaging.schemas.data import SignalData
 from snapper.messaging.schemas.messages import MessageParseError
 from snapper.messaging.schemas.messages import parse_message
 from snapper.messaging.topics.builders import ParsedOrderTopic
+from snapper.messaging.topics.builders import ParsedSignalTopic
 from snapper.messaging.topics.builders import accrual_topic
 from snapper.messaging.topics.builders import order_command_topic
 from snapper.messaging.topics.builders import order_event_topic
@@ -4251,43 +4261,41 @@ class TraderCoordinator(RegisterableProcess):
     async def _resolve_instrument_specs(
         self, instrument: str, exchange: str
     ) -> dict[str, InstrumentSpec]:
-        """Resolve tick_size, lot_size, and public_id from InstrumentSpec repository.
-
-        Falls back to conservative defaults when the lookup fails. The
-        ``public_id`` key is populated whenever the INSTRUMENT lookup
-        succeeds — a missing SPEC row (tick/lot sizing) only degrades
-        the sizing fields to defaults, never the identity: paper
-        instruments legitimately have no spec row, and dropping the
-        resolved ``public_id`` for them made every AI-attributed paper
-        emit fail closed with :class:`InstrumentSpecMissingError`
-        (first live consult-approved order, 2026-07-10). The strategy
-        hot-path's AI-attribution gate reads ``public_id`` for
-        fail-closed cap evaluation on AI-attributed emits, while
-        non-AI emits remain tolerant of an absent ``public_id``.
-        """
-        fallback: dict[str, InstrumentSpec] = {
-            instrument: InstrumentSpec(tick_size=0.01, lot_size=0.0001)
-        }
+        """Load execution sizing evidence, with simulation defaults only for paper."""
+        paper = exchange == ExchangeEnum.PAPER
+        sizing = InstrumentSpec(tick_size=0.01, lot_size=0.0001) if paper else InstrumentSpec()
         try:
             now = datetime.now(UTC)
             inst_pid = await self.repository.get_instrument_public_id_by_symbol(
                 native_symbol=instrument, exchange=exchange, as_of=now
             )
-            if inst_pid is None:
-                return fallback
+            if not isinstance(inst_pid, str) or not inst_pid:
+                return {instrument: sizing} if paper else {}
             spec = await self.repository.get_instrument_spec(inst_pid, as_of=now)
-            if spec is None:
-                return {
-                    instrument: InstrumentSpec(public_id=inst_pid, tick_size=0.01, lot_size=0.0001)
-                }
-            tick = spec["tick_size"] if spec["tick_size"] is not None else 0.01
-            lot = spec["lot_size"] if spec["lot_size"] is not None else 0.0001
-            return {instrument: InstrumentSpec(public_id=inst_pid, tick_size=tick, lot_size=lot)}
         except Exception:
             logger.opt(exception=True).debug(
-                "InstrumentSpec lookup failed for {}/{}, using defaults", instrument, exchange
+                "InstrumentSpec lookup failed for {}/{}", instrument, exchange
             )
-            return fallback
+            return {instrument: sizing} if paper else {}
+        sizing["public_id"] = inst_pid
+        if isinstance(spec, dict):
+            self._populate_instrument_sizing(sizing, spec, paper=paper)
+        return {instrument: sizing}
+
+    @staticmethod
+    def _populate_instrument_sizing(
+        sizing: InstrumentSpec, spec: InstrumentSpecRow, *, paper: bool
+    ) -> None:
+        """Copy observed precision and quantity units into the engine spec."""
+        tick = spec.get("tick_size")
+        lot = spec.get("lot_size")
+        if tick is not None:
+            sizing["tick_size"] = tick
+        if lot is not None:
+            sizing["lot_size"] = lot
+        if not paper:
+            sizing["quantity_unit"] = spec.get("quantity_unit")
+            sizing["native_order_quantity_unit"] = spec.get("native_order_quantity_unit")
 
     async def _create_engine_for_recovery(
         self,
@@ -6963,7 +6971,11 @@ class TraderCoordinator(RegisterableProcess):
         logger.info("ZMQTrader: Starting signal listen loop")
         try:
             while True:
-                topic_str, msg_bytes = await self.signal_subscriber.recv_multipart()
+                try:
+                    topic_str, msg_bytes = await self.signal_subscriber.recv_multipart()
+                except ValueError as exc:
+                    logger.error("Subscriber frame refused: reason={}", exc)
+                    continue
                 if topic_str == "system.symbol_aliases":
                     logger.info("ZMQTrader: Received symbol_aliases update, refreshing cache")
                     SymbolMapperService.get_instance().trigger_cache_invalidation(fail_fast=False)
@@ -6977,16 +6989,7 @@ class TraderCoordinator(RegisterableProcess):
                 if topic_str.startswith("system.heartbeats.executor."):
                     self._handle_executor_heartbeat(topic_str, msg_bytes)
                     continue
-                signal = SignalData.from_json(msg_bytes.decode())
-                self._gap_detector.check(
-                    topic_str,
-                    signal.session_id,
-                    signal.sequence_id,
-                    wallet_public_id=signal.wallet_public_id or "",
-                )
-                logger.info(f"ZMQTrader: Received signal from {topic_str}: {signal}")
-                self._current_topic = topic_str
-                await self._on_signal(signal)
+                await self._handle_signal_message(topic_str, msg_bytes)
         except asyncio.CancelledError:
             logger.info("ZMQTrader: Signal listen loop cancelled")
             raise
@@ -6994,16 +6997,52 @@ class TraderCoordinator(RegisterableProcess):
             logger.error("TraderCoordinator signal listener failed: {}", type(exc).__name__)
             raise
 
+    async def _handle_signal_message(self, topic: str, payload: bytes) -> None:
+        """Decode and deliver one signal."""
+        try:
+            signal = SignalData.from_json(payload.decode())
+        except (UnicodeDecodeError, ValidationError) as exc:
+            logger.error(
+                "Strategy signal frame refused: topic={} reason={}", topic, type(exc).__name__
+            )
+            return
+        self._gap_detector.check(
+            topic, signal.session_id, signal.sequence_id, wallet_public_id=signal.wallet_public_id
+        )
+        logger.info(f"ZMQTrader: Received signal from {topic}: {signal}")
+        self._current_topic = topic
+        await self._on_signal(signal)
+
     async def _on_signal(self, signal: SignalData) -> None:
-        """Process incoming trading signal.
+        """Contain operational refusals and read or write failures per signal."""
+        try:
+            await self._route_signal(signal)
+        except (
+            ValueError,
+            KeyError,
+            SQLAlchemyError,
+            InstrumentSpecMissingError,
+            OSError,
+            TimeoutError,
+            CapsViolationError,
+            ShardOwnershipError,
+            RuntimeError,
+        ) as exc:
+            self._log_signal_refusal(signal, str(exc) or type(exc).__name__)
 
-        Extracts exchange and mode from topic, creates engine if needed,
-        and executes the signal through the appropriate engine.
+    @staticmethod
+    def _log_signal_refusal(signal: SignalData, reason: str) -> None:
+        """Log a refusal where the final order quantity and cap are unavailable."""
+        logger.error(
+            "Strategy signal refused: strategy={} instrument={} qty=None cap=None wallet={} reason={}",
+            signal.strategy_name,
+            signal.instrument,
+            signal.wallet_public_id,
+            reason,
+        )
 
-        Args:
-            signal: Validated signal envelope with instrument, side,
-                strength, and price information.
-        """
+    async def _route_signal(self, signal: SignalData) -> None:
+        """Validate routing and submit one eligible strategy signal."""
         if self._refuse_uncertified_order_execution(
             f"strategy signal {signal.public_id} for {signal.instrument}"
         ):
@@ -7028,10 +7067,37 @@ class TraderCoordinator(RegisterableProcess):
         assert (
             self.execution_publisher is not None
         ), "execution_publisher not initialized - _setup_external_execution must be called first"
+        policy = None
+        if context.exchange != ExchangeEnum.PAPER:
+            policy = await resolve_live_signal_policy(self.repository, signal)
+        await self._execute_routed_signal(signal, context, policy)
+
+    async def _execute_routed_signal(
+        self,
+        signal: SignalData,
+        context: SignalRoutingContext,
+        policy: LiveStrategyOrderPolicy | None,
+    ) -> None:
+        """Run live admission before creating any paired-execution group."""
         engine = await self._get_or_create_signal_engine(signal, context)
-        self.last_signal_time[context.engine_key] = time.time()
         price = cast(float, signal.price)
         desired_units = signal.strength if signal.side == TradeSideEnum.BUY else -signal.strength
+        options: StrategySignalOrderOptions = {
+            "ai_review_public_id": signal.ai_review_public_id,
+            "ai_review_dispatch_version": signal.ai_review_dispatch_version,
+            "signal_public_id": signal.public_id,
+            "origin": signal.origin,
+            "replay_window_start": signal.replay_window_start,
+            "replay_window_end": signal.replay_window_end,
+        }
+        if context.exchange != ExchangeEnum.PAPER:
+            engine._check_in_flight_timeout()
+            prepared = engine.prepare_desired_units(desired_units, price, policy)
+            if prepared is None:
+                return
+            options["policy"] = policy
+            options["prepared"] = prepared
+        self.last_signal_time[context.engine_key] = time.time()
         strategy_name = signal.strategy_name or "unknown"
         logger.info(
             f"ZMQTrader: Processing signal from {strategy_name} - "
@@ -7042,17 +7108,9 @@ class TraderCoordinator(RegisterableProcess):
         signaled_at = signal.fired_at.timestamp()
         prev_oid = engine.pending_client_order_id
         group_public_id = await self._ensure_paired_execution_group(signal)
+        options["grouped_correlation_id"] = group_public_id
         command_public_id = await engine.execute_desired_units(
-            desired_units,
-            price,
-            signaled_at=signaled_at,
-            ai_review_public_id=signal.ai_review_public_id,
-            ai_review_dispatch_version=signal.ai_review_dispatch_version,
-            grouped_correlation_id=group_public_id,
-            signal_public_id=signal.public_id,
-            origin=signal.origin,
-            replay_window_start=signal.replay_window_start,
-            replay_window_end=signal.replay_window_end,
+            desired_units, price, signaled_at=signaled_at, **options
         )
         new_oid = engine.pending_client_order_id
         if new_oid and new_oid != prev_oid:
@@ -7271,6 +7329,8 @@ class TraderCoordinator(RegisterableProcess):
         exchange = self._validate_signal_exchange(parsed.exchange)
         if exchange is None:
             return None
+        if not self._validate_live_signal_route(parsed, signal):
+            return None
         if not self._validate_signal_payload(signal, exchange):
             return None
         wallet_public_id = signal.wallet_public_id or ""
@@ -7318,6 +7378,20 @@ class TraderCoordinator(RegisterableProcess):
                 strategy_tag=strategy_tag,
             ),
         )
+
+    def _validate_live_signal_route(self, parsed: ParsedSignalTopic, signal: SignalData) -> bool:
+        """Reject mismatched live routing before selecting or creating an engine."""
+        if parsed.exchange == signal.exchange == ExchangeEnum.PAPER:
+            return True
+        if (
+            parsed.exchange == signal.exchange
+            and parsed.instrument == signal.instrument
+            and parsed.signal_type == ExecutionModeEnum.LIVE
+            and signal.origin == "live"
+        ):
+            return True
+        self._log_signal_refusal(signal, "live topic and envelope do not match")
+        return False
 
     def _validate_signal_exchange(self, exchange_str: str) -> OrderExchange | None:
         """Validate the exchange segment from the current signal topic."""
@@ -7428,9 +7502,16 @@ class TraderCoordinator(RegisterableProcess):
         """Fetch the routed engine or create it with the current settings."""
         existing = self.engines.get(context.engine_key)
         if existing is not None:
+            if context.exchange != ExchangeEnum.PAPER:
+                if existing.wallet_public_id != context.wallet_public_id:
+                    raise ValueError("live signal wallet conflicts with the registered engine")
+                existing.instrument_specs = await self._resolve_instrument_specs(
+                    signal.instrument, context.exchange
+                )
             return existing
         logger.info(f"ZMQTrader: Creating new engine for {context.engine_key}")
-        await self._ensure_instrument(signal.instrument, exchange=context.exchange)
+        if context.exchange == ExchangeEnum.PAPER:
+            await self._ensure_instrument(signal.instrument, exchange=context.exchange)
         risk = RiskEvaluator(
             RiskConfigModel(
                 r_per_trade=self.settings.risk_r_per_trade,

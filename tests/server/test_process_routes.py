@@ -36,6 +36,7 @@ from snapper.application.process_manager.models import ProcessStartResult
 from snapper.application.process_manager.models import ProcessStopResult
 from snapper.application.process_manager.strategy_scope import StrategyOutputCoverageError
 from snapper.application.process_manager.strategy_scope import StrategyProcessClassification
+from snapper.application.process_manager.strategy_scope import StrategyScopeError
 from snapper.application.process_manager.strategy_scope import StrategyWalletScope
 from snapper.auth.dependencies import require_authentication
 from snapper.auth.dependencies import validate_csrf_token
@@ -1468,6 +1469,7 @@ class TestStartProcess:
             name="zmq_broker",
             mode="process",
             parameters={"endpoint": "tcp://0.0.0.0:6666"},
+            allow_strategy=False,
         )
 
     @pytest.mark.asyncio
@@ -1504,7 +1506,10 @@ class TestStartProcess:
         )
         assert result.payload.status == "success"
         mock_factory.start_process_by_name.assert_awaited_once_with(
-            name="zmq_broker", mode=None, parameters=None
+            name="zmq_broker",
+            mode=None,
+            parameters=None,
+            allow_strategy=False,
         )
 
     @pytest.mark.asyncio
@@ -1570,7 +1575,10 @@ class TestStartProcess:
         assert result.payload.status == "success"
         assert result.payload.process_public_id == "run-002"
         mock_factory.start_process_by_name.assert_awaited_once_with(
-            name="executor_kraken_w0000000000a1", mode=None, parameters=None
+            name="executor_kraken_w0000000000a1",
+            mode=None,
+            parameters=None,
+            allow_strategy=False,
         )
 
 
@@ -1719,6 +1727,41 @@ class TestProcessLifecyclePermissionSubsets:
         assert exc_info.value.detail == "Permission 'start:strategies' required"
         factory.create_process_config.assert_not_awaited()
 
+    async def test_enabled_live_create_uses_scope_and_reports_invalid_cap(self) -> None:
+        """Enabled live create uses scope and reports invalid cap.
+
+        Given: An enabled live strategy.
+        When: Persistence refuses it.
+        Then: Surface the reason.
+        """
+        entry = self._entry(ProcessRoleEnum.STRATEGY)
+        entry.class_ref.get_default_parameters.return_value = _strategy_params(exchange="kraken")
+        factory = MagicMock()
+        factory.create_process_config = AsyncMock(
+            side_effect=StrategyScopeError("max_order_base_qty must be positive")
+        )
+        with (
+            patch(
+                "snapper.server.process_routes.get_registered_processes",
+                return_value={"target": entry},
+            ),
+            patch(
+                "snapper.server.process_routes._enforce_strategy_scope", new_callable=AsyncMock
+            ) as scope,
+            pytest.raises(HTTPException) as exc,
+        ):
+            await create_process_configuration(
+                http_request=_make_rest_request(),
+                factory=factory,
+                settings=MagicMock(),
+                user=_scoped_operator(Permission.CONFIGURE_STRATEGIES, Permission.START_STRATEGIES),
+                repo=MagicMock(),
+                _csrf=None,
+                body=self._create_body(enabled=True),
+            )
+        scope.assert_awaited_once()
+        assert exc.value.status_code == 400 and "max_order_base_qty" in exc.value.detail
+
     @pytest.mark.asyncio
     async def test_nonstrategy_create_requires_manage_processes(self) -> None:
         """A strategy configuration grant cannot create core processes."""
@@ -1760,7 +1803,7 @@ class TestProcessLifecyclePermissionSubsets:
         )
         factory = MagicMock()
         factory.get_process_configs = AsyncMock(return_value=[config])
-        factory.start_process_by_name = AsyncMock(
+        factory.start_strategy_by_name = AsyncMock(
             return_value=ProcessStartResult(status="success", message="started")
         )
         with patch(
@@ -1776,7 +1819,7 @@ class TestProcessLifecyclePermissionSubsets:
                 _csrf=None,
                 body=self._start_body(),
             )
-        factory.start_process_by_name.assert_awaited_once()
+        factory.start_strategy_by_name.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_strategy_start_rejects_manage_only_without_mutation(self) -> None:
@@ -2591,6 +2634,7 @@ class TestEnforceStrategyScope:
             operator_public_id="",
             wallet_public_id="",
             exchange="kraken",
+            max_order_base_qty=1.0,
         )
         error_principal = MagicMock(operator_public_ids=["op-1"])
         error_repo = MagicMock()
@@ -2647,6 +2691,7 @@ class TestEnforceStrategyScope:
             operator_public_id="op-1",
             wallet_public_id="",
             exchange="kraken",
+            max_order_base_qty=1.0,
         )
         await _enforce_strategy_scope(
             parameters=parameters,
@@ -2666,6 +2711,7 @@ class TestEnforceStrategyScope:
             operator_public_id="op-1",
             wallet_public_id="",
             exchange="kraken",
+            max_order_base_qty=1.0,
         )
         error_principal = MagicMock(operator_public_ids=["op-1"], username="alice")
         with pytest.raises(HTTPException) as exc_info:
@@ -2979,6 +3025,7 @@ class TestStartProcessScopeRecheck:
             "inputs": ["candles.BTC-USD"],
             "outputs": ["signals.BTC-USD"],
             "exchange": "kraken",
+            "max_order_base_qty": 1.0,
             "operator_public_id": "op-1",
             "wallet_public_id": "",
         }
@@ -2990,7 +3037,7 @@ class TestStartProcessScopeRecheck:
             ]
         )
         factory = MagicMock()
-        factory.start_process_by_name = AsyncMock(
+        factory.start_strategy_by_name = AsyncMock(
             return_value=ProcessStartResult(status="success", message="started")
         )
         body = ProcessStartRequest(
@@ -3028,11 +3075,7 @@ class TestStartProcessScopeRecheck:
         assert result.payload.status == "success"
         assert persisted_params["wallet_public_id"] == "wallet-live"
         repo.list_accessible_wallets_for_operators.assert_awaited_once()
-        factory.start_process_by_name.assert_awaited_once_with(
-            name="strategy",
-            mode=None,
-            parameters=persisted_params,
-        )
+        factory.start_strategy_by_name.assert_awaited_once_with("strategy", None, ["op-1"])
 
     @pytest.mark.asyncio
     async def test_start_process_rejects_multiple_accessible_wallets(self) -> None:
@@ -3042,6 +3085,7 @@ class TestStartProcessScopeRecheck:
             "inputs": ["candles.BTC-USD"],
             "outputs": ["signals.BTC-USD"],
             "exchange": "kraken",
+            "max_order_base_qty": 1.0,
             "operator_public_id": "op-1",
             "wallet_public_id": "",
         }
@@ -3098,6 +3142,7 @@ class TestStartProcessScopeRecheck:
             "inputs": ["candles.BTC-USD"],
             "outputs": ["signals.BTC-USD"],
             "exchange": "kraken",
+            "max_order_base_qty": 1.0,
             "operator_public_id": "",
             "wallet_public_id": "",
         }
@@ -3155,6 +3200,7 @@ class TestStartProcessScopeRecheck:
             "inputs": ["candles.BTC-USD"],
             "outputs": ["signals.BTC-USD"],
             "exchange": "kraken",
+            "max_order_base_qty": 1.0,
             "operator_public_id": "",
             "wallet_public_id": "",
         }
@@ -3213,6 +3259,7 @@ class TestStartProcessScopeRecheck:
             "inputs": ["candles.BTC-USD"],
             "outputs": ["signals.BTC-USD"],
             "exchange": "kraken",
+            "max_order_base_qty": 1.0,
             "operator_public_id": "",
             "wallet_public_id": "",
         }
@@ -3307,6 +3354,7 @@ class TestStartProcessScopeRecheck:
             name="backfill",
             mode=None,
             parameters=None,
+            allow_strategy=False,
         )
 
     @pytest.mark.asyncio
@@ -3354,6 +3402,7 @@ class TestStartProcessScopeRecheck:
             name="core",
             mode=None,
             parameters=None,
+            allow_strategy=False,
         )
 
     @pytest.mark.asyncio
@@ -3465,6 +3514,7 @@ class TestStartProcessScopeRecheck:
             "inputs": ["candles.BTC-USD"],
             "outputs": ["signals.BTC-USD"],
             "exchange": "kraken",
+            "max_order_base_qty": 1.0,
             "operator_public_id": "",
             "wallet_public_id": "",
         }
@@ -3519,6 +3569,7 @@ class TestStartProcessScopeRecheck:
             "inputs": ["candles.BTC-USD"],
             "outputs": ["signals.BTC-USD"],
             "exchange": "kraken",
+            "max_order_base_qty": 1.0,
             "operator_public_id": "op-1",
             "wallet_public_id": "",
         }
@@ -3585,7 +3636,7 @@ class TestStartProcessScopeRecheck:
             ]
         )
         factory = MagicMock()
-        factory.start_process_by_name = AsyncMock(
+        factory.start_strategy_by_name = AsyncMock(
             return_value=ProcessStartResult(status="success", message="started")
         )
         body = ProcessStartRequest(
@@ -3622,11 +3673,7 @@ class TestStartProcessScopeRecheck:
             )
 
         assert persisted_params["wallet_public_id"] == "wallet-paper"
-        factory.start_process_by_name.assert_awaited_once_with(
-            name="strategy",
-            mode=None,
-            parameters=persisted_params,
-        )
+        factory.start_strategy_by_name.assert_awaited_once_with("strategy", None, ["op-1"])
 
     @pytest.mark.asyncio
     async def test_start_process_rejects_zero_accessible_wallets(self) -> None:
@@ -3636,6 +3683,7 @@ class TestStartProcessScopeRecheck:
             "inputs": ["candles.BTC-USD"],
             "outputs": ["signals.BTC-USD"],
             "exchange": "kraken",
+            "max_order_base_qty": 1.0,
             "operator_public_id": "op-1",
             "wallet_public_id": "",
         }
@@ -3690,13 +3738,14 @@ class TestStartProcessScopeRecheck:
             "inputs": ["candles.BTC-USD"],
             "outputs": ["signals.BTC-USD"],
             "exchange": "kraken",
+            "max_order_base_qty": 1.0,
             "operator_public_id": "op-1",
             "wallet_public_id": "wallet-pinned",
         }
         repo = MagicMock()
         repo.list_accessible_wallets_for_operators = AsyncMock()
         factory = MagicMock()
-        factory.start_process_by_name = AsyncMock(
+        factory.start_strategy_by_name = AsyncMock(
             return_value=ProcessStartResult(status="success", message="started")
         )
         body = ProcessStartRequest(
@@ -3733,11 +3782,7 @@ class TestStartProcessScopeRecheck:
 
         assert persisted_params["wallet_public_id"] == "wallet-pinned"
         repo.list_accessible_wallets_for_operators.assert_not_called()
-        factory.start_process_by_name.assert_awaited_once_with(
-            name="strategy",
-            mode=None,
-            parameters=persisted_params,
-        )
+        factory.start_strategy_by_name.assert_awaited_once_with("strategy", None, ["op-1"])
 
     @pytest.mark.asyncio
     async def test_start_process_rejects_explicit_wallet_without_active_grant(self) -> None:
@@ -3747,6 +3792,7 @@ class TestStartProcessScopeRecheck:
             "inputs": ["candles.BTC-USD"],
             "outputs": ["signals.BTC-USD"],
             "exchange": "kraken",
+            "max_order_base_qty": 1.0,
             "operator_public_id": "op-1",
             "wallet_public_id": "wallet-pinned",
         }
@@ -4484,6 +4530,36 @@ class TestSetProcessDesiredState:
         )
         assert "reconcile" in (result.payload.message or "")
 
+    async def test_enable_writer_conflict_is_reported(self) -> None:
+        """Enable writer conflict is reported.
+
+        Given: A competing live configuration.
+        When: Enabling.
+        Then: Report the conflict.
+        """
+        config = self._config("strategy", enabled=False)
+        factory = self._factory(config, autostart_includes=True)
+        factory.update_process_config.side_effect = StrategyScopeError("overlap")
+        with pytest.raises(HTTPException) as exc:
+            await self._patch("strategy", factory, self._body("enable"))
+        assert exc.value.status_code == 409 and "overlap" in exc.value.detail
+
+    async def test_enable_live_strategy_without_cap_returns_conflict(self) -> None:
+        """Enable reports a missing live cap as a conflict.
+
+        Given: A disabled legacy live strategy without a cap.
+        When: An operator requests enable.
+        Then: The route returns 409 before writing desired state.
+        """
+        config = self._config("strategy", enabled=False, role=ProcessRoleEnum.STRATEGY)
+        config.parameters["exchange"] = "kraken"
+        factory = self._factory(config, autostart_includes=True)
+        with pytest.raises(HTTPException) as exc:
+            await self._patch("strategy", factory, self._body("enable"))
+        assert exc.value.status_code == 409
+        assert "max_order_base_qty must be configured" in exc.value.detail
+        factory.update_process_config.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_enable_non_strategy_local_owner(self) -> None:
         """Enabling a locally-owned non-strategy persists enabled=True, not managed_remotely."""
@@ -4816,6 +4892,7 @@ class TestUpdateProcessScopeConfig:
         operator: str | None = None,
         wallet: str | None = None,
         reference: dict[str, str] | None = None,
+        cap: float | None = None,
     ) -> ProcessConfigScopeRequest:
         """Build a scope-config PATCH envelope."""
         return ProcessConfigScopeRequest(
@@ -4826,6 +4903,7 @@ class TestUpdateProcessScopeConfig:
             payload=ProcessConfigScopeBody(
                 operator_public_id=operator,
                 wallet_public_id=wallet,
+                max_order_base_qty=cap,
                 reference_identity_params=reference,
             ),
         )
@@ -4864,6 +4942,7 @@ class TestUpdateProcessScopeConfig:
         persisted = {
             "operator_public_id": "op-a",
             "wallet_public_id": "wal-1",
+            "max_order_base_qty": 0.00006,
             "params": {
                 "ai_review_strategy_public_id": "uuid-seed",
                 "ai_review_user_public_id": "label:bob",
@@ -4880,6 +4959,7 @@ class TestUpdateProcessScopeConfig:
                 self._body(
                     operator="op-a",
                     wallet="wal-1",
+                    cap=0.00006,
                     reference={"ai_review_user_public_id": "label:bob"},
                 ),
                 operator_public_ids=["op-a"],
@@ -4890,13 +4970,46 @@ class TestUpdateProcessScopeConfig:
         assert mock_enforce.await_args is not None
         enforced = mock_enforce.await_args.args[0]
         assert enforced["operator_public_id"] == "op-a"
+        assert enforced["max_order_base_qty"] == 0.00006
         assert enforced["params"]["ai_review_user_public_id"] == "label:bob"
         kwargs = factory.update_process_config_parameters.await_args.kwargs
         merged = kwargs["parameters"]
         assert merged["operator_public_id"] == "op-a"
         assert merged["wallet_public_id"] == "wal-1"
+        assert merged["max_order_base_qty"] == 0.00006
         assert merged["params"]["ai_review_user_public_id"] == "label:bob"
         assert merged["params"]["ai_review_strategy_public_id"] == "uuid-seed"
+
+    async def test_scope_edit_writer_conflict_is_reported(self) -> None:
+        """Scope edit writer conflict is reported.
+
+        Given: A conflicting active scope edit.
+        When: Saving.
+        Then: Report the conflict.
+        """
+        config = self._config("strategy_x", parameters={})
+        factory = self._factory(config, writer_raises=StrategyScopeError("overlap"))
+        with (
+            patch(self._ENFORCE, new_callable=AsyncMock),
+            pytest.raises(HTTPException) as exc,
+        ):
+            await self._invoke("strategy_x", factory, self._body(cap=0.00006))
+        assert exc.value.status_code == 409 and "overlap" in exc.value.detail
+
+    async def test_live_scope_edit_without_cap_returns_conflict(self) -> None:
+        """Scope editing reports a missing live cap as a conflict.
+
+        Given: A legacy live strategy without a cap.
+        When: An operator edits scope while leaving the cap unset.
+        Then: The route returns 409 before writing the configuration.
+        """
+        config = self._config("strategy_x", parameters={"exchange": "kraken"})
+        factory = self._factory(config)
+        with pytest.raises(HTTPException) as exc:
+            await self._invoke("strategy_x", factory, self._body())
+        assert exc.value.status_code == 409
+        assert "max_order_base_qty must be configured" in exc.value.detail
+        factory.update_process_config_parameters.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_scope_config_requires_configure_strategies_before_mutation(self) -> None:

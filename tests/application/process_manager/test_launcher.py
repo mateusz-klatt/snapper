@@ -1891,7 +1891,7 @@ class TestUpdateProcessConfig:
                 return_value=mock_repo,
             ),
             patch(
-                "snapper.application.process_manager.registry_syncer.begin_scd2_write",
+                "snapper.application.process_manager.registry_syncer.begin_process_config_write",
                 new=fake_begin,
             ),
             patch(
@@ -1931,7 +1931,7 @@ class TestUpdateProcessConfig:
                 return_value=mock_repo,
             ),
             patch(
-                "snapper.application.process_manager.registry_syncer.begin_scd2_write",
+                "snapper.application.process_manager.registry_syncer.begin_process_config_write",
                 new=fake_begin,
             ),
             patch(
@@ -1985,7 +1985,7 @@ class TestUpdateProcessConfig:
                 return_value=mock_repo,
             ),
             patch(
-                "snapper.application.process_manager.registry_syncer.begin_scd2_write",
+                "snapper.application.process_manager.registry_syncer.begin_process_config_write",
                 new=fake_begin,
             ),
             patch(
@@ -2063,7 +2063,7 @@ class TestUpdateProcessConfig:
                 return_value=mock_repo,
             ),
             patch(
-                "snapper.application.process_manager.registry_syncer.begin_scd2_write",
+                "snapper.application.process_manager.registry_syncer.begin_process_config_write",
                 new=fake_begin,
             ),
             patch(

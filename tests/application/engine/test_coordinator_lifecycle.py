@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic import ValidationError
 
 from snapper.application.engine import trader as trader_module
 from snapper.application.engine.trader import TraderCoordinator
@@ -271,36 +270,31 @@ def _null_wallet_payload() -> bytes:
 
 
 @pytest.mark.parametrize("payload", [b"{", _null_wallet_payload()], ids=["brace", "null-wallet"])
-async def test_actual_schema_failure_keeps_original_identity(
+async def test_actual_schema_failure_keeps_coordinator_running(
     lifecycle: _Harness, monkeypatch: pytest.MonkeyPatch, payload: bytes
 ) -> None:
-    """Preserve actual parsing errors through listener logging and owner teardown.
+    """Keep required intake running after a schema failure.
 
     Given: Malformed JSON or an explicit null wallet reaches the real schema parser,
-    When: The parser produces a recorded ValidationError,
-    Then: Listener and owner expose that exact object without logging replacement.
+    When: An executor heartbeat follows the invalid frame,
+    Then: The listener consumes the heartbeat and the coordinator stays alive.
     """
-    errors: list[ValidationError] = []
-    actual_parse = SignalData.from_json
-
-    def parse(raw: str) -> SignalData:
-        """Transparently record the parser's original exception before rethrowing."""
-        try:
-            return actual_parse(raw)
-        except ValidationError as exc:
-            errors.append(exc)
-            raise
-
-    monkeypatch.setattr(SignalData, "from_json", staticmethod(parse))
+    monkeypatch.setattr(
+        lifecycle.coordinator,
+        "_handle_executor_heartbeat",
+        lambda _topic, _raw: lifecycle.stream.marker.set(),
+    )
     lifecycle.stream.frames.put_nowait(("signals.kraken.BTC-USD.live", payload))
+    lifecycle.stream.frames.put_nowait(("system.heartbeats.executor.kraken", b"heartbeat"))
     owner = lifecycle.start()
     await lifecycle.ready()
     lifecycle.stream.release.set()
     async with asyncio.timeout(2):
-        await lifecycle.listener_finished.wait()
-    assert len(errors) == 1
-    assert lifecycle.listener_error is errors[0]
-    assert await _outcome(owner) is errors[0]
+        await lifecycle.stream.marker.wait()
+    assert not owner.done()
+    assert not lifecycle.listener_finished.is_set()
+    owner.cancel()
+    assert isinstance(await _outcome(owner), asyncio.CancelledError)
 
 
 async def test_required_listener_normal_return_fails_owner(lifecycle: _Harness) -> None:

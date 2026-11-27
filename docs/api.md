@@ -2592,7 +2592,9 @@ X-CSRF-Token: <csrf_token>
 client-minted idempotency token (pattern `^[A-Za-z0-9_-]+$`, length 8-64),
 **required** for `restart` and ignored otherwise; re-sending the same nonce
 does not double-bounce the process. Enabling a strategy re-runs the
-operator/wallet/grant scope check (fail-closed) before the write.
+operator/wallet/grant scope check before the write. Enable and restart
+require a live strategy to have `parameters.max_order_base_qty` and
+exclusive ownership of each wallet, exchange, and instrument combination.
 
 **Response (200):**
 
@@ -2621,20 +2623,19 @@ operator/wallet/grant scope check (fail-closed) before the write.
 }
 ```
 
-**Errors:** 404 (per-wallet executor instance or unknown process), 422 (bare
-executor template, or a `restart` without `restart_nonce`), 409 (`restart` of a
-disabled process), 403/400 (strategy operator/wallet/grant scope denied).
+**Errors** include 404 for an executor instance or unknown process, 422 for a
+bare executor template or missing restart nonce, and 403 or 400 for invalid
+strategy scope. A 409 indicates a restart of a disabled process, a missing
+live cap, or an overlap with another enabled live strategy.
 
 ### PATCH /api/processes/{name}/config
 
-Retarget an existing **strategy** config's scope (operator / wallet /
-AI-reviewer reference-identity params) without hand-editing the config JSON.
-Requires `configure:strategies` and CSRF for cookie auth. The endpoint does not
-restart the process: the response carries `restart_required: true` (surfaced by
-the UI as a "restart required" banner), and the change applies on the next
-start or restart. Authorization is fully enforced at edit time against the
-caller's principal; it does not defer cross-tenant checks to the trusted start
-resolver.
+Edit an existing **strategy** config's operator, wallet, AI-reviewer
+reference identities, or per-order quantity cap. Requires
+`configure:strategies` and CSRF for cookie auth. The response always carries
+`restart_required: true`. Scope changes take effect when the process starts or
+restarts. A cap change takes effect on the next live signal without a restart.
+The endpoint checks the caller's authorization at edit time.
 
 **Request:**
 
@@ -2652,6 +2653,7 @@ X-CSRF-Token: <csrf_token>
     "payload": {
         "operator_public_id": "019d6ca4-...",
         "wallet_public_id": "019d7e9a-...",
+        "max_order_base_qty": 0.00006,
         "reference_identity_params": {
             "ai_review_user_public_id": "label:reviewer"
         }
@@ -2659,8 +2661,11 @@ X-CSRF-Token: <csrf_token>
 }
 ```
 
-All payload fields are optional; an omitted field is left unchanged, and an
-empty-string `operator_public_id` clears it. `operator_public_id` /
+All payload fields are optional. Omitted fields keep their current values, and an
+empty-string `operator_public_id` clears it. `max_order_base_qty` is a positive,
+finite JSON number in base-asset units. It is stored as
+`parameters.max_order_base_qty` and is required for a live strategy.
+`operator_public_id` /
 `wallet_public_id` accept either a concrete public_id or a `label:<name>`
 reference. The scope is authorized at edit time against the caller's principal: a
 `label:` reference is resolved scope-qualified to the caller's own operator
@@ -2669,9 +2674,9 @@ strategy's paper/live mode), so it can never resolve outside the caller's
 authority. A label that resolves to exactly one in-scope entity is accepted; a
 blank, unresolved, or ambiguous label is rejected with 400, and a concrete
 operator the caller has no membership on is rejected with 403. Values are
-persisted **verbatim** — a `label:` reference is stored as-is and resolved to a
-concrete UUID only at the next (re)start (the authorization check runs on a
-throwaway resolved copy). `reference_identity_params` values may likewise be
+persisted **verbatim**. Snapper resolves a `label:` reference at start or
+restart and rechecks the live strategy's scope during signal admission.
+`reference_identity_params` values may likewise be
 `label:<name>` references (e.g. `label:<username>` for the AI reviewer); their
 keys must be reference-identity params the strategy **declares** (whitelisted
 against the registry; an undeclared key returns 400).
@@ -2698,6 +2703,7 @@ against the registry; an undeclared key returns 400).
         "parameters": {
             "operator_public_id": "019d6ca4-...",
             "wallet_public_id": "019d7e9a-...",
+            "max_order_base_qty": 0.00006,
             "params": { "ai_review_user_public_id": "label:reviewer" }
         },
         "restart_required": true
@@ -2705,11 +2711,12 @@ against the registry; an undeclared key returns 400).
 }
 ```
 
-**Errors:** 404 (per-wallet executor instance or not configured), 422 (bare
-executor template), 400 (not a strategy, undeclared reference-identity key,
-blank/unresolved/ambiguous operator or wallet label, or wallet resolution
-failure), 403
-(operator not a member / missing wallet grant / output not covered).
+**Errors** include 404 for an executor instance or unknown process and 422
+for a bare executor template. A 400 indicates an invalid strategy target,
+reference key, label, or wallet resolution. A 403 indicates missing operator
+membership, wallet grants, or output coverage. A 409 indicates a missing live
+cap or, when editing an enabled live strategy, overlap with another enabled
+strategy on the same wallet, exchange, and instrument.
 
 ### GET /api/processes/runs
 

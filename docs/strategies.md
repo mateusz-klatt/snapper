@@ -49,6 +49,28 @@ continues to authorize only non-strategy process targets. Scope configuration
 and launch also validate operator membership, wallet grants, and live-output
 coverage.
 
+## Live order quantity cap
+
+Set `parameters.max_order_base_qty` to a positive finite JSON number in base-asset
+units. Each enabled live strategy must own its wallet, exchange and output
+instrument combination exclusively. Paper strategies may omit the cap.
+
+The trading engine reads the persisted cap for each live signal. It floors the
+combined order quantity to the venue lot and refuses quantities above the cap.
+A quantity equal to the cap is allowed. The same rule applies to openings,
+flips and ordinary closes. Repeated orders can accumulate wallet exposure
+beyond this per-order limit.
+
+If a full close would exceed the cap, the strategy can submit individual
+under-cap reductions. An operator can close the position manually, or an
+independently authorized protective exit can close it under its existing rules.
+
+Before rollout, inventory and pause existing live strategy configs. Backfill
+each cap through the strategy scope editor and reconcile outstanding orders
+and commands submitted before the cap was deployed. Enable each live strategy
+after its cap and wallet scope are valid. A live configuration without a valid
+cap cannot be enabled or started.
+
 ## Creating Strategies
 
 ### Basic Structure
@@ -166,6 +188,7 @@ class RSIReversion(BaseStrategy):
 | `inputs` | list[str] | List of ZMQ topics to subscribe |
 | `outputs` | list[str] | List of instruments for signals |
 | `exchange` | string | Target exchange (`paper`, `kraken`, `kraken_futures`, `walutomat`) |
+| `max_order_base_qty` | number | Maximum base-asset quantity per live order, including closes and flips. Required on live venues and optional for paper. |
 | `params` | dict | Strategy-specific parameters |
 | `wallet_public_id` | string | Wallet that will execute orders for this strategy. Still defaults to empty and is NOT validated by `StrategyConfig` itself (the dataclass permits unscoped configuration). Process routes validate active operator/wallet grant coverage when both this field and `operator_public_id` are populated; a wallet without an operator is rejected. The trade coordinator drops signals with missing or blank wallet strings before engine/group persistence. Strategies using `create_ai_review_and_await()` also require a non-empty wallet at the caps guard — see "AI delegate consultation" below. |
 | `operator_public_id` | string | Trading-identity operator that owns this strategy instance. Empty default; validated against the launching principal's `operator_public_ids` when populated, and used with `wallet_public_id` for active grant and live-output coverage checks. |
@@ -257,10 +280,11 @@ The error is loud and operator-actionable: it identifies the
 exact missing config field. Without `wallet_public_id`, the
 engine cannot map the AI delegate's approved trade to a wallet
 for cap evaluation (per-user notional / open-orders / quantity
-caps key on wallet+user). Pure non-AI strategies that never
-invoke `create_ai_review_and_await()` continue to run without a
-wallet; they bypass caps via `guard_service_principal()` per the
-existing audit-bypass contract.
+caps key on wallet+user). Strategies without AI attribution use
+`guard_service_principal()`, which skips per-user cap evaluation.
+On live venues those strategies still need a wallet and are bounded
+by `max_order_base_qty`. Paper strategies without AI attribution
+may run without a wallet.
 
 The `ai_review_public_id` carried on the published `SignalData`
 is transport-only end-to-end through the ZMQ wire. The
@@ -880,6 +904,7 @@ Framework automatically validates:
 4.  **Exchange** — must be one of: `paper`, `kraken`, `kraken_futures`, `walutomat`
 5.  **Instruments** — must be available on selected exchange
 6.  **Paper/live mixing** — mixing paper inputs with live exchange not allowed
+7.  **Live order cap** — `max_order_base_qty` must be a positive, finite number for a live strategy. Paper strategies may omit it.
 
 ## Strategy Lifecycle
 

@@ -858,7 +858,7 @@ class TestHeartbeatConsultConstruction:
         When: HeartbeatConsult is instantiated,
         Then: ValueError marks the strategy paper-only.
         """
-        live_exchange_config = _config(exchange="kraken")
+        live_exchange_config = _config(exchange="kraken", max_order_base_qty=1.0)
         with pytest.raises(ValueError, match="paper-only"):
             HeartbeatConsult(live_exchange_config)
 

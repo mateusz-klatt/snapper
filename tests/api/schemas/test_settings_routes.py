@@ -159,6 +159,33 @@ class TestSettingsRoutes:
         mock_request.app.state.rest_tracker = SequenceTracker()
         return mock_request
 
+    @pytest.mark.parametrize("mutation", ["set", "remove"])
+    async def test_generic_mutations_refuse_process_config(self, mutation: str) -> None:
+        """Generic mutations refuse process config.
+
+        Given: A process key.
+        When: Setting or removing it.
+        Then: Require the process API.
+        """
+        with pytest.raises(HTTPException) as exc:
+            if mutation == "set":
+                await set_setting(
+                    self._make_rest_request(),
+                    "process_strategy",
+                    self._make_user(),
+                    None,
+                    MagicMock(),
+                )
+            else:
+                await remove_setting(
+                    self._make_rest_request(),
+                    "process_strategy",
+                    self._make_user(),
+                    None,
+                    MagicMock(),
+                )
+        assert exc.value.status_code == 409
+
     def test_setting_response_model(self) -> None:
         """Verify SettingRead response model maps fields correctly.
 

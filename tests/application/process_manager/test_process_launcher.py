@@ -707,7 +707,10 @@ class TestStartAllProcesses:
     ) -> None:
         """Autostart resolves an empty strategy wallet in operator scope."""
         config = _strategy_autostart_config()
-        repository = _WalletLookupRepository(operator_wallets=[_wallet_row("wallet-live")])
+        _stub_persisted_strategy(monkeypatch, config)
+        repository = _WalletLookupRepository(
+            operator_wallets=[_wallet_row("dcc5d764-eedb-4a4c-9427-f98463890278")]
+        )
         factory = ProcessLauncherService(_create_settings())
         start_mock = mock.AsyncMock()
         monkeypatch.setattr(factory, "get_process_configs", mock.AsyncMock(return_value=[config]))
@@ -722,7 +725,9 @@ class TestStartAllProcesses:
         assert await_args is not None
         started_config = await_args.args[0]
         assert isinstance(started_config, ProcessConfigModel)
-        assert started_config.parameters["wallet_public_id"] == "wallet-live"
+        assert (
+            started_config.parameters["wallet_public_id"] == "dcc5d764-eedb-4a4c-9427-f98463890278"
+        )
         assert config.parameters["wallet_public_id"] == ""
         assert repository.operator_public_ids == ["op-1"]
         assert repository.operator_lookup_count == 1
@@ -764,6 +769,7 @@ class TestStartAllProcesses:
     ) -> None:
         """Autostart skips a live strategy with no accountable operator."""
         config = _strategy_autostart_config(operator_public_id="")
+        _stub_persisted_strategy(monkeypatch, config)
         repository = _WalletLookupRepository(active_wallets=[_wallet_row("wallet-live")])
         factory = ProcessLauncherService(_create_settings())
         start_mock = mock.AsyncMock()
@@ -790,6 +796,7 @@ class TestStartAllProcesses:
     ) -> None:
         """Autostart skips one strategy and warns when wallet lookup is ambiguous."""
         config = _strategy_autostart_config()
+        _stub_persisted_strategy(monkeypatch, config)
         repository = _WalletLookupRepository(
             operator_wallets=[_wallet_row("wallet-a"), _wallet_row("wallet-b")]
         )
@@ -816,6 +823,7 @@ class TestStartAllProcesses:
     ) -> None:
         """Autostart skips an explicit live wallet without an operator."""
         config = _strategy_autostart_config(operator_public_id="", wallet_public_id="wallet-pinned")
+        _stub_persisted_strategy(monkeypatch, config)
         repository = _WalletLookupRepository()
         factory = ProcessLauncherService(_create_settings())
         start_mock = mock.AsyncMock()
@@ -842,6 +850,7 @@ class TestStartAllProcesses:
     ) -> None:
         """Autostart skips an explicit strategy wallet without an active grant."""
         config = _strategy_autostart_config(wallet_public_id="wallet-pinned")
+        _stub_persisted_strategy(monkeypatch, config)
         repository = MagicMock(spec=SQLAlchemyRepository)
         repository.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
         factory = ProcessLauncherService(_create_settings())
@@ -868,9 +877,10 @@ class TestStartAllProcesses:
     ) -> None:
         """Autostart skips a resolved wallet whose grant does not cover outputs."""
         config = _strategy_autostart_config()
+        _stub_persisted_strategy(monkeypatch, config)
         repository = MagicMock(spec=SQLAlchemyRepository)
         repository.list_accessible_wallets_for_operators = AsyncMock(
-            return_value=[_wallet_row("wallet-live")]
+            return_value=[_wallet_row("dcc5d764-eedb-4a4c-9427-f98463890278")]
         )
         repository.list_active_scope_grants_for_wallet = AsyncMock(
             return_value=[{"operator_public_id": "op-1"}]
@@ -906,9 +916,10 @@ class TestStartAllProcesses:
     ) -> None:
         """Autostart starts a strategy after complete wallet and grant enforcement."""
         config = _strategy_autostart_config()
+        _stub_persisted_strategy(monkeypatch, config)
         repository = MagicMock(spec=SQLAlchemyRepository)
         repository.list_accessible_wallets_for_operators = AsyncMock(
-            return_value=[_wallet_row("wallet-live")]
+            return_value=[_wallet_row("dcc5d764-eedb-4a4c-9427-f98463890278")]
         )
         repository.list_active_scope_grants_for_wallet = AsyncMock(
             return_value=[{"operator_public_id": "op-1"}]
@@ -933,7 +944,9 @@ class TestStartAllProcesses:
         assert await_args is not None
         started_config = await_args.args[0]
         assert isinstance(started_config, ProcessConfigModel)
-        assert started_config.parameters["wallet_public_id"] == "wallet-live"
+        assert (
+            started_config.parameters["wallet_public_id"] == "dcc5d764-eedb-4a4c-9427-f98463890278"
+        )
         repository.list_active_scope_grants_for_wallet.assert_awaited_once()
         repository.list_grant_covered_instrument_public_ids.assert_awaited_once()
 
@@ -952,9 +965,10 @@ class TestStartAllProcesses:
         the scope boundary.
         """
         config = _strategy_autostart_config()
+        _stub_persisted_strategy(monkeypatch, config)
         repository = MagicMock(spec=SQLAlchemyRepository)
         repository.list_accessible_wallets_for_operators = AsyncMock(
-            return_value=[_wallet_row("wallet-live")]
+            return_value=[_wallet_row("dcc5d764-eedb-4a4c-9427-f98463890278")]
         )
         repository.list_active_scope_grants_for_wallet = AsyncMock(
             return_value=[{"operator_public_id": "op-1"}]
@@ -999,6 +1013,7 @@ class TestStartAllProcesses:
             reconcile start failure is counted.
         """
         config = _strategy_autostart_config(wallet_public_id="label:main")
+        _stub_persisted_strategy(monkeypatch, config)
         repository = MagicMock(spec=SQLAlchemyRepository)
         repository.list_accessible_wallets_for_operators = AsyncMock(return_value=[])
         repository.list_active_scope_grants_for_wallet = AsyncMock(
@@ -1038,9 +1053,10 @@ class TestStartAllProcesses:
             for the watchdog to respawn from — and the spawn never happened.
         """
         config = _strategy_autostart_config()
+        _stub_persisted_strategy(monkeypatch, config)
         repository = MagicMock(spec=SQLAlchemyRepository)
         repository.list_accessible_wallets_for_operators = AsyncMock(
-            return_value=[_wallet_row("wallet-live")]
+            return_value=[_wallet_row("dcc5d764-eedb-4a4c-9427-f98463890278")]
         )
         repository.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
         repository.list_grant_covered_instrument_public_ids = AsyncMock(
@@ -1079,6 +1095,7 @@ class TestStartAllProcesses:
             StrategyGrantScopeError — pinning WHICH gate failed the strategy.
         """
         strategy = _strategy_autostart_config()
+        _stub_persisted_strategy(monkeypatch, strategy)
         healthy = ProcessConfigModel(
             name="backfill",
             enabled=True,
@@ -1090,7 +1107,7 @@ class TestStartAllProcesses:
         )
         repository = MagicMock(spec=SQLAlchemyRepository)
         repository.list_accessible_wallets_for_operators = AsyncMock(
-            return_value=[_wallet_row("wallet-live")]
+            return_value=[_wallet_row("dcc5d764-eedb-4a4c-9427-f98463890278")]
         )
         repository.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
         repository.list_grant_covered_instrument_public_ids = AsyncMock(
@@ -1136,9 +1153,10 @@ class TestStartAllProcesses:
             an operator recovers it.
         """
         config = _strategy_autostart_config()
+        _stub_persisted_strategy(monkeypatch, config)
         repository = MagicMock(spec=SQLAlchemyRepository)
         repository.list_accessible_wallets_for_operators = AsyncMock(
-            return_value=[_wallet_row("wallet-live")]
+            return_value=[_wallet_row("dcc5d764-eedb-4a4c-9427-f98463890278")]
         )
         repository.list_active_scope_grants_for_wallet = AsyncMock(return_value=[])
         repository.list_grant_covered_instrument_public_ids = AsyncMock(
@@ -1174,7 +1192,10 @@ class TestStartAllProcesses:
     ) -> None:
         """Autostart treats registry strategy classification as authoritative."""
         config = _strategy_autostart_config(role=ProcessRoleEnum.CORE)
-        repository = _WalletLookupRepository(operator_wallets=[_wallet_row("wallet-live")])
+        _stub_persisted_strategy(monkeypatch, config)
+        repository = _WalletLookupRepository(
+            operator_wallets=[_wallet_row("dcc5d764-eedb-4a4c-9427-f98463890278")]
+        )
         registry = {
             "strategy": ProcessRegistryEntry(
                 class_ref=MagicMock(),
@@ -1209,7 +1230,9 @@ class TestStartAllProcesses:
         assert await_args is not None
         started_config = await_args.args[0]
         assert isinstance(started_config, ProcessConfigModel)
-        assert started_config.parameters["wallet_public_id"] == "wallet-live"
+        assert (
+            started_config.parameters["wallet_public_id"] == "dcc5d764-eedb-4a4c-9427-f98463890278"
+        )
 
     @pytest.mark.asyncio
     async def test_start_all_processes_leaves_non_strategy_unchanged(
@@ -1932,6 +1955,23 @@ class _WalletLookupRepository:
         ]
 
 
+def _stub_persisted_strategy(monkeypatch: pytest.MonkeyPatch, config: ProcessConfigModel) -> None:
+    """Return the strategy fixture from the persisted config reader."""
+    monkeypatch.setattr(
+        "snapper.application.process_manager.strategy_admission.read_current_process_configs",
+        AsyncMock(
+            return_value={
+                config.name: {
+                    "class": config.class_path,
+                    "role": config.role,
+                    "enabled": config.enabled,
+                    "parameters": config.parameters,
+                }
+            }
+        ),
+    )
+
+
 def _strategy_autostart_config(
     *,
     operator_public_id: str = "op-1",
@@ -1949,6 +1989,8 @@ def _strategy_autostart_config(
     }
     if exchange is not None:
         parameters["exchange"] = exchange
+    if exchange not in (None, "paper"):
+        parameters["max_order_base_qty"] = 1.0
     return ProcessConfigModel(
         name="strategy",
         enabled=True,
@@ -9775,10 +9817,11 @@ class TestReconcileProfileFilter:
         factory = ProcessLauncherService(_settings_with_profile("api"))
         publisher = _publisher_config()
         strategy = _strategy_autostart_config()
+        _stub_persisted_strategy(monkeypatch, strategy)
         broker = _non_publisher_config()
         repository = MagicMock(spec=SQLAlchemyRepository)
         repository.list_accessible_wallets_for_operators = AsyncMock(
-            return_value=[_wallet_row("wallet-live")]
+            return_value=[_wallet_row("dcc5d764-eedb-4a4c-9427-f98463890278")]
         )
         repository.list_active_scope_grants_for_wallet = AsyncMock(
             return_value=[{"operator_public_id": "op-1"}]
@@ -11068,7 +11111,7 @@ class TestStartByNameLock:
         monkeypatch.setattr(factory, "start_process", _capture)
         monkeypatch.setattr(factory, "_start_native_process_monitoring", mock.MagicMock())
 
-        setting = SimpleNamespace(value=json.dumps({"class_path": "x", "method": "start"}))
+        setting = SimpleNamespace(value=json.dumps({"class": "x", "method": "start"}))
 
         @asynccontextmanager
         async def _session() -> AsyncIterator[Any]:

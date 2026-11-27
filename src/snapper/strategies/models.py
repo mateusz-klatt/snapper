@@ -10,6 +10,7 @@ from dataclasses import field
 from datetime import datetime
 from typing import Any
 
+from snapper.core.strategy_order_cap import validate_strategy_order_cap
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import OrderExchange
 from snapper.core.types import TradeSide
@@ -75,6 +76,7 @@ class StrategyConfig:
             strategy instance. Empty pairs with an unscoped wallet; when
             populated, process routes validate it against the launching
             principal's ``operator_public_ids``.
+        max_order_base_qty: Maximum base-asset quantity per live order.
     """
 
     name: str
@@ -85,6 +87,7 @@ class StrategyConfig:
     params: dict[str, Any] = field(default_factory=dict)
     wallet_public_id: str = ""
     operator_public_id: str = ""
+    max_order_base_qty: int | float | None = None
 
     @staticmethod
     def _is_paper_or_replay(topic: str) -> bool:
@@ -133,6 +136,7 @@ class StrategyConfig:
             )
         self._validate_output_instruments()
         self._validate_paper_inputs()
+        validate_strategy_order_cap(self.exchange, self.max_order_base_qty)
 
     def _validate_output_instruments(self) -> None:
         """Validate that output instruments are tradeable on the configured exchange.

@@ -27,6 +27,7 @@ def _config(**overrides: object) -> StrategyConfig:
         inputs=["market.kraken_equities.MNQM6-CME.candles.1h"],
         outputs=["BTC-USD"],
         exchange=ExchangeEnum.KRAKEN,
+        max_order_base_qty=1.0,
         params=params,
     )
 
@@ -68,6 +69,7 @@ class TestConstruction:
             inputs=["market.kraken_equities.MNQM6-CME.candles.1h"],
             outputs=["BTC-USD"],
             exchange=ExchangeEnum.KRAKEN,
+            max_order_base_qty=1.0,
         )
         strategy = TradFiObserveCryptoExecute(config)
         assert strategy.fast_period == 12

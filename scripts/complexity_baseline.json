@@ -161,15 +161,6 @@
     "src/snapper/application/engine/service.py": {
       "TradingEngineService.__init__": {
         "PLR0913": 13
-      },
-      "TradingEngineService._build_strategy_insert_row": {
-        "PLR0913": 13
-      },
-      "TradingEngineService._send_order": {
-        "PLR0913": 11
-      },
-      "TradingEngineService.execute_desired_units": {
-        "PLR0913": 10
       }
     },
     "src/snapper/application/engine/trader.py": {
@@ -1311,9 +1302,6 @@
     "src/snapper/strategies/process_wrapper.py": {
       "create_strategy_process": {
         "C901": 14
-      },
-      "create_strategy_process.StrategyProcess.__init__": {
-        "PLR0913": 7
       }
     },
     "tests/application/ai_review/test_create_review.py": {
@@ -1376,9 +1364,6 @@
       },
       "_EngineStub.__init__": {
         "PLR0913": 13
-      },
-      "_EngineStub.execute_desired_units": {
-        "PLR0913": 10
       },
       "_make_engine_with_inflight": {
         "PLR0913": 6

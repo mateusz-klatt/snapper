@@ -1196,18 +1196,25 @@ to be enabled (409 otherwise) and a client-minted `restart_nonce`
 (`^[A-Za-z0-9_-]+$`, 8-64 chars, 422 if missing; idempotent — resending the
 same nonce does not double-bounce). A per-wallet executor instance (404) and a
 bare executor template (422) have no desired-state row; enabling a STRATEGY
-re-runs the operator/wallet/grant scope check fail-closed before the write.
+re-runs the operator/wallet/grant scope check before the write. Enable and
+restart return 409 if a live strategy lacks `parameters.max_order_base_qty`
+or overlaps another enabled live strategy on the same wallet, exchange, and
+instrument. You can still disable a legacy strategy that lacks a cap.
 
 `POST /api/processes` uses the same target-aware model when it creates a
 configuration. A STRATEGY target requires effective `CONFIGURE_STRATEGIES` and,
 when created enabled, effective `START_STRATEGIES`; a non-strategy target
 requires effective `MANAGE_PROCESSES`.
 
-### Retargeting a strategy's scope (restart required)
+### Editing a strategy's scope or live order cap
 
 `PATCH /api/processes/<name>/config` retargets an existing STRATEGY
-config's scope (operator / wallet / AI-reviewer reference-identity
-params) without hand-editing the config JSON. It requires effective
+config's operator, wallet, or AI-reviewer reference identities, and accepts
+`max_order_base_qty` in the request payload. Supply a positive, finite JSON
+number in base-asset units to set `parameters.max_order_base_qty`.
+The route returns 409 if a live config still lacks a cap after the edit or
+if an enabled live strategy would overlap another enabled strategy on the
+same wallet, exchange, and instrument. It requires effective
 `CONFIGURE_STRATEGIES`; cookie-authenticated requests also require CSRF. The
 route fully enforces the caller's authorization at edit time via
 `_enforce_strategy_scope` (operator membership, wallet grant, output coverage
@@ -1219,15 +1226,11 @@ reference: a label is resolved at edit time scope-qualified to the
 caller's own operator memberships (so it can never resolve outside the
 caller's authority), and an in-scope unambiguous label is accepted while
 a blank/unresolved/ambiguous label → 400 and a concrete foreign operator
-→ 403. The value is persisted verbatim — a `label:` reference is stored
-as-is and resolved to a concrete UUID only at the next (re)start (the
-authorization check runs on a throwaway resolved copy). The edit does NOT
-restart the process: the
-response carries `restart_required: true` (surfaced in the UI as a
-"restart required" banner) and the new scope takes effect only on the
-next (re)start of the owning process (via the desired-state `restart`
-action above, or a `snapper-strategies` restart subject to the
-flat-restart discipline above).
+→ 403. Snapper stores the reference verbatim and resolves live strategy scope
+at start and signal admission. The response always carries
+`restart_required: true`. Apply scope changes to the running process with a desired-state
+`restart` or a `snapper-strategies` restart under the flat-restart procedure
+above. A cap change applies on the next live signal without a restart.
 
 ## Enable the feed
 

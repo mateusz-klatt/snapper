@@ -8,6 +8,8 @@ import asyncio
 import copy
 from collections.abc import Mapping
 from typing import Any
+from typing import TypedDict
+from typing import Unpack
 
 from loguru import logger
 
@@ -23,6 +25,14 @@ from snapper.strategies.base import BaseStrategy
 from snapper.strategies.base import StrategyConfig
 from snapper.strategies.factory import StrategyFactory
 from snapper.utils.logging import set_log_context
+
+
+class _StrategyProcessScope(TypedDict, total=False):
+    """Optional wallet identity and live quantity cap for the wrapper."""
+
+    wallet_public_id: str
+    operator_public_id: str
+    max_order_base_qty: int | float | None
 
 
 def create_strategy_process(
@@ -82,8 +92,7 @@ def create_strategy_process(
             outputs: list[str],
             exchange: OrderExchange = ExchangeEnum.PAPER,
             params: dict[str, Any] | None = None,
-            wallet_public_id: str = "",
-            operator_public_id: str = "",
+            **scope: Unpack[_StrategyProcessScope],
         ) -> None:
             self.process_name = process_name
             self.config = StrategyConfig(
@@ -93,8 +102,7 @@ def create_strategy_process(
                 outputs=outputs,
                 exchange=exchange,
                 params=params or {},
-                wallet_public_id=wallet_public_id,
-                operator_public_id=operator_public_id,
+                **scope,
             )
             self.strategy: BaseStrategy | None = None
             self.factory = StrategyFactory()

@@ -24,6 +24,7 @@ from snapper.api.schemas.base import PayloadResponse
 from snapper.api.schemas.base import StrictBody
 from snapper.api.schemas.base import StrictDataSchema
 from snapper.core.json_types import JsonObject
+from snapper.core.strategy_order_cap import OrderBaseQuantityCap
 from snapper.core.types import ProcessLifecycleType
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessRoleType
@@ -975,13 +976,13 @@ class ProcessDesiredStateResponse(
 class ProcessConfigScopeBody(StrictBody):
     """Body for the scope-config PATCH: retarget an existing strategy's scope.
 
-    Only the scope-bearing parameters are updatable; the launcher ``class``,
+    Scope references and the live order cap are updatable. The launcher ``class``,
     ``role``, ``template``, ``mode``, ``enabled`` flag and non-scope kwargs are
     preserved untouched. Values are stored VERBATIM — ``label:<...>`` references
     (e.g. ``label:paper``) are kept and resolve to UUIDs at (re)start, NOT at
     edit time — so an operator can retarget a strategy's operator / wallet /
     reviewer without hand-editing the ``process_<name>`` config JSON. The PATCH
-    does NOT restart the process; the change applies on the next (re)start.
+    does NOT restart the process. The trader reads the current cap on each live signal.
 
     Attributes:
         operator_public_id: New operator scope — a wallet-operator public_id or
@@ -989,6 +990,7 @@ class ProcessConfigScopeBody(StrictBody):
             an empty string clears it (deferred wallet-mode resolution).
         wallet_public_id: New wallet scope — a wallet public_id or a
             ``label:<wallet>`` reference. Omit to leave unchanged.
+        max_order_base_qty: Maximum live order quantity in base-asset units.
         reference_identity_params: New values for the strategy's nested
             reference-identity params (declared by its
             ``reference_identity_params`` schema, e.g.
@@ -1001,6 +1003,9 @@ class ProcessConfigScopeBody(StrictBody):
     )
     wallet_public_id: str | None = Field(
         None, max_length=256, description="Wallet public_id or label:<wallet>"
+    )
+    max_order_base_qty: OrderBaseQuantityCap | None = Field(
+        None, description="Maximum live order quantity in base-asset units"
     )
     reference_identity_params: dict[str, str] | None = Field(
         None, description="Nested reference-identity param overrides merged into params.*"
@@ -1028,9 +1033,8 @@ class ProcessConfigScopeData(StrictDataSchema[Literal["process_config_scope"]]):
         name: Process name.
         parameters: The full persisted ``parameters`` subtree after the merge
             (labels preserved), so the client can re-render the saved scope.
-        restart_required: Always True — the endpoint persists the config but
-            does NOT restart the process, so the change only takes effect on the
-            next (re)start. The UI surfaces this as a "restart required" banner.
+        restart_required: The process must restart to load its updated constructor
+            parameters. The trader reads the persisted cap on each live signal.
     """
 
     type: Literal["process_config_scope"] = "process_config_scope"

@@ -70,6 +70,7 @@ from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import get_settings
 from snapper.core.financial_account_owner import FINANCIAL_OWNER_SETTING_KEY
+from snapper.core.process_config import PROCESS_CONFIG_PREFIX
 from snapper.data.models import Setting
 from snapper.data.repository import get_repository
 from snapper.data.repository import where_active_now
@@ -78,6 +79,13 @@ from snapper.server.json_body import json_body
 from snapper.server.json_body import openapi_schema
 
 router = APIRouter(prefix="/settings", tags=["settings"])
+
+
+def _require_general_setting(key: str) -> None:
+    """Reserve process rows for validated process configuration mutations."""
+    if key.startswith(PROCESS_CONFIG_PREFIX):
+        raise HTTPException(status_code=409, detail="Process settings require the process API")
+
 
 _REST_STREAM = "rest.control"
 
@@ -226,7 +234,10 @@ async def get_setting_categories(
 
 @router.post(
     "/{key}/set",
-    responses={404: {"description": "Setting not found"}},
+    responses={
+        404: {"description": "Setting not found"},
+        409: {"description": "Process settings require the process API"},
+    },
     openapi_extra=openapi_schema(SettingUpdate),
 )
 async def set_setting(
@@ -250,6 +261,7 @@ async def set_setting(
     Raises:
         HTTPException: If setting not found after update.
     """
+    _require_general_setting(key)
     settings = get_settings()
     settings_service = await get_settings_service(
         settings.db_url,
@@ -429,7 +441,10 @@ async def set_push_beta_users(
 
 @router.post(
     "/{key}/remove",
-    responses={404: {"description": "Setting not found"}},
+    responses={
+        404: {"description": "Setting not found"},
+        409: {"description": "Setting requires a dedicated API"},
+    },
     openapi_extra=openapi_schema(RemoveSettingRequest),
 )
 async def remove_setting(
@@ -453,6 +468,7 @@ async def remove_setting(
     Raises:
         HTTPException: If setting not found.
     """
+    _require_general_setting(key)
     if key == FINANCIAL_OWNER_SETTING_KEY:
         raise HTTPException(
             status_code=409,
