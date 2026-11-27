@@ -1459,10 +1459,15 @@ To use the labelled image configured for the `snapper` API service, set
 `TRADE_EVIDENCE_DIR` to the absolute host path holding both CSVs. Mount that
 directory read-only and pass its container path as `--input-root`. Compose
 passes the command to the image's `snapper` entrypoint.
+`SNAPPER_LOG_FILE` points the startup log at a container-local file, because
+the shared `./data` log directory belongs to the service user. Like every
+`snapper` command, these commands initialize the service's encryption
+settings at startup, so run them with the service's environment.
 
 ```bash
 docker compose run --rm --no-deps --pull never -T \
-  --user "$(id -u):$(id -g)" -v "$TRADE_EVIDENCE_DIR:/recovery:ro" \
+  --user "$(id -u):$(id -g)" -e SNAPPER_LOG_FILE=/tmp/kraken-spot-trade-recovery.log \
+  -v "$TRADE_EVIDENCE_DIR:/recovery:ro" \
   snapper plan-kraken-spot-trade-recovery \
   --input-root /recovery \
   --evidence missing-trades.csv \
@@ -1494,7 +1499,8 @@ The examples below use the API service's image and database configuration.
     directory read-only and pass `/recovery` as `--input-root`.
 
         docker compose run --rm --no-deps --pull never -T \
-          --user "$(id -u):$(id -g)" -v "$TRADE_EVIDENCE_DIR:/recovery:ro" \
+          --user "$(id -u):$(id -g)" -e SNAPPER_LOG_FILE=/tmp/kraken-spot-trade-recovery.log \
+          -v "$TRADE_EVIDENCE_DIR:/recovery:ro" \
           snapper import-kraken-spot-trades \
           --input-root /recovery \
           --evidence missing-trades.csv \
@@ -1516,7 +1522,8 @@ The examples below use the API service's image and database configuration.
         TRADE_IMPORT_DIR="$(mktemp -d)"
         cp "$TRADE_EVIDENCE_DIR/missing-trades.csv" "$TRADE_IMPORT_DIR/"
         docker compose run --rm --no-deps --pull never -T \
-          --user "$(id -u):$(id -g)" -v "$TRADE_IMPORT_DIR:/recovery:rw" \
+          --user "$(id -u):$(id -g)" -e SNAPPER_LOG_FILE=/tmp/kraken-spot-trade-recovery.log \
+          -v "$TRADE_IMPORT_DIR:/recovery:rw" \
           snapper import-kraken-spot-trades \
           --input-root /recovery \
           --evidence missing-trades.csv \
