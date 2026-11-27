@@ -15,6 +15,7 @@ from typing import Final
 from typing import TextIO
 from typing import TypedDict
 from typing import cast
+from urllib.request import url2pathname
 from uuid import uuid7
 
 import typer
@@ -185,7 +186,8 @@ async def _read_plan(
 ) -> KrakenSpotTradeRecoveryPlan:
     """Read the full live comparison in one read-only snapshot.
 
-    Open SQLite in read-only file mode to bypass the repository's writer pragmas.
+    Check the SQLite file before opening it in read-only mode to bypass the
+    repository's writer pragmas and avoid starting a worker for a missing file.
     """
     if repository.dialect_name == "postgresql":
         async with repository.session() as session:
@@ -198,11 +200,15 @@ async def _read_plan(
 
     url = repository.engine.url
     database = url.database or ""
-    if url.query.get("uri") != "true" or not database.startswith("file:"):
-        database = Path(database).absolute().as_uri()
-    reader = create_async_engine(
-        url.set(database=database).update_query_dict({"mode": "ro", "uri": "true"})
-    )
+    file_uri = url.query.get("uri") == "true" and database.startswith("file:")
+    filename = url2pathname(database, require_scheme=True) if file_uri else database
+    path = Path(filename).absolute()
+    if filename not in ("", ":memory:") and not path.is_file():
+        raise ValueError(f"SQLite database file not found: {path}")
+    if not file_uri:
+        database = path.as_uri()
+    reader_url = url.set(database=database).update_query_dict({"mode": "ro", "uri": "true"})
+    reader = create_async_engine(reader_url)
     try:
         async with AsyncSession(reader) as session:
             await session.execute(text("BEGIN"))
