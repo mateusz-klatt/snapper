@@ -133,10 +133,14 @@ instrument's snapshot fallback even when that snapshot is fresh.
 Non-USD quote exposure uses current market-data-enabled, non-paper forex
 planes against USD. The oracle normalizes direct and inverse rates and chooses
 the newest usable plane after applying candle priority to each instrument.
-Equally recent planes with conflicting normalized rates refuse admission
-with `fx_plane_conflict`. USD quotes need no FX lookup. The oracle excludes
-historical and carried P&L conversion rates. General commodity, option, margin
-and collateral valuation remain outside this profile.
+When candles or snapshot fallbacks tie at the newest usable timestamp, the
+position-display venue order applies. Walutomat comes first for USD-PLN, with
+other venues in lexical order. Other pairs use lexical venue order, so Kraken
+comes before Walutomat for EUR-USD and GBP-USD. Within a venue, a direct
+currency-to-USD plane comes first, followed by instrument public ID as the
+final tie-breaker. USD quotes need no FX lookup. The oracle excludes historical
+and carried P&L conversion rates. General commodity, option, margin and
+collateral valuation remain outside this profile.
 
 Both marks must be at most 300 seconds old and at most 5 seconds ahead of the
 final clock, with inclusive boundaries and timezone-aware timestamps. The main
@@ -145,8 +149,9 @@ metadata and every FX leg on each conversion. Freshness,
 certification and contract expiry are checked again after all awaited reads,
 including cached and USD-only calls. Missing or unsafe evidence reports
 `caps_price_unavailable`, retaining structured reason codes (`snapshot_missing`,
-`price_stale`, `fx_snapshot_missing`, `fx_price_stale`, `fx_plane_conflict`,
-etc.).
+`price_stale`, `fx_snapshot_missing`, `fx_price_stale`, etc.). The reason
+`fx_plane_conflict` applies only when candidates for the same FX instrument
+disagree after normalization at the newest usable timestamp.
 
 Admission stores the converted value in `submitted_notional_usd`, rounded up to
 whole cents by the existing cap enforcer. The rolling 24-hour cap uses that

@@ -16,9 +16,10 @@ from refreshing old bars. The active ``market_snapshots`` row is a deprecated,
 transitional fallback available only for instruments without active 1m candles.
 
 Non-USD quotes require an independently evidenced current direct or inverse
-forex plane against USD. The newest usable plane supplies the rate. Disagreeing
-normalized rates at the newest timestamp cause ``fx_plane_conflict``. FX evidence
-is reread on every conversion. Contract notional measures exposure.
+forex plane against USD. The newest usable plane supplies the rate, with the
+position-display venue order breaking timestamp ties. Disagreeing normalized
+rates for the same instrument at that timestamp cause ``fx_plane_conflict``.
+FX evidence is reread on every conversion. Contract notional measures exposure.
 
 Cache + staleness:
 In-process TTL cache (60s) keyed by ``instrument_public_id`` stores
@@ -38,6 +39,7 @@ from datetime import timedelta
 from decimal import Decimal
 from decimal import DecimalException
 
+from snapper.application.portfolio.pnl_timeline_service import _fx_plane_tiebreak
 from snapper.core.contract_valuation import ContractValuation
 from snapper.core.contract_valuation import InverseContractValuation
 from snapper.core.contract_valuation import LinearContractValuation
@@ -73,7 +75,8 @@ class PriceUnavailableError(Exception):
           snapshot exists against USD.
         ``fx_price_stale``: no FX rate satisfies the age and clock-skew bounds.
         ``fx_price_invalid``: no positive finite FX rate or final USD value.
-        ``fx_plane_conflict``: newest FX planes disagree after normalization.
+        ``fx_plane_conflict``: candidates for the same FX instrument at the
+          newest usable timestamp disagree after normalization.
         ``last_price_invalid``: price is nonpositive or nonfinite.
         ``invalid_quantity``: quantity is not a nonnegative finite Decimal.
         ``contract_valuation_unavailable``: payoff, currency or unit evidence
@@ -295,7 +298,27 @@ def _select_fx_rate(
     instrument_public_id: str,
     currency: str,
 ) -> _FxRate:
-    """Select the newest usable plane, refusing disagreeing normalized rates."""
+    """Select the newest usable FX rate from candles or snapshot fallbacks.
+
+    At equal timestamps, follow the position-display fiat election. For PLN,
+    Walutomat comes first, followed by other venues in lexical order. Other
+    pairs use lexical venue order. Among Kraken and Walutomat, Kraken wins
+    EUR-USD and GBP-USD, and Walutomat wins USD-PLN. Within a venue, direct
+    currency-to-USD orientation comes first, then instrument public ID.
+
+    Args:
+        rows: Current candles and snapshot fallbacks for the USD pair.
+        now: Final evaluation time for evidence freshness.
+        instrument_public_id: Submitted instrument identity for error context.
+        currency: Non-USD quote currency to convert.
+
+    Returns:
+        The elected USD-per-quote rate with its source evidence.
+
+    Raises:
+        PriceUnavailableError: If no usable rate exists or candidates for the
+            same FX instrument disagree at the newest usable timestamp.
+    """
     if not rows:
         raise PriceUnavailableError(
             "fx_snapshot_missing", instrument_public_id, f"quote={currency}"
@@ -316,9 +339,23 @@ def _select_fx_rate(
         raise PriceUnavailableError("fx_price_stale", instrument_public_id)
     newest = max(rate.candidate["timestamp"] for rate in fresh)
     planes = [rate for rate in fresh if rate.candidate["timestamp"] == newest]
-    if len({rate.rate for rate in planes}) != 1:
-        raise PriceUnavailableError("fx_plane_conflict", instrument_public_id)
-    return min(planes, key=lambda rate: rate.candidate["snapshot_public_id"])
+    instrument_rates: dict[str, Decimal] = {}
+    for rate in planes:
+        fx_instrument_id = rate.candidate["instrument_public_id"]
+        first_rate = instrument_rates.setdefault(fx_instrument_id, rate.rate)
+        if first_rate != rate.rate:
+            raise PriceUnavailableError("fx_plane_conflict", instrument_public_id)
+    return min(
+        planes,
+        key=lambda rate: (
+            _fx_plane_tiebreak(
+                (rate.candidate["base"], rate.candidate["quote"], rate.candidate["exchange"]),
+                "USD",
+                prefer_walutomat=currency == "PLN",
+            ),
+            rate.candidate["instrument_public_id"],
+        ),
+    )
 
 
 def _require_contract_evidence(

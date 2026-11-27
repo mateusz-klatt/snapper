@@ -19,6 +19,7 @@ from snapper.application.pricing.usd_converter import STALENESS_THRESHOLD_SECOND
 from snapper.application.pricing.usd_converter import PriceUnavailableError
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.application.pricing.usd_converter import _normalized_fx_rate
+from snapper.application.pricing.usd_converter import _select_fx_rate
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -164,27 +165,45 @@ async def test_direct_and_inverse_fx_produce_the_same_usd_notional(
     assert await USDConverter(repo, now=lambda: _NOW).to_usd("main", quantity) == quantity * 125
 
 
-@pytest.mark.parametrize(
-    "direct,inverse,expected",
-    [(1.25, 0.8, "250"), (1.25, 1.25, None)],
-)
-async def test_equal_time_planes_compare_normalized_rates(
-    repo: SQLAlchemyRepository, direct: float, inverse: float, expected: str | None
+async def test_equal_time_same_venue_prefers_direct_then_instrument_id(
+    repo: SQLAlchemyRepository,
 ) -> None:
-    """Deduplicate reciprocal rates and refuse apparently equal raw inverse prices.
+    """Break same-venue ties by orientation and instrument identity.
 
-    Given: equally recent direct and inverse planes.
-    When: the oracle compares their USD-per-EUR values.
-    Then: reciprocal prices agree while equal raw prices conflict.
+    Given: two Kraken snapshots and a direct candle with the same evidence timestamp.
+    When: the oracle selects a rate for EUR exposure.
+    Then: the direct snapshot wins by instrument ID even though the candle evidence ID sorts first.
     """
-    await _seed(repo, _Market("direct", price=direct))
-    await _seed(repo, _Market("inverse", base="USD", quote="EUR", price=inverse))
-    converter = USDConverter(repo, now=lambda: _NOW)
-    if expected is None:
-        with pytest.raises(PriceUnavailableError, match="fx_plane_conflict"):
-            await converter.to_usd("main", Decimal(2))
-    else:
-        assert await converter.to_usd("main", Decimal(2)) == Decimal(expected)
+    await _seed(repo, _Market("a-inverse", base="USD", quote="EUR", price=1.25))
+    await _seed_fx_candle(repo, _Market("c-direct", price=1.5), open_at=_NOW - timedelta(minutes=1))
+    await _seed(repo, _Market("b-direct", price=1.25))
+    assert await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(2)) == 250
+
+
+def test_disagreeing_newest_rates_for_same_instrument_conflict() -> None:
+    """Refuse duplicate current evidence that disagrees for a single FX instrument.
+
+    Given: two equally recent candidate rows for the same instrument with different prices.
+    When: the oracle selects the newest usable rate.
+    Then: it raises the structured ``fx_plane_conflict`` reason.
+    """
+    candidate: UsdFxSnapshotCandidateRow = {
+        "snapshot_public_id": "snap-1",
+        "instrument_public_id": "fx",
+        "exchange": "kraken",
+        "base": "EUR",
+        "quote": "USD",
+        "last_price": 1.25,
+        "timestamp": _NOW,
+    }
+    conflicting: UsdFxSnapshotCandidateRow = {
+        **candidate,
+        "snapshot_public_id": "snap-2",
+        "last_price": 1.5,
+    }
+    with pytest.raises(PriceUnavailableError) as exc:
+        _select_fx_rate([candidate, conflicting], _NOW, "main", "EUR")
+    assert exc.value.reason_code == "fx_plane_conflict"
 
 
 async def test_newest_usable_fx_wins_and_main_cache_does_not_cache_fx(
@@ -477,16 +496,9 @@ async def test_cache_does_not_admit_future_main_price(
         await converter.to_usd("usd", Decimal(1))
 
 
-async def test_admission_stores_cent_usd_and_rolling_cap_never_revalues_it(
-    repo: SQLAlchemyRepository,
-) -> None:
-    """Keep real admission persistence and rolling notional in the same USD units.
-
-    Given: one EUR order converted at 1.25001, then a new FX rate of 0.5.
-    When: the first rounded-up admission value is persisted and a second order is checked.
-    Then: the cap sums stored 1.26 USD plus new 0.50 USD, not historical EUR or new FX.
-    """
-    await _seed(repo, _Market("fx", price=1.25001))
+@pytest.fixture
+async def capped_eur_order(repo: SQLAlchemyRepository) -> TradeCommandSubmission:
+    """Set a USD daily cap and provide an order with a 1 EUR quote notional."""
     async with repo.session() as session:
         session.add(
             UserTradingCaps(
@@ -500,9 +512,7 @@ async def test_admission_stores_cent_usd_and_rolling_cap_never_revalues_it(
             )
         )
         await session.commit()
-    converter = USDConverter(repo, now=lambda: _NOW)
-    enforcer = TradingCapsEnforcer(repo, converter, now=lambda: _NOW)
-    submission = TradeCommandSubmission(
+    return TradeCommandSubmission(
         user_public_id="user",
         operator_public_id="operator",
         wallet_public_id="wallet",
@@ -515,7 +525,21 @@ async def test_admission_stores_cent_usd_and_rolling_cap_never_revalues_it(
         source_surface="rest",
         idempotency_key=None,
     )
-    async with enforcer.guard(submission) as guard:
+
+
+async def test_admission_stores_cent_usd_and_rolling_cap_never_revalues_it(
+    repo: SQLAlchemyRepository, capped_eur_order: TradeCommandSubmission
+) -> None:
+    """Keep real admission persistence and rolling notional in the same USD units.
+
+    Given: one EUR order converted at 1.25001, then a new FX rate of 0.5.
+    When: the first rounded-up admission value is persisted and a second order is checked.
+    Then: the cap sums stored 1.26 USD plus new 0.50 USD, so the second order exceeds it.
+    """
+    await _seed(repo, _Market("fx", price=1.25001))
+    converter = USDConverter(repo, now=lambda: _NOW)
+    enforcer = TradingCapsEnforcer(repo, converter, now=lambda: _NOW)
+    async with enforcer.guard(capped_eur_order) as guard:
         assert guard.submitted_notional_usd == 1.26
         async with repo.session() as session:
             session.add(
@@ -554,7 +578,7 @@ async def test_admission_stores_cent_usd_and_rolling_cap_never_revalues_it(
         snapshot.last_price = 0.5
         await session.commit()
     with pytest.raises(CapsViolationError, match="max_daily_notional_usd"):
-        async with enforcer.guard(submission):
+        async with enforcer.guard(capped_eur_order):
             pytest.fail("Stored USD history must consume the configured cap")
 
 
@@ -666,15 +690,71 @@ async def test_fx_leg_from_candles_in_both_orientations(
     )
 
 
-async def test_fx_plane_conflict_between_candle_and_snapshot_at_equal_timestamps(
+@pytest.mark.parametrize(
+    "pair,kraken_open_age,expected",
+    [
+        (("EUR", "USD"), 60, 250),
+        (("GBP", "USD"), 60, 250),
+        (("USD", "PLN"), 60, 50),
+        (("EUR", "USD"), 120, 300),
+        (("EUR", "USD"), STALENESS_THRESHOLD_SECONDS + 61, 300),
+    ],
+)
+async def test_fx_candles_rank_by_freshness_then_venue(
+    repo: SQLAlchemyRepository, pair: tuple[str, str], kraken_open_age: int, expected: int
+) -> None:
+    """Choose a real 1m candle by its usable close time and the fiat venue order.
+
+    Given: Kraken and Walutomat publish differing FX closes for the same USD pair.
+    When: the Kraken close ties the Walutomat close in time, is older, or is stale.
+    Then: venue order resolves a tie and the newer usable close wins otherwise.
+    """
+    base, quote = pair
+    currency = quote if base == "USD" else base
+    main_id = f"main-{currency.lower()}"
+    await _seed(repo, _Market(main_id, base="BTC", quote=currency, price=100, asset_type="crypto"))
+    kraken_price, walutomat_price = (5.0, 4.0) if currency == "PLN" else (1.25, 1.5)
+    await _seed_fx_candle(
+        repo,
+        _Market("a-walutomat", base=base, quote=quote, price=walutomat_price, exchange="walutomat"),
+        open_at=_NOW - timedelta(minutes=1),
+    )
+    await _seed_fx_candle(
+        repo,
+        _Market("z-kraken", base=base, quote=quote, price=kraken_price, exchange="kraken"),
+        open_at=_NOW - timedelta(seconds=kraken_open_age),
+    )
+    assert await USDConverter(repo, now=lambda: _NOW).to_usd(main_id, Decimal(2)) == expected
+
+
+async def test_capped_eur_order_is_admitted_with_preferred_fx_candle(
+    repo: SQLAlchemyRepository, capped_eur_order: TradeCommandSubmission
+) -> None:
+    """Admit a capped non-USD order when same-minute FX venues have different closes.
+
+    Given: a 1.70 USD cap and same-minute EUR-USD closes of 1.25 and 1.80.
+    When: the cap enforcer checks a new order with a 1 EUR quote notional.
+    Then: Kraken's 1.25 USD value admits the order.
+    """
+    open_at = _NOW - timedelta(minutes=1)
+    await _seed_fx_candle(
+        repo, _Market("a-walutomat", price=1.8, exchange="walutomat"), open_at=open_at
+    )
+    await _seed_fx_candle(repo, _Market("z-kraken", price=1.25), open_at=open_at)
+    converter = USDConverter(repo, now=lambda: _NOW)
+    enforcer = TradingCapsEnforcer(repo, converter, now=lambda: _NOW)
+    async with enforcer.guard(capped_eur_order) as guard:
+        assert guard.submitted_notional_usd == 1.25
+
+
+async def test_equal_time_fx_candle_wins_on_preferred_venue(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Refuse equal-freshness FX candle and snapshot rates that disagree after normalization.
+    """Apply venue order across equally recent FX candles and snapshot fallbacks.
 
-    Given: an active 1m candle closed at _NOW (1.25) and a snapshot on a
-        different venue at _NOW (1.20),
-    When: the oracle selects the FX rate,
-    Then: ``fx_plane_conflict`` refuses admission.
+    Given: a Kraken FX candle closed at _NOW and a Walutomat snapshot at _NOW.
+    When: the oracle selects the FX rate for an EUR order.
+    Then: Kraken's candle close supplies the rate.
     """
     await _seed_fx_candle(
         repo,
@@ -687,8 +767,7 @@ async def test_fx_plane_conflict_between_candle_and_snapshot_at_equal_timestamps
             "fx-snap", base="EUR", quote="USD", price=1.20, timestamp=_NOW, exchange="walutomat"
         ),
     )
-    with pytest.raises(PriceUnavailableError, match="fx_plane_conflict"):
-        await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(2))
+    assert await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(2)) == 250
 
 
 @pytest.mark.parametrize("candle_open_age", [60, 120, STALENESS_THRESHOLD_SECONDS + 61])
@@ -778,36 +857,25 @@ async def test_fx_candle_staleness_invalid_and_naive_guards(
         await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(1))
 
 
-@pytest.mark.parametrize("inverse_price,expected", [(0.8, "250"), (1.25, None)])
-async def test_equal_time_candle_and_snapshot_compare_normalized_fx_rates(
+async def test_equal_time_fx_snapshot_wins_on_preferred_venue_even_if_inverse(
     repo: SQLAlchemyRepository,
-    inverse_price: float,
-    expected: str | None,
 ) -> None:
-    """Equal-time inverse FX candle and direct snapshot agree or conflict after normalization.
+    """Rank venue before FX orientation among equally recent candles and snapshots.
 
-    Given: a USD-EUR 1m candle closed at _NOW and an EUR-USD snapshot at _NOW,
-    When: normalized USD-per-EUR rates are compared,
-    Then: reciprocal rates succeed deterministically while equal raw rates raise
-        ``fx_plane_conflict``.
+    Given: a direct Walutomat candle and an inverse Kraken snapshot at the same time.
+    When: the oracle selects the FX rate for an EUR order.
+    Then: Kraken's snapshot supplies its normalized USD-per-EUR rate.
     """
     await _seed_fx_candle(
         repo,
-        _Market("fx-inv-candle", base="USD", quote="EUR", price=inverse_price, exchange="kraken"),
+        _Market("fx-dir-candle", base="EUR", quote="USD", price=1.5, exchange="walutomat"),
         open_at=_NOW - timedelta(seconds=60),
     )
     await _seed(
         repo,
-        _Market(
-            "fx-dir-snap", base="EUR", quote="USD", price=1.25, timestamp=_NOW, exchange="walutomat"
-        ),
+        _Market("fx-inv-snap", base="USD", quote="EUR", price=0.8, timestamp=_NOW),
     )
-    converter = USDConverter(repo, now=lambda: _NOW)
-    if expected is None:
-        with pytest.raises(PriceUnavailableError, match="fx_plane_conflict"):
-            await converter.to_usd("main", Decimal(2))
-    else:
-        assert await converter.to_usd("main", Decimal(2)) == Decimal(expected)
+    assert await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(2)) == 250
 
 
 async def test_fx_candles_are_reread_per_call_and_skipped_for_usd(
