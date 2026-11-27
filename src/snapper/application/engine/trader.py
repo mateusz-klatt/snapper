@@ -946,7 +946,6 @@ class TraderCoordinator(RegisterableProcess):
             return
         if self._ownership is None:
             return
-        now = datetime.now(UTC)
         try:
             await self._restore_paired_execution_halt_mirror(self.repository, self._ownership)
         except Exception as exc:
@@ -954,7 +953,7 @@ class TraderCoordinator(RegisterableProcess):
                 f"ZMQTrader: paired-execution halt mirror recovery failed, continuing: {exc}"
             )
         try:
-            await self._wake_outbox_for_owned_armed_groups(self.repository, self._ownership, now)
+            await self._wake_outbox_for_owned_armed_groups(self.repository, self._ownership)
         except Exception as exc:
             logger.warning(
                 f"ZMQTrader: paired-execution outbox wake recovery failed, continuing: {exc}"
@@ -1005,16 +1004,15 @@ class TraderCoordinator(RegisterableProcess):
         self,
         repository: SQLAlchemyRepository,
         ownership: ShardOwnership,
-        now: datetime,
     ) -> None:
-        """Wake the outbox once if this coordinator owns a leg of an armed group."""
+        """Wake the outbox for an owned leg of a currently armed group."""
         if self.outbox is None:
             return
-        armed = await repository.list_active_paired_execution_groups(
-            [PairedExecutionGroupStatusEnum.ARMED.value], now
+        armed = await repository.list_current_paired_execution_groups(
+            [PairedExecutionGroupStatusEnum.ARMED.value]
         )
         for group in armed:
-            legs = await repository.get_paired_execution_legs(group["public_id"], now)
+            legs = await repository.get_current_paired_execution_legs(group["public_id"])
             if any(ownership.owns(leg["shard_key"]) for leg in legs):
                 self.outbox.notify()
                 return

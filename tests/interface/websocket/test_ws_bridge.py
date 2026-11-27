@@ -4044,9 +4044,9 @@ class TestAccountStateScopeBridge:
             "user-B": {wallet_b},
         }
 
-        async def _list_accessible(*, principal: AuthPrincipal, as_of: datetime) -> set[str]:
-            """Return the test principal's wallet set at the frame timestamp."""
-            assert as_of.tzinfo is not None
+        async def _list_accessible(*, principal: AuthPrincipal, as_of: datetime | None) -> set[str]:
+            """Return the test principal's current wallet set."""
+            assert as_of is None
             return accessible_by_user[principal.user_public_id]
 
         def _principal_for(websocket: object) -> AuthPrincipal:

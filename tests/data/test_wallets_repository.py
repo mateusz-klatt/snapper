@@ -267,7 +267,9 @@ class TestListAccessibleWalletsForOperators:
             )
             await session.commit()
 
-        assert await repo.list_accessible_wallets_for_operators([ids["alice"]], as_of) == []
+        assert await repo.list_accessible_wallets_for_operators([ids["alice"]], as_of=None) == []
+        historical = await repo.list_accessible_wallets_for_operators([ids["alice"]], as_of)
+        assert [row["public_id"] for row in historical] == [ids["wallet_paper"]]
 
 
 class TestCreateWallet:

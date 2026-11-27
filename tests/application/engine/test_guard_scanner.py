@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 
 from snapper.application.engine.guard_scanner import PairedExecutionGuardScanner
@@ -27,7 +28,9 @@ from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
 from snapper.core.types import PairedExecutionPolicyEnum
+from snapper.data.models import PairedExecutionGroup
 from snapper.data.models import PairedExecutionHalt
+from snapper.data.models import PairedExecutionLeg
 from snapper.data.models import TradeCommand
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import where_active
@@ -303,6 +306,62 @@ async def test_scanner_arms_complete_group_within_deadline(_repo: SQLAlchemyRepo
     group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
     assert group is not None
     assert group["status"] == PairedExecutionGroupStatusEnum.ARMED.value
+
+
+@pytest.mark.parametrize("ahead_row", ["group", "leg"])
+async def test_scanner_retires_complete_group_that_cannot_arm_by_deadline(
+    _repo: SQLAlchemyRepository, ahead_row: str
+) -> None:
+    """Refuse to arm a pair whose committed state places arming after its deadline.
+
+    Given: A complete assembling pair with its group or last leg stamped after
+        the assembly deadline, although the reader's clock is still before it.
+    When: The repository attempts to arm and the scanner later passes the deadline.
+    Then: Arming is refused and the scanner breaks the group and retires its held commands.
+    """
+    await _insert_group(_repo, public_id="grp-1", assembly_deadline=_T1)
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id="cmd-1",
+    )
+    skewed_row = (
+        update(PairedExecutionGroup).where(PairedExecutionGroup.public_id == "grp-1")
+        if ahead_row == "group"
+        else update(PairedExecutionLeg).where(PairedExecutionLeg.public_id == "leg-1")
+    )
+    async with _repo.session() as session:
+        await session.execute(skewed_row.values(timestamp=_FUTURE))
+        await session.commit()
+    await _insert_command(_repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD)
+    await _insert_command(_repo, public_id="cmd-1", correlation_id="grp-1", shard_key=_ETH_SHARD)
+    assert not await _repo.try_arm_paired_execution_group_if_complete("grp-1", _T0, _SESSION, 2)
+    assert await _repo.get_undispatched_commands(_T0) == []
+
+    scan_at = _T1 + timedelta(seconds=1)
+    scanner = _scanner(_repo)
+    await scanner._sweep_assembling(scan_at)
+    await scanner._sweep_broken(scan_at)
+
+    group = await _repo.get_current_paired_execution_group("grp-1")
+    assert group is not None
+    assert group["status"] == "broken"
+    assert group["failure_reason"] == "assembly timeout"
+    assert await _repo.get_current_trade_command_status("cmd-0") == "cancelled"
+    assert await _repo.get_current_trade_command_status("cmd-1") == "cancelled"
 
 
 async def test_scanner_skips_sequential_handoff_policy(_repo: SQLAlchemyRepository) -> None:

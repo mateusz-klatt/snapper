@@ -955,7 +955,7 @@ class AiReviewService:
             delegate_public_id=delegate_public_id,
             wallet_public_id=review["wallet_public_id"],
             instrument_public_id=review["instrument_public_id"],
-            as_of=wall_clock,
+            as_of=None,
         )
         if not scope_ok:
             return AiReviewDecisionResult(

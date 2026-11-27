@@ -1146,6 +1146,12 @@ async def test_ai_review_authority_excludes_future_stamped_revocation(
         delegate_public_id=ids["delegate_public_id"],
         wallet_public_id=ids["wallet_public_id"],
         instrument_public_id=ids["instrument_public_id"],
+        as_of=None,
+    )
+    assert await repo.has_grant_for_delegate(
+        delegate_public_id=ids["delegate_public_id"],
+        wallet_public_id=ids["wallet_public_id"],
+        instrument_public_id=ids["instrument_public_id"],
         as_of=as_of,
     )
 

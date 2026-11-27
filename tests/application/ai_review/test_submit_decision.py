@@ -62,10 +62,11 @@ class _FakeScopeGrantService:
         delegate_public_id: str,
         wallet_public_id: str,
         instrument_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> bool:
         """Return the pre-configured verdict; record call count for assertions."""
-        del delegate_public_id, wallet_public_id, instrument_public_id, as_of
+        assert as_of is None
+        del delegate_public_id, wallet_public_id, instrument_public_id
         self.calls += 1
         return self.allow
 

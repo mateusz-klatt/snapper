@@ -37,7 +37,7 @@ class FakeWalletRepository:
         self.active_wallets = active_wallets if active_wallets is not None else []
         self.accessible_wallets = accessible_wallets if accessible_wallets is not None else []
         self.active_calls: list[datetime] = []
-        self.accessible_calls: list[tuple[list[str], datetime]] = []
+        self.accessible_calls: list[tuple[list[str], datetime | None]] = []
 
     async def list_active_wallets(self, as_of: datetime) -> list[WalletRow]:
         """Return configured active wallets."""
@@ -47,7 +47,7 @@ class FakeWalletRepository:
     async def list_accessible_wallets_for_operators(
         self,
         operator_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> list[WalletRow]:
         """Return configured operator-scoped wallets."""
         self.accessible_calls.append((list(operator_public_ids), as_of))
@@ -97,9 +97,14 @@ class TestResolveWalletOrDefault:
         assert repo.accessible_calls == []
 
     @pytest.mark.asyncio
-    async def test_operator_lookup_uses_accessible_wallets(self) -> None:
-        """Non-admin lookup is scoped to supplied operator IDs."""
-        as_of = datetime(2026, 2, 4, tzinfo=UTC)
+    @pytest.mark.parametrize("as_of", [None, datetime(2026, 2, 4, tzinfo=UTC)])
+    async def test_operator_lookup_uses_accessible_wallets(self, as_of: datetime | None) -> None:
+        """Non-admin lookup scopes to supplied operator IDs.
+
+        Given: An operator-scoped default with current or historical authority requested.
+        When: The default wallet is resolved.
+        Then: The repository receives the original cutoff for its operator lookup.
+        """
         repo = FakeWalletRepository(accessible_wallets=[_wallet_row("operator-wallet")])
 
         result = await resolve_wallet_or_default(

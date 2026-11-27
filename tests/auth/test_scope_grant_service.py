@@ -576,7 +576,8 @@ class TestListAccessibleWalletPublicIds:
     """
 
     @pytest.mark.asyncio
-    async def test_admin_returns_all_active_wallets(self) -> None:
+    @pytest.mark.parametrize("as_of", [None, datetime(2026, 5, 7, 12, tzinfo=UTC)])
+    async def test_admin_returns_all_active_wallets(self, as_of: datetime | None) -> None:
         """ADMIN bypasses operator-scope filtering.
 
         Given an ADMIN principal,
@@ -586,7 +587,6 @@ class TestListAccessibleWalletPublicIds:
             public_id.
         """
         service = ScopeGrantService()
-        as_of = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
         admin = AuthPrincipal(
             username="admin-x",
             role=UserRole.ADMIN,
@@ -597,11 +597,18 @@ class TestListAccessibleWalletPublicIds:
         service.repository.list_active_wallets = AsyncMock(return_value=rows)
         service.repository.list_accessible_wallets_for_operators = AsyncMock()
 
+        before = datetime.now(UTC)
         result = await service.list_accessible_wallet_public_ids(principal=admin, as_of=as_of)
 
         assert result == {"wal-A", "wal-B", "wal-C"}
         active_mock: AsyncMock = service.repository.list_active_wallets
-        active_mock.assert_awaited_once_with(as_of=as_of)
+        active_mock.assert_awaited_once()
+        assert active_mock.await_args is not None
+        cutoff = active_mock.await_args.kwargs["as_of"]
+        if as_of is None:
+            assert before <= cutoff <= datetime.now(UTC)
+        else:
+            assert cutoff == as_of
         scoped_mock: AsyncMock = service.repository.list_accessible_wallets_for_operators
         scoped_mock.assert_not_called()
 

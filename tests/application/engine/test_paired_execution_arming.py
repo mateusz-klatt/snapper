@@ -951,11 +951,37 @@ async def test_guard_recovery_outbox_wake_failure_keeps_halt_mirror(
         shard_key=_BTC_SHARD,
     )
     await _insert_scope_halt(_sql_repo(_coord), group_public_id="grp-b")
-    _sql_repo(_coord).list_active_paired_execution_groups = AsyncMock(
+    _sql_repo(_coord).list_current_paired_execution_groups = AsyncMock(
         side_effect=RuntimeError("db down")
     )
     await _coord._recover_paired_execution_guard_state()
     assert _coord.trade_service.is_halted(_BTC_SHARD) is True
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_wakes_outbox_for_future_stamped_armed_group_and_leg(
+    _coord: TraderCoordinator,
+) -> None:
+    """Wake the outbox for committed arming state from an ahead clock.
+
+    Given: An armed group and its owned leg committed with future timestamps.
+    When: The slower coordinator recovers paired execution.
+    Then: Its outbox is notified once.
+    """
+    _coord._ownership = ShardOwnership(instance_id=0, instance_count=1)
+    ahead = datetime.now(UTC) + timedelta(minutes=5)
+    repo = _sql_repo(_coord)
+    await _insert_guard_group(repo, public_id="grp-ahead", status="armed", timestamp=ahead)
+    await _insert_guard_leg(
+        repo,
+        public_id="leg-ahead",
+        group_public_id="grp-ahead",
+        leg_index=0,
+        shard_key=_BTC_SHARD,
+        timestamp=ahead,
+    )
+    await _coord._recover_paired_execution_guard_state()
+    _outbox_mock(_coord).notify.assert_called_once()
 
 
 @pytest.mark.asyncio

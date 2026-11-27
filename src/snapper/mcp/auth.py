@@ -28,7 +28,6 @@ the MCP variant raises :class:`PermissionError` which MCPServer
 surfaces as a structured tool error.
 """
 
-from datetime import UTC
 from datetime import datetime
 
 from snapper.auth.domain.permissions import Permission
@@ -152,9 +151,7 @@ async def validate_user_wallet_scope(
             strings to a wallet-less code path before getting here.
         repository: Shared :class:`Repository` singleton resolved by
             the tool via its ``repository_getter``.
-        as_of: Optional bus time for the temporal lookup. Defaults
-            to ``datetime.now(UTC)``. Tests override this to pin a
-            deterministic instant.
+        as_of: Point-in-time cutoff, or None for current wallet scope.
 
     Raises:
         PermissionError: when the caller lacks global scope and the
@@ -174,10 +171,9 @@ async def validate_user_wallet_scope(
             f"{WALLET_SCOPE_ERROR_CODE}: caller has no operator memberships; "
             f"wallet '{wallet_public_id}' is out of scope."
         )
-    lookup_time = as_of or datetime.now(UTC)
     accessible_rows = await repository.list_accessible_wallets_for_operators(
         list(claims.operator_public_ids),
-        lookup_time,
+        as_of,
     )
     accessible_ids = {row["public_id"] for row in accessible_rows}
     if wallet_public_id not in accessible_ids:

@@ -382,27 +382,24 @@ async def test_uses_provided_as_of_for_scope_check() -> None:
 
 
 @pytest.mark.asyncio
-async def test_default_as_of_uses_datetime_now_utc() -> None:
-    """Omitted ``as_of`` defaults to ``datetime.now(UTC)``.
+async def test_default_delegate_scope_uses_current_authority() -> None:
+    """Omitted ``as_of`` requests current delegate authority.
 
     Given the default ``as_of=None``,
     When the filter evaluates,
-    Then the wall-clock forwarded to has_grant_for_delegate falls
-    within ``[before, after]`` bounds.
+    Then the scope service receives None.
     """
     service = _mock_scope_service(allow=True)
-    before = datetime.now(UTC)
     await enforce_ai_review_scope(
         topic="ai_reviews.user-1.strat-1.request",
         connection_principal=_delegate_principal(),
         payload=_payload(),
         scope_grant_service=service,
     )
-    after = datetime.now(UTC)
     has_grant_mock: AsyncMock = service.has_grant_for_delegate
     assert has_grant_mock.await_args is not None
     kwargs = has_grant_mock.await_args.kwargs
-    assert before <= kwargs["as_of"] <= after
+    assert kwargs["as_of"] is None
 
 
 def _viewer_principal(
@@ -599,25 +596,23 @@ async def test_orders_events_uses_provided_as_of_for_scope_check() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orders_events_default_as_of_uses_datetime_now_utc() -> None:
-    """When no ``as_of`` is supplied, the filter uses the current UTC time.
+async def test_orders_events_defaults_to_current_wallet_scope() -> None:
+    """When no ``as_of`` is supplied, the filter requests current wallet scope.
 
     Given: A VIEWER frame without an explicit ``as_of``,
     When: The orders.events scope filter is invoked,
-    Then: The scope service receives an ``as_of`` between before and after now.
+    Then: The scope service receives None.
     """
     service = _mock_orders_events_service(accessible={"wallet-A"})
-    before = datetime.now(UTC)
     await enforce_orders_events_scope(
         topic="orders.events.kraken.BTC-USD.executed",
         connection_principal=_viewer_principal(),
         payload={"wallet_public_id": "wallet-A"},
         scope_grant_service=service,
     )
-    after = datetime.now(UTC)
     list_mock: AsyncMock = service.list_accessible_wallet_public_ids
     assert list_mock.await_args is not None
-    assert before <= list_mock.await_args.kwargs["as_of"] <= after
+    assert list_mock.await_args.kwargs["as_of"] is None
 
 
 @pytest.mark.asyncio

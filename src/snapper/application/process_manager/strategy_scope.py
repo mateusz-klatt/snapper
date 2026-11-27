@@ -490,7 +490,7 @@ async def _resolve_wallet_label(
         value: Parameter value carrying the label prefix.
         operator_public_id: Resolved operator scope, or empty for admin.
         wallet_resolution_mode: Paper or live wallet selection mode.
-        as_of: Temporal anchor for the wallet catalogue.
+        as_of: Temporal anchor for the unscoped wallet catalogue.
 
     Returns:
         The resolved wallet public ID.
@@ -503,7 +503,7 @@ async def _resolve_wallet_label(
     label = _label_from_reference(value)
     if operator_public_id:
         wallets = await repository.list_accessible_wallets_for_operators(
-            [operator_public_id], as_of
+            [operator_public_id], as_of=None
         )
     else:
         wallets = await repository.list_active_wallets(as_of)

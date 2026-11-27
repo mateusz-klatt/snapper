@@ -310,7 +310,6 @@ async def _enforce_scope(
     repo: Repository,
     principal: AuthPrincipal,
     plan: ExecutionPlanRow,
-    as_of: datetime,
 ) -> None:
     """Raise :class:`PlanScopeError` when the caller cannot reach the plan's wallet."""
     if has_effective_permission(
@@ -321,7 +320,7 @@ async def _enforce_scope(
     ):
         return
     accessible = await repo.list_accessible_wallets_for_operators(
-        list(principal.operator_public_ids), as_of
+        list(principal.operator_public_ids), as_of=None
     )
     if plan["wallet_public_id"] not in {row["public_id"] for row in accessible}:
         raise PlanScopeError(plan["public_id"])
@@ -418,7 +417,7 @@ class PlansCancelService:
         plan = await repo.get_execution_plan(plan_public_id, as_of=now)
         if plan is None:
             raise PlanNotFoundError(plan_public_id)
-        await _enforce_scope(repo=repo, principal=principal, plan=plan, as_of=now)
+        await _enforce_scope(repo=repo, principal=principal, plan=plan)
         if _check_idempotency_replay(plan=plan, idempotency_key=idempotency_key):
             return plan
         _enforce_idempotency_key_consistency(plan=plan, idempotency_key=idempotency_key)

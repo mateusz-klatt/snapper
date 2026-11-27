@@ -635,7 +635,6 @@ async def _resolve_target_wallets_for_mcp(
     claims: TokenClaims,
     repo: Repository,
     wallet_public_id: str | None,
-    as_of: datetime,
 ) -> tuple[list[str] | None, bool]:
     """Mirror REST :func:`snapper.server.scoping.resolve_tradable_wallets`.
 
@@ -668,7 +667,7 @@ async def _resolve_target_wallets_for_mcp(
             return [wallet_public_id], False
         return None, False
     accessible = await repo.list_accessible_wallets_for_operators(
-        list(claims.operator_public_ids), as_of
+        list(claims.operator_public_ids), as_of=None
     )
     accessible_ids = [row["public_id"] for row in accessible]
     if wallet_public_id is not None:
@@ -862,11 +861,10 @@ async def _resolve_manual_order_route(
             explicit_wallet_public_id=order.wallet_public_id,
             operator_public_ids=list(claims.operator_public_ids),
             mode=manual_order_mode,
-            as_of=created_at,
         )
     except (WalletAmbiguousError, WalletUnresolvedError) as exc:
         return _manual_order_wallet_resolution_result(exc)
-    await validate_user_wallet_scope(claims, wallet_public_id, repo, as_of=created_at)
+    await validate_user_wallet_scope(claims, wallet_public_id, repo)
     try:
         execution_exchange = await resolve_execution_venue(
             repo,
@@ -1279,7 +1277,6 @@ async def _resolve_wallet_ids_or_envelope(
     claims: TokenClaims,
     repo: Repository,
     wallet_public_id: str | None,
-    as_of: datetime,
     error_code: str,
     message: str,
 ) -> tuple[list[str] | None, CallToolResult | None]:
@@ -1288,7 +1285,6 @@ async def _resolve_wallet_ids_or_envelope(
         claims=claims,
         repo=repo,
         wallet_public_id=wallet_public_id,
-        as_of=as_of,
     )
     if not scope_violation:
         return wallet_ids, None
@@ -1615,7 +1611,6 @@ async def _list_orders_tool(
         claims=access.claims,
         repo=access.repo,
         wallet_public_id=wallet_public_id,
-        as_of=now,
         error_code="order_not_found",
         message="No orders found for the given filters.",
     )
@@ -1670,7 +1665,6 @@ async def _get_order_status_tool(
         claims=access.claims,
         repo=access.repo,
         wallet_public_id=None,
-        as_of=now,
     )
     command_row = await access.repo.get_trade_command_by_public_id(command_public_id, as_of=now)
     if command_row is None:
@@ -1742,7 +1736,6 @@ async def _list_positions_tool(
         claims=access.claims,
         repo=access.repo,
         wallet_public_id=wallet_public_id,
-        as_of=now,
         error_code="position_not_found",
         message="No positions found for the given filters.",
     )
@@ -1792,7 +1785,6 @@ async def _list_venue_account_states_tool(
         claims=access.claims,
         repo=access.repo,
         wallet_public_id=wallet_public_id,
-        as_of=now,
         error_code="account_state_not_found",
         message="No venue account states found for the given filters.",
     )
@@ -1841,7 +1833,6 @@ async def _get_position_cycle_tool(
         claims=access.claims,
         repo=access.repo,
         wallet_public_id=None,
-        as_of=now,
     )
     cycle_row = await access.repo.get_position_cycle_by_public_id(cycle_public_id, as_of=now)
     if cycle_row is None or (
@@ -1905,7 +1896,7 @@ async def _get_ai_review_aftermath_tool(
         delegate_public_id=delegate["public_id"],
         wallet_public_id=review["wallet_public_id"],
         instrument_public_id=review["instrument_public_id"],
-        as_of=as_of,
+        as_of=None,
     )
     if not scope_ok:
         return to_call_tool_result(
@@ -2120,7 +2111,6 @@ async def _list_recent_signals_tool(
         claims=access.claims,
         repo=access.repo,
         wallet_public_id=wallet_public_id,
-        as_of=now,
         error_code="signal_not_found",
         message="No signals found for the given filters.",
     )

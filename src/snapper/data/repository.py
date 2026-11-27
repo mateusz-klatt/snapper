@@ -9210,7 +9210,7 @@ class Repository(ABC):
     async def get_position_cycle_statuses_by_public_ids(
         self,
         cycle_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> dict[str, str]:
         """Return the active status of each given cycle public_id in one query.
 
@@ -9223,7 +9223,7 @@ class Repository(ABC):
 
         Args:
             cycle_public_ids: Cycle public identifiers to resolve.
-            as_of: Bus time for the temporal query.
+            as_of: Point-in-time cutoff, or None for current cycle statuses.
 
         Returns:
             Mapping of cycle public_id -> status for cycles active at ``as_of``.
@@ -9690,7 +9690,7 @@ class Repository(ABC):
     async def list_accessible_wallets_for_operators(
         self,
         operator_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> list[WalletRow]:
         """Wallets covered by at least one active grant from the given operators.
 
@@ -9706,7 +9706,7 @@ class Repository(ABC):
             operator_public_ids: Principal's full operator ID set.
                 When empty, the method returns an empty list without
                 querying.
-            as_of: Retained for caller compatibility. Trading uses current rows.
+            as_of: Point-in-time cutoff, or None for current wallets and grants.
 
         Returns:
             Active wallet rows, deduplicated, ordered by
@@ -10607,7 +10607,7 @@ class Repository(ABC):
         delegate_public_id: str,
         wallet_public_id: str,
         instrument_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> bool:
         """AI delegate scope check with underlying expansion.
 
@@ -10636,7 +10636,7 @@ class Repository(ABC):
             instrument_public_id: Instrument to check (matched
                 directly for ``scope_kind='instrument'`` grants OR
                 via underlying mapping for ``scope_kind='underlying'``).
-            as_of: Retained for caller compatibility. Scope checks use current rows.
+            as_of: Point-in-time cutoff, or None for current authority.
 
         Returns:
             True iff some operator member of the delegate's user
@@ -38187,11 +38187,16 @@ class SQLAlchemyRepository(Repository):
     async def get_position_cycle_statuses_by_public_ids(
         self,
         cycle_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> dict[str, str]:
         """Return the active status of each given cycle public_id, chunked by IN-list."""
         if not cycle_public_ids:
             return {}
+        version_filters = (
+            (PositionCycle.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(PositionCycle, as_of)
+        )
         result: dict[str, str] = {}
         async with self.session() as s:
             for offset in range(0, len(cycle_public_ids), _POSITION_CYCLE_LOOKUP_CHUNK_SIZE):
@@ -38200,7 +38205,7 @@ class SQLAlchemyRepository(Repository):
                     await s.execute(
                         select(PositionCycle.public_id, PositionCycle.status).where(
                             PositionCycle.public_id.in_(chunk),
-                            *where_active(PositionCycle, as_of),
+                            *version_filters,
                         )
                     )
                 ).all()
@@ -38975,14 +38980,13 @@ class SQLAlchemyRepository(Repository):
     async def list_accessible_wallets_for_operators(
         self,
         operator_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> list[WalletRow]:
-        """Wallets covered by at least one current grant from the given operators."""
-        del as_of
+        """Return accessible wallets from current rows or at a supplied cutoff."""
         if not operator_public_ids:
             return []
         return await self._list_wallets_matching(
-            self._operator_scope_grant_wallet_predicate(operator_public_ids, None), None
+            self._operator_scope_grant_wallet_predicate(operator_public_ids, as_of), as_of
         )
 
     async def list_readable_wallets_for_user(
@@ -41444,7 +41448,7 @@ class SQLAlchemyRepository(Repository):
         delegate_public_id: str,
         wallet_public_id: str,
         instrument_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> bool:
         """AI delegate scope check with underlying expansion.
 
@@ -41455,7 +41459,21 @@ class SQLAlchemyRepository(Repository):
         ``scope_kind='underlying'`` expanded via
         ``InstrumentUnderlyingMapping``.
         """
-        del as_of
+        membership_filters = (
+            (UserOperatorMembership.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(UserOperatorMembership, as_of)
+        )
+        grant_filters = (
+            (WalletOperatorScopeGrant.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(WalletOperatorScopeGrant, as_of)
+        )
+        mapping_filters = (
+            (InstrumentUnderlyingMapping.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(InstrumentUnderlyingMapping, as_of)
+        )
         async with self.session() as s:
             delegate_user_id = (
                 await s.execute(
@@ -41472,7 +41490,7 @@ class SQLAlchemyRepository(Repository):
                     await s.execute(
                         select(UserOperatorMembership.operator_public_id).where(
                             UserOperatorMembership.user_public_id == delegate_user_id,
-                            UserOperatorMembership.known_to == KNOWN_TO_MAX,
+                            *membership_filters,
                         )
                     )
                 )
@@ -41490,7 +41508,7 @@ class SQLAlchemyRepository(Repository):
                         WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
                         WalletOperatorScopeGrant.scope_kind == "instrument",
                         WalletOperatorScopeGrant.instrument_public_id == instrument_public_id,
-                        WalletOperatorScopeGrant.known_to == KNOWN_TO_MAX,
+                        *grant_filters,
                     )
                     .limit(1)
                 )
@@ -41511,8 +41529,8 @@ class SQLAlchemyRepository(Repository):
                         WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
                         WalletOperatorScopeGrant.scope_kind == "underlying",
                         InstrumentUnderlyingMapping.instrument_public_id == instrument_public_id,
-                        WalletOperatorScopeGrant.known_to == KNOWN_TO_MAX,
-                        InstrumentUnderlyingMapping.known_to == KNOWN_TO_MAX,
+                        *grant_filters,
+                        *mapping_filters,
                     )
                     .limit(1)
                 )

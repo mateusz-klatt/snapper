@@ -259,6 +259,10 @@ async def _load_tokenized_limits(
 ) -> _TokenizedLimits | None:
     """Bind all sizing evidence to the exact requested venue instrument identity.
 
+    A current spec first observed by an ahead clock can look future-dated
+    at ``as_of``. Refuse the order until its observation is visible at the
+    evaluation time, using ``tokenized_order_metadata_unavailable``.
+
     Args:
         repo: Repository used for catalog identity and current order constraints.
         terms: Exact identity presented by the manual order.

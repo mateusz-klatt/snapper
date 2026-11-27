@@ -480,7 +480,7 @@ async def get_ai_review_aftermath_route(
         delegate_public_id=principal.delegate_public_id,
         wallet_public_id=review["wallet_public_id"],
         instrument_public_id=review["instrument_public_id"],
-        as_of=as_of,
+        as_of=None,
     )
     if not scope_ok:
         raise HTTPException(

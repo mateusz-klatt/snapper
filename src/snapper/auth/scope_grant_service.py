@@ -22,6 +22,7 @@ socket is available; tests stub it with a fake implementing
 `send(topic, payload)`.
 """
 
+from datetime import UTC
 from datetime import datetime
 from typing import Literal
 from typing import cast
@@ -434,7 +435,7 @@ class ScopeGrantService:
         self,
         *,
         principal: AuthPrincipal,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> set[str]:
         """Return the wallet ``public_id`` set visible on the OPERATOR plane.
 
@@ -474,8 +475,7 @@ class ScopeGrantService:
         Args:
             principal: Authenticated caller whose named permissions and
                 ``operator_public_ids`` drive the wallet-scope filter.
-            as_of: Wall-clock for SCD2-active filtering on operator
-                memberships and scope grants.
+            as_of: Point-in-time cutoff, or None for current wallet scope.
 
         Returns:
             Set of wallet ``public_id`` strings the principal's operators
@@ -489,7 +489,7 @@ class ScopeGrantService:
             principal.permission_scope_version,
             Permission.IMPERSONATE_OPERATOR,
         ):
-            rows = await self.repository.list_active_wallets(as_of=as_of)
+            rows = await self.repository.list_active_wallets(as_of=as_of or datetime.now(UTC))
         elif not principal.operator_public_ids:
             return set()
         else:
@@ -505,7 +505,7 @@ class ScopeGrantService:
         delegate_public_id: str,
         wallet_public_id: str,
         instrument_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> bool:
         """AI delegate scope check forwarder.
 
@@ -521,8 +521,7 @@ class ScopeGrantService:
                 delegate whose scope is being checked.
             wallet_public_id: Target wallet for the scope check.
             instrument_public_id: Target instrument for the scope check.
-            as_of: Wall-clock used for SCD2-active filtering on
-                memberships and grants.
+            as_of: Point-in-time cutoff, or None for current authority.
 
         Returns:
             ``True`` when the delegate has at least one active grant

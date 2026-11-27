@@ -1622,7 +1622,7 @@ class PlanExecutorService(RegisterableProcess):
             return
         statuses = await self.repository.get_position_cycle_statuses_by_public_ids(
             [cycle_pid for _, _, cycle_pid in armed],
-            as_of=datetime.now(UTC),
+            as_of=None,
         )
         for public_id, plan_type, cycle_pid in armed:
             if statuses.get(cycle_pid) == "open":

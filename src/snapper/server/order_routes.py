@@ -217,7 +217,6 @@ async def _resolve_create_order_wallet(
     repo: Repository,
     principal: AuthPrincipal,
     body: CreateOrderBody,
-    as_of: datetime,
 ) -> str:
     """Resolve and scope-check the wallet for a create-order request."""
     if _is_blank_wallet_public_id(body.wallet_public_id):
@@ -237,7 +236,6 @@ async def _resolve_create_order_wallet(
             explicit_wallet_public_id=body.wallet_public_id,
             operator_public_ids=principal.operator_public_ids,
             mode=body.mode,
-            as_of=as_of,
         )
     except (WalletAmbiguousError, WalletUnresolvedError) as exc:
         raise HTTPException(
@@ -673,7 +671,6 @@ async def create_order(
         repo=repo,
         principal=principal,
         body=body,
-        as_of=now,
     )
 
     execution_exchange = await _resolve_execution_venue(
