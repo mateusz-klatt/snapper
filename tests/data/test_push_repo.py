@@ -53,6 +53,7 @@ from snapper.data.models import Wallet
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import AlertDeliveryAttemptCancelWrite
+from snapper.data.repository_types import AlertDeliveryAttemptUnregisterWrite
 from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertListCursor
@@ -3660,9 +3661,11 @@ class TestAdmitAndChargeApnsDeliveryRepo:
             )
         )
 
-        assert outcome == ApnsAdmissionRefusal(refusal="routing_suppressed", attempt_count=0)
         versions = await _delivery_versions(repo, delivery_pid)
         assert len(versions) == 1
+        assert outcome == ApnsAdmissionRefusal(
+            refusal="routing_suppressed", attempt_count=0, version_id=versions[0].id
+        )
         assert versions[0].attempt_count == 0
         assert versions[0].status == "queued"
         assert versions[0].next_attempt_at == _ts(5)
@@ -3709,10 +3712,12 @@ class TestAdmitAndChargeApnsDeliveryRepo:
             )
         )
 
-        assert outcome == ApnsAdmissionRefusal(refusal="device_inactive", attempt_count=0)
-        assert predicate_called is False
         versions = await _delivery_versions(repo, delivery_pid)
         assert len(versions) == 1
+        assert outcome == ApnsAdmissionRefusal(
+            refusal="device_inactive", attempt_count=0, version_id=versions[0].id
+        )
+        assert predicate_called is False
         assert versions[0].attempt_count == 0
 
     @pytest.mark.asyncio
@@ -4042,11 +4047,11 @@ class TestAdmitAndChargeApnsDeliveryRepo:
     async def test_expected_attempt_count_guards_terminal_refusal_writes(
         self, repo: SQLAlchemyRepository, refusal_path: str
     ) -> None:
-        """Expected-attempt guard rejects stale writes and commits matching ones.
+        """Expected version and attempt guard rejects stale writes and commits matching ones.
 
-        Given: A queued delivery that has advanced to ``attempt_count == 1``.
-        When: A stale terminal write arrives expecting ``attempt_count == 0`` and a
-            subsequent write arrives expecting ``attempt_count == 1``.
+        Given: A queued delivery that has advanced to ``attempt_count == 1`` (new ``id``).
+        When: A stale guarded write arrives citing the initial version/count and a
+            subsequent guarded write cites the current version/count.
         Then: The stale write returns ``False`` and leaves the queued attempt intact;
             the matching write returns ``True`` and transitions to the terminal state.
         """
@@ -4060,24 +4065,32 @@ class TestAdmitAndChargeApnsDeliveryRepo:
             delivery_pid, transition_at=_ts(1), session_id="worker-b", sequence_id=2
         )
         assert charged == 1
+        versions = await _delivery_versions(repo, delivery_pid)
+        stale_version_id, current_version_id = versions[0].id, versions[1].id
 
         if refusal_path == "unregistered":
-            stale_ok = await repo.mark_delivery_unregistered(
-                delivery_pid,
-                transition_at=_ts(2),
-                session_id="worker-a",
-                sequence_id=3,
-                expected_attempt_count=0,
+            stale_ok = await repo.mark_delivery_unregistered_at_attempt(
+                AlertDeliveryAttemptUnregisterWrite(
+                    public_id=delivery_pid,
+                    expected_version_id=stale_version_id,
+                    expected_attempt_count=0,
+                    transition_at=_ts(2),
+                    session_id="worker-a",
+                    sequence_id=3,
+                )
             )
             assert stale_ok is False
             mid = await repo.get_delivery_by_public_id(delivery_pid)
             assert mid is not None and mid["status"] == "queued" and mid["attempt_count"] == 1
-            match_ok = await repo.mark_delivery_unregistered(
-                delivery_pid,
-                transition_at=_ts(3),
-                session_id="worker-b",
-                sequence_id=4,
-                expected_attempt_count=1,
+            match_ok = await repo.mark_delivery_unregistered_at_attempt(
+                AlertDeliveryAttemptUnregisterWrite(
+                    public_id=delivery_pid,
+                    expected_version_id=current_version_id,
+                    expected_attempt_count=1,
+                    transition_at=_ts(3),
+                    session_id="worker-b",
+                    sequence_id=4,
+                )
             )
             assert match_ok is True
             final = await repo.get_delivery_by_public_id(delivery_pid)
@@ -4088,6 +4101,7 @@ class TestAdmitAndChargeApnsDeliveryRepo:
             AlertDeliveryAttemptCancelWrite(
                 public_id=delivery_pid,
                 reason="routing_suppressed",
+                expected_version_id=stale_version_id,
                 expected_attempt_count=0,
                 transition_at=_ts(2),
                 session_id="worker-a",
@@ -4101,6 +4115,7 @@ class TestAdmitAndChargeApnsDeliveryRepo:
             AlertDeliveryAttemptCancelWrite(
                 public_id=delivery_pid,
                 reason="routing_suppressed",
+                expected_version_id=current_version_id,
                 expected_attempt_count=1,
                 transition_at=_ts(3),
                 session_id="worker-b",
@@ -4114,6 +4129,147 @@ class TestAdmitAndChargeApnsDeliveryRepo:
             and final["status"] == "cancelled_scope"
             and final["error_reason"] == "routing_suppressed"
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("refusal_path", ["unregistered", "cancelled"])
+    async def test_expected_version_id_rejects_same_attempt_count_schedule_rewrite(
+        self, repo: SQLAlchemyRepository, refusal_path: str
+    ) -> None:
+        """A schedule rewrite at the same ``attempt_count`` is protected by ``expected_version_id``.
+
+        Given: A queued APNs delivery whose retry schedule was rewritten without changing
+            ``attempt_count`` (``0 -> 0``, new SCD2 primary key ``id``).
+        When: A guarded refusal write cites the pre-rewrite ``version_id`` (with matching
+            ``expected_attempt_count == 0``), followed by a write citing the current
+            ``version_id``.
+        Then: The pre-rewrite refusal write returns ``False`` leaving the scheduled queued
+            row intact; the matching-version write transitions it cleanly.
+        """
+        device_pid = await _seed_user_and_device(
+            repo, user_public_id=f"user-ver-{refusal_path}", device_token=f"tok-ver-{refusal_path}"
+        )
+        delivery_pid = await _seed_queued_apns_delivery(
+            repo, user_public_id=f"user-ver-{refusal_path}", device_public_id=device_pid
+        )
+        initial_versions = await _delivery_versions(repo, delivery_pid)
+        stale_version_id = initial_versions[0].id
+        rewritten = await repo.update_delivery_retry_schedule(
+            delivery_pid,
+            attempt_count=0,
+            next_attempt_at=_ts(5),
+            error_reason="retry_schedule",
+            transition_at=_ts(1),
+            session_id="worker-b",
+            sequence_id=2,
+        )
+        assert rewritten is True
+        updated_versions = await _delivery_versions(repo, delivery_pid)
+        current_version_id = updated_versions[-1].id
+        assert current_version_id != stale_version_id
+
+        if refusal_path == "unregistered":
+            assert (
+                await repo.mark_delivery_unregistered_at_attempt(
+                    AlertDeliveryAttemptUnregisterWrite(
+                        public_id=delivery_pid,
+                        expected_version_id=stale_version_id,
+                        expected_attempt_count=0,
+                        transition_at=_ts(2),
+                        session_id="worker-a",
+                        sequence_id=3,
+                    )
+                )
+                is False
+            )
+            mid = await repo.get_delivery_by_public_id(delivery_pid)
+            assert (
+                mid is not None and mid["status"] == "queued" and mid["next_attempt_at"] == _ts(5)
+            )
+            assert (
+                await repo.mark_delivery_unregistered_at_attempt(
+                    AlertDeliveryAttemptUnregisterWrite(
+                        public_id=delivery_pid,
+                        expected_version_id=current_version_id,
+                        expected_attempt_count=0,
+                        transition_at=_ts(3),
+                        session_id="worker-b",
+                        sequence_id=4,
+                    )
+                )
+                is True
+            )
+            final = await repo.get_delivery_by_public_id(delivery_pid)
+            assert final is not None and final["status"] == "unregistered"
+            return
+
+        assert (
+            await repo.mark_delivery_cancelled_at_attempt(
+                AlertDeliveryAttemptCancelWrite(
+                    public_id=delivery_pid,
+                    reason="routing_suppressed",
+                    expected_version_id=stale_version_id,
+                    expected_attempt_count=0,
+                    transition_at=_ts(2),
+                    session_id="worker-a",
+                    sequence_id=3,
+                )
+            )
+            is False
+        )
+        mid = await repo.get_delivery_by_public_id(delivery_pid)
+        assert mid is not None and mid["status"] == "queued" and mid["next_attempt_at"] == _ts(5)
+        assert (
+            await repo.mark_delivery_cancelled_at_attempt(
+                AlertDeliveryAttemptCancelWrite(
+                    public_id=delivery_pid,
+                    reason="routing_suppressed",
+                    expected_version_id=current_version_id,
+                    expected_attempt_count=0,
+                    transition_at=_ts(3),
+                    session_id="worker-b",
+                    sequence_id=4,
+                )
+            )
+            is True
+        )
+        final = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final is not None and final["status"] == "cancelled_scope"
+
+    @pytest.mark.asyncio
+    async def test_admit_and_charge_apns_delivery_rejects_unsupported_dialect(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Unsupported database dialects fail closed before opening a session or reading.
+
+        Given: A repository reporting an unsupported dialect (``mysql``).
+        When: ``admit_and_charge_apns_delivery`` is called.
+        Then: ``NotImplementedError`` is raised before ``session_factory`` runs.
+        """
+        session_spy = MagicMock()
+        request = ApnsAdmissionRequest(
+            delivery_public_id="del-unsupported",
+            user_public_id="user-unsupported",
+            device_public_id="dev-unsupported",
+            transition_at=_ts(1),
+            session_id="worker",
+            sequence_id=1,
+            admits=lambda _ctx: True,
+        )
+        with (
+            patch.object(
+                SQLAlchemyRepository,
+                "dialect_name",
+                new_callable=PropertyMock,
+                return_value="mysql",
+            ),
+            patch.object(repo, "session_factory", session_spy),
+            pytest.raises(
+                NotImplementedError,
+                match="atomic APNs admission is not implemented for dialect=mysql",
+            ),
+        ):
+            await repo.admit_and_charge_apns_delivery(request)
+        session_spy.assert_not_called()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("fail_commit", [False, True], ids=["success", "pg-serialization"])

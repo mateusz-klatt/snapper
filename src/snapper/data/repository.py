@@ -386,6 +386,7 @@ from snapper.data.repository_types import AiReviewInsertRow
 from snapper.data.repository_types import AiReviewPositionCycleTransitionRow
 from snapper.data.repository_types import AiReviewRow
 from snapper.data.repository_types import AlertDeliveryAttemptCancelWrite
+from snapper.data.repository_types import AlertDeliveryAttemptUnregisterWrite
 from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertDeliveryRetryScheduleWrite
 from snapper.data.repository_types import AlertDeliveryRow
@@ -807,6 +808,7 @@ class _DeliveryAttemptTransition:
     """Counter operation and preconditions for closing a delivery version."""
 
     expected_count: int | None = None
+    expected_version_id: int | None = None
     increment: bool = False
     provider_receipt: str | None = None
     reject_stale_timestamp: bool = False
@@ -10454,9 +10456,16 @@ class Repository(ABC):
         transition_at: datetime,
         session_id: str,
         sequence_id: int,
-        expected_attempt_count: int | None = None,
+    ) -> None:
+        """SCD2 transition queued -> unregistered (APNs 410)."""
+        ...
+
+    @abstractmethod
+    async def mark_delivery_unregistered_at_attempt(
+        self,
+        write: AlertDeliveryAttemptUnregisterWrite,
     ) -> bool:
-        """SCD2 transition queued -> unregistered (APNs 410 or stale device)."""
+        """SCD2 transition queued -> unregistered guarded by SCD2 version and attempt."""
         ...
 
     @abstractmethod
@@ -10477,7 +10486,7 @@ class Repository(ABC):
         self,
         write: AlertDeliveryAttemptCancelWrite,
     ) -> bool:
-        """SCD2 transition queued -> cancelled_scope guarded by attempt count."""
+        """SCD2 transition queued -> cancelled_scope guarded by SCD2 version and attempt."""
         ...
 
     @abstractmethod
@@ -40866,6 +40875,18 @@ class SQLAlchemyRepository(Repository):
             return None
         return existing
 
+    @staticmethod
+    def _delivery_transition_preconditions_met(
+        existing: AlertDelivery,
+        attempt: _DeliveryAttemptTransition,
+    ) -> bool:
+        """Check expected SCD2 version id, attempt count, and unscheduled constraints."""
+        if attempt.expected_version_id is not None and existing.id != attempt.expected_version_id:
+            return False
+        if attempt.expected_count is not None and existing.attempt_count != attempt.expected_count:
+            return False
+        return not (attempt.require_unscheduled and existing.next_attempt_at is not None)
+
     async def _commit_delivery_transition_in_session(
         self,
         s: AsyncSession,
@@ -40874,9 +40895,7 @@ class SQLAlchemyRepository(Repository):
     ) -> int | None:
         """Conditionally close ``existing`` and commit its successor inside ``s``."""
         attempt = spec.attempt
-        if attempt.expected_count is not None and existing.attempt_count != attempt.expected_count:
-            return None
-        if attempt.require_unscheduled and existing.next_attempt_at is not None:
+        if not self._delivery_transition_preconditions_met(existing, attempt):
             return None
         effective_transition_at = self._resolve_delivery_transition_time(
             existing, spec.transition_at, attempt
@@ -41040,21 +41059,37 @@ class SQLAlchemyRepository(Repository):
         transition_at: datetime,
         session_id: str,
         sequence_id: int,
-        expected_attempt_count: int | None = None,
-    ) -> bool:
-        """SCD2 transition queued -> unregistered (APNs 410 or stale device).
-
-        When ``expected_attempt_count`` is set, only a queued version at that
-        exact attempt count is closed; a newer attempt or already-closed row
-        leaves the row untouched and returns ``False``.
-        """
-        committed = await self._scd2_transition_delivery(
+    ) -> None:
+        """SCD2 transition queued -> unregistered (APNs 410)."""
+        await self._scd2_transition_delivery(
             public_id,
             "unregistered",
             transition_at=transition_at,
             session_id=session_id,
             sequence_id=sequence_id,
-            attempt=_DeliveryAttemptTransition(expected_count=expected_attempt_count),
+        )
+
+    async def mark_delivery_unregistered_at_attempt(
+        self,
+        write: AlertDeliveryAttemptUnregisterWrite,
+    ) -> bool:
+        """SCD2 transition queued -> unregistered guarded by SCD2 version and attempt.
+
+        Returns ``True`` when the exact ``write.expected_version_id`` queued
+        version at ``write.expected_attempt_count`` closed and inserted its
+        successor, or ``False`` without writing when a newer attempt, schedule
+        rewrite, or terminal close moved past that version.
+        """
+        committed = await self._scd2_transition_delivery(
+            write.public_id,
+            "unregistered",
+            transition_at=write.transition_at,
+            session_id=write.session_id,
+            sequence_id=write.sequence_id,
+            attempt=_DeliveryAttemptTransition(
+                expected_count=write.expected_attempt_count,
+                expected_version_id=write.expected_version_id,
+            ),
         )
         return committed is not None
 
@@ -41081,10 +41116,12 @@ class SQLAlchemyRepository(Repository):
         self,
         write: AlertDeliveryAttemptCancelWrite,
     ) -> bool:
-        """SCD2 transition queued -> cancelled_scope guarded by attempt count.
+        """SCD2 transition queued -> cancelled_scope guarded by SCD2 version and attempt.
 
-        Returns ``True`` when closed and inserted, or ``False`` without writing
-        when the queued version moved to another attempt count or closed first.
+        Returns ``True`` when the exact ``write.expected_version_id`` queued
+        version at ``write.expected_attempt_count`` closed and inserted its
+        successor, or ``False`` without writing when a newer attempt, schedule
+        rewrite, or terminal close moved past that version.
         """
         committed = await self._scd2_transition_delivery(
             write.public_id,
@@ -41093,7 +41130,10 @@ class SQLAlchemyRepository(Repository):
             session_id=write.session_id,
             sequence_id=write.sequence_id,
             error_reason=write.reason,
-            attempt=_DeliveryAttemptTransition(expected_count=write.expected_attempt_count),
+            attempt=_DeliveryAttemptTransition(
+                expected_count=write.expected_attempt_count,
+                expected_version_id=write.expected_version_id,
+            ),
         )
         return committed is not None
 
@@ -41132,6 +41172,8 @@ class SQLAlchemyRepository(Repository):
         failure. On SQLite the session opens with ``BEGIN IMMEDIATE`` before any
         read so all admission reads and the attempt charge execute inside one
         writer-serialized transaction instead of auto-committed deferred reads.
+        Any other dialect raises ``NotImplementedError`` before opening a
+        session or reading rows.
 
         ``request.admits`` MUST be pure and synchronous (no I/O, no awaits)
         because it runs inside the transaction while the delivery row is locked
@@ -41162,28 +41204,45 @@ class SQLAlchemyRepository(Repository):
         Returns:
             :class:`ApnsAdmissionCharge` when admitted and committed, or
             :class:`ApnsAdmissionRefusal` carrying the refusal reason and (when
-            a queued version was read) its observed ``attempt_count``.
+            a queued version was read) its observed ``attempt_count`` and
+            ``version_id``.
+
+        Raises:
+            NotImplementedError: When the configured dialect is neither
+                ``postgresql`` nor ``sqlite``.
         """
+        dialect = self.dialect_name
+        if dialect not in ("postgresql", "sqlite"):
+            raise NotImplementedError(
+                f"atomic APNs admission is not implemented for dialect={dialect}"
+            )
         async with self.session() as s:
-            if self.dialect_name == "postgresql":
+            if dialect == "postgresql":
                 await s.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
-            elif self.dialect_name == "sqlite":
+            else:
                 await s.execute(text("BEGIN IMMEDIATE"))
             existing = await self._select_queued_delivery_in_session(s, request.delivery_public_id)
             if existing is None:
-                return ApnsAdmissionRefusal(refusal="not_queued", attempt_count=None)
+                return ApnsAdmissionRefusal(
+                    refusal="not_queued", attempt_count=None, version_id=None
+                )
             observed_attempt = existing.attempt_count
+            observed_version_id = existing.id
             context = await self._read_apns_admission_context(
                 s, request.user_public_id, request.device_public_id
             )
             device = context["device"]
             if device is None:
                 return ApnsAdmissionRefusal(
-                    refusal="device_inactive", attempt_count=observed_attempt
+                    refusal="device_inactive",
+                    attempt_count=observed_attempt,
+                    version_id=observed_version_id,
                 )
             if not request.admits(context):
                 return ApnsAdmissionRefusal(
-                    refusal="routing_suppressed", attempt_count=observed_attempt
+                    refusal="routing_suppressed",
+                    attempt_count=observed_attempt,
+                    version_id=observed_version_id,
                 )
             committed_attempt = await self._commit_delivery_transition_in_session(
                 s,
@@ -41198,7 +41257,9 @@ class SQLAlchemyRepository(Repository):
                 ),
             )
             if committed_attempt is None:
-                return ApnsAdmissionRefusal(refusal="not_queued", attempt_count=None)
+                return ApnsAdmissionRefusal(
+                    refusal="not_queued", attempt_count=None, version_id=None
+                )
             return ApnsAdmissionCharge(attempt=committed_attempt, device=device)
 
     async def update_delivery_retry_schedule(

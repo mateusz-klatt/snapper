@@ -67,6 +67,7 @@ from snapper.application.process_manager.models import RegisterableProcess
 from snapper.core.json_types import JsonObject
 from snapper.data.repository import Repository
 from snapper.data.repository_types import AlertDeliveryAttemptCancelWrite
+from snapper.data.repository_types import AlertDeliveryAttemptUnregisterWrite
 from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
@@ -782,11 +783,12 @@ class NotifySidecar(RegisterableProcess):
         length of one admission transaction, and the very next attempt reads the
         committed change, so an opt-out or deactivation can let through at most
         one extra push, never a stream.
-        Live fan-out targets keep the ``_bump_attempt`` path followed by fresh
-        scope and deadline checks. Deliveries past their deadline transition to
-        ``failed`` without sending. Otherwise, bounds ``ApnsClientPool.send``
-        with ``_APNS_SEND_TIMEOUT_S``, and computes retry backoff and SCD2
-        transition times from fresh UTC timestamps.
+        Live fan-out targets keep the ``_bump_attempt`` path (reusing the
+        pre-charge clock sample for the pre-bump deadline check) followed by
+        fresh scope and deadline checks. Deliveries past their deadline
+        transition to ``failed`` without sending. Otherwise, bounds
+        ``ApnsClientPool.send`` with ``_APNS_SEND_TIMEOUT_S``, and computes retry
+        backoff and SCD2 transition times from fresh UTC timestamps.
 
         Note:
             If ``ApnsClientPool.send`` hits the 30s timeout after APNs already
@@ -798,16 +800,18 @@ class NotifySidecar(RegisterableProcess):
         apns = self._apns
         if apns is None:
             return
+        admission_now = self._clock()
         if await self._cancel_if_scope_revoked(
-            target.delivery_public_id, target.event, self._clock()
+            target.delivery_public_id, target.event, admission_now
         ):
             return
-        deadline = await self._resolve_delivery_deadline(target, self._clock())
+        deadline_now = self._clock() if isinstance(target, _QueuedDeliveryTarget) else admission_now
+        deadline = await self._resolve_delivery_deadline(target, deadline_now)
         if await self._expire_if_past_deadline(
             target.delivery_public_id,
             target.prior_error_reason,
             deadline,
-            self._clock(),
+            deadline_now,
         ):
             return
         admitted = await self._charge_delivery_attempt(target)
@@ -1317,12 +1321,29 @@ class NotifySidecar(RegisterableProcess):
             self._clock(),
         )
 
+    @staticmethod
+    def _require_refusal_version(outcome: ApnsAdmissionRefusal) -> tuple[int, int]:
+        """Extract required SCD2 version id and attempt count from a refusal."""
+        if outcome.version_id is None or outcome.attempt_count is None:
+            raise ValueError(
+                f"guarded refusal {outcome.refusal!r} requires version_id and attempt_count"
+            )
+        return outcome.version_id, outcome.attempt_count
+
     async def _handle_queued_admission_refusal(
         self,
         delivery_public_id: str,
         outcome: ApnsAdmissionRefusal,
     ) -> None:
         """Apply the guarded transition or log for an atomic admission refusal."""
+        if outcome.refusal == "not_queued":
+            logger.info(
+                "sidecar: delivery {pid} no longer queued at admission time —"
+                " concurrent cancel / terminal transition wins",
+                pid=delivery_public_id,
+            )
+            return
+        expected_version_id, expected_attempt_count = self._require_refusal_version(outcome)
         refusal_now = self._clock()
         if outcome.refusal == "device_inactive":
             logger.info(
@@ -1333,28 +1354,24 @@ class NotifySidecar(RegisterableProcess):
             applied = await self._mark_unregistered_no_device(
                 delivery_public_id,
                 refusal_now,
-                expected_attempt_count=outcome.attempt_count,
+                expected_version_id=expected_version_id,
+                expected_attempt_count=expected_attempt_count,
             )
-        elif outcome.refusal == "routing_suppressed":
-            applied = await self._mark_cancelled(
+        else:
+            applied = await self._mark_cancelled_at_attempt(
                 delivery_public_id,
                 "routing_suppressed",
                 refusal_now,
-                expected_attempt_count=outcome.attempt_count,
+                expected_version_id=expected_version_id,
+                expected_attempt_count=expected_attempt_count,
             )
-        else:
-            logger.info(
-                "sidecar: delivery {pid} no longer queued at admission time —"
-                " concurrent cancel / terminal transition wins",
-                pid=delivery_public_id,
-            )
-            return
         if not applied:
             logger.info(
-                "sidecar: delivery={pid} refusal for attempt {attempt} superseded by"
-                " a newer attempt; leaving it untouched",
+                "sidecar: delivery={pid} refusal for attempt {attempt} version {vid}"
+                " superseded by a newer attempt; leaving it untouched",
                 pid=delivery_public_id,
-                attempt=outcome.attempt_count,
+                attempt=expected_attempt_count,
+                vid=expected_version_id,
             )
 
     async def _admit_and_charge_queued(
@@ -1503,58 +1520,60 @@ class NotifySidecar(RegisterableProcess):
         delivery_public_id: str,
         now: datetime,
         *,
-        expected_attempt_count: int | None = None,
+        expected_version_id: int,
+        expected_attempt_count: int,
     ) -> bool:
-        """Mark a delivery unregistered when its target device is already gone.
+        """Mark a delivery unregistered only if the observed queued SCD2 version still matches.
 
         Returns:
-            ``True`` when transitioned, or ``False`` when a guarded expected-attempt
-            check saw a newer attempt or closed row.
+            ``True`` when transitioned, or ``False`` when another attempt,
+            schedule rewrite, or terminal transition closed that version first.
         """
-        sid = self._tracker.session_id
-        seq = self._tracker.next_sequence(_ZMQ_STREAM)
-        return await self._repo.mark_delivery_unregistered(
-            delivery_public_id,
-            transition_at=now,
-            session_id=sid,
-            sequence_id=seq,
-            expected_attempt_count=expected_attempt_count,
+        return await self._repo.mark_delivery_unregistered_at_attempt(
+            AlertDeliveryAttemptUnregisterWrite(
+                public_id=delivery_public_id,
+                expected_version_id=expected_version_id,
+                expected_attempt_count=expected_attempt_count,
+                transition_at=now,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_ZMQ_STREAM),
+            )
         )
 
-    async def _mark_cancelled(
+    async def _mark_cancelled(self, delivery_public_id: str, reason: str, now: datetime) -> None:
+        """Terminal scope cancellation with provenance from this sidecar."""
+        await self._repo.mark_delivery_cancelled(
+            delivery_public_id,
+            reason=reason[:_MAX_ERROR_REASON_LEN],
+            transition_at=now,
+            session_id=self._tracker.session_id,
+            sequence_id=self._tracker.next_sequence(_ZMQ_STREAM),
+        )
+
+    async def _mark_cancelled_at_attempt(
         self,
         delivery_public_id: str,
         reason: str,
         now: datetime,
         *,
-        expected_attempt_count: int | None = None,
+        expected_version_id: int,
+        expected_attempt_count: int,
     ) -> bool:
-        """Terminal scope/routing cancellation with provenance from this sidecar.
+        """Cancel a queued delivery only if the observed SCD2 version still matches.
 
         Returns:
-            ``False`` when a guarded expected-attempt cancellation lost to a
-            newer version, otherwise ``True``.
+            ``True`` when transitioned, or ``False`` when another attempt,
+            schedule rewrite, or terminal transition closed that version first.
         """
-        trimmed_reason = reason[:_MAX_ERROR_REASON_LEN]
-        sid = self._tracker.session_id
-        seq = self._tracker.next_sequence(_ZMQ_STREAM)
-        if expected_attempt_count is None:
-            await self._repo.mark_delivery_cancelled(
-                delivery_public_id,
-                reason=trimmed_reason,
-                transition_at=now,
-                session_id=sid,
-                sequence_id=seq,
-            )
-            return True
         return await self._repo.mark_delivery_cancelled_at_attempt(
             AlertDeliveryAttemptCancelWrite(
                 public_id=delivery_public_id,
-                reason=trimmed_reason,
+                reason=reason[:_MAX_ERROR_REASON_LEN],
+                expected_version_id=expected_version_id,
                 expected_attempt_count=expected_attempt_count,
                 transition_at=now,
-                session_id=sid,
-                sequence_id=seq,
+                session_id=self._tracker.session_id,
+                sequence_id=self._tracker.next_sequence(_ZMQ_STREAM),
             )
         )
 

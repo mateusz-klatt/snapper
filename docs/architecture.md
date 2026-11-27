@@ -1640,9 +1640,10 @@ registration, that device's routing preferences, and user alert defaults (under
 `REPEATABLE READ` on PostgreSQL and `BEGIN IMMEDIATE` on SQLite) in the same
 repository transaction that allocates the attempt (`admit_and_charge_apns_delivery`),
 followed by a fresh deadline check immediately before `ApnsClientPool.send`;
-refusal writes carry the observed `attempt_count` so a stale worker never closes a
-newer attempt, and repository admission errors leave the delivery `queued` without
-charging an attempt. A drain or retry batch prefetches events and
+refusal writes carry the observed SCD2 version ID and `attempt_count` so a stale
+worker never closes a newer attempt or schedule rewrite, and repository admission errors
+leave the delivery `queued` without charging an attempt. A drain or retry batch
+prefetches events and
 recipient languages for queued APNs rows only (skipping `provider='fcm'`
 rows). Outage window tracking is scoped per APNs environment (`sandbox` vs
 `prod`). Recovery

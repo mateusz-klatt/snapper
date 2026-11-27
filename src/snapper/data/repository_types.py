@@ -4190,14 +4190,17 @@ class ApnsAdmissionCharge:
 class ApnsAdmissionRefusal:
     """Refusal returned when atomic queued APNs admission declines to charge.
 
-    ``attempt_count`` records the observed queued version's attempt counter
-    when a queued row was inspected (``device_inactive`` or
-    ``routing_suppressed``) so terminal refusal writes remain conditional on that
-    version and leave a newer attempt untouched; ``None`` for ``not_queued``.
+    ``attempt_count`` and ``version_id`` record the observed queued
+    ``AlertDelivery`` row's attempt counter and SCD2 primary key (``id``) when
+    a queued row was inspected (``device_inactive`` or ``routing_suppressed``)
+    so terminal refusal writes require that exact SCD2 version and leave any
+    newer attempt or schedule rewrite untouched; both are ``None`` for
+    ``not_queued``.
     """
 
     refusal: ApnsAdmissionRefusalCode
     attempt_count: int | None = None
+    version_id: int | None = None
 
 
 type ApnsAdmissionResult = ApnsAdmissionCharge | ApnsAdmissionRefusal
@@ -4325,11 +4328,24 @@ class AlertDeliveryRetryScheduleWrite(TypedDict):
 
 @dataclass(frozen=True, slots=True)
 class AlertDeliveryAttemptCancelWrite:
-    """Guarded cancellation payload pinned to an observed queued attempt count."""
+    """Guarded cancellation payload pinned to an exact observed SCD2 version."""
 
     public_id: str
     reason: str
-    expected_attempt_count: int | None
+    expected_version_id: int
+    expected_attempt_count: int
+    transition_at: datetime
+    session_id: str
+    sequence_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class AlertDeliveryAttemptUnregisterWrite:
+    """Guarded unregister payload pinned to an exact observed SCD2 version."""
+
+    public_id: str
+    expected_version_id: int
+    expected_attempt_count: int
     transition_at: datetime
     session_id: str
     sequence_id: int

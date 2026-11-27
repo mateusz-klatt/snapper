@@ -4,14 +4,16 @@ Verifies real PostgreSQL ``REPEATABLE READ`` snapshot semantics and ``SQLSTATE
 40001`` serialization conflicts across two independent engines executing
 ``SQLAlchemyRepository.admit_and_charge_apns_delivery`` concurrently.
 
-Every test SKIPS unless ``TEST_DB_URL`` (or the Makefile's ``DB_URL``
-pass-through) is a PostgreSQL URL, so default SQLite runs and coverage gates
-remain unaffected. Opt in against a migrated scratch database via::
+Every test SKIPS unless the dedicated ``SNAPPER_PG_WITNESS_URL`` environment
+variable is a PostgreSQL URL whose database name ends with ``_witness`` or
+``_scratch`` (never falls back to ``DB_URL`` or ``TEST_DB_URL``), so default
+SQLite runs and coverage gates remain unaffected and non-scratch databases are
+protected. Opt in against a migrated scratch database via::
 
-    TEST_DB_URL=postgresql+asyncpg://snapper:example@localhost:5432/snapper_witness pytest tests/data/test_apns_admission_pg_witness.py
+    SNAPPER_PG_WITNESS_URL=postgresql+asyncpg://snapper:example@localhost:5432/snapper_witness pytest tests/data/test_apns_admission_pg_witness.py
 
-Never point at production. Each test allocates random UUID7 identifiers and
-deletes only its own synthetic fixture rows on teardown.
+Each test allocates random UUID7 identifiers and deletes only its own
+synthetic fixture rows on teardown.
 """
 
 import os
@@ -60,30 +62,40 @@ from snapper.data.repository_types import NotificationDeviceUpsertRow
 _T0 = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 _T1 = _T0 + timedelta(minutes=1)
 _T2 = _T0 + timedelta(minutes=2)
+_T3 = _T0 + timedelta(minutes=3)
+_WITNESS_ENV_VAR = "SNAPPER_PG_WITNESS_URL"
 
 
-def _opt_in_pg_url() -> URL | None:
-    """Resolve an explicit ``TEST_DB_URL`` (or Makefile ``DB_URL``) PostgreSQL URL."""
-    raw = os.environ.get("TEST_DB_URL", "").strip() or os.environ.get("DB_URL", "").strip()
+def _resolve_witness_url() -> tuple[URL | None, str]:
+    """Validate ``SNAPPER_PG_WITNESS_URL`` and enforce a dedicated witness/scratch DB name."""
+    raw = os.environ.get(_WITNESS_ENV_VAR, "").strip()
     if not raw:
-        return None
+        return (
+            None,
+            f"live-PostgreSQL witness: set {_WITNESS_ENV_VAR}=postgresql+asyncpg://.../<db>_witness to opt in",
+        )
     try:
         url = make_url(raw)
     except ArgumentError:
-        return None
+        return None, f"{_WITNESS_ENV_VAR} is not a valid SQLAlchemy URL"
     if url.get_backend_name() != "postgresql":
-        return None
-    return url.set(drivername="postgresql+asyncpg")
+        return (
+            None,
+            f"{_WITNESS_ENV_VAR} must use a postgresql backend (got {url.get_backend_name()!r})",
+        )
+    db_name = (url.database or "").strip()
+    if not db_name.endswith(("_witness", "_scratch")):
+        return (
+            None,
+            f"{_WITNESS_ENV_VAR} refuses to run unless database name ends with '_witness' or '_scratch' (got {db_name!r})",
+        )
+    return url.set(drivername="postgresql+asyncpg"), ""
 
+
+_WITNESS_URL, _SKIP_REASON = _resolve_witness_url()
 
 pytestmark = [
-    pytest.mark.skipif(
-        _opt_in_pg_url() is None,
-        reason=(
-            "live-PostgreSQL witness: opt in via "
-            "TEST_DB_URL=postgresql+asyncpg://... pytest tests/data/test_apns_admission_pg_witness.py"
-        ),
-    ),
+    pytest.mark.skipif(_WITNESS_URL is None, reason=_SKIP_REASON),
 ]
 
 
@@ -127,7 +139,7 @@ async def _cleanup_fixture_rows(
 @pytest.fixture
 async def pg_fixture() -> AsyncIterator[_PgAdmissionFixture]:
     """Provision two independent PostgreSQL engines with an isolated queued APNs delivery."""
-    url = _opt_in_pg_url()
+    url = _WITNESS_URL
     assert url is not None
     url_str = url.render_as_string(hide_password=False)
     repo_primary = SQLAlchemyRepository(url_str)
@@ -309,9 +321,11 @@ async def test_pg_repeatable_read_admits_snapshot_and_next_call_refuses_routing_
         )
     )
 
-    assert second == ApnsAdmissionRefusal(refusal="routing_suppressed", attempt_count=1)
     versions = await _load_pg_delivery_versions(
         pg_fixture.repo_primary, pg_fixture.delivery_public_id
+    )
+    assert second == ApnsAdmissionRefusal(
+        refusal="routing_suppressed", attempt_count=1, version_id=versions[-1].id
     )
     assert [(v.status, v.attempt_count) for v in versions] == [("queued", 0), ("queued", 1)]
 
@@ -346,11 +360,7 @@ async def test_pg_repeatable_read_concurrent_close_raises_sqlstate_40001(
             session_id=rival_session_id,
             sequence_id=30,
         )
-        return await original_commit_transition(
-            session,
-            existing,
-            spec,
-        )
+        return await original_commit_transition(session, existing, spec)
 
     with (
         patch.object(
@@ -384,4 +394,95 @@ async def test_pg_repeatable_read_concurrent_close_raises_sqlstate_40001(
     assert [(v.status, v.attempt_count) for v in versions] == [
         ("queued", 0),
         ("cancelled_scope", 0),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pg_repeatable_read_concurrent_schedule_rewrite_40001_recovers_on_retry(
+    pg_fixture: _PgAdmissionFixture,
+) -> None:
+    """Concurrent schedule rewrite under ``REPEATABLE READ`` raises ``40001`` and recovers next call.
+
+    Given: Two independent PostgreSQL engines sharing a queued APNs delivery at
+        ``attempt_count == 0``.
+    When: Engine 1 begins admission and passes ``admits``, then engine 2 rewrites
+        the delivery's retry schedule (still queued and due at ``attempt_count == 0``)
+        and commits before engine 1 executes its guarded ``UPDATE``.
+    Then: Engine 1 raises a real ``SQLSTATE 40001`` serialization failure with
+        zero attempt charge leaving the row queued and due, and a subsequent
+        ``admit_and_charge_apns_delivery`` call admits and charges attempt 1.
+    """
+    original_commit_transition = pg_fixture.repo_primary._commit_delivery_transition_in_session
+    rival_session_id = str(uuid7())
+
+    async def _rewrite_schedule_from_rival_before_update(
+        session: AsyncSession,
+        existing: AlertDelivery,
+        spec: _DeliveryTransitionSpec,
+    ) -> int | None:
+        rewritten = await pg_fixture.repo_rival.update_delivery_retry_schedule(
+            pg_fixture.delivery_public_id,
+            attempt_count=0,
+            next_attempt_at=_T1,
+            error_reason="rival_schedule_rewrite",
+            transition_at=_T1,
+            session_id=rival_session_id,
+            sequence_id=40,
+        )
+        assert rewritten is True
+        return await original_commit_transition(session, existing, spec)
+
+    with (
+        patch.object(
+            pg_fixture.repo_primary,
+            "_commit_delivery_transition_in_session",
+            side_effect=_rewrite_schedule_from_rival_before_update,
+        ),
+        pytest.raises(DBAPIError) as exc_info,
+    ):
+        await pg_fixture.repo_primary.admit_and_charge_apns_delivery(
+            ApnsAdmissionRequest(
+                delivery_public_id=pg_fixture.delivery_public_id,
+                user_public_id=pg_fixture.user_public_id,
+                device_public_id=pg_fixture.device_public_id,
+                transition_at=_T2,
+                session_id=str(uuid7()),
+                sequence_id=41,
+                admits=lambda _ctx: True,
+            )
+        )
+
+    assert _is_pg_serialization_failure(exc_info.value) is True
+    after_conflict = await pg_fixture.repo_primary.get_delivery_by_public_id(
+        pg_fixture.delivery_public_id
+    )
+    assert after_conflict is not None
+    assert after_conflict["status"] == "queued"
+    assert after_conflict["attempt_count"] == 0
+    assert after_conflict["next_attempt_at"] == _T1
+    assert after_conflict["error_reason"] == "rival_schedule_rewrite"
+    due_rows = await pg_fixture.repo_primary.list_deliveries_ready_for_retry(_T2)
+    assert any(row["public_id"] == pg_fixture.delivery_public_id for row in due_rows)
+
+    recovered = await pg_fixture.repo_primary.admit_and_charge_apns_delivery(
+        ApnsAdmissionRequest(
+            delivery_public_id=pg_fixture.delivery_public_id,
+            user_public_id=pg_fixture.user_public_id,
+            device_public_id=pg_fixture.device_public_id,
+            transition_at=_T3,
+            session_id=str(uuid7()),
+            sequence_id=42,
+            admits=lambda _ctx: True,
+        )
+    )
+
+    assert isinstance(recovered, ApnsAdmissionCharge)
+    assert recovered.attempt == 1
+    versions = await _load_pg_delivery_versions(
+        pg_fixture.repo_primary, pg_fixture.delivery_public_id
+    )
+    assert [(v.status, v.attempt_count, v.next_attempt_at) for v in versions] == [
+        ("queued", 0, None),
+        ("queued", 0, _T1),
+        ("queued", 1, None),
     ]

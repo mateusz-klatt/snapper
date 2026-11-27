@@ -4911,7 +4911,10 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         assert len(outcomes) == 2
         assert isinstance(outcomes[0], ApnsAdmissionCharge)
         assert outcomes[0].attempt == 1
-        assert outcomes[1] == ApnsAdmissionRefusal(refusal="routing_suppressed", attempt_count=1)
+        assert isinstance(outcomes[1], ApnsAdmissionRefusal)
+        assert outcomes[1].refusal == "routing_suppressed"
+        assert outcomes[1].attempt_count == 1
+        assert isinstance(outcomes[1].version_id, int)
         apns.send.assert_awaited_once()
         final_row = await repo.get_delivery_by_public_id(delivery_pid)
         assert final_row is not None
@@ -4927,7 +4930,7 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         """A stale admission refusal does not close a newer queued attempt charged in between.
 
         Given: A queued APNs delivery at ``attempt_count == 0`` whose admission returns
-            ``ApnsAdmissionRefusal(refusal=refusal_kind, attempt_count=0)``.
+            ``ApnsAdmissionRefusal(refusal=refusal_kind, attempt_count=0, version_id=...)``.
         When: Before the sidecar persists its terminal refusal write, a competing worker
             charges attempt 1 via ``begin_delivery_attempt``.
         Then: The conditional refusal write returns ``False``, logs an INFO message noting
@@ -4971,7 +4974,10 @@ class TestQueuedAdmissionRecheckAndPrefetch:
             request: ApnsAdmissionRequest,
         ) -> ApnsAdmissionResult:
             outcome = await original_admit(request)
-            assert outcome == ApnsAdmissionRefusal(refusal=refusal_kind, attempt_count=0)
+            assert isinstance(outcome, ApnsAdmissionRefusal)
+            assert outcome.refusal == refusal_kind
+            assert outcome.attempt_count == 0
+            assert isinstance(outcome.version_id, int)
             charged = await repo.begin_delivery_attempt(
                 delivery_pid,
                 transition_at=_ts(2),
@@ -5050,9 +5056,11 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         )
         sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(2))
         unreg_spy = AsyncMock(wraps=repo.mark_delivery_unregistered)
+        unreg_attempt_spy = AsyncMock(wraps=repo.mark_delivery_unregistered_at_attempt)
         cancel_spy = AsyncMock(wraps=repo.mark_delivery_cancelled)
         cancel_attempt_spy = AsyncMock(wraps=repo.mark_delivery_cancelled_at_attempt)
         monkeypatch.setattr(repo, "mark_delivery_unregistered", unreg_spy)
+        monkeypatch.setattr(repo, "mark_delivery_unregistered_at_attempt", unreg_attempt_spy)
         monkeypatch.setattr(repo, "mark_delivery_cancelled", cancel_spy)
         monkeypatch.setattr(repo, "mark_delivery_cancelled_at_attempt", cancel_attempt_spy)
 
@@ -5113,13 +5121,16 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         assert final_row is not None
         if refusal_kind == "device_inactive":
             assert final_row["status"] == "unregistered"
-            unreg_spy.assert_awaited_once()
+            unreg_attempt_spy.assert_awaited_once()
+            unreg_spy.assert_not_awaited()
         elif refusal_kind == "routing_suppressed":
             assert final_row["status"] == "cancelled_scope"
             assert final_row["error_reason"] == "routing_suppressed"
             cancel_attempt_spy.assert_awaited_once()
+            cancel_spy.assert_not_awaited()
         else:
             assert final_row["status"] == "cancelled_scope"
+            unreg_attempt_spy.assert_not_awaited()
             unreg_spy.assert_not_awaited()
             cancel_spy.assert_not_awaited()
             cancel_attempt_spy.assert_not_awaited()
@@ -5178,6 +5189,200 @@ class TestQueuedAdmissionRecheckAndPrefetch:
 
         admit_spy.assert_not_awaited()
         apns.send.assert_not_awaited()
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "failed"
+        assert final_row["error_reason"] == "expired during outage"
+        assert final_row["attempt_count"] == 1
+        assert final_row["timestamp"] == _ts(6)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("refusal_kind", ["device_inactive", "routing_suppressed"])
+    async def test_stale_refusal_same_attempt_count_schedule_rewrite_leaves_successor_untouched(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch, refusal_kind: str
+    ) -> None:
+        """A schedule rewrite at the same ``attempt_count`` leaves the rewritten row queued.
+
+        Given: A queued APNs delivery at ``attempt_count == 0`` whose admission refuses
+            with ``refusal_kind`` and the initial SCD2 version ``id``.
+        When: Before the sidecar writes its guarded terminal refusal, another worker
+            rewrites the delivery's retry schedule via ``update_delivery_retry_schedule``
+            (leaving ``attempt_count == 0`` unchanged but advancing the SCD2 row ``id``).
+        Then: The guarded terminal write refuses with ``False``, logs at INFO, sends no
+            APNs request, and preserves the rewritten queued row and schedule.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        if refusal_kind == "device_inactive":
+            await repo.deactivate_notification_device_scd2(
+                device_pid,
+                reason="user_unregistered",
+                timestamp=_ts(1),
+                session_id="deact",
+                sequence_id=5,
+            )
+        else:
+            await repo.upsert_device_alert_pref(
+                DeviceAlertPrefUpsertRow(
+                    session_id="opt-out",
+                    sequence_id=5,
+                    timestamp=_ts(1),
+                    device_public_id=device_pid,
+                    alert_type="order_fill_full",
+                    enabled=False,
+                )
+            )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(2))
+        original_admit = repo.admit_and_charge_apns_delivery
+
+        async def _admit_then_rewrite_schedule(
+            request: ApnsAdmissionRequest,
+        ) -> ApnsAdmissionResult:
+            outcome = await original_admit(request)
+            rewritten = await repo.update_delivery_retry_schedule(
+                delivery_pid,
+                attempt_count=0,
+                next_attempt_at=_ts(5),
+                error_reason="schedule_rewrite",
+                transition_at=_ts(2),
+                session_id="worker-b",
+                sequence_id=20,
+            )
+            assert rewritten is True
+            return outcome
+
+        monkeypatch.setattr(repo, "admit_and_charge_apns_delivery", _admit_then_rewrite_schedule)
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+        info_logs: list[str] = []
+        info_id = logger.add(info_logs.append, level="INFO")
+        try:
+            await sidecar._attempt_on_queued_row(row, _ts(2))
+        finally:
+            logger.remove(info_id)
+
+        apns.send.assert_not_awaited()
+        assert any(
+            f"delivery={delivery_pid}" in msg
+            and "superseded by a newer attempt; leaving it untouched" in msg
+            for msg in info_logs
+        )
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "queued"
+        assert final_row["attempt_count"] == 0
+        assert final_row["next_attempt_at"] == _ts(5)
+        assert final_row["error_reason"] == "schedule_rewrite"
+
+    @pytest.mark.asyncio
+    async def test_malformed_guarded_refusal_without_version_raises_value_error(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Guarded refusal handling rejects missing version identity so None cannot bypass it.
+
+        Given: A malformed ``ApnsAdmissionRefusal`` for ``device_inactive`` missing
+            ``version_id`` or ``attempt_count``.
+        When: ``_handle_queued_admission_refusal`` processes the refusal.
+        Then: ``ValueError`` is raised before any repository write is attempted.
+        """
+        sidecar, _ = _make_sidecar(repo, clock=lambda: _ts(1))
+        with pytest.raises(ValueError, match="requires version_id and attempt_count"):
+            await sidecar._handle_queued_admission_refusal(
+                "del-missing-version",
+                ApnsAdmissionRefusal(refusal="device_inactive"),
+            )
+
+    @pytest.mark.asyncio
+    async def test_live_fanout_scope_check_clock_advance_bumps_before_expiring_without_send(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Live fan-out keeps pre-bump deadline at initial clock, bumps, then expires before send.
+
+        Given: A queued APNs delivery expiring at ``_ts(5)`` dispatched via the live
+            fan-out path (``_attempt_once``) with clock initially at ``_ts(4)``.
+        When: The initial ``should_skip_send`` advances the clock to ``_ts(6)`` and
+            returns ``False``.
+        Then: The live path preserves its pre-change order (charges via
+            ``begin_delivery_attempt`` first, then expires before ``apns.send`` using
+            fresh ``_ts(6)``) leaving ``status == 'failed'`` and ``attempt_count == 1``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="seed",
+                sequence_id=1,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                expires_at=_ts(5),
+                created_at=_ts(0),
+            )
+        )
+        device = (await repo.list_active_notification_devices_for_user(user))[0]
+        current_now = _ts(4)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: current_now)
+        call_order: list[str] = []
+        original_bump = repo.begin_delivery_attempt
+        original_fail = repo.mark_delivery_failed
+
+        async def _advance_on_first_scope(
+            _event: AlertEventRow, _repo: Repository, _now: datetime
+        ) -> bool:
+            nonlocal current_now
+            call_order.append("scope")
+            if len(call_order) == 1:
+                current_now = _ts(6)
+            return False
+
+        async def _record_bump(
+            public_id: str, *, transition_at: datetime, session_id: str, sequence_id: int
+        ) -> int | None:
+            call_order.append("bump")
+            return await original_bump(
+                public_id,
+                transition_at=transition_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+            )
+
+        async def _record_fail(
+            public_id: str,
+            error_reason: str,
+            *,
+            transition_at: datetime,
+            session_id: str,
+            sequence_id: int,
+        ) -> None:
+            call_order.append("fail")
+            await original_fail(
+                public_id,
+                error_reason,
+                transition_at=transition_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+            )
+
+        monkeypatch.setattr(sidecar._scope_revalidator, "should_skip_send", _advance_on_first_scope)
+        monkeypatch.setattr(repo, "begin_delivery_attempt", _record_bump)
+        monkeypatch.setattr(repo, "mark_delivery_failed", _record_fail)
+
+        await sidecar._attempt_once(delivery_pid, device, event, _ts(4))
+
+        apns.send.assert_not_awaited()
+        assert call_order == ["scope", "bump", "scope", "fail"]
         final_row = await repo.get_delivery_by_public_id(delivery_pid)
         assert final_row is not None
         assert final_row["status"] == "failed"
