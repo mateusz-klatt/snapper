@@ -18,6 +18,7 @@ from snapper.application.pricing.usd_converter import MAX_FUTURE_SKEW_SECONDS
 from snapper.application.pricing.usd_converter import STALENESS_THRESHOLD_SECONDS
 from snapper.application.pricing.usd_converter import PriceUnavailableError
 from snapper.application.pricing.usd_converter import USDConverter
+from snapper.application.pricing.usd_converter import _normalized_fx_rate
 from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.submission import TradeCommandSubmission
@@ -836,3 +837,25 @@ async def test_fx_candles_are_reread_per_call_and_skipped_for_usd(
     assert await converter.to_usd("main", Decimal(2)) == Decimal("250")
     assert await converter.to_usd("main", Decimal(2)) == Decimal("250")
     assert fx_candles.await_count == 2
+
+
+def test_inverse_fx_normalization_overflow_is_refused() -> None:
+    """Treat a trapped overflow while inverting a USD-based quote as unusable evidence.
+
+    Given: a positive finite USD-based FX price whose inverse exceeds the Decimal exponent range.
+    When: the rate is normalized with overflow trapping enabled.
+    Then: no rate is produced instead of the exception escaping.
+    """
+    candidate: UsdFxSnapshotCandidateRow = {
+        "snapshot_public_id": "snap-overflow",
+        "instrument_public_id": "usd-pln",
+        "exchange": "walutomat",
+        "base": "USD",
+        "quote": "PLN",
+        "last_price": 1e-300,
+        "timestamp": _NOW,
+    }
+    with localcontext() as context:
+        context.Emax = 4
+        context.traps[Overflow] = True
+        assert _normalized_fx_rate(candidate) is None
