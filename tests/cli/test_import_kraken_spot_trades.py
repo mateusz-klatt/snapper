@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+from collections.abc import Generator
 from collections.abc import Iterator
 from contextlib import closing
 from datetime import UTC
@@ -16,6 +17,7 @@ from uuid import UUID
 from uuid import uuid7
 
 import pytest
+from aiosqlite import Connection as SQLiteConnection
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typer.testing import CliRunner
@@ -246,8 +248,30 @@ def test_dry_run_does_not_create_a_missing_sqlite_database(
 
     Given: The database URL points to an absent SQLite file.
     When: The operator previews the import.
-    Then: The command reports the connection failure and the file stays absent.
+    Then: The command waits for the failed reader's worker to stop, reports
+        the connection failure, and leaves the file absent.
     """
+    awaited_stops: list[asyncio.Future[object]] = []
+    original_stop = SQLiteConnection.stop
+
+    class ObservedStopFuture(asyncio.Future[object]):
+        """Record when the importer awaits the worker's shutdown."""
+
+        def __await__(self) -> Generator[object, None, object]:
+            """Record the await and delegate to the actual shutdown future."""
+            awaited_stops.append(self)
+            return super().__await__()
+
+    def observe_stop(connection: SQLiteConnection) -> asyncio.Future[object] | None:
+        """Use an observable future for the driver's actual worker shutdown."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return original_stop(connection)
+        with monkeypatch.context() as patch:
+            patch.setattr(loop, "create_future", ObservedStopFuture)
+            return original_stop(connection)
+
     path = tmp_path / "missing.db"
     monkeypatch.setattr(
         importer,
@@ -255,8 +279,12 @@ def test_dry_run_does_not_create_a_missing_sqlite_database(
         lambda: SimpleNamespace(db_url=f"sqlite+aiosqlite:///{path}"),
     )
 
-    assert importer.main(_args(tmp_path)) == 1
+    with monkeypatch.context() as patch:
+        patch.setattr(SQLiteConnection, "stop", observe_stop)
+        assert importer.main(_args(tmp_path)) == 1
 
+    assert len(awaited_stops) == 1
+    assert awaited_stops[0].done()
     assert "OperationalError" in capsys.readouterr().err
     assert not path.exists()
 
