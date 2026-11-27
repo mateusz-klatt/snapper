@@ -4164,6 +4164,9 @@ class ApnsAdmissionRequest:
     ``admits`` MUST be pure and synchronous (no I/O, no ``await``) because the
     repository invokes it inside the admission transaction while the delivery
     row is locked on PostgreSQL or while SQLite holds its writer lock.
+    Quiet-hours evaluation may load timezone data from ``zoneinfo`` on a first
+    cache miss and may log a warning for an invalid stored timezone; both are
+    synchronous and bounded.
     """
 
     delivery_public_id: str
@@ -4185,9 +4188,16 @@ class ApnsAdmissionCharge:
 
 @dataclass(frozen=True, slots=True)
 class ApnsAdmissionRefusal:
-    """Refusal returned when atomic queued APNs admission declines to charge."""
+    """Refusal returned when atomic queued APNs admission declines to charge.
+
+    ``attempt_count`` records the observed queued version's attempt counter
+    when a queued row was inspected (``device_inactive`` or
+    ``routing_suppressed``) so terminal refusal writes remain conditional on that
+    version and leave a newer attempt untouched; ``None`` for ``not_queued``.
+    """
 
     refusal: ApnsAdmissionRefusalCode
+    attempt_count: int | None = None
 
 
 type ApnsAdmissionResult = ApnsAdmissionCharge | ApnsAdmissionRefusal
@@ -4308,6 +4318,18 @@ class AlertDeliveryRetryScheduleWrite(TypedDict):
     attempt_count: int
     next_attempt_at: datetime | None
     error_reason: str | None
+    transition_at: datetime
+    session_id: str
+    sequence_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class AlertDeliveryAttemptCancelWrite:
+    """Guarded cancellation payload pinned to an observed queued attempt count."""
+
+    public_id: str
+    reason: str
+    expected_attempt_count: int | None
     transition_at: datetime
     session_id: str
     sequence_id: int

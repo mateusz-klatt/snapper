@@ -1637,11 +1637,12 @@ can duplicate the push (collapsed per `thread_key` via `apns-collapse-id` when
 present). Each queued APNs delivery runs fresh scope revalidation and deadline
 checks, then atomically verifies the active queued row, current device
 registration, that device's routing preferences, and user alert defaults (under
-`REPEATABLE READ` on PostgreSQL) in the same repository transaction that allocates
-the attempt (`admit_and_charge_apns_delivery`), followed by a fresh deadline check
-immediately before `ApnsClientPool.send`; repository admission errors leave the
-delivery `queued` without charging an attempt. A drain or retry batch
-prefetches events and
+`REPEATABLE READ` on PostgreSQL and `BEGIN IMMEDIATE` on SQLite) in the same
+repository transaction that allocates the attempt (`admit_and_charge_apns_delivery`),
+followed by a fresh deadline check immediately before `ApnsClientPool.send`;
+refusal writes carry the observed `attempt_count` so a stale worker never closes a
+newer attempt, and repository admission errors leave the delivery `queued` without
+charging an attempt. A drain or retry batch prefetches events and
 recipient languages for queued APNs rows only (skipping `provider='fcm'`
 rows). Outage window tracking is scoped per APNs environment (`sandbox` vs
 `prod`). Recovery

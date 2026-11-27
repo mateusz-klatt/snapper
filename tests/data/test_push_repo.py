@@ -29,6 +29,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select as _select
+from sqlalchemy import text as _text
 from sqlalchemy import update as _update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,10 +47,12 @@ from snapper.data.models import DeviceAlertPref
 from snapper.data.models import NotificationDevice
 from snapper.data.models import Operator
 from snapper.data.models import User
+from snapper.data.models import UserAlertDefault
 from snapper.data.models import UserOperatorMembership
 from snapper.data.models import Wallet
 from snapper.data.models import WalletOperatorScopeGrant
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import AlertDeliveryAttemptCancelWrite
 from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertListCursor
@@ -3455,7 +3458,12 @@ async def _seed_admission_filter_fixture(
     )
 
 
-def _make_pg_admission_session(statements: list[str], *, fail_commit: bool) -> AsyncMock:
+def _make_pg_admission_session(
+    statements: list[str],
+    *,
+    fail_commit: bool = False,
+    close_rowcount: int = 1,
+) -> AsyncMock:
     """Build a mock ``AsyncSession`` capturing SQL statements for PostgreSQL admission."""
     delivery_model = AlertDelivery(
         id=1,
@@ -3495,7 +3503,7 @@ def _make_pg_admission_session(statements: list[str], *, fail_commit: bool) -> A
         if sql_text.startswith("SET TRANSACTION"):
             return MagicMock()
         if sql_text.startswith("UPDATE alert_deliveries"):
-            return MagicMock(rowcount=1)
+            return MagicMock(rowcount=close_rowcount)
         if "FROM alert_deliveries" in sql_text or "FROM notification_devices" in sql_text:
             return MagicMock(scalar_one_or_none=MagicMock(return_value=next(scalar_results)))
         return MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[]))))
@@ -3508,6 +3516,61 @@ def _make_pg_admission_session(statements: list[str], *, fail_commit: bool) -> A
         rollback=AsyncMock(),
         close=AsyncMock(),
     )
+
+
+async def _write_deny_override_and_new_default(
+    writer_repo: SQLAlchemyRepository,
+    *,
+    user_public_id: str,
+    device_public_id: str,
+    writer_entered: asyncio.Event,
+) -> None:
+    """Block on SQLite ``BEGIN IMMEDIATE``, then commit deny pref and newer default together."""
+    async with writer_repo.session() as s2:
+        writer_entered.set()
+        await s2.execute(_text("BEGIN IMMEDIATE"))
+        await s2.execute(
+            _update(UserAlertDefault)
+            .where(
+                UserAlertDefault.user_public_id == user_public_id,
+                UserAlertDefault.alert_type == "order_fill_full",
+                UserAlertDefault.known_to == KNOWN_TO_MAX,
+            )
+            .values(known_to=_ts(1))
+        )
+        s2.add(
+            DeviceAlertPref(
+                public_id="pref-sqlite-deny",
+                session_id="writer-2",
+                sequence_id=10,
+                timestamp=_ts(1),
+                known_to=KNOWN_TO_MAX,
+                device_public_id=device_public_id,
+                alert_type="order_fill_full",
+                operator_public_id=None,
+                wallet_public_id=None,
+                enabled=False,
+                min_priority="medium",
+                quiet_hours_start_min=None,
+                quiet_hours_end_min=None,
+                mute_until=None,
+                timezone="UTC",
+            )
+        )
+        s2.add(
+            UserAlertDefault(
+                public_id="def-sqlite-new",
+                session_id="writer-2",
+                sequence_id=11,
+                timestamp=_ts(1),
+                known_to=KNOWN_TO_MAX,
+                user_public_id=user_public_id,
+                alert_type="order_fill_full",
+                enabled=True,
+                min_priority="low",
+            )
+        )
+        await s2.commit()
 
 
 class TestAdmitAndChargeApnsDeliveryRepo:
@@ -3597,7 +3660,7 @@ class TestAdmitAndChargeApnsDeliveryRepo:
             )
         )
 
-        assert outcome == ApnsAdmissionRefusal(refusal="routing_suppressed")
+        assert outcome == ApnsAdmissionRefusal(refusal="routing_suppressed", attempt_count=0)
         versions = await _delivery_versions(repo, delivery_pid)
         assert len(versions) == 1
         assert versions[0].attempt_count == 0
@@ -3646,7 +3709,7 @@ class TestAdmitAndChargeApnsDeliveryRepo:
             )
         )
 
-        assert outcome == ApnsAdmissionRefusal(refusal="device_inactive")
+        assert outcome == ApnsAdmissionRefusal(refusal="device_inactive", attempt_count=0)
         assert predicate_called is False
         versions = await _delivery_versions(repo, delivery_pid)
         assert len(versions) == 1
@@ -3709,61 +3772,44 @@ class TestAdmitAndChargeApnsDeliveryRepo:
 
     @pytest.mark.asyncio
     async def test_concurrent_close_between_select_and_update_refuses_not_queued(
-        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+        self, repo: SQLAlchemyRepository
     ) -> None:
         """A concurrent close between SELECT and UPDATE refuses ``not_queued`` without increment.
 
-        Given: A queued APNs delivery admitted by SELECT and the predicate.
-        When: A competing transaction cancels the row right before the close UPDATE runs.
-        Then: The close affects zero rows, rolls back, returns ``not_queued``, and preserves
-            the winner's ``cancelled_scope`` version with ``attempt_count == 0``.
+        Given: A PostgreSQL-mode admission session where a competing writer closed
+            the queued row before the guarded ``UPDATE`` executes (``rowcount == 0``;
+            SQLite prevents this inter-statement race via ``BEGIN IMMEDIATE``).
+        When: ``admit_and_charge_apns_delivery`` finishes the transition check.
+        Then: It rolls back the session, adds no replacement version, and returns
+            ``ApnsAdmissionRefusal(refusal="not_queued", attempt_count=None)``.
         """
-        device_pid = await _seed_user_and_device(
-            repo, user_public_id="user-adm-race", device_token="tok-race", sequence_id=1
-        )
-        delivery_pid = await _seed_queued_apns_delivery(
-            repo, user_public_id="user-adm-race", device_public_id=device_pid
-        )
-        original_execute = AsyncSession.execute
-        raced = False
-
-        async def _intercept(
-            session: AsyncSession,
-            statement: Executable,
-            params: Sequence[Mapping[str, object]] | Mapping[str, object] | None = None,
-        ) -> object:
-            """Commit a competing close right before the guarded close UPDATE executes."""
-            nonlocal raced
-            if not raced and str(statement).startswith("UPDATE alert_deliveries"):
-                raced = True
-                await repo.mark_delivery_cancelled(
-                    delivery_pid,
-                    reason="user_deactivated",
-                    transition_at=_ts(1),
-                    session_id="admin",
-                    sequence_id=9,
-                )
-            return await original_execute(session, statement, params)
-
-        monkeypatch.setattr(AsyncSession, "execute", _intercept)
-
-        outcome = await repo.admit_and_charge_apns_delivery(
-            ApnsAdmissionRequest(
-                delivery_public_id=delivery_pid,
-                user_public_id="user-adm-race",
-                device_public_id=device_pid,
-                transition_at=_ts(2),
-                session_id="worker",
-                sequence_id=10,
-                admits=lambda _ctx: True,
-            )
+        statements: list[str] = []
+        session = _make_pg_admission_session(statements, fail_commit=False, close_rowcount=0)
+        request = ApnsAdmissionRequest(
+            delivery_public_id="del-pg",
+            user_public_id="user-pg",
+            device_public_id="dev-pg",
+            transition_at=_ts(2),
+            session_id="worker",
+            sequence_id=10,
+            admits=lambda _ctx: True,
         )
 
-        assert raced is True
-        assert outcome == ApnsAdmissionRefusal(refusal="not_queued")
-        versions = await _delivery_versions(repo, delivery_pid)
-        assert [v.status for v in versions] == ["queued", "cancelled_scope"]
-        assert [v.attempt_count for v in versions] == [0, 0]
+        with (
+            patch.object(
+                SQLAlchemyRepository,
+                "dialect_name",
+                new_callable=PropertyMock,
+                return_value="postgresql",
+            ),
+            patch.object(repo, "session_factory", return_value=session),
+        ):
+            outcome = await repo.admit_and_charge_apns_delivery(request)
+
+        assert outcome == ApnsAdmissionRefusal(refusal="not_queued", attempt_count=None)
+        session.rollback.assert_awaited_once()
+        session.add.assert_not_called()
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_predicate_exception_rolls_back_and_propagates_without_increment(
@@ -3884,7 +3930,190 @@ class TestAdmitAndChargeApnsDeliveryRepo:
         )
 
         assert isinstance(outcome, ApnsAdmissionCharge)
+        assert statements[0] == "BEGIN IMMEDIATE"
         assert not any("REPEATABLE READ" in stmt for stmt in statements)
+
+    @pytest.mark.asyncio
+    async def test_sqlite_begin_immediate_serializes_concurrent_writer_across_admission_reads(
+        self, repo: SQLAlchemyRepository, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two-connection SQLite admission holds ``BEGIN IMMEDIATE`` so concurrent writes cannot mix.
+
+        Given: Two repositories over the same SQLite database file, an initial default
+            (``min_priority='medium'``), and a queued APNs delivery.
+        When: Connection 1 begins ``admit_and_charge_apns_delivery`` and pauses right after
+            reading ``notification_devices`` while connection 2 tries to insert a deny
+            ``DeviceAlertPref`` and a newer ``UserAlertDefault`` (``min_priority='low'``).
+        Then: ``BEGIN IMMEDIATE`` is connection 1's first statement and blocks connection 2
+            until connection 1 commits, so admission sees one consistent pre-writer snapshot
+            (zero deny overrides and ``min_priority == 'medium'``) before connection 2's
+            writes commit together afterward.
+        """
+        device_pid = await _seed_user_and_device(
+            repo, user_public_id="user-sqlite-iso", device_token="tok-iso", sequence_id=1
+        )
+        delivery_pid = await _seed_queued_apns_delivery(
+            repo, user_public_id="user-sqlite-iso", device_public_id=device_pid
+        )
+        await repo.upsert_user_alert_default(
+            UserAlertDefaultUpsertRow(
+                user_public_id="user-sqlite-iso",
+                alert_type="order_fill_full",
+                enabled=True,
+                min_priority="medium",
+                session_id="seed",
+                sequence_id=1,
+                timestamp=_ts(0),
+            )
+        )
+        writer_repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path}/push.db")
+        reader_after_device = asyncio.Event()
+        release_reader = asyncio.Event()
+        writer_entered = asyncio.Event()
+        reader_statements: list[str] = []
+        captured: list[ApnsAdmissionContext] = []
+        original_execute = AsyncSession.execute
+
+        async def _intercept_reader_execute(
+            session: AsyncSession,
+            statement: Executable,
+            params: Sequence[Mapping[str, object]] | Mapping[str, object] | None = None,
+        ) -> object:
+            sql_text = str(statement)
+            if not writer_entered.is_set():
+                reader_statements.append(sql_text)
+            result = await original_execute(session, statement, params)
+            if "FROM notification_devices" in sql_text and not reader_after_device.is_set():
+                reader_after_device.set()
+                await asyncio.wait_for(release_reader.wait(), timeout=5.0)
+            return result
+
+        def _capture_admits(ctx: ApnsAdmissionContext) -> bool:
+            captured.append(ctx)
+            return True
+
+        monkeypatch.setattr(AsyncSession, "execute", _intercept_reader_execute)
+        try:
+            admit_task = asyncio.create_task(
+                repo.admit_and_charge_apns_delivery(
+                    ApnsAdmissionRequest(
+                        delivery_public_id=delivery_pid,
+                        user_public_id="user-sqlite-iso",
+                        device_public_id=device_pid,
+                        transition_at=_ts(2),
+                        session_id="reader-1",
+                        sequence_id=10,
+                        admits=_capture_admits,
+                    )
+                )
+            )
+            await asyncio.wait_for(reader_after_device.wait(), timeout=5.0)
+            writer_task = asyncio.create_task(
+                _write_deny_override_and_new_default(
+                    writer_repo,
+                    user_public_id="user-sqlite-iso",
+                    device_public_id=device_pid,
+                    writer_entered=writer_entered,
+                )
+            )
+            await asyncio.wait_for(writer_entered.wait(), timeout=5.0)
+            done, pending = await asyncio.wait({writer_task}, timeout=0.1)
+            assert done == set()
+            assert pending == {writer_task}
+            release_reader.set()
+            outcome = await asyncio.wait_for(admit_task, timeout=5.0)
+            await asyncio.wait_for(writer_task, timeout=5.0)
+        finally:
+            release_reader.set()
+            await writer_repo.engine.dispose()
+
+        assert reader_statements[0] == "BEGIN IMMEDIATE"
+        assert isinstance(outcome, ApnsAdmissionCharge)
+        assert outcome.attempt == 1
+        assert len(captured) == 1
+        assert captured[0]["device_prefs"] == []
+        assert [d["min_priority"] for d in captured[0]["user_defaults"]] == ["medium"]
+        after_ctx = await repo.get_apns_admission_context("user-sqlite-iso", device_pid)
+        assert [p["enabled"] for p in after_ctx["device_prefs"]] == [False]
+        assert [d["min_priority"] for d in after_ctx["user_defaults"]] == ["low"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("refusal_path", ["unregistered", "cancelled"])
+    async def test_expected_attempt_count_guards_terminal_refusal_writes(
+        self, repo: SQLAlchemyRepository, refusal_path: str
+    ) -> None:
+        """Expected-attempt guard rejects stale writes and commits matching ones.
+
+        Given: A queued delivery that has advanced to ``attempt_count == 1``.
+        When: A stale terminal write arrives expecting ``attempt_count == 0`` and a
+            subsequent write arrives expecting ``attempt_count == 1``.
+        Then: The stale write returns ``False`` and leaves the queued attempt intact;
+            the matching write returns ``True`` and transitions to the terminal state.
+        """
+        device_pid = await _seed_user_and_device(
+            repo, user_public_id=f"user-guard-{refusal_path}", device_token=f"tok-{refusal_path}"
+        )
+        delivery_pid = await _seed_queued_apns_delivery(
+            repo, user_public_id=f"user-guard-{refusal_path}", device_public_id=device_pid
+        )
+        charged = await repo.begin_delivery_attempt(
+            delivery_pid, transition_at=_ts(1), session_id="worker-b", sequence_id=2
+        )
+        assert charged == 1
+
+        if refusal_path == "unregistered":
+            stale_ok = await repo.mark_delivery_unregistered(
+                delivery_pid,
+                transition_at=_ts(2),
+                session_id="worker-a",
+                sequence_id=3,
+                expected_attempt_count=0,
+            )
+            assert stale_ok is False
+            mid = await repo.get_delivery_by_public_id(delivery_pid)
+            assert mid is not None and mid["status"] == "queued" and mid["attempt_count"] == 1
+            match_ok = await repo.mark_delivery_unregistered(
+                delivery_pid,
+                transition_at=_ts(3),
+                session_id="worker-b",
+                sequence_id=4,
+                expected_attempt_count=1,
+            )
+            assert match_ok is True
+            final = await repo.get_delivery_by_public_id(delivery_pid)
+            assert final is not None and final["status"] == "unregistered"
+            return
+
+        stale_cancel = await repo.mark_delivery_cancelled_at_attempt(
+            AlertDeliveryAttemptCancelWrite(
+                public_id=delivery_pid,
+                reason="routing_suppressed",
+                expected_attempt_count=0,
+                transition_at=_ts(2),
+                session_id="worker-a",
+                sequence_id=3,
+            )
+        )
+        assert stale_cancel is False
+        mid = await repo.get_delivery_by_public_id(delivery_pid)
+        assert mid is not None and mid["status"] == "queued" and mid["attempt_count"] == 1
+        match_cancel = await repo.mark_delivery_cancelled_at_attempt(
+            AlertDeliveryAttemptCancelWrite(
+                public_id=delivery_pid,
+                reason="routing_suppressed",
+                expected_attempt_count=1,
+                transition_at=_ts(3),
+                session_id="worker-b",
+                sequence_id=4,
+            )
+        )
+        assert match_cancel is True
+        final = await repo.get_delivery_by_public_id(delivery_pid)
+        assert (
+            final is not None
+            and final["status"] == "cancelled_scope"
+            and final["error_reason"] == "routing_suppressed"
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("fail_commit", [False, True], ids=["success", "pg-serialization"])

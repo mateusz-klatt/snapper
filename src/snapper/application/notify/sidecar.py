@@ -66,13 +66,13 @@ from snapper.application.notify.scope_revalidation import ScopeRevalidator
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.core.json_types import JsonObject
 from snapper.data.repository import Repository
+from snapper.data.repository_types import AlertDeliveryAttemptCancelWrite
 from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import ApnsAdmissionContext
 from snapper.data.repository_types import ApnsAdmissionRefusal
-from snapper.data.repository_types import ApnsAdmissionRefusalCode
 from snapper.data.repository_types import ApnsAdmissionRequest
 from snapper.data.repository_types import NotificationDeviceRow
 from snapper.i18n import catalog
@@ -770,15 +770,18 @@ class NotifySidecar(RegisterableProcess):
         The admission predicate MUST remain pure and synchronous (no I/O, no
         awaits) because it runs inside the repository transaction while the
         delivery row is locked on PostgreSQL or while SQLite holds its writer
-        lock. Remaining non-atomic windows on the queued path are: a scope
-        revocation that has not yet cancelled the ``alert_deliveries`` row
-        (bounded by the revocation path's own latency), a device or preference
-        change committed after the ``REPEATABLE READ`` snapshot starts but
-        before commit (``REPEATABLE READ`` does not lock those tables), and the
-        commit-to-send gap before ``ApnsClientPool.send``. The device/preference
-        window is bounded by the length of one admission transaction, and the
-        very next attempt reads the committed change, so an opt-out or
-        deactivation can let through at most one extra push, never a stream.
+        lock; quiet-hours evaluation may load timezone data on a first cache
+        miss and may log a warning for an invalid stored timezone (both are
+        synchronous and bounded). Remaining non-atomic windows on the queued
+        path are: a scope revocation that has not yet cancelled the
+        ``alert_deliveries`` row (bounded by the revocation path's own
+        latency), a device or preference change committed after the
+        ``REPEATABLE READ`` snapshot starts but before commit (``REPEATABLE
+        READ`` does not lock those tables), and the commit-to-send gap before
+        ``ApnsClientPool.send``. The device/preference window is bounded by the
+        length of one admission transaction, and the very next attempt reads the
+        committed change, so an opt-out or deactivation can let through at most
+        one extra push, never a stream.
         Live fan-out targets keep the ``_bump_attempt`` path followed by fresh
         scope and deadline checks. Deliveries past their deadline transition to
         ``failed`` without sending. Otherwise, bounds ``ApnsClientPool.send``
@@ -795,17 +798,16 @@ class NotifySidecar(RegisterableProcess):
         apns = self._apns
         if apns is None:
             return
-        admission_now = self._clock()
         if await self._cancel_if_scope_revoked(
-            target.delivery_public_id, target.event, admission_now
+            target.delivery_public_id, target.event, self._clock()
         ):
             return
-        deadline = await self._resolve_delivery_deadline(target, admission_now)
+        deadline = await self._resolve_delivery_deadline(target, self._clock())
         if await self._expire_if_past_deadline(
             target.delivery_public_id,
             target.prior_error_reason,
             deadline,
-            admission_now,
+            self._clock(),
         ):
             return
         admitted = await self._charge_delivery_attempt(target)
@@ -1296,7 +1298,13 @@ class NotifySidecar(RegisterableProcess):
         target: _QueuedDeliveryTarget,
         admission: ApnsAdmissionContext,
     ) -> bool:
-        """Evaluate rollout gate and routing preferences with a fresh UTC timestamp."""
+        """Evaluate rollout gate and routing preferences with a fresh UTC timestamp.
+
+        Runs synchronously inside ``admit_and_charge_apns_delivery`` while the
+        transaction holds the delivery guard; quiet-hours evaluation may load
+        timezone data on a first cache miss and may log a warning for an invalid
+        stored timezone (both synchronous and bounded).
+        """
         if self._push_beta_provider is not None and not self._push_beta_provider().includes(
             target.user_public_id
         ):
@@ -1312,26 +1320,42 @@ class NotifySidecar(RegisterableProcess):
     async def _handle_queued_admission_refusal(
         self,
         delivery_public_id: str,
-        refusal: ApnsAdmissionRefusalCode,
+        outcome: ApnsAdmissionRefusal,
     ) -> None:
-        """Apply the sidecar transition or log for an atomic admission refusal."""
+        """Apply the guarded transition or log for an atomic admission refusal."""
         refusal_now = self._clock()
-        if refusal == "device_inactive":
+        if outcome.refusal == "device_inactive":
             logger.info(
                 "sidecar: delivery={pid} target device inactive —"
                 " marking unregistered (no APNs call)",
                 pid=delivery_public_id,
             )
-            await self._mark_unregistered_no_device(delivery_public_id, refusal_now)
+            applied = await self._mark_unregistered_no_device(
+                delivery_public_id,
+                refusal_now,
+                expected_attempt_count=outcome.attempt_count,
+            )
+        elif outcome.refusal == "routing_suppressed":
+            applied = await self._mark_cancelled(
+                delivery_public_id,
+                "routing_suppressed",
+                refusal_now,
+                expected_attempt_count=outcome.attempt_count,
+            )
+        else:
+            logger.info(
+                "sidecar: delivery {pid} no longer queued at admission time —"
+                " concurrent cancel / terminal transition wins",
+                pid=delivery_public_id,
+            )
             return
-        if refusal == "routing_suppressed":
-            await self._mark_cancelled(delivery_public_id, "routing_suppressed", refusal_now)
-            return
-        logger.info(
-            "sidecar: delivery {pid} no longer queued at admission time —"
-            " concurrent cancel / terminal transition wins",
-            pid=delivery_public_id,
-        )
+        if not applied:
+            logger.info(
+                "sidecar: delivery={pid} refusal for attempt {attempt} superseded by"
+                " a newer attempt; leaving it untouched",
+                pid=delivery_public_id,
+                attempt=outcome.attempt_count,
+            )
 
     async def _admit_and_charge_queued(
         self, target: _QueuedDeliveryTarget
@@ -1341,15 +1365,17 @@ class NotifySidecar(RegisterableProcess):
         The ``admits`` callback MUST stay pure and synchronous (no I/O, no
         awaits) because the repository evaluates it inside the database
         transaction while PostgreSQL locks the delivery row or SQLite holds its
-        writer lock. PostgreSQL serialization conflicts (SQLSTATE ``40001``)
-        log at INFO and leave the delivery queued with its schedule intact for
-        the next retry tick without entering outage backoff; remaining windows
-        are unpropagated scope revocations, device/preference updates committed
-        between snapshot start and commit, and the commit-to-send gap. The
-        device/preference window is bounded by the length of one admission
-        transaction, and the very next attempt reads the committed change, so
-        an opt-out or deactivation can let through at most one extra push, never
-        a stream.
+        writer lock; quiet-hours evaluation may load timezone data on a first
+        cache miss and may log a warning for an invalid stored timezone (both
+        are synchronous and bounded). PostgreSQL serialization conflicts
+        (SQLSTATE ``40001``) log at INFO and leave the delivery queued with its
+        schedule intact for the next retry tick without entering outage backoff;
+        remaining windows are unpropagated scope revocations, device/preference
+        updates committed between snapshot start and commit, and the
+        commit-to-send gap. The device/preference window is bounded by the
+        length of one admission transaction, and the very next attempt reads the
+        committed change, so an opt-out or deactivation can let through at most
+        one extra push, never a stream.
         """
         request = ApnsAdmissionRequest(
             delivery_public_id=target.delivery_public_id,
@@ -1378,7 +1404,7 @@ class NotifySidecar(RegisterableProcess):
                 )
             return None
         if isinstance(outcome, ApnsAdmissionRefusal):
-            await self._handle_queued_admission_refusal(target.delivery_public_id, outcome.refusal)
+            await self._handle_queued_admission_refusal(target.delivery_public_id, outcome)
             return None
         return (
             _DeliveryTarget(
@@ -1411,19 +1437,21 @@ class NotifySidecar(RegisterableProcess):
         transaction ahead of the final deadline check and ``ApnsClientPool.send``.
         The admission predicate MUST be pure and synchronous (no I/O, no awaits)
         because it runs while the delivery row is locked (PostgreSQL) or while
-        SQLite holds its writer lock; remaining windows are an uncancelled scope
-        revocation (bounded by the revocation path's latency), a device or
-        preference update committed after the ``REPEATABLE READ`` snapshot starts
-        but before commit (``REPEATABLE READ`` does not lock those tables), and
-        the commit-to-send gap. The device/preference window is bounded by the
-        length of one admission transaction, and the very next attempt reads the
-        committed change, so an opt-out or deactivation can let through at most
-        one extra push, never a stream. Missing events, inactive devices, and rows
-        suppressed by the routing cascade transition to terminal ``failed``,
-        ``unregistered``, or ``cancelled_scope`` instead of remaining ``queued``,
-        while PostgreSQL serialization conflicts (INFO) and unexpected
-        repository errors (WARNING) leave the row queued without consuming
-        retry budget.
+        SQLite holds its writer lock; quiet-hours evaluation may load timezone
+        data on a first cache miss and may log a warning for an invalid stored
+        timezone (both are synchronous and bounded). Remaining windows are an
+        uncancelled scope revocation (bounded by the revocation path's latency),
+        a device or preference update committed after the ``REPEATABLE READ``
+        snapshot starts but before commit (``REPEATABLE READ`` does not lock
+        those tables), and the commit-to-send gap. The device/preference window
+        is bounded by the length of one admission transaction, and the very next
+        attempt reads the committed change, so an opt-out or deactivation can
+        let through at most one extra push, never a stream. Missing events,
+        inactive devices, and rows suppressed by the routing cascade transition
+        to terminal ``failed``, ``unregistered``, or ``cancelled_scope`` instead
+        of remaining ``queued``, while PostgreSQL serialization conflicts (INFO)
+        and unexpected repository errors (WARNING) leave the row queued without
+        consuming retry budget.
         """
         if row.get("provider", "apns") == "fcm":
             if self._android is not None:
@@ -1470,25 +1498,64 @@ class NotifySidecar(RegisterableProcess):
             sequence_id=seq,
         )
 
-    async def _mark_unregistered_no_device(self, delivery_public_id: str, now: datetime) -> None:
-        """Mark a delivery unregistered when its target device is already gone."""
+    async def _mark_unregistered_no_device(
+        self,
+        delivery_public_id: str,
+        now: datetime,
+        *,
+        expected_attempt_count: int | None = None,
+    ) -> bool:
+        """Mark a delivery unregistered when its target device is already gone.
+
+        Returns:
+            ``True`` when transitioned, or ``False`` when a guarded expected-attempt
+            check saw a newer attempt or closed row.
+        """
         sid = self._tracker.session_id
         seq = self._tracker.next_sequence(_ZMQ_STREAM)
-        await self._repo.mark_delivery_unregistered(
+        return await self._repo.mark_delivery_unregistered(
             delivery_public_id,
             transition_at=now,
             session_id=sid,
             sequence_id=seq,
+            expected_attempt_count=expected_attempt_count,
         )
 
-    async def _mark_cancelled(self, delivery_public_id: str, reason: str, now: datetime) -> None:
-        """Terminal scope/routing cancellation with provenance from this sidecar."""
-        await self._repo.mark_delivery_cancelled(
-            delivery_public_id,
-            reason=reason[:_MAX_ERROR_REASON_LEN],
-            transition_at=now,
-            session_id=self._tracker.session_id,
-            sequence_id=self._tracker.next_sequence(_ZMQ_STREAM),
+    async def _mark_cancelled(
+        self,
+        delivery_public_id: str,
+        reason: str,
+        now: datetime,
+        *,
+        expected_attempt_count: int | None = None,
+    ) -> bool:
+        """Terminal scope/routing cancellation with provenance from this sidecar.
+
+        Returns:
+            ``False`` when a guarded expected-attempt cancellation lost to a
+            newer version, otherwise ``True``.
+        """
+        trimmed_reason = reason[:_MAX_ERROR_REASON_LEN]
+        sid = self._tracker.session_id
+        seq = self._tracker.next_sequence(_ZMQ_STREAM)
+        if expected_attempt_count is None:
+            await self._repo.mark_delivery_cancelled(
+                delivery_public_id,
+                reason=trimmed_reason,
+                transition_at=now,
+                session_id=sid,
+                sequence_id=seq,
+            )
+            return True
+        return await self._repo.mark_delivery_cancelled_at_attempt(
+            AlertDeliveryAttemptCancelWrite(
+                public_id=delivery_public_id,
+                reason=trimmed_reason,
+                expected_attempt_count=expected_attempt_count,
+                transition_at=now,
+                session_id=sid,
+                sequence_id=seq,
+            )
         )
 
     async def _process_retry_queue_loop(self) -> None:
