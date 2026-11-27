@@ -12,6 +12,7 @@ durable consumed id, and nothing ever raises into the trading path.
 
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
@@ -47,7 +48,9 @@ def _make_repo() -> AsyncMock:
     repo.resolve_source_instrument_public_id = AsyncMock(
         return_value={"valuation_public_id": _SOURCE, "is_paper": True, "mapped": True}
     )
-    repo.get_active_market_snapshot_price = AsyncMock(return_value=(50100.0, _MARKED_AT))
+    repo.get_active_latest_1m_candle_price = AsyncMock(
+        return_value={"close": 50100.0, "open_at": _MARKED_AT - timedelta(minutes=1)}
+    )
     repo.upsert_position_projection = AsyncMock(return_value=1)
     repo.close_position_projection = AsyncMock(return_value=True)
     return repo
@@ -252,7 +255,7 @@ async def test_single_shard_projection_row_carries_full_truth() -> None:
     assert row["session_id"] == "s-test"
     assert row["sequence_id"] == 7
     assert row["bus_time"] == _NOW
-    repo.get_active_market_snapshot_price.assert_awaited_once_with(_SOURCE)
+    repo.get_active_latest_1m_candle_price.assert_awaited_once_with(_SOURCE)
 
 
 async def test_multi_shard_same_direction_aggregates_with_vwap() -> None:
@@ -406,10 +409,10 @@ async def test_mark_degradation_paths_yield_null_trio() -> None:
     """Every mark failure mode degrades to honest NULLs, never zeros.
 
     Given: an unmapped paper identity, a resolver exception, a missing
-        snapshot, and a non-positive price — in sequence,
+        candle, and a non-positive price — in sequence,
     When: the mark resolves for each,
     Then: each yields (None, None) and the unmapped case never touches
-        the snapshot accessor.
+        the candle accessor.
     """
     repo = _make_repo()
     coord = _make_coord(repo)
@@ -419,7 +422,7 @@ async def test_mark_degradation_paths_yield_null_trio() -> None:
         "mapped": False,
     }
     assert await coord._resolve_projection_mark(_INSTRUMENT) == (None, None)
-    repo.get_active_market_snapshot_price.assert_not_awaited()
+    repo.get_active_latest_1m_candle_price.assert_not_awaited()
     repo.resolve_source_instrument_public_id.side_effect = RuntimeError("boom")
     assert await coord._resolve_projection_mark(_INSTRUMENT) == (None, None)
     repo.resolve_source_instrument_public_id.side_effect = None
@@ -428,13 +431,16 @@ async def test_mark_degradation_paths_yield_null_trio() -> None:
         "is_paper": False,
         "mapped": False,
     }
-    repo.get_active_market_snapshot_price.return_value = None
+    repo.get_active_latest_1m_candle_price.return_value = None
     assert await coord._resolve_projection_mark(_INSTRUMENT) == (None, None)
-    repo.get_active_market_snapshot_price.return_value = (0.0, _MARKED_AT)
+    repo.get_active_latest_1m_candle_price.return_value = {"close": 0.0, "open_at": _MARKED_AT}
     assert await coord._resolve_projection_mark(_INSTRUMENT) == (None, None)
-    repo.get_active_market_snapshot_price.return_value = (None, _MARKED_AT)
+    repo.get_active_latest_1m_candle_price.return_value = {"close": None, "open_at": _MARKED_AT}
     assert await coord._resolve_projection_mark(_INSTRUMENT) == (None, None)
-    repo.get_active_market_snapshot_price.return_value = (float("nan"), _MARKED_AT)
+    repo.get_active_latest_1m_candle_price.return_value = {
+        "close": float("nan"),
+        "open_at": _MARKED_AT,
+    }
     assert await coord._resolve_projection_mark(_INSTRUMENT) == (None, None)
     plain_coord = _make_coord(MagicMock())
     assert await plain_coord._resolve_projection_mark(_INSTRUMENT) == (None, None)
@@ -443,13 +449,13 @@ async def test_mark_degradation_paths_yield_null_trio() -> None:
 async def test_mark_unavailable_projects_null_unrealized() -> None:
     """A markless identity persists truth with a NULL mark trio.
 
-    Given: a non-flat shard whose mark lookup finds no snapshot,
+    Given: a non-flat shard whose mark lookup finds no candle,
     When: the projection persists,
     Then: the row keeps quantity/entry/realized while the mark trio and
         unrealized PnL are NULL.
     """
     repo = _make_repo()
-    repo.get_active_market_snapshot_price.return_value = None
+    repo.get_active_latest_1m_candle_price.return_value = None
     coord = _make_coord(repo)
     _seed_shard(coord, _SHARD_A, 1.0, 50000.0, 5.0)
     await coord._persist_position_projection(_SHARD_A, now=_NOW)
@@ -589,6 +595,8 @@ async def test_recovery_rebuild_refreshes_and_projects_once_per_identity() -> No
     repo.upsert_position_projection.assert_awaited_once()
     row = repo.upsert_position_projection.await_args.args[0]
     assert row["quantity"] == 3.0
+    assert row["mark_price"] == 50100.0
+    assert row["marked_at"] == _MARKED_AT
     repo.close_position_projection.assert_not_awaited()
     repo.get_active_position_identities.assert_awaited_once()
 

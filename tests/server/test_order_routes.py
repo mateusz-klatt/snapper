@@ -168,48 +168,16 @@ def _arm_execution_venue(
     )
 
 
-def _snapshot_row(
-    *,
-    ts: datetime | None = None,
-    bid: float | None = 100.0,
-    ask: float | None = 101.0,
-    last: float | None = 100.5,
-) -> dict[str, object]:
-    """Build a ``MarketSnapshotRow`` for paper reference-price tests.
-
-    Only ``ts`` (recency ordering) and the ``bid``/``ask``/``last`` price
-    legs are read by
-    :func:`snapper.server.order_routes._resolve_paper_reference_price`; the
-    remaining depth/OHLC fields round out the row shape.
-    """
-    return {
-        "ts": ts if ts is not None else _ts(),
-        "instrument_public_id": "inst-1",
-        "bid": bid,
-        "bid_volume": 1.0,
-        "ask": ask,
-        "ask_volume": 1.0,
-        "last": last,
-        "volume": 10.0,
-        "vwap": 100.4,
-        "low": 99.0,
-        "high": 102.0,
-    }
-
-
 def _candle_row(
     *,
-    close: float = 250.0,
+    close: float | None = 250.0,
     timestamp: datetime | None = None,
+    open_at: datetime | None = None,
 ) -> dict[str, object]:
-    """Build a ``CandleRow`` for paper reference-price candle-fallback tests.
-
-    ``timestamp`` drives the ≤120 s freshness gate and ``close`` is the
-    fallback reference price; the rest complete the 1m candle row shape.
-    """
+    """Build a provisional source candle for paper MARKET reference tests."""
     anchor = timestamp if timestamp is not None else datetime.now(UTC)
     return {
-        "open_at": anchor,
+        "open_at": open_at if open_at is not None else anchor,
         "timeframe": "1m",
         "open": 249.0,
         "high": 251.0,
@@ -219,7 +187,7 @@ def _candle_row(
         "vwap": None,
         "trades": None,
         "source": "native",
-        "complete": True,
+        "complete": False,
         "public_id": "candle-1",
         "timestamp": anchor,
         "session_id": "s1",
@@ -1733,15 +1701,7 @@ class TestCreateOrderModifierRefusals:
 
 
 class TestPaperReferencePrice:
-    """Branch coverage for ``order_routes._resolve_paper_reference_price``.
-
-    A manual paper MARKET order carries no limit price, but the paper
-    simulator rejects a priceless fill, so ``create_order`` attaches a
-    fresh reference price at create time. These tests exercise every
-    resolution arm: the side-aware snapshot leg, the snapshot→candle
-    fall-through, the candle freshness gate, the hard ``no_reference_price``
-    rejection, and the LIMIT short-circuit that skips pricing entirely.
-    """
+    """Exercise paper order admission with candle-only reference prices."""
 
     def _paper_market_repo(self) -> AsyncMock:
         """Build a repo that clears the paper venue and reaches pricing."""
@@ -1749,150 +1709,69 @@ class TestPaperReferencePrice:
         _arm_execution_venue(repo, is_paper=True, credential_exchanges=("paper",))
         return repo
 
-    def test_paper_market_buy_uses_snapshot_ask(self) -> None:
-        """Price a paper MARKET buy at the freshest snapshot ask.
+    @pytest.mark.parametrize("side", ["buy", "sell"])
+    def test_paper_market_uses_provisional_candle_close(self, side: str) -> None:
+        """Use the same 1m close for both sides of a paper MARKET order.
 
-        Given: a paper MARKET buy whose freshest snapshot has a positive
-            ask,
-        When: the client POSTs the order,
-        Then: the trade-command price and the plan's ``reference_price``
-            param are the ask, confirming the buy side prices at the ask.
+        Given: a fresh provisional source candle,
+        When: the client submits a paper MARKET order,
+        Then: both the trade command and the plan use the candle close.
         """
         repo = self._paper_market_repo()
-        repo.get_market_snapshots = AsyncMock(
-            return_value=[_snapshot_row(bid=100.0, ask=101.0, last=100.5)]
-        )
-        repo.get_candles = AsyncMock(return_value=[])
+        repo.get_candles = AsyncMock(return_value=[_candle_row()])
         client = _create_client(repo)
-        response = client.post("/api/orders", json=_paper_market_body(side="buy"))
-        assert response.status_code == 200
-        cmd_insert = repo.insert_trade_command.call_args[0][0]
-        plan_insert = repo.insert_execution_plan.call_args[0][0]
-        assert cmd_insert["price"] == 101.0
-        assert plan_insert["params"]["reference_price"] == 101.0
-        repo.get_candles.assert_not_called()
+        response = client.post("/api/orders", json=_paper_market_body(side=side))
         client.close()
-
-    def test_paper_market_sell_uses_snapshot_bid(self) -> None:
-        """Price a paper MARKET sell at the freshest snapshot bid.
-
-        Given: a paper MARKET sell whose freshest snapshot has a positive
-            bid,
-        When: the client POSTs the order,
-        Then: the trade-command price is the bid, confirming the sell side
-            prices at the bid (the mirror of the buy-at-ask rule).
-        """
-        repo = self._paper_market_repo()
-        repo.get_market_snapshots = AsyncMock(
-            return_value=[_snapshot_row(bid=100.0, ask=101.0, last=100.5)]
-        )
-        repo.get_candles = AsyncMock(return_value=[])
-        client = _create_client(repo)
-        response = client.post("/api/orders", json=_paper_market_body(side="sell"))
         assert response.status_code == 200
-        cmd_insert = repo.insert_trade_command.call_args[0][0]
-        assert cmd_insert["price"] == 100.0
-        client.close()
+        assert repo.insert_trade_command.call_args.args[0]["price"] == 250.0
+        assert repo.insert_execution_plan.call_args.args[0]["params"]["reference_price"] == 250.0
+        repo.get_market_snapshots.assert_not_awaited()
 
-    def test_paper_market_picks_freshest_snapshot(self) -> None:
-        """Select the newest snapshot by ``ts`` when several are returned.
+    @pytest.mark.parametrize(
+        "write_age,open_age,close",
+        [(300, 300, 250.0), (-60, 0, 250.0), (0, 300, 250.0), (0, -60, 250.0), (0, 0, None)],
+    )
+    def test_paper_market_rejects_unusable_candle(
+        self, write_age: int, open_age: int, close: float | None
+    ) -> None:
+        """Refuse stale, re-persisted, future, and invalid reference evidence.
 
-        Given: two snapshots for the instrument with different ``ts`` and
-            asks,
-        When: the client POSTs a paper MARKET buy,
-        Then: the price is the ask of the newest snapshot, confirming the
-            resolver orders by ``ts`` rather than trusting list order.
-        """
-        repo = self._paper_market_repo()
-        older = _snapshot_row(ts=_ts() - timedelta(seconds=10), ask=90.0)
-        newer = _snapshot_row(ts=_ts(), ask=105.0)
-        repo.get_market_snapshots = AsyncMock(return_value=[older, newer])
-        client = _create_client(repo)
-        response = client.post("/api/orders", json=_paper_market_body(side="buy"))
-        assert response.status_code == 200
-        cmd_insert = repo.insert_trade_command.call_args[0][0]
-        assert cmd_insert["price"] == 105.0
-        client.close()
-
-    def test_paper_market_falls_through_to_candle_when_snapshot_unusable(self) -> None:
-        """Fall through to a fresh candle close when snapshot legs are unusable.
-
-        Given: a snapshot whose bid, ask and last are all None,
-        When: the client POSTs a paper MARKET buy and a fresh 1m candle
-            exists,
-        Then: the price is the candle close — the resolver exhausts the
-            snapshot legs then uses the candle fallback.
-        """
-        repo = self._paper_market_repo()
-        repo.get_market_snapshots = AsyncMock(
-            return_value=[_snapshot_row(bid=None, ask=None, last=None)]
-        )
-        repo.get_candles = AsyncMock(
-            return_value=[_candle_row(close=250.0, timestamp=datetime.now(UTC))]
-        )
-        client = _create_client(repo)
-        response = client.post("/api/orders", json=_paper_market_body(side="buy"))
-        assert response.status_code == 200
-        cmd_insert = repo.insert_trade_command.call_args[0][0]
-        plan_insert = repo.insert_execution_plan.call_args[0][0]
-        assert cmd_insert["price"] == 250.0
-        assert plan_insert["params"]["reference_price"] == 250.0
-        client.close()
-
-    def test_paper_market_uses_candle_when_no_snapshot(self) -> None:
-        """Use a fresh candle close when no snapshot is returned at all.
-
-        Given: an empty snapshot list and a fresh 1m candle,
-        When: the client POSTs a paper MARKET buy,
-        Then: the price is the candle close, covering the no-snapshot
-            branch into the candle fallback.
-        """
-        repo = self._paper_market_repo()
-        repo.get_market_snapshots = AsyncMock(return_value=[])
-        repo.get_candles = AsyncMock(
-            return_value=[_candle_row(close=300.0, timestamp=datetime.now(UTC))]
-        )
-        client = _create_client(repo)
-        response = client.post("/api/orders", json=_paper_market_body(side="buy"))
-        assert response.status_code == 200
-        cmd_insert = repo.insert_trade_command.call_args[0][0]
-        assert cmd_insert["price"] == 300.0
-        client.close()
-
-    def test_paper_market_stale_candle_returns_400(self) -> None:
-        """Reject when the only candle is older than the 120 s freshness gate.
-
-        Given: no snapshot and a 1m candle whose timestamp is 300 s old,
-        When: the client POSTs a paper MARKET buy,
-        Then: the response is 400 ``no_reference_price`` and no order row
-            is written — a stale candle is not a valid fill reference.
+        Given: one candle with unusable market time, write time, or close,
+        When: the client submits a paper MARKET order,
+        Then: admission returns no_reference_price before inserting a plan.
         """
         repo = _venue_failure_repo()
         _arm_execution_venue(repo, is_paper=True, credential_exchanges=("paper",))
-        repo.get_market_snapshots = AsyncMock(return_value=[])
+        now = datetime.now(UTC)
         repo.get_candles = AsyncMock(
             return_value=[
-                _candle_row(close=250.0, timestamp=datetime.now(UTC) - timedelta(seconds=300))
+                _candle_row(
+                    close=close,
+                    timestamp=now - timedelta(seconds=write_age),
+                    open_at=now - timedelta(seconds=open_age),
+                )
             ]
         )
         client = _create_client(repo)
-        response = client.post("/api/orders", json=_paper_market_body(side="buy"))
+        response = client.post("/api/orders", json=_paper_market_body())
+        client.close()
         assert response.status_code == 400
         assert response.json()["detail"]["error_code"] == "no_reference_price"
         repo.insert_execution_plan.assert_not_called()
-        client.close()
 
     def test_paper_market_no_price_source_returns_400(self) -> None:
-        """Reject when neither a snapshot nor a candle is available.
+        """Reject a snapshot-only source during a feed gap.
 
-        Given: an empty snapshot list and an empty candle list,
+        Given: a research snapshot and an empty candle list,
         When: the client POSTs a paper MARKET buy,
         Then: the response is 400 ``no_reference_price`` and no order row
             is written, covering the no-candle rejection arm.
         """
         repo = _venue_failure_repo()
         _arm_execution_venue(repo, is_paper=True, credential_exchanges=("paper",))
-        repo.get_market_snapshots = AsyncMock(return_value=[])
+        repo.get_market_snapshots = AsyncMock(
+            return_value=[{"ask": 100.0, "ts": datetime.now(UTC)}]
+        )
         repo.get_candles = AsyncMock(return_value=[])
         client = _create_client(repo)
         response = client.post("/api/orders", json=_paper_market_body(side="buy"))
@@ -1906,12 +1785,12 @@ class TestPaperReferencePrice:
 
         Given: a paper LIMIT order carrying an explicit price,
         When: the client POSTs the order,
-        Then: the trade-command price is the limit price, the snapshot
+        Then: the trade-command price is the limit price, the candle
             lookup is never called, and no ``reference_price`` param is
             written — pricing is skipped for non-MARKET orders.
         """
         repo = self._paper_market_repo()
-        repo.get_market_snapshots = AsyncMock(return_value=[_snapshot_row()])
+        repo.get_candles = AsyncMock(return_value=[_candle_row()])
         body = _create_order_body()
         body["payload"]["mode"] = "paper"
         client = _create_client(repo)
@@ -1921,5 +1800,5 @@ class TestPaperReferencePrice:
         plan_insert = repo.insert_execution_plan.call_args[0][0]
         assert cmd_insert["price"] == 50000.0
         assert "reference_price" not in plan_insert["params"]
-        repo.get_market_snapshots.assert_not_called()
+        repo.get_candles.assert_not_called()
         client.close()

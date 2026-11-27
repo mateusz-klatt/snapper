@@ -17,12 +17,11 @@ from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Candle
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
-from snapper.data.models import MarketSnapshot
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentValuationMetadataRow
-from snapper.data.repository_types import UsdFxSnapshotCandidateRow
+from snapper.data.repository_types import UsdFxCandleCandidateRow
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_ETL_VERSION
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 
@@ -101,10 +100,18 @@ async def _market(
             )
         )
         session.add(
-            MarketSnapshot(
-                public_id="contract-snapshot",
+            Candle(
+                public_id="contract-candle",
                 instrument_public_id=_INSTRUMENT,
-                last_price=100_000,
+                timeframe="1m",
+                open_at=_NOW,
+                open=100_000.0,
+                high=100_000.0,
+                low=100_000.0,
+                close=100_000.0,
+                volume=1.0,
+                source="calculated",
+                complete=False,
                 timestamp=_NOW,
                 known_to=KNOWN_TO_MAX,
                 session_id="test",
@@ -338,19 +345,19 @@ async def test_invalid_order_quantity_is_never_valued(quantity: object) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("price", [0, -1])
-async def test_nonpositive_snapshot_price_is_unavailable(price: int) -> None:
+async def test_nonpositive_candle_close_is_unavailable(price: int) -> None:
     """Keep the supported positive-price contract profile explicit.
 
-    Given: a contract snapshot with a zero or negative price.
+    Given: a contract candle with a zero or negative price.
     When: USD exposure is requested.
     Then: the oracle refuses the unsupported price instead of producing negative exposure.
     """
     repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     await _market(repo, _spec("linear"))
     async with repo.session() as session:
-        snapshot = await session.get(MarketSnapshot, 1)
-        assert snapshot is not None
-        snapshot.last_price = price
+        candle = await session.get(Candle, 1)
+        assert candle is not None
+        candle.close = price
         await session.commit()
     with pytest.raises(PriceUnavailableError, match="last_price_invalid"):
         await USDConverter(repo, now=lambda: _NOW).to_usd(_INSTRUMENT, Decimal(1))
@@ -477,8 +484,8 @@ async def test_cached_derivative_evidence_cannot_disappear_into_spot_fallback(
     """
     repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
     await _market(repo, _spec("inverse"), exchange=exchange)
-    snapshots = AsyncMock(wraps=repo.get_active_market_snapshot_price)
-    monkeypatch.setattr(repo, "get_active_market_snapshot_price", snapshots)
+    candles = AsyncMock(wraps=repo.get_active_latest_1m_candle_price)
+    monkeypatch.setattr(repo, "get_active_latest_1m_candle_price", candles)
     converter = USDConverter(repo, now=lambda: _NOW)
     with pytest.raises(PriceUnavailableError, match="contract_valuation_unavailable"):
         await converter.to_usd(_INSTRUMENT, Decimal(1000))
@@ -499,7 +506,7 @@ async def test_cached_derivative_evidence_cannot_disappear_into_spot_fallback(
         await session.commit()
     with pytest.raises(PriceUnavailableError, match="contract_valuation_unavailable"):
         await converter.to_usd(_INSTRUMENT, Decimal(1000))
-    assert snapshots.await_count == 1
+    assert candles.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -599,12 +606,12 @@ async def test_trapped_or_nonfinite_notional_is_refused_on_cached_public_path(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("price", [float("nan"), float("inf"), float("-inf"), "", "not-a-price"])
-async def test_invalid_snapshot_boundary_values_are_refused(
+async def test_invalid_candle_boundary_values_are_refused(
     price: float | str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Refuse malformed market data before it enters a price cache or model.
 
-    Given: a repository boundary returning a non-finite or unparseable last price.
+    Given: a repository boundary returning a non-finite or unparseable close.
     When: a valid derivative order requests its USD exposure.
     Then: last_price_invalid is returned independently of model completeness.
     """
@@ -612,8 +619,8 @@ async def test_invalid_snapshot_boundary_values_are_refused(
     await _market(repo, _spec("linear"))
     monkeypatch.setattr(
         repo,
-        "get_active_market_snapshot_price",
-        AsyncMock(return_value=(price, _NOW)),
+        "get_active_latest_1m_candle_price",
+        AsyncMock(return_value={"close": price, "open_at": _NOW}),
     )
     with pytest.raises(PriceUnavailableError, match="last_price_invalid"):
         await USDConverter(repo, now=lambda: _NOW).to_usd(_INSTRUMENT, Decimal(1))
@@ -638,18 +645,18 @@ async def test_contract_quote_payoff_is_applied_before_fx(model: str) -> None:
         assert symbol is not None
         symbol.quote = "EUR"
         await session.commit()
-    candidate: UsdFxSnapshotCandidateRow = {
-        "snapshot_public_id": "fx-snapshot",
+    candidate: UsdFxCandleCandidateRow = {
+        "candle_public_id": "fx-candle",
         "instrument_public_id": "fx-instrument",
         "exchange": "kraken",
         "base": "EUR",
         "quote": "USD",
-        "last_price": 1.25,
-        "timestamp": _NOW,
+        "close": 1.25,
+        "open_at": _NOW,
     }
     with pytest.MonkeyPatch.context() as patcher:
         patcher.setattr(
-            repo, "get_active_usd_fx_snapshot_candidates", AsyncMock(return_value=[candidate])
+            repo, "get_active_usd_fx_candle_candidates", AsyncMock(return_value=[candidate])
         )
         result = await USDConverter(repo, now=lambda: _NOW).to_usd(_INSTRUMENT, Decimal(2))
     assert result == (Decimal(750_000) if model == "linear" else Decimal("7.5"))
@@ -683,17 +690,17 @@ async def test_contract_guards_use_clock_after_last_repository_await(
             assert symbol is not None
             symbol.quote = "EUR"
             await session.commit()
-    candidate: UsdFxSnapshotCandidateRow = {
-        "snapshot_public_id": "fx-snapshot",
+    candidate: UsdFxCandleCandidateRow = {
+        "candle_public_id": "fx-candle",
         "instrument_public_id": "fx-instrument",
         "exchange": "kraken",
         "base": "EUR",
         "quote": "USD",
-        "last_price": 1.25,
-        "timestamp": _NOW,
+        "close": 1.25,
+        "open_at": _NOW,
     }
     monkeypatch.setattr(
-        repo, "get_active_usd_fx_snapshot_candidates", AsyncMock(return_value=[candidate])
+        repo, "get_active_usd_fx_candle_candidates", AsyncMock(return_value=[candidate])
     )
     clock = [_NOW]
     converter = USDConverter(repo, now=lambda: clock[0])
@@ -706,13 +713,13 @@ async def test_contract_guards_use_clock_after_last_repository_await(
         clock[0] += timedelta(seconds=2)
         return metadata
 
-    async def delayed_fx(currency: str) -> list[UsdFxSnapshotCandidateRow]:
+    async def delayed_fx(currency: str) -> list[UsdFxCandleCandidateRow]:
         assert currency == "EUR"
         clock[0] += timedelta(seconds=2)
         return [candidate]
 
     if stage == "eur_fx":
-        monkeypatch.setattr(repo, "get_active_usd_fx_snapshot_candidates", delayed_fx)
+        monkeypatch.setattr(repo, "get_active_usd_fx_candle_candidates", delayed_fx)
     else:
         monkeypatch.setattr(repo, "get_active_instrument_valuation_metadata", delayed_metadata)
     reason = "contract_expired" if boundary == "expiry" else "contract_valuation_unavailable"
@@ -765,8 +772,7 @@ async def test_contract_valuation_works_from_active_1m_candle_without_snapshot(
 ) -> None:
     """Contract multiplier and inverse valuation stay unchanged when priced from 1m candle.
 
-    Given: a certified derivative instrument with a stale MarketSnapshot removed
-        and a fresh active 1m calculated candle close at 100_000,
+    Given: a certified derivative instrument with a fresh active 1m calculated candle close at 100_000,
     When: ``to_usd`` runs,
     Then: explicit linear and inverse payoff math produces the exact USD notional.
     """
@@ -775,7 +781,7 @@ async def test_contract_valuation_works_from_active_1m_candle_without_snapshot(
     spec.contract_size = Decimal(multiplier)
     await _market(repo, spec)
     async with repo.session() as session:
-        await session.execute(MarketSnapshot.__table__.delete())
+        await session.execute(Candle.__table__.delete())
         session.add(
             Candle(
                 public_id="contract-1m-candle",

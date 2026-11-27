@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+from pydantic import Field
+
 from snapper.api.schemas.base import StrictBody
 from snapper.core.json_types import JsonObject
 
@@ -135,6 +137,8 @@ class AiReviewAftermathPosition(StrictBody):
     realized_pnl: float | None
     mark_price: float | None
     marked_at: datetime | None
+    mark_as_of: datetime | None = None
+    mark_stale: bool = Field(default_factory=bool)
     source_venue_event_id: int | None
     position_cycle_public_id: str | None
     wallet_public_id: str

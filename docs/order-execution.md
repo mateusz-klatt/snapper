@@ -126,13 +126,12 @@ instrument and each FX plane, the newest active 1m candle supplies the price.
 This includes `calculated`, `native`, `synthesized`, and provisional rows.
 Freshness uses `open_at + 60s`, capped at `now` for the current minute, and
 uses `open_at` for future-opened candles. The oracle requires a positive finite
-price. `market_snapshots` is a deprecated transitional fallback available only
-when the instrument has no active 1m candle. A stale candle blocks its
-instrument's snapshot fallback even when that snapshot is fresh.
+price. Instruments without a usable live candle are refused. The
+`market_snapshots` table is reserved for research.
 
 Non-USD quote exposure uses current market-data-enabled, non-paper forex
 planes against USD. The oracle normalizes direct and inverse rates and chooses
-the newest usable plane after applying candle priority to each instrument.
+the newest usable plane from the current 1m candle evidence.
 Equally recent planes with conflicting normalized rates refuse admission
 with `fx_plane_conflict`. USD quotes need no FX lookup. The oracle excludes
 historical and carried P&L conversion rates. General commodity, option, margin
@@ -144,16 +143,21 @@ price and its evidence timestamp have a 60-second cache. The converter rereads
 metadata and every FX leg on each conversion. Freshness,
 certification and contract expiry are checked again after all awaited reads,
 including cached and USD-only calls. Missing or unsafe evidence reports
-`caps_price_unavailable`, retaining structured reason codes (`snapshot_missing`,
-`price_stale`, `fx_snapshot_missing`, `fx_price_stale`, `fx_plane_conflict`,
+`caps_price_unavailable`, retaining structured reason codes (`snapshot_missing`
+for a missing instrument candle, `price_stale`, `fx_snapshot_missing` for a
+missing USD FX candle, `fx_price_stale`, `fx_plane_conflict`,
 etc.).
 
 Admission stores the converted value in `submitted_notional_usd`, rounded up to
 whole cents by the existing cap enforcer. The rolling 24-hour cap uses that
-stored USD value; current FX rates never revalue old submissions. Passing converter
-tests does not enable snapshot refresh or authorize a live order: the named
-refresh set, freshness monitoring, retention evidence and operator approval are
-separate gates.
+stored USD value; current FX rates never revalue old submissions.
+
+Paper ticker lookups and unpriced simulator fills require a valid 1m close
+with evidence no more than 300 seconds old. Manual paper MARKET admission
+requires a close and a persistence timestamp within 120 seconds and returns
+`no_reference_price` when either is unavailable. Position payloads keep an
+aged close and its unrealized PnL for display, with `mark_stale` and
+`mark_as_of` identifying the evidence.
 
 Legacy live submissions without a stored USD value permit `quantity × price`
 only when catalog versions at submission prove a USD quote on a known spot venue

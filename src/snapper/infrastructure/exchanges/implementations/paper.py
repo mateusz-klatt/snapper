@@ -41,6 +41,8 @@ from typing import Any
 from loguru import logger
 from sqlalchemy import select
 
+from snapper.core.candle_price import candle_mark
+from snapper.core.candle_price import mark_is_stale
 from snapper.core.types import AllExchange
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
@@ -48,7 +50,7 @@ from snapper.data.models import Instrument
 from snapper.data.models import Symbol
 from snapper.data.repository import Repository
 from snapper.data.repository import where_active
-from snapper.data.repository_types import MarketSnapshotRow
+from snapper.data.repository_types import ActiveCandlePriceRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -70,15 +72,6 @@ _REPO_REQUIRED_MSG = "Repository required for paper market data"
 _CALL_CONNECT_MSG = "Not connected - call connect() first"
 _TIME_RANGE_REQUIRED_MSG = "Time range (start_time, end_time) required for paper market data replay"
 _SOURCE_EXCHANGE_REQUIRED_MSG = "source_exchange required for paper market data replay"
-
-_MARKET_FILL_PRICE_MAX_AGE_S = 3600.0
-"""Maximum age of the reference close accepted for a paper MARKET fill.
-
-Explicit simulator policy: a source venue whose freshest complete 1m
-bar opened more than an hour ago is halted/closed (or its feed is
-dead) — paper orders must then CANCEL rather than fill at an
-arbitrarily old mark that no live venue would honor.
-"""
 
 _MARKET_FILL_PRICE_SOURCE_EXCHANGES: tuple[MarketDataExchange, ...] = (
     ExchangeEnum.KRAKEN,
@@ -305,19 +298,10 @@ class PaperExchangeClient(ExchangeClientBase):
     async def _resolve_market_fill_price(self, symbol: str) -> float | None:
         """Resolve a market-order fill price from persisted source-venue candles.
 
-        Tries ``source_exchange`` first when the client was constructed
-        with one, then each venue in
-        ``_MARKET_FILL_PRICE_SOURCE_EXCHANGES``, returning the freshest
-        complete 1m close for the symbol from the first venue that has
-        an ACCEPTABLE one: the close must be a finite positive number
-        and its bar must have opened within
-        ``_MARKET_FILL_PRICE_MAX_AGE_S`` (explicit simulator policy — a
-        halted or closed source venue must NOT fill paper orders at an
-        arbitrarily old mark). A row failing validation counts as a
-        per-venue miss and the next venue is tried. Returns ``None``
-        when the client has no repository or no venue yields an
-        acceptable price — the caller must then CANCEL the order rather
-        than invent a price.
+        Read the newest 1m close, including provisional bars. A configured
+        source venue is authoritative. Otherwise try the simulator's existing
+        source venue preference order. Missing, invalid, future and stale
+        closes are unusable. The simulator cancels an unpriceable order.
 
         Args:
             symbol: Native venue symbol of the paper order.
@@ -334,46 +318,34 @@ class PaperExchangeClient(ExchangeClientBase):
                 f"temporally wrong; replay flows must submit priced orders"
             )
             return None
-        now = datetime.now(UTC)
         candidates: tuple[MarketDataExchange, ...] = (
             (self.source_exchange,) if self.source_exchange else _MARKET_FILL_PRICE_SOURCE_EXCHANGES
         )
         for exchange in candidates:
             try:
-                rows = await self.repository.get_candles(
-                    symbol,
-                    "1m",
-                    None,
-                    None,
-                    exchange,
-                    now,
-                    limit=1,
-                    order="desc",
-                    complete=True,
-                )
-                if not rows:
-                    continue
-                price = float(rows[0]["close"])
-                age_s = (now - rows[0]["open_at"]).total_seconds()
+                candle = await self._get_source_candle(self.repository, symbol, exchange)
             except Exception as exc:
                 logger.warning(f"Paper fill-price lookup failed on {exchange}: {exc}")
                 continue
-            if not (math.isfinite(price) and price > 0.0):
-                logger.warning(
-                    f"Paper fill-price on {exchange} rejected for {symbol}: "
-                    f"non-positive/non-finite close {price!r}"
-                )
+            if candle is None:
                 continue
-            if not 0.0 <= age_s <= _MARKET_FILL_PRICE_MAX_AGE_S:
-                logger.warning(
-                    f"Paper fill-price on {exchange} rejected for {symbol}: "
-                    f"close age {age_s:.0f}s outside [0, "
-                    f"{_MARKET_FILL_PRICE_MAX_AGE_S:.0f}]s (stale or future-dated bar)"
-                )
+            now = datetime.now(UTC)
+            mark = candle_mark(candle["close"], candle["open_at"], now)
+            if mark is None or mark_is_stale(mark[1], now):
                 continue
+            price, _ = mark
             logger.info(f"Paper market fill price for {symbol}: {price} (source {exchange})")
             return price
         return None
+
+    async def _get_source_candle(
+        self, repo: Repository, symbol: str, exchange: MarketDataExchange
+    ) -> ActiveCandlePriceRow | None:
+        """Read the newest active 1m close for one source venue and symbol."""
+        instrument_ids = await self._resolve_instrument_public_ids([symbol], exchange)
+        if not instrument_ids:
+            return None
+        return await repo.get_active_latest_1m_candle_price(instrument_ids[0])
 
     def _order_still_fillable(self, order: ExchangeOrderSnapshot) -> bool:
         """Re-check order lifecycle after every await in the fill simulator.
@@ -730,13 +702,13 @@ class PaperExchangeClient(ExchangeClientBase):
         return result
 
     async def get_ticker(self, symbol: str) -> TickerSnapshot:
-        """Get ticker data from repository for backtesting.
+        """Get a fresh paper ticker from the source venue's latest active 1m close.
 
         Args:
             symbol: Trading pair.
 
         Returns:
-            Latest ticker snapshot from historical data.
+            Latest usable close and evidence time, with no bid or ask evidence.
 
         Raises:
             RuntimeError: If repository not configured.
@@ -746,23 +718,20 @@ class PaperExchangeClient(ExchangeClientBase):
             raise RuntimeError(_REPO_REQUIRED_MSG)
         if not self.source_exchange:
             raise ValueError(_SOURCE_EXCHANGE_REQUIRED_MSG)
-        end_dt = datetime.now(tz=UTC)
-        start_dt = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        inst_pids = await self._resolve_instrument_public_ids([symbol], self.source_exchange)
-        if not inst_pids:
+        candle = await self._get_source_candle(self.repository, symbol, self.source_exchange)
+        if candle is None:
             raise ValueError(f"No ticker data found for {symbol}")
-        snapshots = await self.repository.get_market_snapshots(
-            inst_pids, start_dt, end_dt, as_of=datetime.now(UTC)
-        )
-        if not snapshots:
-            raise ValueError(f"No ticker data found for {symbol}")
-        latest = snapshots[-1]
+        now = datetime.now(UTC)
+        mark = candle_mark(candle["close"], candle["open_at"], now)
+        if mark is None or mark_is_stale(mark[1], now):
+            raise ValueError(f"No fresh ticker data found for {symbol}")
+        price, evidence_at = mark
         return TickerSnapshot(
             symbol=symbol,
-            bid=latest["bid"] or 0.0,
-            ask=latest["ask"] or 0.0,
-            last=latest["last"] or 0.0,
-            timestamp=latest["ts"].timestamp(),
+            bid=0.0,
+            ask=0.0,
+            last=price,
+            timestamp=evidence_at.timestamp(),
         )
 
     async def get_ohlcv(
@@ -821,7 +790,7 @@ class PaperExchangeClient(ExchangeClientBase):
         return ohlcv_list
 
     def subscribe_ticker(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
-        """Replay historical ticker data for backtesting.
+        """Subscribe to ticker updates from historical trade prints.
 
         Uses self.source_exchange (if set) to query the correct exchange data.
 
@@ -838,70 +807,30 @@ class PaperExchangeClient(ExchangeClientBase):
         return self._subscribe_ticker_impl(symbols)
 
     async def _subscribe_ticker_impl(self, symbols: list[str]) -> AsyncIterator[TickerUpdate]:
-        """Implement historical ticker streaming for paper trading.
-
-        Streams snapshots via :meth:`Repository.iter_market_snapshots`
-        (bounded-memory paper backtest streaming) so multi-day windows
-        keep RSS flat. The legacy materialising path
-        (:meth:`Repository.get_market_snapshots`) is reserved for
-        bounded UI / one-shot lookups.
+        """Stream trade-backed ticker updates in replay event order.
 
         Args:
-            symbols: List of trading pairs to replay.
+            symbols: Trading pairs to replay.
 
         Yields:
-            TickerUpdate from historical data in time order.
-
-        Raises:
-            RuntimeError: If repository not configured or not connected.
-            ValueError: If time range not specified.
+            Last prices from persisted trade prints. Bid, ask and 24-hour
+            aggregates are unavailable in trade evidence.
         """
-        if not self.repository:
-            raise RuntimeError(_REPO_REQUIRED_MSG)
-        if not self._running:
-            raise RuntimeError(_CALL_CONNECT_MSG)
-        if self.start_time is None or self.end_time is None:
-            raise ValueError(_TIME_RANGE_REQUIRED_MSG)
-        start_dt = datetime.fromtimestamp(self.start_time, tz=UTC)
-        end_dt = datetime.fromtimestamp(self.end_time, tz=UTC)
-        if not self.source_exchange:
-            raise ValueError(_SOURCE_EXCHANGE_REQUIRED_MSG)
-        exchange_name = self.source_exchange
-        logger.info(
-            f"Replaying ticker for {symbols} from {start_dt} to {end_dt} from {exchange_name}"
-        )
-        inst_pids = await self._resolve_instrument_public_ids(symbols, exchange_name)
-        if not inst_pids:
-            return
-        async for snap in self.repository.iter_market_snapshots(
-            inst_pids, start_dt, end_dt, as_of=datetime.now(UTC)
-        ):
-            yield self._snapshot_to_ticker(snap)
-
-    @staticmethod
-    def _snapshot_to_ticker(snap: MarketSnapshotRow) -> TickerUpdate:
-        """Convert a market snapshot row to a TickerUpdate.
-
-        Args:
-            snap: Market snapshot row from the repository.
-
-        Returns:
-            TickerUpdate with zero-defaults for missing values.
-        """
-        return TickerUpdate(
-            symbol=str(snap.get("symbol", "")),
-            bid=snap["bid"] or 0.0,
-            bid_qty=snap["bid_volume"] or 0.0,
-            ask=snap["ask"] or 0.0,
-            ask_qty=snap["ask_volume"] or 0.0,
-            last=snap["last"] or 0.0,
-            volume=snap["volume"] or 0.0,
-            vwap=snap["vwap"] or 0.0,
-            low=snap["low"] or 0.0,
-            high=snap["high"] or 0.0,
-            change=0.0,
-            change_pct=0.0,
-        )
+        async for trade in self.subscribe_trades(symbols):
+            yield TickerUpdate(
+                symbol=trade.symbol,
+                bid=0.0,
+                bid_qty=0.0,
+                ask=0.0,
+                ask_qty=0.0,
+                last=trade.price,
+                volume=0.0,
+                vwap=0.0,
+                low=0.0,
+                high=0.0,
+                change=0.0,
+                change_pct=0.0,
+            )
 
     def subscribe_candles(
         self,

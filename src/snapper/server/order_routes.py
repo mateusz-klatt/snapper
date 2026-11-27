@@ -55,6 +55,7 @@ from snapper.auth.dependencies import require_permission
 from snapper.auth.dependencies import validate_csrf_token
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.schemas.principal import AuthPrincipal
+from snapper.core.candle_price import candle_evidence_timestamp
 from snapper.core.json_types import JsonObject
 from snapper.core.numeric import is_positive_finite
 from snapper.core.types import AllExchange
@@ -344,7 +345,6 @@ async def _resolve_execution_venue(
     return execution_exchange
 
 
-_PAPER_SNAPSHOT_MAX_AGE = timedelta(seconds=30)
 _PAPER_CANDLE_MAX_AGE = timedelta(seconds=120)
 
 
@@ -352,29 +352,16 @@ async def _resolve_paper_reference_price(
     *,
     repo: Repository,
     body: CreateOrderBody,
-    source_instrument_public_id: str,
     as_of: datetime,
 ) -> float:
     """Resolve the fill reference price for a manual paper MARKET order.
 
-    The paper simulator fills a market order at ``order.price`` and
-    (since the zero-fill fix) rejects priceless orders, so the route
-    must attach a fresh reference price at create time. Sources, in
-    order (source identity = the request's market-data exchange —
-    never guessed from the symbol alone):
-
-    1. Freshest market snapshot within 30 s — side-aware: BUY prices at
-       the ask, SELL at the bid, falling back to ``last``.
-    2. Freshest 1m candle close whose persistence timestamp is within
-       120 s (provisional rows included — they carry the newest close).
-    3. Otherwise 400 ``no_reference_price`` — a definitive, loud
-       rejection instead of the historic silent 0.0 fill.
+    The simulator needs a positive reference close. Use the newest source
+    venue 1m candle, including provisional bars, within the 120-second window.
 
     Args:
-        repo: Repository for snapshot/candle lookups.
-        body: Create-order request payload (side + source exchange).
-        source_instrument_public_id: Instrument resolved against the
-            request's market-data exchange.
+        repo: Repository for candle lookups.
+        body: Create-order request with source exchange and instrument.
         as_of: Bus time for the temporal queries.
 
     Returns:
@@ -383,18 +370,6 @@ async def _resolve_paper_reference_price(
     Raises:
         HTTPException: 400 when no fresh positive price exists.
     """
-    snapshots = await repo.get_market_snapshots(
-        [source_instrument_public_id],
-        as_of - _PAPER_SNAPSHOT_MAX_AGE,
-        as_of,
-        as_of,
-    )
-    if snapshots:
-        newest = max(snapshots, key=lambda row: row["ts"])
-        side_price = newest["ask"] if body.side == "buy" else newest["bid"]
-        for candidate in (side_price, newest["last"]):
-            if is_positive_finite(candidate):
-                return candidate
     candles = await repo.get_candles(
         instrument=body.instrument,
         timeframe="1m",
@@ -407,7 +382,11 @@ async def _resolve_paper_reference_price(
     )
     if candles:
         newest_candle = candles[0]
-        fresh = as_of - newest_candle["timestamp"] <= _PAPER_CANDLE_MAX_AGE
+        evidence_at = candle_evidence_timestamp(newest_candle["open_at"], as_of)
+        fresh = (
+            timedelta(0) <= as_of - newest_candle["timestamp"] <= _PAPER_CANDLE_MAX_AGE
+            and timedelta(0) <= as_of - evidence_at <= _PAPER_CANDLE_MAX_AGE
+        )
         if fresh and is_positive_finite(newest_candle["close"]):
             return float(newest_candle["close"])
     raise HTTPException(
@@ -417,9 +396,8 @@ async def _resolve_paper_reference_price(
             "instrument": body.instrument,
             "exchange": body.exchange,
             "reason": (
-                "no fresh reference price (snapshot ≤30s or 1m candle "
-                "≤120s) on the source exchange; a paper market order "
-                "cannot be priced"
+                "no fresh 1m candle close within 120s on the source exchange; "
+                "a paper market order cannot be priced"
             ),
         },
     )
@@ -471,7 +449,6 @@ async def _create_order_command_price(
     repo: Repository,
     body: CreateOrderBody,
     execution_exchange: str,
-    instrument_public_id: str,
     as_of: datetime,
 ) -> float | None:
     """Resolve the price used to persist a live or paper manual order.
@@ -480,7 +457,6 @@ async def _create_order_command_price(
         repo: Repository supplying paper market reference prices.
         body: Validated manual-order payload.
         execution_exchange: Actual venue selected by wallet routing.
-        instrument_public_id: Exact source market identity.
         as_of: Reference-price evaluation time.
 
     Returns:
@@ -490,7 +466,6 @@ async def _create_order_command_price(
         return await _resolve_paper_reference_price(
             repo=repo,
             body=body,
-            source_instrument_public_id=instrument_public_id,
             as_of=as_of,
         )
     return body.price
@@ -687,9 +662,7 @@ async def create_order(
         repo, body, execution_exchange, resolved_instrument_public_id, now
     )
 
-    command_price = await _create_order_command_price(
-        repo, body, execution_exchange, resolved_instrument_public_id, now
-    )
+    command_price = await _create_order_command_price(repo, body, execution_exchange, now)
 
     await _validate_create_order_ai_review_citation(
         repo=repo,

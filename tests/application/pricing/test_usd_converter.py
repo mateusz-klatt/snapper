@@ -5,8 +5,7 @@ Covers:
     - Non-USD quote without FX evidence: raises :class:`PriceUnavailableError`
       with ``fx_snapshot_missing``.
     - Missing instrument: ``instrument_not_found``.
-    - Missing snapshot: ``snapshot_missing``.
-    - Null last_price: ``last_price_null``.
+    - Missing live candle: ``snapshot_missing``.
     - Stale snapshot (> 300s): ``price_stale`` — both via cached
       re-check AND on fresh load.
     - Cache behavior: repeated calls within 60s TTL skip DB; after
@@ -146,38 +145,38 @@ async def _seed_candle(
 
 
 @pytest.mark.asyncio
-async def test_usd_quote_uses_snapshot_fallback_without_active_1m_candle(
+async def test_snapshot_only_usd_quote_fails_closed(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """USD-quoted instrument can use the transitional snapshot fallback.
+    """Refuse a snapshot-only instrument at the USD pricing boundary.
 
-    Given: an Instrument with a USD-quoted Symbol and a fresh
-        MarketSnapshot with ``last_price = 50_000`` and no active 1m candle,
-    When: ``to_usd(instrument_public_id, Decimal('0.5'))`` runs,
-    Then: the Decimal result equals ``0.5 × 50000 = 25000``.
+    Given: a fresh research snapshot and no active 1m candle,
+    When: to_usd runs,
+    Then: the documented missing-price code is raised and the cache stays empty.
     """
     inst_id = "inst-btc-usd"
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
     await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=50_000.0)
     conv = USDConverter(repo, now=_seed_time)
-    result = await conv.to_usd(inst_id, Decimal("0.5"))
-    assert result == Decimal("25000")
+    with pytest.raises(PriceUnavailableError, match="snapshot_missing"):
+        await conv.to_usd(inst_id, Decimal("0.5"))
+    assert inst_id not in conv._cache
 
 
 @pytest.mark.asyncio
-async def test_non_usd_quote_without_fx_snapshot_is_unavailable(
+async def test_non_usd_quote_without_fx_candle_is_unavailable(
     repo: SQLAlchemyRepository,
 ) -> None:
     """Non-USD quote without independently evidenced FX fails closed.
 
-    Given: an EUR-quoted Symbol + Instrument + fresh snapshot,
+    Given: an EUR-quoted Symbol + Instrument + fresh candle,
     When: ``to_usd`` runs,
     Then: :class:`PriceUnavailableError` with
         ``reason='fx_snapshot_missing'`` is raised.
     """
     inst_id = "inst-btc-eur"
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="EUR")
-    await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=47_000.0)
+    await _seed_candle(repo, instrument_public_id=inst_id, close=47_000.0, open_at=_seed_time())
     conv = USDConverter(repo, now=_seed_time)
     one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError) as exc:
@@ -204,10 +203,10 @@ async def test_missing_instrument_raises_instrument_not_found(
 
 
 @pytest.mark.asyncio
-async def test_missing_snapshot_raises_snapshot_missing(
+async def test_missing_candle_raises_snapshot_missing(
     repo: SQLAlchemyRepository,
 ) -> None:
-    """Instrument without MarketSnapshot raises ``snapshot_missing``.
+    """Instrument without an active 1m candle raises ``snapshot_missing``.
 
     Given: an Instrument seeded with USD quote but no snapshot row,
     When: ``to_usd`` runs,
@@ -224,34 +223,12 @@ async def test_missing_snapshot_raises_snapshot_missing(
 
 
 @pytest.mark.asyncio
-async def test_null_last_price_raises_last_price_null(
-    repo: SQLAlchemyRepository,
-) -> None:
-    """Snapshot with last_price=None raises ``last_price_null``.
-
-    Given: an Instrument with a MarketSnapshot whose
-        ``last_price IS NULL`` (venue never reported a trade),
-    When: ``to_usd`` runs,
-    Then: :class:`PriceUnavailableError` with
-        ``reason='last_price_null'`` is raised.
-    """
-    inst_id = "inst-null-price"
-    await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
-    await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=None)
-    conv = USDConverter(repo, now=_seed_time)
-    one_unit = Decimal("1")
-    with pytest.raises(PriceUnavailableError) as exc:
-        await conv.to_usd(inst_id, one_unit)
-    assert exc.value.reason_code == "last_price_null"
-
-
-@pytest.mark.asyncio
-async def test_stale_snapshot_fresh_load_raises_price_stale(
+async def test_stale_candle_fresh_load_raises_price_stale(
     repo: SQLAlchemyRepository,
 ) -> None:
     """Snapshot older than 300s at first load raises ``price_stale``.
 
-    Given: a snapshot with ``timestamp`` set 10 minutes before
+    Given: a candle with ``timestamp`` set 10 minutes before
         the converter's clock,
     When: ``to_usd`` runs (fresh load path),
     Then: :class:`PriceUnavailableError` with
@@ -260,7 +237,7 @@ async def test_stale_snapshot_fresh_load_raises_price_stale(
     inst_id = "inst-stale"
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
     old = _seed_time() - timedelta(seconds=STALENESS_THRESHOLD_SECONDS + 100)
-    await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=1.0, snapshot_time=old)
+    await _seed_candle(repo, instrument_public_id=inst_id, close=1.0, open_at=old)
     conv = USDConverter(repo, now=_seed_time)
     one_unit = Decimal("1")
     with pytest.raises(PriceUnavailableError) as exc:
@@ -269,7 +246,7 @@ async def test_stale_snapshot_fresh_load_raises_price_stale(
 
 
 @pytest.mark.asyncio
-async def test_stale_snapshot_via_cache_re_check_raises(
+async def test_stale_candle_via_cache_re_check_raises(
     repo: SQLAlchemyRepository,
 ) -> None:
     """Cached entry re-checked as stale on subsequent call raises.
@@ -284,12 +261,12 @@ async def test_stale_snapshot_via_cache_re_check_raises(
     """
     inst_id = "inst-cache-stale"
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
-    snap_time = _seed_time() - timedelta(seconds=STALENESS_THRESHOLD_SECONDS - 10)
-    await _seed_snapshot(
+    snap_time = _seed_time() - timedelta(seconds=STALENESS_THRESHOLD_SECONDS + 50)
+    await _seed_candle(
         repo,
         instrument_public_id=inst_id,
-        last_price=100.0,
-        snapshot_time=snap_time,
+        close=100.0,
+        open_at=snap_time,
     )
     clock = {"t": _seed_time()}
     conv = USDConverter(repo, now=lambda: clock["t"])
@@ -307,20 +284,20 @@ async def test_cache_hit_skips_db(repo: SQLAlchemyRepository) -> None:
     """Second call within TTL returns from cache without DB hit.
 
     Given: an initial call populates the cache; the underlying
-        MarketSnapshot row is then deleted,
+        Candle row is then deleted,
     When: a second call runs within the 60s TTL,
     Then: the converter returns the cached price (DB miss would
-        raise ``snapshot_missing``) — proves the cache short-circuit.
+        raise ``candle_missing``) — proves the cache short-circuit.
     """
     inst_id = "inst-cache-hit"
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
-    await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=10.0)
+    await _seed_candle(repo, instrument_public_id=inst_id, close=10.0, open_at=_seed_time())
     conv = USDConverter(repo, now=_seed_time)
     first = await conv.to_usd(inst_id, Decimal("1"))
     assert first == Decimal("10")
 
     async with repo.session() as s:
-        await s.execute(MarketSnapshot.__table__.delete())
+        await s.execute(Candle.__table__.delete())
         await s.commit()
 
     second = await conv.to_usd(inst_id, Decimal("2"))
@@ -333,8 +310,8 @@ async def test_cache_ttl_expiry_forces_reload(
 ) -> None:
     """Call after 60s TTL re-reads from DB and sees updated price.
 
-    Given: an initial call caches last_price=10; the MarketSnapshot
-        is then updated to last_price=20 and the clock advances
+    Given: an initial call caches close=10; the Candle
+        is then updated to close=20 and the clock advances
         past the 60s TTL,
     When: a third call runs,
     Then: the new value (20) is used — the TTL expiry path is
@@ -342,19 +319,17 @@ async def test_cache_ttl_expiry_forces_reload(
     """
     inst_id = "inst-ttl-expiry"
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
-    await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=10.0)
+    await _seed_candle(repo, instrument_public_id=inst_id, close=10.0, open_at=_seed_time())
     clock = {"t": _seed_time()}
     conv = USDConverter(repo, now=lambda: clock["t"])
     first = await conv.to_usd(inst_id, Decimal("1"))
     assert first == Decimal("10")
 
     async with repo.session() as s:
-        await s.execute(MarketSnapshot.__table__.delete())
+        await s.execute(Candle.__table__.delete())
         await s.commit()
     new_time = _seed_time() + timedelta(seconds=CACHE_TTL_SECONDS + 5)
-    await _seed_snapshot(
-        repo, instrument_public_id=inst_id, last_price=20.0, snapshot_time=new_time
-    )
+    await _seed_candle(repo, instrument_public_id=inst_id, close=20.0, open_at=new_time)
     clock["t"] = new_time
     result = await conv.to_usd(inst_id, Decimal("1"))
     assert result == Decimal("20")
@@ -369,7 +344,7 @@ async def test_invalidate_single_entry_forces_db_reload(
     Given: two instruments both cached,
     When: ``_invalidate(inst_a)`` runs followed by a lookup for
         each,
-    Then: ``inst_a`` re-reads from DB (raises on missing snapshot)
+    Then: ``inst_a`` re-reads from DB (raises on missing candle)
         while ``inst_b`` still returns from cache — proves the
         test hook operates at single-key granularity.
     """
@@ -377,14 +352,14 @@ async def test_invalidate_single_entry_forces_db_reload(
     inst_b = "inst-b"
     await _seed_instrument(repo, instrument_public_id=inst_a, quote="USD")
     await _seed_instrument(repo, instrument_public_id=inst_b, quote="USD")
-    await _seed_snapshot(repo, instrument_public_id=inst_a, last_price=1.0)
-    await _seed_snapshot(repo, instrument_public_id=inst_b, last_price=2.0)
+    await _seed_candle(repo, instrument_public_id=inst_a, close=1.0, open_at=_seed_time())
+    await _seed_candle(repo, instrument_public_id=inst_b, close=2.0, open_at=_seed_time())
     conv = USDConverter(repo, now=_seed_time)
     await conv.to_usd(inst_a, Decimal("1"))
     await conv.to_usd(inst_b, Decimal("1"))
 
     async with repo.session() as s:
-        await s.execute(MarketSnapshot.__table__.delete())
+        await s.execute(Candle.__table__.delete())
         await s.commit()
 
     conv._invalidate(inst_a)
@@ -413,7 +388,7 @@ async def test_concurrent_first_loads_share_one_db_round_trip(
     """
     inst_id = "inst-concurrent"
     await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
-    await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=42.0)
+    await _seed_candle(repo, instrument_public_id=inst_id, close=42.0, open_at=_seed_time())
     conv = USDConverter(repo, now=_seed_time)
 
     load_calls = {"n": 0}
@@ -489,7 +464,7 @@ async def test_candle_only_fresh_price_succeeds(
 
 
 @pytest.mark.asyncio
-async def test_stale_candle_blocks_fresh_snapshot_fallback(
+async def test_stale_candle_refuses_despite_fresh_research_snapshot(
     repo: SQLAlchemyRepository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -527,7 +502,7 @@ async def test_stale_candle_blocks_fresh_snapshot_fallback(
         (30, 90),
     ],
 )
-async def test_active_1m_candle_is_primary_regardless_of_snapshot_age(
+async def test_active_1m_candle_prices_regardless_of_research_snapshot_age(
     repo: SQLAlchemyRepository,
     snapshot_age: int,
     candle_open_age: int,

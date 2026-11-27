@@ -103,7 +103,7 @@ Persistence layer with SQLAlchemy:
     - `InstrumentSpec` — Instrument trading specifications (tick_size, margins, expiry_at, instrument_kind)
     - `UnderlyingAsset` — Canonical asset identity (e.g., S&P 500, Gold) linking instruments across exchanges
     - `InstrumentUnderlyingMapping` — Temporal link from instrument to underlying (exact/derivative/proxy)
-    - `MarketSnapshot` — Real-time market data snapshots
+    - `MarketSnapshot` — Whole-market snapshots used for research
     - `InstrumentFeedHealth` — Current per-symbol feed-health snapshot
       keyed by coordinator, exchange, native symbol, stream kind, and timeframe
     - `UserLoginEvent` — Authentication event log
@@ -900,7 +900,7 @@ candles             -- OHLCV data
 shadow_candles      -- A/B shadow plane for trade-built 1m candles
 ticks               -- Real-time price snapshots
 trades              -- Transaction history
-market_snapshots    -- Real-time market data (SCD2 per instrument, one active row each)
+market_snapshots    -- Research snapshots (SCD2 per instrument, one active row each)
 instrument_feed_health -- Current per-symbol feed health snapshots
 
 -- Trading (joined to instruments via instrument_public_id)

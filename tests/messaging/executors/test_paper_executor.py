@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from snapper.config.app import AppSettings
+from snapper.data.repository_types import ActiveCandlePriceRow
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderRequest
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
@@ -27,7 +28,7 @@ def _make_repo_mock() -> MagicMock:
 
     Returns:
         MagicMock with ensure_instrument, insert_order, update_order,
-        insert_execution, and get_candles (a fresh reference candle so
+        insert_execution, and get_active_latest_1m_candle_price (a reference candle so
         MARKET orders resolve a fill price) configured as AsyncMock.
     """
     repo = MagicMock()
@@ -35,7 +36,9 @@ def _make_repo_mock() -> MagicMock:
     repo.insert_order = AsyncMock(return_value=(1, "order-uuid-0001"))
     repo.update_order = AsyncMock()
     repo.insert_execution = AsyncMock()
-    repo.get_candles = AsyncMock(return_value=[{"close": 64000.0, "open_at": datetime.now(UTC)}])
+    repo.get_active_latest_1m_candle_price = AsyncMock(
+        return_value={"close": 64000.0, "open_at": datetime.now(UTC)}
+    )
     session = AsyncMock()
     execute_result = MagicMock()
     execute_result.scalar_one_or_none = MagicMock(return_value="symbol-public-id")
@@ -47,39 +50,16 @@ def _make_repo_mock() -> MagicMock:
     return repo
 
 
-async def fake_get_market_snapshots(
-    instrument_public_ids: list[str],
-    start_dt: datetime,
-    end_dt: datetime,
-    as_of: datetime | None = None,
-) -> list[dict]:
-    """Return fake market snapshot data for testing."""
-    return [
-        {
-            "instrument_public_id": "inst-btc-usd",
-            "bid": 50000.0,
-            "ask": 50100.0,
-            "last": 50050.0,
-            "bid_volume": 1.0,
-            "ask_volume": 1.0,
-            "volume": 100.0,
-            "vwap": 50000.0,
-            "low": 49000.0,
-            "high": 51000.0,
-            "ts": datetime.now(tz=UTC),
-        }
-    ]
-
-
-async def fake_iter_market_snapshots(
-    instrument_public_ids: list[str],
-    start_dt: datetime,
-    end_dt: datetime,
-    as_of: datetime | None = None,
-) -> AsyncIterator[dict]:
-    """Async-generator companion mirroring :meth:`fake_get_market_snapshots`."""
-    for snap in await fake_get_market_snapshots(instrument_public_ids, start_dt, end_dt, as_of):
-        yield snap
+async def fake_get_active_latest_1m_candle_price(
+    instrument_public_id: str,
+) -> ActiveCandlePriceRow:
+    """Return a fresh source candle for the simulated ticker."""
+    return {
+        "candle_public_id": "candle-paper-source",
+        "instrument_public_id": instrument_public_id,
+        "close": 50050.0,
+        "open_at": datetime.now(UTC),
+    }
 
 
 async def fake_resolve_instrument_public_ids(symbols: list[str], exchange: str) -> list[str]:
@@ -520,11 +500,10 @@ class TestPaperMarketDataMethods:
 
         Given: A connected paper client with repository,
         When: get_ticker is called,
-        Then: Ticker with bid, ask, last prices is returned.
+        Then: The ticker carries the candle close and empty bid and ask.
         """
         mock_repo = SimpleNamespace(
-            get_market_snapshots=fake_get_market_snapshots,
-            iter_market_snapshots=fake_iter_market_snapshots,
+            get_active_latest_1m_candle_price=fake_get_active_latest_1m_candle_price,
         )
         client = PaperExchangeClient(repository=mock_repo, source_exchange="kraken")
         client._resolve_instrument_public_ids = fake_resolve_instrument_public_ids
@@ -532,8 +511,7 @@ class TestPaperMarketDataMethods:
         await client.connect()
         ticker = await client.get_ticker("BTC-USD")
         assert ticker.symbol == "BTC-USD"
-        assert ticker.bid == pytest.approx(50000.0)
-        assert ticker.ask == pytest.approx(50100.0)
+        assert ticker.bid == ticker.ask == 0.0
         assert ticker.last == pytest.approx(50050.0)
         await client.disconnect()
 
@@ -594,8 +572,7 @@ class TestPaperMarketDataMethods:
         Then: Ticker updates are yielded from repository.
         """
         mock_repo = SimpleNamespace(
-            get_market_snapshots=fake_get_market_snapshots,
-            iter_market_snapshots=fake_iter_market_snapshots,
+            iter_trades=fake_iter_trades,
         )
         start_ts = time.time() - 3600
         end_ts = time.time()
@@ -609,8 +586,7 @@ class TestPaperMarketDataMethods:
         client.set_tracker(SequenceTracker())
         await client.connect()
         async for ticker in client.subscribe_ticker(["BTC-USD"]):
-            assert ticker.bid == pytest.approx(50000.0)
-            break
+            assert ticker.last == pytest.approx(50000.0)
         await client.disconnect()
 
     @pytest.mark.asyncio
@@ -622,8 +598,7 @@ class TestPaperMarketDataMethods:
         Then: ValueError is raised.
         """
         mock_repo = SimpleNamespace(
-            get_market_snapshots=fake_get_market_snapshots,
-            iter_market_snapshots=fake_iter_market_snapshots,
+            iter_trades=fake_iter_trades,
         )
         client = PaperExchangeClient(repository=mock_repo, source_exchange="kraken")
         client.set_tracker(SequenceTracker())
@@ -642,8 +617,7 @@ class TestPaperMarketDataMethods:
         Then: ValueError is raised.
         """
         mock_repo = SimpleNamespace(
-            get_market_snapshots=fake_get_market_snapshots,
-            iter_market_snapshots=fake_iter_market_snapshots,
+            iter_trades=fake_iter_trades,
         )
         client = PaperExchangeClient(
             repository=mock_repo,

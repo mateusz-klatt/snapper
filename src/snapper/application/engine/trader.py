@@ -74,6 +74,7 @@ from snapper.config.settings import get_bootstrap_settings
 from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
+from snapper.core.candle_price import candle_mark
 from snapper.core.paired_execution import paired_halt_reason
 from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import ORDER_STATUS_REASON_ADOPTED
@@ -5973,22 +5974,13 @@ class TraderCoordinator(RegisterableProcess):
     async def _resolve_projection_mark(
         self, instrument_public_id: str
     ) -> tuple[float | None, datetime | None]:
-        """Resolve the stale-visible mark for a projection identity.
-
-        Echoes the active market snapshot verbatim — ``marked_at`` is
-        the snapshot's own bus timestamp and NO age gate is applied
-        (consumers judge freshness themselves). Paper instruments
-        resolve through their Phase-1 source mapping first; an unmapped
-        paper identity, any lookup failure, a missing snapshot, or a
-        non-finite/non-positive price all yield honest NULLs. A
-        previous mark is never carried forward.
+        """Read the newest active 1m close for the projection's source identity.
 
         Args:
-            instrument_public_id: Projection instrument identity.
+            instrument_public_id: Projected instrument, including mapped paper identities.
 
         Returns:
-            Tuple of (mark price, marked_at), both None when no usable
-            mark exists.
+            Mark and candle evidence time, or a null pair if unavailable.
         """
         repository = self.repository
         if not isinstance(repository, SQLAlchemyRepository):
@@ -5997,7 +5989,7 @@ class TraderCoordinator(RegisterableProcess):
             resolution = await repository.resolve_source_instrument_public_id(instrument_public_id)
             if resolution["is_paper"] and not resolution["mapped"]:
                 return None, None
-            quote = await repository.get_active_market_snapshot_price(
+            quote = await repository.get_active_latest_1m_candle_price(
                 resolution["valuation_public_id"]
             )
         except Exception:
@@ -6008,10 +6000,7 @@ class TraderCoordinator(RegisterableProcess):
             return None, None
         if quote is None:
             return None, None
-        price, marked_at = quote
-        if price is None or not math.isfinite(price) or price <= 0:
-            return None, None
-        return float(price), marked_at
+        return candle_mark(quote["close"], quote["open_at"], datetime.now(UTC)) or (None, None)
 
     async def _persist_position_projection(self, shard_key: str, *, now: datetime) -> None:
         """Best-effort truthful position write after a COMMITTED checkpoint.

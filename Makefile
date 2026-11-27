@@ -1,4 +1,4 @@
-.PHONY: android-check android-build help system-deps setup setup-full worktree local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-gitlinks sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite _force-test-db check fix check-all fix-all check-exclusions check-complexity-ratchet check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary check-read-visibility-boundary move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-server-uat dev-uat run-static reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf sonar-report clean
+.PHONY: android-check android-build help system-deps setup setup-full worktree local-plugin mcp-pat py-refresh mcp-refresh actions-refresh refresh update pre-refresh sync-gitlinks sync-docker-tool-pins fmt fmt-fix lint lint-fix typecheck test test-serial test-integration cov cov-serial cov-xml migrate-dev-sqlite _force-test-db check fix check-all fix-all check-exclusions check-complexity-ratchet check-docstrings check-no-comments check-main-guard check-temporal-mutations check-init-files check-vendor-neutral check-pydantic-routes check-egress-compose check-delegate-boundary check-read-visibility-boundary move-imports run-server uat-db-up uat-db-schema uat-db-refresh uat-setup run-uat run-server-uat dev-uat run-static research-market-snapshots reconcile-aliases run-polygon-aggregates run-polygon-load run-polygon run-polygon-grouped run-polygon-grouped-candles backfill-kraken-equities-candles migrate-dev migrate-prod dev-backend dev-notify dev-all dev-frontend run-broker run-feed run-executor run-trader-zmq zmq-logger ui-setup ui-refresh ui-dev ui-build ui-typecheck ui-lint ui-lint-fix ui-format ui-format-fix ui-dead-code ui-dead-code-fix ui-check ui-fix ui-gen-api-types ui-gen-ws-types ui-gen-zod ui-gen-api-zod ui-gen-entities ui-gen-permissions ui-gen-types ui-check-types ui-test ui-test-serial ui-cov ui-cov-serial ui-i18n-check ui-i18n-check-alerts ui-i18n-check-market ts-bridge bridge-regen bridge-check ios-gen-types ios-i18n-check gen-backend-i18n-catalog docker-build-dev docker-build-prod docker-migrate-dev docker-migrate-prod docker-push docker-run docker-run-static docker-research-market-snapshots docker-reconcile-aliases docker-polygon-aggregates docker-polygon-load docker-polygon docker-polygon-grouped docker-stop restart-frontend restart-backend restart-all server-check docs-pdf sonar-report clean
 
 help:
 	$(info Snapper Makefile - Authoritative Development Workflow)
@@ -56,7 +56,8 @@ help:
 	$(info )
 	$(info Application:)
 	$(info run-server                 Start web dashboard [production mode])
-	$(info run-static                 Refresh symbol mappings, underlyings, and market snapshots)
+	$(info run-static                 Refresh symbol mappings and underlyings)
+	$(info research-market-snapshots  Poll whole-market snapshots for research)
 	$(info reconcile-aliases          Close SCD2 alias rows for symbols whose capability is deactivated [idempotent])
 	$(info run-polygon-aggregates     Download Polygon OHLCV to CSV cache [no DB write; settings symbols; ["*"] = all mapped])
 	$(info run-polygon-load           Load cached Polygon CSVs into the DB [cache-only, no API])
@@ -136,7 +137,8 @@ help:
 	$(info docker-migrate-prod           Run migrations + seed prod data in Docker)
 	$(info docker-push                   Push Docker image)
 	$(info docker-run                    Run Docker container [background])
-	$(info docker-run-static             Refresh symbol mappings, underlyings, and market snapshots in Docker)
+	$(info docker-run-static             Refresh symbol mappings and underlyings in Docker)
+	$(info docker-research-market-snapshots  Poll whole-market snapshots for research in Docker)
 	$(info docker-reconcile-aliases      Close SCD2 alias rows whose capability is deactivated in Docker [idempotent])
 	$(info docker-polygon-aggregates     Download Polygon OHLCV to CSV cache in Docker [no DB write; settings symbols; ["*"] = all mapped])
 	$(info docker-polygon-load           Load cached Polygon CSVs into the DB in Docker [cache-only, no API])
@@ -504,6 +506,9 @@ run-static:
 	$(PYRUN) snapper update-walutomat-symbols --force
 	$(PYRUN) snapper update-polygon-symbols --force || true
 	$(PYRUN) snapper update-underlyings
+
+research-market-snapshots:
+	@echo "WARNING: Polls the whole market for research only."
 	$(PYRUN) snapper update-kraken-market-snapshot
 	$(PYRUN) snapper update-kraken-futures-market-snapshot
 	$(PYRUN) snapper update-kraken-equities-market-snapshot
@@ -751,6 +756,9 @@ docker-run-static:
 	$(DOCKER_RUN) update-walutomat-symbols --force
 	$(DOCKER_RUN) update-polygon-symbols --force || true
 	$(DOCKER_RUN) update-underlyings
+
+docker-research-market-snapshots:
+	@echo "WARNING: Polls the whole market for research only."
 	$(DOCKER_RUN) update-kraken-market-snapshot
 	$(DOCKER_RUN) update-kraken-futures-market-snapshot
 	$(DOCKER_RUN) update-kraken-equities-market-snapshot

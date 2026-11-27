@@ -455,6 +455,7 @@ def _serialize_position_row(row: PositionRow) -> dict[str, Any]:
     :func:`json.dumps` (called by :func:`to_call_tool_result`) cannot
     encode it, so it is converted to ISO-8601 string.
     """
+    mark_as_of = row.get("mark_as_of")
     return {
         "public_id": row["public_id"],
         "timestamp": row["timestamp"].isoformat(),
@@ -470,6 +471,8 @@ def _serialize_position_row(row: PositionRow) -> dict[str, Any]:
         "realized_pnl": row["realized_pnl"],
         "mark_price": row["mark_price"],
         "marked_at": row["marked_at"].isoformat() if row["marked_at"] else None,
+        "mark_as_of": mark_as_of.isoformat() if mark_as_of is not None else None,
+        "mark_stale": row.get("mark_stale", False),
         "source_venue_event_id": row["source_venue_event_id"],
         "position_cycle_public_id": row["position_cycle_public_id"],
         "wallet_public_id": row["wallet_public_id"],

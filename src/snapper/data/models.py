@@ -1540,12 +1540,10 @@ class Position(TemporalMixin, Base):
     of same-direction shards and NULL when directions oppose or any
     non-flat shard lacks an entry).
 
-    Provenance columns are stale-VISIBLE, never faked current:
-    ``mark_price``/``marked_at`` echo the active market snapshot
-    (``marked_at`` is the snapshot's own bus timestamp, no age gate) and
-    all three of ``mark_price``/``marked_at``/``unrealized_pnl`` are NULL
-    when no usable mark exists — a previous mark is never carried
-    forward. ``source_venue_event_id`` is the maximum durable
+    The mark price and its evidence time retain the last valid 1m candle close,
+    including aged closes. Both are NULL with unrealized PnL when no usable
+    candle exists. Read payloads derive staleness from evidence time.
+    The source venue event ID is the maximum durable
     venue-event WATERMARK consumed into this state, not the exact causal
     fill: recovery may advance it over non-fill lifecycle events and
     funding changes ``realized_pnl`` without advancing it (funding

@@ -217,6 +217,8 @@ from snapper.auth.domain.permissions import ROLE_PERMISSIONS
 from snapper.auth.domain.permissions import Permission
 from snapper.auth.domain.roles import UserRole
 from snapper.core.candle_identity import deterministic_candle_public_id
+from snapper.core.candle_price import candle_mark
+from snapper.core.candle_price import mark_is_stale
 from snapper.core.command_material import COMMAND_MATERIAL_CONFLICT_EVENT
 from snapper.core.command_material import TRADE_COMMAND_LIFECYCLE_FIELDS
 from snapper.core.command_material import TradeCommandMaterialChangedError
@@ -5922,9 +5924,7 @@ class Repository(ABC):
     ) -> AsyncIterator[MarketSnapshotRow]:
         """Stream market snapshots in time order without materialising.
 
-        Companion to :meth:`get_market_snapshots` for paper-mode
-        backtest replays over long windows. Implementations yield
-        rows in ``timestamp ASC`` order.
+        Research replay over long windows. Implementations yield in timestamp order.
         """
         ...
 
@@ -7495,8 +7495,7 @@ class Repository(ABC):
         Args:
             as_of: Point-in-time for temporal query.
             wallet_public_ids: Optional wallet scope filter.
-            current_marks: Replace the stored event-time mark with a fresh
-                durable tick for current-state display.
+            current_marks: Overlay the stored event-time mark with the newest active 1m close.
 
         Returns:
             Position dicts denormalized with instrument and symbol info.
@@ -13246,7 +13245,7 @@ class SQLAlchemyRepository(Repository):
                     exchange=row[2],
                     base=row[3],
                     quote=cast(str, row[4]),
-                    close=cast(float, row[5]),
+                    close=row[5],
                     open_at=row[6],
                 )
                 for row in result.all()
@@ -26842,12 +26841,8 @@ class SQLAlchemyRepository(Repository):
         changes. Self-exclusion uses the internal PK ``id`` so no
         UUID comparison is involved.
 
-        Current reads value each row from the newest positive finite
-        tick no older than the market-coverage freshness window. The
-        stored mark remains the event-time projection value for
-        historical reads. Missing, stale, unmapped-paper, or unusable
-        tick evidence clears the mark trio instead of carrying a
-        confident stale value into a current-money display.
+        Current reads overlay the newest active 1m close and flag an aged
+        close for display. Historical reads retain the event-time projection.
         """
         async with self.session() as s:
             other_cycle = aliased(PositionCycle)
@@ -26931,6 +26926,8 @@ class SQLAlchemyRepository(Repository):
                     "realized_pnl": pos.realized_pnl,
                     "mark_price": pos.mark_price,
                     "marked_at": pos.marked_at,
+                    "mark_as_of": pos.marked_at,
+                    "mark_stale": mark_is_stale(pos.marked_at, as_of),
                     "source_venue_event_id": pos.source_venue_event_id,
                     "position_cycle_public_id": cycle_pid,
                     "wallet_public_id": pos.wallet_public_id,
@@ -26947,20 +26944,24 @@ class SQLAlchemyRepository(Repository):
         row: PositionRow,
         as_of: datetime,
     ) -> PositionRow:
-        """Overlay one current position with fail-closed durable tick evidence."""
+        """Overlay one current position with the latest active 1m candle close."""
         valuation_public_id = await self._position_valuation_instrument(
             session, row["instrument_public_id"]
         )
         marked = dict(row)
-        quote = await self._fresh_tick_mark(session, valuation_public_id, as_of)
+        quote = await self._latest_position_candle_mark(session, valuation_public_id, as_of)
         if quote is None:
             marked["mark_price"] = None
             marked["marked_at"] = None
+            marked["mark_as_of"] = None
+            marked["mark_stale"] = False
             marked["unrealized_pnl"] = None
             return cast(PositionRow, marked)
         price, marked_at = quote
         marked["mark_price"] = price
         marked["marked_at"] = marked_at
+        marked["mark_as_of"] = marked_at
+        marked["mark_stale"] = mark_is_stale(marked_at, as_of)
         average_price = row["average_price"]
         marked["unrealized_pnl"] = (
             None if average_price is None else row["quantity"] * (price - average_price)
@@ -27003,34 +27004,20 @@ class SQLAlchemyRepository(Repository):
         ).scalar_one_or_none()
 
     @staticmethod
-    async def _fresh_tick_mark(
+    async def _latest_position_candle_mark(
         session: AsyncSession,
         instrument_public_id: str | None,
         as_of: datetime,
     ) -> tuple[float, datetime] | None:
-        """Return the newest usable tick inside the ten-minute live window."""
+        """Read the current candle mark using the position query's session."""
         if instrument_public_id is None:
             return None
-        cutoff = as_of - timedelta(minutes=10)
-        tick = (
-            await session.execute(
-                select(Tick.last, Tick.timestamp)
-                .where(
-                    Tick.instrument_public_id == instrument_public_id,
-                    Tick.timestamp >= cutoff,
-                    Tick.timestamp <= as_of,
-                    Tick.known_to > as_of,
-                )
-                .order_by(Tick.timestamp.desc(), Tick.id.desc())
-                .limit(1)
-            )
+        row = (
+            await session.execute(_latest_active_1m_candle_query(instrument_public_id))
         ).one_or_none()
-        if tick is None or tick.last is None:
+        if row is None:
             return None
-        price = float(tick.last)
-        if not math.isfinite(price) or price <= 0:
-            return None
-        return price, tick.timestamp
+        return candle_mark(row.close, row.open_at, as_of)
 
     async def get_pnl_spot_order_minimum_window(
         self,
@@ -42274,6 +42261,8 @@ class SQLAlchemyRepository(Repository):
                     "realized_pnl": position.realized_pnl,
                     "mark_price": position.mark_price,
                     "marked_at": position.marked_at,
+                    "mark_as_of": position.marked_at,
+                    "mark_stale": mark_is_stale(position.marked_at, as_of),
                     "source_venue_event_id": position.source_venue_event_id,
                     "position_cycle_public_id": cycle_public_id,
                     "wallet_public_id": position.wallet_public_id,

@@ -35,13 +35,17 @@ make ui-setup
 make ui-build
 
 # Initialize the database + seed dev data, then refresh the verified
-# symbol mappings, underlying mappings, and non-Polygon market snapshots
-# so the dashboard has data to show.
+# symbol mappings and underlying mappings.
 make migrate-dev run-static
 
 # Start the server
 make run-server
 ```
+
+`make run-static` and `make docker-run-static` refresh symbol mappings and
+underlyings. Live prices come from persisted candles or trades. To poll
+whole-market snapshots for research, use `make research-market-snapshots` or
+`make docker-research-market-snapshots`.
 
 Open <http://localhost:8000/> and log in with the dev seed credentials —
 the default values are defined in the bundled seed file

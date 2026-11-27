@@ -1915,6 +1915,8 @@ class PositionRow(TypedDict):
     realized_pnl: float | None
     mark_price: float | None
     marked_at: datetime | None
+    mark_as_of: NotRequired[datetime | None]
+    mark_stale: NotRequired[bool]
     source_venue_event_id: int | None
     position_cycle_public_id: str | None
     wallet_public_id: str
@@ -2834,7 +2836,7 @@ class ActiveCandlePriceRow(TypedDict):
 
     candle_public_id: str
     instrument_public_id: str
-    close: float
+    close: float | None
     open_at: datetime
 
 
@@ -2846,7 +2848,7 @@ class UsdFxCandleCandidateRow(TypedDict):
     exchange: str
     base: str
     quote: str
-    close: float
+    close: float | None
     open_at: datetime
 
 
