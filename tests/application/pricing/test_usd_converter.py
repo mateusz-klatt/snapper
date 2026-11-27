@@ -466,7 +466,6 @@ async def test_candle_only_fresh_price_succeeds(
 @pytest.mark.asyncio
 async def test_stale_candle_refuses_despite_fresh_research_snapshot(
     repo: SQLAlchemyRepository,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stale 1m candle prevents use of the transitional snapshot.
 
@@ -484,12 +483,9 @@ async def test_stale_candle_refuses_despite_fresh_research_snapshot(
         open_at=_seed_time() - timedelta(seconds=600),
     )
     await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=55_000.0)
-    snapshot_read = AsyncMock(wraps=repo.get_active_market_snapshot_price)
-    monkeypatch.setattr(repo, "get_active_market_snapshot_price", snapshot_read)
     conv = USDConverter(repo, now=_seed_time)
     with pytest.raises(PriceUnavailableError, match="price_stale"):
         await conv.to_usd(inst_id, Decimal("2"))
-    snapshot_read.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -627,6 +623,7 @@ async def test_candle_future_skew_naive_and_invalid_price_fail_closed(
         "instrument_public_id": inst_id,
         "close": 250.0,
         "open_at": _seed_time() + timedelta(seconds=MAX_FUTURE_SKEW_SECONDS + 1),
+        "timestamp": _seed_time(),
     }
     monkeypatch.setattr(
         repo, "get_active_latest_1m_candle_price", AsyncMock(return_value=bad_future)
@@ -639,6 +636,7 @@ async def test_candle_future_skew_naive_and_invalid_price_fail_closed(
         "instrument_public_id": inst_id,
         "close": 250.0,
         "open_at": _seed_time().replace(tzinfo=None),
+        "timestamp": _seed_time(),
     }
     monkeypatch.setattr(
         repo, "get_active_latest_1m_candle_price", AsyncMock(return_value=naive_row)
@@ -651,15 +649,10 @@ async def test_candle_future_skew_naive_and_invalid_price_fail_closed(
         "instrument_public_id": inst_id,
         "close": 0.0,
         "open_at": _seed_time(),
+        "timestamp": _seed_time(),
     }
     monkeypatch.setattr(
         repo, "get_active_latest_1m_candle_price", AsyncMock(return_value=invalid_row)
-    )
-    with pytest.raises(PriceUnavailableError, match="last_price_invalid"):
-        await USDConverter(repo, now=_seed_time).to_usd(inst_id, Decimal("1"))
-
-    monkeypatch.setattr(
-        repo, "get_active_market_snapshot_price", AsyncMock(return_value=(300.0, _seed_time()))
     )
     with pytest.raises(PriceUnavailableError, match="last_price_invalid"):
         await USDConverter(repo, now=_seed_time).to_usd(inst_id, Decimal("1"))

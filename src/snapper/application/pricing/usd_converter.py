@@ -15,8 +15,9 @@ retained for future-opened bars). This keeps historical backfills and repairs
 from refreshing old bars.
 
 Non-USD quotes require an independently evidenced current direct or inverse
-forex plane against USD. The newest usable plane supplies the rate. Disagreeing
-normalized rates at the newest timestamp cause ``fx_plane_conflict``. FX evidence
+forex plane against USD. The newest usable evidence wins. Among tied closes,
+the portfolio FX venue rule prefers Walutomat for PLN and otherwise orders
+venues lexically. Direct rates win orientation ties on the same venue. FX evidence
 is reread on every conversion. Contract notional measures exposure.
 
 Cache + staleness:
@@ -67,7 +68,6 @@ class PriceUnavailableError(Exception):
         ``fx_snapshot_missing``: no eligible active forex 1m candle exists against USD (legacy code).
         ``fx_price_stale``: no FX rate satisfies the age and clock-skew bounds.
         ``fx_price_invalid``: no positive finite FX rate or final USD value.
-        ``fx_plane_conflict``: newest FX planes disagree after normalization.
         ``last_price_invalid``: candle close is null, nonpositive or nonfinite.
         ``invalid_quantity``: quantity is not a nonnegative finite Decimal.
         ``contract_valuation_unavailable``: payoff, currency or unit evidence
@@ -103,7 +103,9 @@ class _CacheEntry:
 class _FxRate:
     """Normalized USD-per-quote rate retaining raw price and orientation evidence."""
 
-    candle_public_id: str
+    instrument_public_id: str
+    exchange: str
+    is_inverse: bool
     timestamp: datetime
     rate: Decimal
 
@@ -148,11 +150,14 @@ def _normalized_fx_rate(candidate: UsdFxCandleCandidateRow, now: datetime) -> _F
     if raw is None:
         return None
     try:
-        rate = Decimal(1) / raw if candidate["base"] == "USD" else raw
+        is_inverse = candidate["base"] == "USD"
+        rate = Decimal(1) / raw if is_inverse else raw
         if not rate.is_finite() or rate <= 0:
             return None
         return _FxRate(
-            candidate["candle_public_id"],
+            candidate["instrument_public_id"],
+            candidate["exchange"],
+            is_inverse,
             candle_price.candle_evidence_timestamp(candidate["open_at"], now),
             rate,
         )
@@ -189,7 +194,11 @@ def _select_fx_rate(
     instrument_public_id: str,
     currency: str,
 ) -> _FxRate:
-    """Select the newest usable plane, refusing disagreeing normalized rates."""
+    """Prefer the newest usable close, then apply the portfolio FX venue rule.
+
+    The catalog query emits one latest active candle per instrument. Different
+    instruments can report different closes for the same market minute.
+    """
     if not rows:
         raise PriceUnavailableError(
             "fx_snapshot_missing", instrument_public_id, f"quote={currency}"
@@ -208,9 +217,15 @@ def _select_fx_rate(
         raise PriceUnavailableError("fx_price_stale", instrument_public_id)
     newest = max(rate.timestamp for rate in fresh)
     planes = [rate for rate in fresh if rate.timestamp == newest]
-    if len({rate.rate for rate in planes}) != 1:
-        raise PriceUnavailableError("fx_plane_conflict", instrument_public_id)
-    return min(planes, key=lambda rate: rate.candle_public_id)
+    return min(
+        planes,
+        key=lambda rate: (
+            currency == "PLN" and rate.exchange != "walutomat",
+            rate.exchange,
+            rate.is_inverse,
+            rate.instrument_public_id,
+        ),
+    )
 
 
 def _require_contract_evidence(

@@ -68,6 +68,8 @@ from snapper.core.wallet_resolution import WalletAmbiguousError
 from snapper.core.wallet_resolution import WalletUnresolvedError
 from snapper.core.wallet_resolution import resolve_wallet_or_default
 from snapper.data.repository import Repository
+from snapper.data.repository_types import ActiveCandlePriceRow
+from snapper.data.repository_types import CandleRow
 from snapper.data.repository_types import ExecutionPlanInsertRow
 from snapper.data.repository_types import ExecutionPlanRow
 from snapper.data.repository_types import TradeCommandInsertRow
@@ -352,6 +354,7 @@ async def _resolve_paper_reference_price(
     *,
     repo: Repository,
     body: CreateOrderBody,
+    instrument_public_id: str,
     as_of: datetime,
 ) -> float:
     """Resolve the fill reference price for a manual paper MARKET order.
@@ -362,6 +365,7 @@ async def _resolve_paper_reference_price(
     Args:
         repo: Repository for candle lookups.
         body: Create-order request with source exchange and instrument.
+        instrument_public_id: Resolved request instrument, including paper mirrors.
         as_of: Bus time for the temporal queries.
 
     Returns:
@@ -370,25 +374,15 @@ async def _resolve_paper_reference_price(
     Raises:
         HTTPException: 400 when no fresh positive price exists.
     """
-    candles = await repo.get_candles(
-        instrument=body.instrument,
-        timeframe="1m",
-        start=None,
-        end=None,
-        exchange=cast(AllExchange, body.exchange),
-        as_of=as_of,
-        limit=1,
-        order="desc",
-    )
-    if candles:
-        newest_candle = candles[0]
-        evidence_at = candle_evidence_timestamp(newest_candle["open_at"], as_of)
+    candle = await _load_paper_reference_candle(repo, body, instrument_public_id, as_of)
+    if candle is not None:
+        evidence_at = candle_evidence_timestamp(candle["open_at"], as_of)
         fresh = (
-            timedelta(0) <= as_of - newest_candle["timestamp"] <= _PAPER_CANDLE_MAX_AGE
+            timedelta(0) <= as_of - candle["timestamp"] <= _PAPER_CANDLE_MAX_AGE
             and timedelta(0) <= as_of - evidence_at <= _PAPER_CANDLE_MAX_AGE
         )
-        if fresh and is_positive_finite(newest_candle["close"]):
-            return float(newest_candle["close"])
+        if fresh and is_positive_finite(candle["close"]):
+            return candle["close"]
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail={
@@ -401,6 +395,28 @@ async def _resolve_paper_reference_price(
             ),
         },
     )
+
+
+async def _load_paper_reference_candle(
+    repo: Repository, body: CreateOrderBody, instrument_public_id: str, as_of: datetime
+) -> ActiveCandlePriceRow | CandleRow | None:
+    """Read the mapped source candle for paper mirrors and preserve other venue reads."""
+    if body.exchange == ExchangeEnum.PAPER.value:
+        source = await repo.resolve_source_instrument_public_id(instrument_public_id)
+        if not source["mapped"]:
+            return None
+        return await repo.get_active_latest_1m_candle_price(source["valuation_public_id"])
+    candles = await repo.get_candles(
+        instrument=body.instrument,
+        timeframe="1m",
+        start=None,
+        end=None,
+        exchange=cast(AllExchange, body.exchange),
+        as_of=as_of,
+        limit=1,
+        order="desc",
+    )
+    return candles[0] if candles else None
 
 
 def _refuse_unsupported_modifiers(body: CreateOrderBody, execution_exchange: str) -> None:
@@ -449,6 +465,7 @@ async def _create_order_command_price(
     repo: Repository,
     body: CreateOrderBody,
     execution_exchange: str,
+    instrument_public_id: str,
     as_of: datetime,
 ) -> float | None:
     """Resolve the price used to persist a live or paper manual order.
@@ -457,6 +474,7 @@ async def _create_order_command_price(
         repo: Repository supplying paper market reference prices.
         body: Validated manual-order payload.
         execution_exchange: Actual venue selected by wallet routing.
+        instrument_public_id: Resolved request instrument identity.
         as_of: Reference-price evaluation time.
 
     Returns:
@@ -466,6 +484,7 @@ async def _create_order_command_price(
         return await _resolve_paper_reference_price(
             repo=repo,
             body=body,
+            instrument_public_id=instrument_public_id,
             as_of=as_of,
         )
     return body.price
@@ -662,7 +681,9 @@ async def create_order(
         repo, body, execution_exchange, resolved_instrument_public_id, now
     )
 
-    command_price = await _create_order_command_price(repo, body, execution_exchange, now)
+    command_price = await _create_order_command_price(
+        repo, body, execution_exchange, resolved_instrument_public_id, now
+    )
 
     await _validate_create_order_ai_review_citation(
         repo=repo,

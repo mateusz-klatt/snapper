@@ -2628,6 +2628,10 @@ def register_mcp_tools(
     ) -> CallToolResult:
         """List active positions with optional filters.
 
+        ``mark_as_of`` is the mark's evidence time. When ``mark_stale`` is true,
+        the mark and its unrealized PnL are for display only and must never
+        drive trading, risk, or other decisions.
+
         Args:
             wallet_public_id: Filter to one wallet. Caller must have
                 scope; mismatch returns an empty list with
@@ -2740,6 +2744,10 @@ def register_mcp_tools(
         emits no audit event. It resolves activity by the review's immutable
         wallet and instrument keys over the inclusive ``[created_at, as_of]``
         window, using one temporal anchor for every bitemporal read.
+
+        Position snapshots carry ``mark_as_of``, the mark's evidence time.
+        When ``mark_stale`` is true, the mark and its unrealized PnL are for
+        display only and must never drive trading, risk, or other decisions.
 
         Args:
             review_public_id: Public identifier of the terminal AI review.

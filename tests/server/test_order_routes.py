@@ -1759,6 +1759,56 @@ class TestPaperReferencePrice:
         assert response.json()["detail"]["error_code"] == "no_reference_price"
         repo.insert_execution_plan.assert_not_called()
 
+    @pytest.mark.parametrize("scenario", ["fresh", "stale", "missing", "unmapped"])
+    def test_paper_exchange_market_prices_its_mapped_candle(self, scenario: str) -> None:
+        """Use the mapped source candle for an explicit paper venue request.
+
+        Given: a paper mirror selected directly, with a usable or unavailable reference,
+        When: the client submits a paper MARKET order,
+        Then: admission uses only the mapped source and enforces the same freshness window.
+        """
+        repo = self._paper_market_repo()
+        repo.get_instrument_public_id_by_symbol.return_value = "paper-inst"
+        mapped: InstrumentSourceResolution = {
+            "valuation_public_id": "inst-1",
+            "is_paper": True,
+            "mapped": True,
+        }
+        resolution = {**mapped, "mapped": False} if scenario == "unmapped" else mapped
+        repo.resolve_source_instrument_public_id.side_effect = [mapped, resolution]
+        now = datetime.now(UTC)
+        repo.get_active_latest_1m_candle_price = AsyncMock(
+            return_value=(
+                None
+                if scenario == "missing"
+                else {
+                    "candle_public_id": "source-candle",
+                    "instrument_public_id": "inst-1",
+                    "close": 251.0,
+                    "timestamp": now,
+                    "open_at": now - timedelta(seconds=181 if scenario == "stale" else 0),
+                }
+            )
+        )
+        body = _paper_market_body()
+        body["payload"]["exchange"] = "paper"
+        client = _create_client(repo)
+        response = client.post("/api/orders", json=body)
+        client.close()
+
+        repo.get_candles.assert_not_awaited()
+        if scenario == "unmapped":
+            repo.get_active_latest_1m_candle_price.assert_not_awaited()
+        else:
+            repo.get_active_latest_1m_candle_price.assert_awaited_once_with("inst-1")
+        if scenario == "fresh":
+            assert response.status_code == 200
+            assert repo.insert_trade_command.call_args.args[0]["price"] == 251.0
+        else:
+            assert response.status_code == 400
+            assert response.json()["detail"]["error_code"] == "no_reference_price"
+            repo.insert_execution_plan.assert_not_called()
+
     def test_paper_market_no_price_source_returns_400(self) -> None:
         """Reject a snapshot-only source during a feed gap.
 

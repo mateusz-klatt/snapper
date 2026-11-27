@@ -46,10 +46,10 @@ from snapper.core.candle_price import mark_is_stale
 from snapper.core.types import AllExchange
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import MarketDataExchange
+from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Instrument
 from snapper.data.models import Symbol
 from snapper.data.repository import Repository
-from snapper.data.repository import where_active
 from snapper.data.repository_types import ActiveCandlePriceRow
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.exchanges.contracts import AccountBalance
@@ -72,23 +72,6 @@ _REPO_REQUIRED_MSG = "Repository required for paper market data"
 _CALL_CONNECT_MSG = "Not connected - call connect() first"
 _TIME_RANGE_REQUIRED_MSG = "Time range (start_time, end_time) required for paper market data replay"
 _SOURCE_EXCHANGE_REQUIRED_MSG = "source_exchange required for paper market data replay"
-
-_MARKET_FILL_PRICE_SOURCE_EXCHANGES: tuple[MarketDataExchange, ...] = (
-    ExchangeEnum.KRAKEN,
-    ExchangeEnum.KRAKEN_FUTURES,
-    ExchangeEnum.KRAKEN_EQUITIES,
-    ExchangeEnum.WALUTOMAT,
-)
-"""Source-venue preference order for pricing a paper MARKET fill.
-
-The paper venue mirrors instruments from live source venues, so a
-market order's fill price is the freshest persisted 1m close for the
-symbol on the first source venue that knows it. ``source_exchange``
-(when the client was constructed with one) takes precedence over this
-list. Without any resolvable price the simulator CANCELS the order
-instead of filling at 0.0 — a zero-price fill poisons position entry
-price, cash accounting, and every P&L consumer downstream.
-"""
 
 
 class _EmptyInstrumentsAsyncIterator(AsyncIterator[dict[str, Any]]):
@@ -299,8 +282,8 @@ class PaperExchangeClient(ExchangeClientBase):
         """Resolve a market-order fill price from persisted source-venue candles.
 
         Read the newest 1m close, including provisional bars. A configured
-        source venue is authoritative. Otherwise try the simulator's existing
-        source venue preference order. Missing, invalid, future and stale
+        source venue is authoritative. Without one, use the active paper
+        instrument's mapped source identity. Missing, invalid, future and stale
         closes are unusable. The simulator cancels an unpriceable order.
 
         Args:
@@ -318,34 +301,37 @@ class PaperExchangeClient(ExchangeClientBase):
                 f"temporally wrong; replay flows must submit priced orders"
             )
             return None
-        candidates: tuple[MarketDataExchange, ...] = (
-            (self.source_exchange,) if self.source_exchange else _MARKET_FILL_PRICE_SOURCE_EXCHANGES
-        )
-        for exchange in candidates:
-            try:
-                candle = await self._get_source_candle(self.repository, symbol, exchange)
-            except Exception as exc:
-                logger.warning(f"Paper fill-price lookup failed on {exchange}: {exc}")
-                continue
-            if candle is None:
-                continue
-            now = datetime.now(UTC)
-            mark = candle_mark(candle["close"], candle["open_at"], now)
-            if mark is None or mark_is_stale(mark[1], now):
-                continue
-            price, _ = mark
-            logger.info(f"Paper market fill price for {symbol}: {price} (source {exchange})")
-            return price
-        return None
+        try:
+            candle = await self._get_source_candle(self.repository, symbol, self.source_exchange)
+        except Exception as exc:
+            logger.warning(f"Paper fill-price lookup failed for {symbol}: {exc}")
+            return None
+        if candle is None:
+            return None
+        now = datetime.now(UTC)
+        mark = candle_mark(candle["close"], candle["open_at"], now)
+        if mark is None or mark_is_stale(mark[1], now):
+            return None
+        price, _ = mark
+        logger.info(f"Paper market fill price for {symbol}: {price}")
+        return price
 
     async def _get_source_candle(
-        self, repo: Repository, symbol: str, exchange: MarketDataExchange
+        self, repo: Repository, symbol: str, exchange: MarketDataExchange | None
     ) -> ActiveCandlePriceRow | None:
-        """Read the newest active 1m close for one source venue and symbol."""
-        instrument_ids = await self._resolve_instrument_public_ids([symbol], exchange)
+        """Read the newest candle for the configured or mapped instrument."""
+        instrument_ids = await self._resolve_instrument_public_ids(
+            [symbol], exchange or ExchangeEnum.PAPER
+        )
         if not instrument_ids:
             return None
-        return await repo.get_active_latest_1m_candle_price(instrument_ids[0])
+        instrument_id = instrument_ids[0]
+        if exchange is None:
+            source = await repo.resolve_source_instrument_public_id(instrument_id)
+            if not source["mapped"]:
+                return None
+            instrument_id = source["valuation_public_id"]
+        return await repo.get_active_latest_1m_candle_price(instrument_id)
 
     def _order_still_fillable(self, order: ExchangeOrderSnapshot) -> bool:
         """Re-check order lifecycle after every await in the fill simulator.
@@ -662,6 +648,7 @@ class PaperExchangeClient(ExchangeClientBase):
 
         Performs 2-hop lookup: Symbol(native_symbol) -> Symbol.public_id,
         then Instrument(symbol_public_id, exchange) -> Instrument.public_id.
+        Both hops select active catalog versions without a wall-clock cutoff.
 
         Args:
             symbols: List of native symbol strings.
@@ -673,27 +660,22 @@ class PaperExchangeClient(ExchangeClientBase):
         if not self.repository:
             return []
         result: list[str] = []
-        now = datetime.now(tz=UTC)
         async with self.repository.session() as s:
             for symbol in symbols:
-                s_ts, s_kt = where_active(Symbol, now)
                 sym_q = await s.execute(
                     select(Symbol.public_id).where(
                         Symbol.native_symbol == symbol,
-                        s_ts,
-                        s_kt,
+                        Symbol.known_to == KNOWN_TO_MAX,
                     )
                 )
                 symbol_pid = sym_q.scalar_one_or_none()
                 if symbol_pid is None:
                     continue
-                i_ts, i_kt = where_active(Instrument, now)
                 inst_q = await s.execute(
                     select(Instrument.public_id).where(
                         Instrument.symbol_public_id == symbol_pid,
                         Instrument.exchange == exchange,
-                        i_ts,
-                        i_kt,
+                        Instrument.known_to == KNOWN_TO_MAX,
                     )
                 )
                 inst_pid = inst_q.scalar_one_or_none()

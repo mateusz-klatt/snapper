@@ -123,39 +123,6 @@ async def repo() -> AsyncIterator[SQLAlchemyRepository]:
     await repository.engine.dispose()
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"closed": "symbol"},
-        {"closed": "instrument"},
-        {"closed": "capability"},
-        {"closed": "snapshot"},
-        {"snapshot": False},
-        {"exchange": "paper", "capability_exchange": "paper"},
-        {"asset_type": "crypto"},
-        {"can_market_data": False},
-        {"base": "GBP"},
-        {"capability_exchange": "walutomat"},
-    ],
-)
-async def test_repository_fx_read_requires_every_current_evidence_plane(
-    repo: SQLAlchemyRepository, change: dict[str, object]
-) -> None:
-    """Exclude an ineligible plane while retaining both current USD orientations.
-
-    Given: two usable forex planes and a third with one invalid eligibility fact.
-    When: current EUR conversion candidates are read from real SQLite joins.
-    Then: only direct and inverse current market-data evidence enters the oracle.
-    """
-    await _seed(repo, _Market("direct"))
-    await _seed(repo, _Market("inverse", base="USD", quote="EUR", price=0.8))
-    await _seed(repo, replace(_Market("excluded"), **change))
-    rows = await repo.get_active_usd_fx_snapshot_candidates("EUR")
-    assert {row["instrument_public_id"] for row in rows} == {"direct", "inverse"}
-    assert {row["snapshot_public_id"] for row in rows} == {"snap-direct", "snap-inverse"}
-    assert all(row["timestamp"] == _NOW for row in rows)
-
-
 @pytest.mark.parametrize("inverse", [False, True])
 @pytest.mark.parametrize("quantity", [Decimal(0), Decimal("2")])
 async def test_direct_and_inverse_fx_produce_the_same_usd_notional(
@@ -172,27 +139,53 @@ async def test_direct_and_inverse_fx_produce_the_same_usd_notional(
     assert await USDConverter(repo, now=lambda: _NOW).to_usd("main", quantity) == quantity * 125
 
 
-@pytest.mark.parametrize(
-    "direct,inverse,expected",
-    [(1.25, 0.8, "250"), (1.25, 1.25, None)],
-)
-async def test_equal_time_planes_compare_normalized_rates(
-    repo: SQLAlchemyRepository, direct: float, inverse: float, expected: str | None
-) -> None:
-    """Deduplicate reciprocal rates and refuse apparently equal raw inverse prices.
+async def test_same_venue_fx_tie_prefers_direct_orientation(repo: SQLAlchemyRepository) -> None:
+    """Prefer direct USD conversion for equal evidence on one venue.
 
-    Given: equally recent direct and inverse planes.
-    When: the oracle compares their USD-per-EUR values.
-    Then: reciprocal prices agree while equal raw prices conflict.
+    Given: a Kraken direct and inverse pair with equal close times and disagreeing rates,
+    When: the oracle values a EUR-quoted order,
+    Then: it selects the direct rate even when the inverse identity sorts first.
     """
-    await _seed(repo, _Market("direct", price=direct))
-    await _seed(repo, _Market("inverse", base="USD", quote="EUR", price=inverse))
-    converter = USDConverter(repo, now=lambda: _NOW)
-    if expected is None:
-        with pytest.raises(PriceUnavailableError, match="fx_plane_conflict"):
-            await converter.to_usd("main", Decimal(2))
-    else:
-        assert await converter.to_usd("main", Decimal(2)) == Decimal(expected)
+    await _seed(repo, _Market("z-direct", price=1.25))
+    await _seed(repo, _Market("a-inverse", base="USD", quote="EUR", price=1.25))
+    assert await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(2)) == 250
+
+
+@pytest.mark.parametrize(
+    "quote,kraken_age,walutomat_age,expected",
+    [
+        ("EUR", 0, 0, 250),
+        ("EUR", 301, 0, 240),
+        ("EUR", 30, 0, 240),
+        ("PLN", 0, 0, 240),
+        ("PLN", 0, 301, 250),
+    ],
+)
+async def test_fx_candle_election_uses_freshness_then_venue(
+    repo: SQLAlchemyRepository, quote: str, kraken_age: int, walutomat_age: int, expected: int
+) -> None:
+    """Rank equal-time cross-venue closes deterministically.
+
+    Given: Kraken and Walutomat publish different USD rates for the same pair,
+    When: both rates enter the live FX query,
+    Then: the newest usable close wins and venue preference breaks a tie.
+    """
+    await _seed(repo, _Market("asset", base="BTC", quote=quote, price=100, asset_type="crypto"))
+    await _seed(
+        repo,
+        _Market("z-kraken", base=quote, price=1.25, timestamp=_NOW - timedelta(seconds=kraken_age)),
+    )
+    await _seed(
+        repo,
+        _Market(
+            "a-walutomat",
+            base=quote,
+            price=1.2,
+            exchange="walutomat",
+            timestamp=_NOW - timedelta(seconds=walutomat_age),
+        ),
+    )
+    assert await USDConverter(repo, now=lambda: _NOW).to_usd("asset", Decimal(2)) == expected
 
 
 async def test_newest_usable_fx_wins_and_main_cache_does_not_cache_fx(

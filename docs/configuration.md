@@ -609,6 +609,12 @@ rejected for that refresh cycle and the previous policy remains active.
 Use `/api/market/cache/health` and `/api/market/coverage` to verify the
 effective persisted universe.
 
+Auto candle persistence includes every active non-paper, market-data-enabled
+forex instrument with a USD leg. These conversion dependencies bypass
+auto candle exclusions and do not require a scope grant. Explicit candle
+mode controls its own allowlist. Publishers must still subscribe to the
+pairs and receive candles for the converter to price them.
+
 In Kraken Spot `trade_built` mode, a supervised history worker starts alongside
 the live consumers and reconciles recent closed minutes for persisted, subscribed
 instruments: the last 719 minutes for priority symbols and the last 120 minutes

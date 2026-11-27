@@ -132,8 +132,10 @@ price. Instruments without a usable live candle are refused. The
 Non-USD quote exposure uses current market-data-enabled, non-paper forex
 planes against USD. The oracle normalizes direct and inverse rates and chooses
 the newest usable plane from the current 1m candle evidence.
-Equally recent planes with conflicting normalized rates refuse admission
-with `fx_plane_conflict`. USD quotes need no FX lookup. The oracle excludes
+Tied candle closes use the portfolio venue rule. Walutomat leads for PLN;
+other ties use lexical venue order, then direct orientation within a venue.
+The catalog query returns a single latest active candle per instrument.
+USD quotes need no FX lookup. The oracle excludes
 historical and carried P&L conversion rates. General commodity, option, margin
 and collateral valuation remain outside this profile.
 
@@ -145,7 +147,7 @@ certification and contract expiry are checked again after all awaited reads,
 including cached and USD-only calls. Missing or unsafe evidence reports
 `caps_price_unavailable`, retaining structured reason codes (`snapshot_missing`
 for a missing instrument candle, `price_stale`, `fx_snapshot_missing` for a
-missing USD FX candle, `fx_price_stale`, `fx_plane_conflict`,
+missing USD FX candle, `fx_price_stale`,
 etc.).
 
 Admission stores the converted value in `submitted_notional_usd`, rounded up to

@@ -2819,18 +2819,6 @@ class PositionDisplayFactRow(TypedDict):
     instrument_kind: str | None
 
 
-class UsdFxSnapshotCandidateRow(TypedDict):
-    """Current forex identity and original direct or inverse USD price evidence."""
-
-    snapshot_public_id: str
-    instrument_public_id: str
-    exchange: str
-    base: str
-    quote: str
-    last_price: float | None
-    timestamp: datetime
-
-
 class ActiveCandlePriceRow(TypedDict):
     """Newest active 1m candle close and opening time for an instrument."""
 
@@ -2838,6 +2826,7 @@ class ActiveCandlePriceRow(TypedDict):
     instrument_public_id: str
     close: float | None
     open_at: datetime
+    timestamp: datetime
 
 
 class UsdFxCandleCandidateRow(TypedDict):

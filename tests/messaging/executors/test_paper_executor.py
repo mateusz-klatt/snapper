@@ -39,6 +39,9 @@ def _make_repo_mock() -> MagicMock:
     repo.get_active_latest_1m_candle_price = AsyncMock(
         return_value={"close": 64000.0, "open_at": datetime.now(UTC)}
     )
+    repo.resolve_source_instrument_public_id = AsyncMock(
+        return_value={"valuation_public_id": "inst-source", "is_paper": True, "mapped": True}
+    )
     session = AsyncMock()
     execute_result = MagicMock()
     execute_result.scalar_one_or_none = MagicMock(return_value="symbol-public-id")
@@ -59,6 +62,7 @@ async def fake_get_active_latest_1m_candle_price(
         "instrument_public_id": instrument_public_id,
         "close": 50050.0,
         "open_at": datetime.now(UTC),
+        "timestamp": datetime.now(UTC),
     }
 
 

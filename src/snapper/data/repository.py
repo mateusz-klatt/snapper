@@ -564,7 +564,6 @@ from snapper.data.repository_types import TradeUpsertRow
 from snapper.data.repository_types import UnderlyingAssetRow
 from snapper.data.repository_types import UnwitnessedExecutionRow
 from snapper.data.repository_types import UsdFxCandleCandidateRow
-from snapper.data.repository_types import UsdFxSnapshotCandidateRow
 from snapper.data.repository_types import UserActiveTokenInsertRow
 from snapper.data.repository_types import UserActiveTokenVerificationRow
 from snapper.data.repository_types import UserAlertDefaultRow
@@ -4640,7 +4639,7 @@ type _UsdFxCandleProjection = tuple[
 
 def _latest_active_1m_candle_query(
     instrument_public_id: str | ColumnElement[str],
-) -> Select[str, str, float, datetime]:
+) -> Select[str, str, float, datetime, datetime]:
     """Build an index-ordered lookup for one instrument's newest active 1m row.
 
     The active sentinel and row limit are SQL literals so PostgreSQL generic
@@ -4654,7 +4653,13 @@ def _latest_active_1m_candle_query(
         Select of the newest active 1m row, including provisional bars.
     """
     return (
-        select(Candle.public_id, Candle.instrument_public_id, Candle.close, Candle.open_at)
+        select(
+            Candle.public_id,
+            Candle.instrument_public_id,
+            Candle.close,
+            Candle.open_at,
+            Candle.timestamp,
+        )
         .where(
             Candle.instrument_public_id == instrument_public_id,
             Candle.timeframe == "1m",
@@ -4662,6 +4667,37 @@ def _latest_active_1m_candle_query(
         )
         .order_by(Candle.open_at.desc())
         .limit(literal(1, literal_execute=True))
+    )
+
+
+def _active_usd_fx_instruments_query() -> Select[str, str, str, str, str | None]:
+    """List clock-free market-data-enabled forex instrument metadata with a USD leg."""
+    return (
+        select(
+            Instrument.public_id,
+            Instrument.exchange,
+            Symbol.native_symbol,
+            Symbol.base,
+            Symbol.quote,
+        )
+        .select_from(Instrument)
+        .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
+        .join(
+            SymbolExchangeCapability,
+            (SymbolExchangeCapability.symbol_public_id == Symbol.public_id)
+            & (SymbolExchangeCapability.exchange == Instrument.exchange),
+        )
+        .where(
+            Instrument.known_to == KNOWN_TO_MAX,
+            Instrument.exchange != "paper",
+            Symbol.known_to == KNOWN_TO_MAX,
+            Symbol.asset_type == "forex",
+            Symbol.quote.is_not(None),
+            Symbol.base != Symbol.quote,
+            SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
+            SymbolExchangeCapability.can_market_data.is_(True),
+            or_(Symbol.base == "USD", Symbol.quote == "USD"),
+        )
     )
 
 
@@ -4686,7 +4722,8 @@ def _active_usd_fx_candle_candidates_query(
         Instrument
     )
     return (
-        select(
+        _active_usd_fx_instruments_query()
+        .with_only_columns(
             latest_candle.with_only_columns(Candle.public_id).scalar_subquery(),
             Instrument.public_id,
             Instrument.exchange,
@@ -4695,20 +4732,7 @@ def _active_usd_fx_candle_candidates_query(
             latest_candle.with_only_columns(Candle.close).scalar_subquery(),
             latest_candle.with_only_columns(Candle.open_at).scalar_subquery(),
         )
-        .select_from(Instrument)
-        .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
-        .join(
-            SymbolExchangeCapability,
-            (SymbolExchangeCapability.symbol_public_id == Symbol.public_id)
-            & (SymbolExchangeCapability.exchange == Instrument.exchange),
-        )
         .where(
-            Instrument.known_to == KNOWN_TO_MAX,
-            Instrument.exchange != "paper",
-            Symbol.known_to == KNOWN_TO_MAX,
-            Symbol.asset_type == "forex",
-            SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
-            SymbolExchangeCapability.can_market_data.is_(True),
             or_(
                 (Symbol.base == currency) & (Symbol.quote == "USD"),
                 (Symbol.base == "USD") & (Symbol.quote == currency),
@@ -5151,17 +5175,8 @@ class Repository(ABC):
         ...
 
     @abstractmethod
-    async def get_active_usd_fx_snapshot_candidates(
-        self, currency: str
-    ) -> list[UsdFxSnapshotCandidateRow]:
-        """Read deprecated transitional snapshots for non-paper USD forex planes.
-
-        Args:
-            currency: Quote currency requiring current USD conversion evidence.
-
-        Returns:
-            Both pair orientations with current snapshots and original raw rates.
-        """
+    async def list_active_usd_fx_instrument_pairs(self) -> set[tuple[str, str]]:
+        """Return venue and native symbol for eligible USD forex candle sources."""
         ...
 
     @abstractmethod
@@ -5175,19 +5190,6 @@ class Repository(ABC):
 
         Returns:
             Both pair orientations with newest active 1m candle close and open time.
-        """
-        ...
-
-    @abstractmethod
-    async def get_active_market_snapshot_price(
-        self, instrument_public_id: str
-    ) -> tuple[float | None, datetime] | None:
-        """Read the CURRENT market-snapshot price row (clock-free).
-
-        Returns:
-            ``(last_price, snapshot_timestamp)`` of the active
-            MarketSnapshot row, or ``None`` when no active row exists.
-            ``last_price`` may itself be NULL (venue never traded).
         """
         ...
 
@@ -13167,62 +13169,13 @@ class SQLAlchemyRepository(Repository):
             }
             return metadata
 
-    async def get_active_usd_fx_snapshot_candidates(
-        self, currency: str
-    ) -> list[UsdFxSnapshotCandidateRow]:
-        """Read deprecated transitional snapshots with current forex metadata.
-
-        Args:
-            currency: Quote currency paired directly or inversely with USD.
-
-        Returns:
-            All current eligible planes without choosing a venue or price in SQL.
-        """
+    async def list_active_usd_fx_instrument_pairs(self) -> set[tuple[str, str]]:
+        """Read eligible USD forex symbols even before their first candle is written."""
+        query = _active_usd_fx_instruments_query().with_only_columns(
+            Instrument.exchange, Symbol.native_symbol
+        )
         async with self.session() as session:
-            result = await session.execute(
-                select(
-                    MarketSnapshot.public_id,
-                    Instrument.public_id,
-                    Instrument.exchange,
-                    Symbol.base,
-                    Symbol.quote,
-                    MarketSnapshot.last_price,
-                    MarketSnapshot.timestamp,
-                )
-                .select_from(Instrument)
-                .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
-                .join(
-                    SymbolExchangeCapability,
-                    (SymbolExchangeCapability.symbol_public_id == Symbol.public_id)
-                    & (SymbolExchangeCapability.exchange == Instrument.exchange),
-                )
-                .join(MarketSnapshot, MarketSnapshot.instrument_public_id == Instrument.public_id)
-                .where(
-                    Instrument.known_to == KNOWN_TO_MAX,
-                    Instrument.exchange != "paper",
-                    Symbol.known_to == KNOWN_TO_MAX,
-                    Symbol.asset_type == "forex",
-                    SymbolExchangeCapability.known_to == KNOWN_TO_MAX,
-                    SymbolExchangeCapability.can_market_data.is_(True),
-                    MarketSnapshot.known_to == KNOWN_TO_MAX,
-                    or_(
-                        (Symbol.base == currency) & (Symbol.quote == "USD"),
-                        (Symbol.base == "USD") & (Symbol.quote == currency),
-                    ),
-                )
-            )
-            return [
-                UsdFxSnapshotCandidateRow(
-                    snapshot_public_id=row[0],
-                    instrument_public_id=row[1],
-                    exchange=row[2],
-                    base=row[3],
-                    quote=cast(str, row[4]),
-                    last_price=row[5],
-                    timestamp=row[6],
-                )
-                for row in result.all()
-            ]
+            return {(exchange, symbol) for exchange, symbol in (await session.execute(query)).all()}
 
     async def get_active_usd_fx_candle_candidates(
         self, currency: str
@@ -13252,30 +13205,6 @@ class SQLAlchemyRepository(Repository):
                 if row[6] is not None
             ]
 
-    async def get_active_market_snapshot_price(
-        self, instrument_public_id: str
-    ) -> tuple[float | None, datetime] | None:
-        """Read the CURRENT market-snapshot price row (clock-free).
-
-        Args:
-            instrument_public_id: Instrument identity to resolve.
-
-        Returns:
-            ``(last_price, snapshot_timestamp)`` of the active row, or
-            ``None`` when no active row exists.
-        """
-        async with self.session() as s:
-            result = await s.execute(
-                select(MarketSnapshot.last_price, MarketSnapshot.timestamp).where(
-                    MarketSnapshot.instrument_public_id == instrument_public_id,
-                    MarketSnapshot.known_to == KNOWN_TO_MAX,
-                )
-            )
-            row = result.one_or_none()
-            if row is None:
-                return None
-            return (row.last_price, row.timestamp)
-
     async def get_active_latest_1m_candle_price(
         self, instrument_public_id: str
     ) -> ActiveCandlePriceRow | None:
@@ -13301,6 +13230,7 @@ class SQLAlchemyRepository(Repository):
                 instrument_public_id=row.instrument_public_id,
                 close=row.close,
                 open_at=row.open_at,
+                timestamp=row.timestamp,
             )
 
     async def resolve_market_snapshot_refresh_targets(

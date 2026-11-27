@@ -14,7 +14,10 @@ from unittest.mock import patch
 import pytest
 
 from snapper.core.types import ExchangeEnum
+from snapper.data.models import Instrument
+from snapper.data.models import Symbol
 from snapper.data.repository import Repository
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ActiveCandlePriceRow
 from snapper.infrastructure.exchanges.contracts import AccountBalance
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -284,6 +287,7 @@ def _fill_candle(close: float, *, age: int = 0) -> ActiveCandlePriceRow:
         "instrument_public_id": "inst-btc-usd",
         "close": close,
         "open_at": datetime.now(UTC) - timedelta(seconds=age),
+        "timestamp": datetime.now(UTC),
     }
 
 
@@ -291,12 +295,15 @@ def _fill_candle(close: float, *, age: int = 0) -> ActiveCandlePriceRow:
 async def test_simulate_fill_market_order_uses_source_venue_close() -> None:
     """Verify a market order fills at the freshest source-venue 1m close.
 
-    Given: A running client whose repository serves a kraken 1m candle,
+    Given: a running client whose paper instrument maps to a live source,
     When: _simulate_fill() runs for a priceless MARKET order,
     Then: The trade execution carries the candle close as both average
         and last price and the order closes fully filled.
     """
     repo = AsyncMock()
+    repo.resolve_source_instrument_public_id = AsyncMock(
+        return_value={"valuation_public_id": "source-id", "is_paper": True, "mapped": True}
+    )
     repo.get_active_latest_1m_candle_price = AsyncMock(return_value=_fill_candle(64000.0))
     client = PaperExchangeClient(repository=cast(Repository, repo), fill_delay=0)
     client._resolve_instrument_public_ids = AsyncMock(wraps=_fake_resolve)
@@ -312,8 +319,10 @@ async def test_simulate_fill_market_order_uses_source_venue_close() -> None:
     assert order.filled == 0.01
     assert repo.get_active_latest_1m_candle_price.await_args is not None
     client._resolve_instrument_public_ids.assert_awaited_once_with(
-        [order.symbol], ExchangeEnum.KRAKEN
+        [order.symbol], ExchangeEnum.PAPER
     )
+    repo.resolve_source_instrument_public_id.assert_awaited_once_with("inst-btc-usd")
+    repo.get_active_latest_1m_candle_price.assert_awaited_once_with("source-id")
 
 
 @pytest.mark.asyncio
@@ -321,7 +330,7 @@ async def test_simulate_fill_market_order_uses_source_venue_close() -> None:
 async def test_simulate_fill_market_order_cancels_without_reference_price(age: int | None) -> None:
     """Verify an unpriceable market order is CANCELED, never zero-filled.
 
-    Given: A running client with missing or stale candles on every source venue,
+    Given: a running client with a missing or stale candle on the configured source,
     When: _simulate_fill() runs for a priceless MARKET order,
     Then: A canceled execution is queued, the order is CANCELED with
         its full amount remaining, and no 0.0-price fill exists.
@@ -330,7 +339,9 @@ async def test_simulate_fill_market_order_cancels_without_reference_price(age: i
     repo.get_active_latest_1m_candle_price = AsyncMock(
         return_value=None if age is None else _fill_candle(64000.0, age=age)
     )
-    client = PaperExchangeClient(repository=cast(Repository, repo), fill_delay=0)
+    client = PaperExchangeClient(
+        repository=cast(Repository, repo), fill_delay=0, source_exchange=ExchangeEnum.KRAKEN
+    )
     client._resolve_instrument_public_ids = AsyncMock(wraps=_fake_resolve)
     client._running = True
     order = _market_order()
@@ -381,7 +392,7 @@ async def test_simulate_fill_priced_order_fills_at_own_price() -> None:
 
 @pytest.mark.asyncio
 async def test_resolve_market_fill_price_prefers_source_exchange() -> None:
-    """Verify an explicit source_exchange short-circuits the venue list.
+    """Verify pricing uses an explicitly configured source venue.
 
     Given: A client constructed with source_exchange=kraken_futures,
     When: _resolve_market_fill_price() runs,
@@ -420,23 +431,74 @@ async def test_resolve_market_fill_price_rejects_stale_close() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_market_fill_price_rejects_non_positive_close() -> None:
-    """Verify zero/non-finite closes count as per-venue misses.
+@pytest.mark.parametrize("age,close,expected", [(0, 88.0, 88.0), (361, 88.0, None), (0, 0.0, None)])
+async def test_resolve_market_fill_price_uses_only_mapped_polygon(
+    age: int, close: float, expected: float | None
+) -> None:
+    """Price a paper mirror from its mapped source using clock-free lookup.
 
-    Given: The first venue serving a 0.0 close and the second a valid one,
-    When: _resolve_market_fill_price() runs,
-    Then: The valid second-venue close wins.
+    Given: active catalog versions with bus-time lag, a Polygon mapping and a Kraken peer,
+    When: the simulator prices the paper instrument without a configured venue,
+    Then: the mapped source alone supplies or refuses the price.
+    """
+    repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    try:
+        await repo.create_all()
+        future = datetime.now(UTC) + timedelta(hours=1)
+        async with repo.session() as session:
+            session.add(
+                Symbol(
+                    public_id="symbol-btc",
+                    native_symbol="BTC-USD",
+                    base="BTC",
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=future,
+                    timestamp=future,
+                    session_id="test",
+                    sequence_id=1,
+                )
+            )
+            for exchange in ("paper", "polygon", "kraken"):
+                session.add(
+                    Instrument(
+                        public_id=f"{exchange}-btc",
+                        symbol_public_id="symbol-btc",
+                        exchange=exchange,
+                        source_exchange="polygon" if exchange == "paper" else None,
+                        timestamp=future,
+                        session_id="test",
+                        sequence_id=1,
+                    )
+                )
+            await session.commit()
+        candle = AsyncMock(return_value=_fill_candle(close, age=age))
+        with patch.object(repo, "get_active_latest_1m_candle_price", candle):
+            client = PaperExchangeClient(repository=repo)
+            assert await client._resolve_market_fill_price("BTC-USD") == expected
+        candle.assert_awaited_once_with("polygon-btc")
+    finally:
+        await repo.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_resolve_market_fill_price_refuses_unmapped_paper() -> None:
+    """Require an authoritative source mapping for a paper instrument.
+
+    Given: a paper symbol without an active source mapping,
+    When: the simulator tries to price it,
+    Then: pricing fails without reading any venue candle.
     """
     repo = AsyncMock()
-    repo.get_active_latest_1m_candle_price = AsyncMock(
-        side_effect=[
-            _fill_candle(0.0),
-            _fill_candle(88.0),
-        ]
-    )
+    repo.resolve_source_instrument_public_id.return_value = {
+        "valuation_public_id": "inst-btc-usd",
+        "is_paper": True,
+        "mapped": False,
+    }
     client = PaperExchangeClient(repository=cast(Repository, repo))
     client._resolve_instrument_public_ids = AsyncMock(wraps=_fake_resolve)
-    assert await client._resolve_market_fill_price("BTC-USD") == 88.0
+    assert await client._resolve_market_fill_price("BTC-USD") is None
+    repo.get_active_latest_1m_candle_price.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -449,7 +511,9 @@ async def test_simulate_fill_loses_race_to_cancel_during_lookup() -> None:
     Then: No execution is queued and the order stays CANCELED.
     """
     repo = AsyncMock()
-    client = PaperExchangeClient(repository=cast(Repository, repo), fill_delay=0)
+    client = PaperExchangeClient(
+        repository=cast(Repository, repo), fill_delay=0, source_exchange=ExchangeEnum.KRAKEN
+    )
     client._resolve_instrument_public_ids = AsyncMock(wraps=_fake_resolve)
     client._running = True
     order = _market_order()
@@ -579,23 +643,21 @@ async def test_cancel_order_refuses_to_rewrite_closed_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_market_fill_price_skips_failing_venue() -> None:
-    """Verify a failing venue lookup falls through to the next venue.
+async def test_resolve_market_fill_price_refuses_after_source_lookup_failure() -> None:
+    """Reject a failed candle lookup on the authoritative source.
 
-    Given: The first source venue raising and the second returning a
-        candle,
-    When: _resolve_market_fill_price() runs,
-    Then: The second venue's close is returned.
+    Given: a configured source whose candle lookup raises,
+    When: the simulator tries to resolve a fill price,
+    Then: it refuses after one lookup.
     """
     repo = AsyncMock()
-    repo.get_active_latest_1m_candle_price = AsyncMock(
-        side_effect=[RuntimeError("venue down"), _fill_candle(77.0)]
+    repo.get_active_latest_1m_candle_price = AsyncMock(side_effect=RuntimeError("venue down"))
+    client = PaperExchangeClient(
+        repository=cast(Repository, repo), source_exchange=ExchangeEnum.KRAKEN
     )
-    client = PaperExchangeClient(repository=cast(Repository, repo))
     client._resolve_instrument_public_ids = AsyncMock(wraps=_fake_resolve)
-    price = await client._resolve_market_fill_price("BTC-USD")
-    assert price == 77.0
-    assert repo.get_active_latest_1m_candle_price.await_count == 2
+    assert await client._resolve_market_fill_price("BTC-USD") is None
+    repo.get_active_latest_1m_candle_price.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1097,6 +1159,7 @@ class _ReplayRepo:
             "instrument_public_id": "inst-btc-usd",
             "close": 10.5,
             "open_at": now - timedelta(minutes=1),
+            "timestamp": now,
         }
         self.candles = [
             {
