@@ -36,6 +36,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -66,6 +67,7 @@ from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
+from snapper.data.repository_types import ApnsAdmissionContext
 from snapper.data.repository_types import NotificationDeviceRow
 from snapper.i18n import catalog
 from snapper.messaging.infrastructure.publisher import MessagePublisher
@@ -97,6 +99,7 @@ class _DeliveryTarget:
     expires_at: datetime | None = None
     created_at: datetime | None = None
     prior_error_reason: str | None = None
+    recheck_admission: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -722,14 +725,20 @@ class NotifySidecar(RegisterableProcess):
     async def _attempt_delivery(self, target: _DeliveryTarget, now: datetime) -> None:
         """Run exactly one APNs send attempt on a queued delivery row.
 
-        Before reserving an attempt and again immediately before the APNs
-        call, ``ScopeRevalidator.should_skip_send`` decides whether the
-        event's scope is still active and a fresh UTC check enforces the
-        resolved delivery deadline (``expires_at`` or ``created_at + 6 h``).
-        Deliveries past their deadline transition to ``failed`` without
-        sending. Otherwise, bumps ``attempt_count`` first, bounds
-        ``ApnsClientPool.send`` with ``_APNS_SEND_TIMEOUT_S``, and computes
-        retry backoff and SCD2 transition times from fresh UTC timestamps.
+        Before reserving an attempt, ``ScopeRevalidator.should_skip_send``
+        decides whether the event's scope is still active and a fresh UTC check
+        enforces the resolved delivery deadline (``expires_at`` or
+        ``created_at + 6 h``). After ``_bump_attempt`` commits the incremented
+        attempt count, the queued APNs path (``target.recheck_admission``) runs
+        its single-read pre-send admission recheck first (refreshing the target
+        device registration when updated), followed immediately before payload
+        assembly and ``ApnsClientPool.send`` by a fresh
+        ``ScopeRevalidator.should_skip_send`` check and a fresh UTC deadline
+        check so neither scope revocation nor TTL expiry during the admission
+        read can leak into a send. Deliveries past their deadline transition to
+        ``failed`` without sending. Otherwise, bounds ``ApnsClientPool.send``
+        with ``_APNS_SEND_TIMEOUT_S``, and computes retry backoff and SCD2
+        transition times from fresh UTC timestamps.
 
         Note:
             If ``ApnsClientPool.send`` hits the 30s timeout after APNs already
@@ -761,35 +770,42 @@ class NotifySidecar(RegisterableProcess):
                 pid=target.delivery_public_id,
             )
             return
+        admitted_target = await self._recheck_queued_admission(target)
+        if admitted_target is None:
+            return
         scope_now = self._clock()
-        if await self._cancel_if_scope_revoked(target.delivery_public_id, target.event, scope_now):
+        if await self._cancel_if_scope_revoked(
+            admitted_target.delivery_public_id, admitted_target.event, scope_now
+        ):
             return
         send_now = self._clock()
         if await self._expire_if_past_deadline(
-            target.delivery_public_id,
-            target.prior_error_reason,
+            admitted_target.delivery_public_id,
+            admitted_target.prior_error_reason,
             deadline,
             send_now,
         ):
             return
-        payload = _build_apns_payload(target.event, user_language=target.user_language)
+        payload = _build_apns_payload(
+            admitted_target.event, user_language=admitted_target.user_language
+        )
         try:
             result = await asyncio.wait_for(
                 self._apns.send(
-                    env=target.device["env"],
-                    device_token=target.device["device_token"],
+                    env=admitted_target.device["env"],
+                    device_token=admitted_target.device["device_token"],
                     payload=payload,
                     apns_topic=self._apns_topic,
-                    priority=_priority_to_apns(target.event["priority"]),
+                    priority=_priority_to_apns(admitted_target.event["priority"]),
                     push_type="alert",
-                    collapse_id=target.event.get("thread_key"),
+                    collapse_id=admitted_target.event.get("thread_key"),
                 ),
                 timeout=_APNS_SEND_TIMEOUT_S,
             )
         except Exception as exc:
-            await self._handle_send_exception(target, current_attempt, exc, self._clock())
+            await self._handle_send_exception(admitted_target, current_attempt, exc, self._clock())
             return
-        await self._apply_result(target, current_attempt, result, self._clock())
+        await self._apply_result(admitted_target, current_attempt, result, self._clock())
 
     async def _handle_send_exception(
         self,
@@ -1131,9 +1147,11 @@ class NotifySidecar(RegisterableProcess):
         ``next_attempt_at`` backoff while still expiring rows already past
         their outage TTL regardless of APNs sender availability.
 
-        Bulk-prefetches events and languages for the eligible batch. Each
-        queued APNs row uses a fresh UTC timestamp and reads the active
-        device and routing preferences after the preceding row finishes.
+        Bulk-prefetches events and languages for queued APNs rows in the
+        eligible batch (skipping ``provider='fcm'`` rows). Each queued APNs
+        row uses a fresh UTC timestamp, performs a single-read admission check
+        before reserving an attempt, and re-verifies device activity and
+        routing eligibility in one read immediately before sending.
         """
         _ = now
         queued = await self._repo.list_queued_deliveries_all()
@@ -1152,16 +1170,19 @@ class NotifySidecar(RegisterableProcess):
     async def _prefetch_caches_for_rows(
         self, rows: list[AlertDeliveryRow]
     ) -> _PrefetchedBatchCaches:
-        """Bulk-load alert events and recipient languages for one batch.
+        """Bulk-load alert events and recipient languages for queued APNs rows.
 
-        Returns a :class:`_PrefetchedBatchCaches` bundle, deduplicating IDs
-        so underlying SELECTs touch each event or user at most once per batch.
-        Admission reads active devices and routing preferences per row.
+        Skips ``provider='fcm'`` rows, whose delivery path owns its own
+        authoritative lookups. Returns a :class:`_PrefetchedBatchCaches`
+        bundle, deduplicating IDs so underlying SELECTs touch each APNs
+        event or user at most once per batch. Admission reads active device
+        registration, device prefs, and user defaults in one session per check.
         """
-        if not rows:
+        apns_rows = [row for row in rows if row.get("provider", "apns") != "fcm"]
+        if not apns_rows:
             return _PrefetchedBatchCaches(events={}, languages={})
-        event_pids = [row["alert_event_public_id"] for row in rows]
-        user_pids = list(dict.fromkeys(row["user_public_id"] for row in rows))
+        event_pids = [row["alert_event_public_id"] for row in apns_rows]
+        user_pids = list(dict.fromkeys(row["user_public_id"] for row in apns_rows))
         events_cache = await self._repo.get_alert_events_by_public_ids(event_pids)
         languages_cache = await self._repo.get_default_languages_for_users(user_pids)
         return _PrefetchedBatchCaches(events=events_cache, languages=languages_cache)
@@ -1191,13 +1212,6 @@ class NotifySidecar(RegisterableProcess):
             return caches.events[event_pid]
         return await self._repo.get_alert_event_by_public_id(event_pid)
 
-    async def _resolve_queued_device(
-        self, user_pid: str, device_pid: str
-    ) -> NotificationDeviceRow | None:
-        """Read the current active APNs device for one queued delivery."""
-        devices = await self._repo.list_active_notification_devices_for_user(user_pid)
-        return next((d for d in devices if d["public_id"] == device_pid), None)
-
     async def _resolve_user_language(
         self, user_pid: str, caches: _PrefetchedBatchCaches | None
     ) -> str | None:
@@ -1207,22 +1221,63 @@ class NotifySidecar(RegisterableProcess):
         language_map = await self._repo.get_default_languages_for_users([user_pid])
         return language_map.get(user_pid)
 
-    async def _cancel_if_routing_suppressed(
-        self, row: AlertDeliveryRow, event: AlertEventRow, now: datetime
+    def _is_routing_suppressed(
+        self,
+        device: NotificationDeviceRow,
+        event: AlertEventRow,
+        admission: ApnsAdmissionContext,
+        now: datetime,
     ) -> bool:
-        """Cancel a queued APNs row if rollout gate or alert prefs now suppress it."""
-        user_pid = row["user_public_id"]
+        """Return whether rollout gate or alert prefs/defaults suppress this device."""
         if self._push_beta_provider is not None and not self._push_beta_provider().includes(
-            user_pid
+            device["user_public_id"]
         ):
-            await self._mark_cancelled(row["public_id"], "routing_suppressed", now)
             return True
-        prefs = await self._repo.list_device_alert_prefs_for_user(user_pid)
-        defaults = await self._repo.list_user_alert_defaults(user_pid)
-        if not allows_device_alert(row["device_public_id"], event, prefs, defaults, now):
-            await self._mark_cancelled(row["public_id"], "routing_suppressed", now)
-            return True
-        return False
+        return not allows_device_alert(
+            device["public_id"],
+            event,
+            admission["device_prefs"],
+            admission["user_defaults"],
+            now,
+        )
+
+    async def _admit_queued_apns_device(
+        self,
+        delivery_public_id: str,
+        device_ref: tuple[str, str],
+        event: AlertEventRow,
+        now: datetime,
+    ) -> NotificationDeviceRow | None:
+        """Verify active APNs device and routing eligibility in one repository read."""
+        user_pid, device_pid = device_ref
+        admission = await self._repo.get_apns_admission_context(user_pid, device_pid)
+        device = admission["device"]
+        if device is None:
+            logger.info(
+                "sidecar: delivery={pid} target device inactive —"
+                " marking unregistered (no APNs call)",
+                pid=delivery_public_id,
+            )
+            await self._mark_unregistered_no_device(delivery_public_id, now)
+            return None
+        if self._is_routing_suppressed(device, event, admission, now):
+            await self._mark_cancelled(delivery_public_id, "routing_suppressed", now)
+            return None
+        return device
+
+    async def _recheck_queued_admission(self, target: _DeliveryTarget) -> _DeliveryTarget | None:
+        """Re-verify queued APNs device and routing eligibility immediately before send."""
+        if not target.recheck_admission:
+            return target
+        admitted_device = await self._admit_queued_apns_device(
+            target.delivery_public_id,
+            (target.device["user_public_id"], target.device["public_id"]),
+            target.event,
+            self._clock(),
+        )
+        if admitted_device is None:
+            return None
+        return replace(target, device=admitted_device)
 
     async def _attempt_on_queued_row(
         self,
@@ -1235,10 +1290,15 @@ class NotifySidecar(RegisterableProcess):
 
         Enforces the resolved delivery TTL before routing and before checking
         APNs sender availability so expired APNs rows transition to ``failed``
-        even when APNs is disabled or routing data is malformed. Missing
-        events, inactive devices, and rows suppressed by the routing cascade
-        transition to terminal ``failed``, ``unregistered``, or
-        ``cancelled_scope`` instead of remaining ``queued``.
+        even when APNs is disabled or routing data is malformed. Reads active
+        device registration, device prefs, and user defaults in one repository
+        session before attempt allocation, and passes ``recheck_admission=True``
+        so ``_attempt_delivery`` re-verifies admission in one read after
+        ``_bump_attempt``, ahead of the final scope revalidation and deadline
+        checks immediately before ``ApnsClientPool.send``. Missing events,
+        inactive devices, and rows suppressed by the routing cascade transition
+        to terminal ``failed``, ``unregistered``, or ``cancelled_scope`` instead
+        of remaining ``queued``.
         """
         if row.get("provider", "apns") == "fcm":
             if self._android is not None:
@@ -1260,16 +1320,13 @@ class NotifySidecar(RegisterableProcess):
             )
             await self._mark_failed(row["public_id"], "alert_event missing", self._clock())
             return
-        device = await self._resolve_queued_device(row["user_public_id"], row["device_public_id"])
+        device = await self._admit_queued_apns_device(
+            row["public_id"],
+            (row["user_public_id"], row["device_public_id"]),
+            event,
+            self._clock(),
+        )
         if device is None:
-            logger.info(
-                "sidecar: delivery={pid} target device inactive —"
-                " marking unregistered (no APNs call)",
-                pid=row["public_id"],
-            )
-            await self._mark_unregistered_no_device(row["public_id"], self._clock())
-            return
-        if await self._cancel_if_routing_suppressed(row, event, self._clock()):
             return
         user_language = await self._resolve_user_language(row["user_public_id"], caches)
         target = _DeliveryTarget(
@@ -1280,6 +1337,7 @@ class NotifySidecar(RegisterableProcess):
             expires_at=row.get("expires_at"),
             created_at=row["created_at"],
             prior_error_reason=row.get("error_reason"),
+            recheck_admission=True,
         )
         await self._attempt_delivery(target, now)
 
@@ -1321,10 +1379,12 @@ class NotifySidecar(RegisterableProcess):
 
         Background task spawned in ``start()``; tears down when
         ``stop()`` sets the stop event. Each tick selects ready rows at tick
-        entry and prefetches their events and languages. Each row receives a
-        fresh UTC timestamp, and APNs admission reads the active device and
-        routing preferences per row, so slow sends do not leave stale expiry,
-        retry timestamps or routing data for later rows.
+        entry and prefetches events and languages for queued APNs rows only
+        (skipping ``provider='fcm'`` rows). Each queued APNs row receives a
+        fresh UTC timestamp, reads its active device and routing policy in a
+        single repository session before admission, and re-checks them in one
+        read immediately before sending so slow sends do not leave stale
+        expiry, retry timestamps or routing data for later rows.
 
         Why every send is bounded: both retry selections
         (``list_deliveries_ready_for_retry`` and ``list_queued_deliveries_all``)

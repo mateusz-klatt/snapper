@@ -4139,6 +4139,20 @@ class UserAlertDefaultRow(TypedDict):
     min_priority: str
 
 
+class ApnsAdmissionContext(TypedDict):
+    """Single-session APNs device, device-pref, and user-default admission state.
+
+    Returned by :meth:`Repository.get_apns_admission_context` so queued APNs
+    pre-routing admission and pre-send rechecks inspect active device
+    registration, device-scoped prefs filtered to ``device_public_id``, and
+    user-level defaults from one database session.
+    """
+
+    device: NotificationDeviceRow | None
+    device_prefs: list[DeviceAlertPrefRow]
+    user_defaults: list[UserAlertDefaultRow]
+
+
 class AlertListCursor(TypedDict):
     """Opaque keyset cursor for ``list_recent_alerts_for_user`` (SCD2-stable).
 

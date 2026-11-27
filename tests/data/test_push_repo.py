@@ -3074,3 +3074,262 @@ async def test_device_retry_warning_redacts_token_and_database_error_payload(
         assert "INSERT notification_devices" not in warning
     finally:
         repository_module.logger.remove(sink)
+
+
+class TestApnsAdmissionContextRepo:
+    """Single-session APNs admission read returns device, device prefs, and user defaults."""
+
+    @pytest.mark.asyncio
+    async def test_returns_target_device_filtered_prefs_and_user_defaults(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Combined read scopes device prefs to the target device and defaults to the user.
+
+        Given: Two active APNs devices for one user with separate prefs (including
+            a superseded SCD2 pref version), another user's device and default,
+            and active user defaults.
+        When: ``get_apns_admission_context`` is called for the first user and device.
+        Then: It returns the target device, only that device's active prefs, and
+            only that user's active defaults.
+        """
+        dev_one = await _seed_user_and_device(
+            repo,
+            user_public_id="user-adm-1",
+            device_token="tok-adm-1",
+            device_id="ios-adm-1",
+            sequence_id=1,
+        )
+        dev_two = await repo.upsert_notification_device(
+            NotificationDeviceUpsertRow(
+                user_public_id="user-adm-1",
+                device_token="tok-adm-2",
+                device_id="ios-adm-2",
+                env="sandbox",
+                registered_at=_ts(),
+                session_id="test",
+                sequence_id=2,
+                timestamp=_ts(),
+            )
+        )
+        dev_other = await _seed_user_and_device(
+            repo,
+            user_public_id="user-adm-2",
+            device_token="tok-adm-other",
+            device_id="ios-adm-other",
+            sequence_id=3,
+        )
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=dev_one,
+                alert_type="order_fill_full",
+                enabled=True,
+                min_priority="low",
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(1),
+            )
+        )
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=dev_one,
+                alert_type="order_fill_full",
+                enabled=False,
+                min_priority="high",
+                session_id="s1",
+                sequence_id=2,
+                timestamp=_ts(2),
+            )
+        )
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=dev_two,
+                alert_type="order_fill_full",
+                enabled=True,
+                min_priority="medium",
+                session_id="s1",
+                sequence_id=3,
+                timestamp=_ts(1),
+            )
+        )
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=dev_other,
+                alert_type="order_fill_full",
+                enabled=True,
+                min_priority="medium",
+                session_id="s1",
+                sequence_id=4,
+                timestamp=_ts(1),
+            )
+        )
+        await repo.upsert_user_alert_default(
+            UserAlertDefaultUpsertRow(
+                user_public_id="user-adm-1",
+                alert_type="order_rejected",
+                enabled=True,
+                min_priority="medium",
+                session_id="s1",
+                sequence_id=5,
+                timestamp=_ts(1),
+            )
+        )
+        await repo.upsert_user_alert_default(
+            UserAlertDefaultUpsertRow(
+                user_public_id="user-adm-1",
+                alert_type="order_rejected",
+                enabled=False,
+                min_priority="high",
+                session_id="s1",
+                sequence_id=6,
+                timestamp=_ts(2),
+            )
+        )
+        await repo.upsert_user_alert_default(
+            UserAlertDefaultUpsertRow(
+                user_public_id="user-adm-2",
+                alert_type="order_rejected",
+                enabled=True,
+                min_priority="low",
+                session_id="s1",
+                sequence_id=7,
+                timestamp=_ts(1),
+            )
+        )
+
+        ctx = await repo.get_apns_admission_context("user-adm-1", dev_one)
+
+        assert ctx["device"] is not None
+        assert ctx["device"]["public_id"] == dev_one
+        assert ctx["device"]["device_token"] == "tok-adm-1"
+        assert len(ctx["device_prefs"]) == 1
+        assert ctx["device_prefs"][0]["device_public_id"] == dev_one
+        assert ctx["device_prefs"][0]["enabled"] is False
+        assert ctx["device_prefs"][0]["min_priority"] == "high"
+        assert len(ctx["user_defaults"]) == 1
+        assert ctx["user_defaults"][0]["user_public_id"] == "user-adm-1"
+        assert ctx["user_defaults"][0]["enabled"] is False
+        assert ctx["user_defaults"][0]["min_priority"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_inactive_device(self, repo: SQLAlchemyRepository) -> None:
+        """Inactive devices return None device without leaking tombstoned device prefs.
+
+        Given: A deactivated APNs device that still has active pref and user-default rows.
+        When: ``get_apns_admission_context`` is called for that user and device.
+        Then: ``device`` is ``None`` and ``device_prefs`` and ``user_defaults`` are empty.
+        """
+        device_pid = await _seed_user_and_device(
+            repo,
+            user_public_id="user-adm-inactive",
+            device_token="tok-adm-inactive",
+            sequence_id=1,
+        )
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=device_pid,
+                alert_type="order_fill_full",
+                enabled=True,
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(1),
+            )
+        )
+        await repo.upsert_user_alert_default(
+            UserAlertDefaultUpsertRow(
+                user_public_id="user-adm-inactive",
+                alert_type="order_fill_full",
+                enabled=True,
+                session_id="s1",
+                sequence_id=2,
+                timestamp=_ts(1),
+            )
+        )
+        await repo.deactivate_notification_device_scd2(
+            device_pid,
+            reason="user_unregistered",
+            timestamp=_ts(2),
+            session_id="s2",
+            sequence_id=3,
+        )
+
+        ctx = await repo.get_apns_admission_context("user-adm-inactive", device_pid)
+
+        assert ctx == {"device": None, "device_prefs": [], "user_defaults": []}
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_other_users_device(self, repo: SQLAlchemyRepository) -> None:
+        """A device owned by another user is never admitted across users.
+
+        Given: An active APNs device owned by ``user-adm-owner`` and a separate user.
+        When: ``get_apns_admission_context`` is queried with ``user-adm-caller`` and that device.
+        Then: ``device`` is ``None`` and ``device_prefs`` and ``user_defaults`` are empty.
+        """
+        owner_device = await _seed_user_and_device(
+            repo,
+            user_public_id="user-adm-owner",
+            device_token="tok-adm-owner",
+            sequence_id=1,
+        )
+        await repo.upsert_device_alert_pref(
+            DeviceAlertPrefUpsertRow(
+                device_public_id=owner_device,
+                alert_type="order_fill_full",
+                enabled=True,
+                session_id="s1",
+                sequence_id=1,
+                timestamp=_ts(1),
+            )
+        )
+        await repo.upsert_user_alert_default(
+            UserAlertDefaultUpsertRow(
+                user_public_id="user-adm-caller",
+                alert_type="order_fill_full",
+                enabled=True,
+                session_id="s1",
+                sequence_id=2,
+                timestamp=_ts(1),
+            )
+        )
+
+        ctx = await repo.get_apns_admission_context("user-adm-caller", owner_device)
+
+        assert ctx == {"device": None, "device_prefs": [], "user_defaults": []}
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_fcm_or_missing_device(self, repo: SQLAlchemyRepository) -> None:
+        """Android FCM registrations and missing device IDs are excluded from APNs admission.
+
+        Given: An active ``provider='fcm'`` device registration and an unknown device ID.
+        When: ``get_apns_admission_context`` is called for each.
+        Then: Both return ``device=None`` with empty prefs and defaults.
+        """
+        async with repo.session() as s:
+            s.add(
+                NotificationDevice(
+                    public_id="dev-fcm-1",
+                    session_id="s1",
+                    sequence_id=1,
+                    timestamp=_ts(),
+                    known_to=KNOWN_TO_MAX,
+                    user_public_id="user-adm-fcm",
+                    provider="fcm",
+                    configuration_id="cfg-1",
+                    binding_id="bind-1",
+                    installation_id="inst-1",
+                    firebase_installation_id="fid-1",
+                    package_name="ch.snapper.android",
+                    device_token=None,
+                    device_id="android-1",
+                    platform="android",
+                    env=None,
+                    registered_at=_ts(),
+                    token_status="active",
+                )
+            )
+            await s.commit()
+
+        fcm_ctx = await repo.get_apns_admission_context("user-adm-fcm", "dev-fcm-1")
+        missing_ctx = await repo.get_apns_admission_context("user-adm-fcm", "dev-does-not-exist")
+
+        assert fcm_ctx == {"device": None, "device_prefs": [], "user_defaults": []}
+        assert missing_ctx == {"device": None, "device_prefs": [], "user_defaults": []}

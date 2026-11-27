@@ -1,22 +1,30 @@
 """Tests for candle audit archiver (all SCD2 versions with temporal metadata)."""
 
 import csv
+import errno
+import os
 from datetime import UTC
 from datetime import date
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from typing import TextIO
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 from typer.testing import CliRunner
 
 from snapper.cli.app import app
 from snapper.data.archiver import _CANDLE_AUDIT_COLUMNS
 from snapper.data.archiver import CandleAuditArchiver
 from snapper.data.archiver import ExportResult
+from snapper.data.archiver import _directory_fsync_supported
+from snapper.data.archiver import _fsync_base_ancestors
+from snapper.data.archiver import _fsync_directory
+from snapper.data.archiver import _fsync_directory_tree
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import Candle
@@ -833,3 +841,839 @@ def test_cli_archive_candles_audit_purge_without_closed_only_rejected() -> None:
     )
     assert result.exit_code == 1
     assert "closed-only" in result.output.lower()
+
+
+def test_candle_audit_replace_failure_preserves_target_cleans_staging_and_skips_purge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure inside ``Path.replace`` preserves existing CSV, cleans ``.ca-*``, and skips purge.
+
+    Given: An archived 1m CSV file on disk and a closed 5m candle pending purge in SQLite.
+    When: ``Path.replace`` raises ``OSError`` during the 5m export with ``purge=True``.
+    Then: The existing CSV bytes and permissions are untouched, no ``.ca-*`` directory remains,
+        and the pending 5m DB version stays unpurged.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_path = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024" / "2024-01-01.csv"
+    archiver = CandleAuditArchiver(repo, tmp_path)
+    real_replace = Path.replace
+
+    def _fail_replace(self_path: Path, target: Path | str) -> Path:
+        if Path(target) == csv_path:
+            raise OSError("injected replace failure")
+        return real_replace(self_path, target)
+
+    try:
+        first = archiver.export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+        )
+        assert first == ExportResult(files_written=1, rows_exported=1, rows_purged=1)
+        csv_path.chmod(0o600)
+        original_mode = csv_path.stat().st_mode
+        original_bytes = csv_path.read_bytes()
+        _insert_closed_five_minute_candle(repo, instrument_id)
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "5m", day, day, closed_only=True
+        )
+        assert len(pending) == 1
+
+        monkeypatch.setattr(Path, "replace", _fail_replace)
+        with pytest.raises(OSError, match="injected replace failure"):
+            archiver.export(
+                timeframe="5m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert csv_path.read_bytes() == original_bytes
+        assert csv_path.stat().st_mode == original_mode
+        assert list(csv_path.parent.iterdir()) == [csv_path]
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "5m", day, day, closed_only=True)
+            == pending
+        )
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_multi_file_later_replace_failure_skips_all_purges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure on a later day/instrument file skips database purge for ALL exported rows.
+
+    Given: Closed candle versions across two days (2024-01-01 and 2024-01-02) in SQLite.
+    When: ``Path.replace`` succeeds on the first day and fails on the second day.
+    Then: Neither day's closed DB rows are purged and no ``.ca-*`` staging dirs remain.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day_one = date(2024, 1, 1)
+    day_two = date(2024, 1, 2)
+    with repo.get_session() as session:
+        session.add(
+            Candle(
+                public_id="candle-day-two",
+                instrument_public_id=instrument_id,
+                open_at=datetime(2024, 1, 2, 10, 0, tzinfo=UTC),
+                timeframe="1m",
+                open=110.0,
+                high=120.0,
+                low=105.0,
+                close=115.0,
+                volume=500.0,
+                vwap=112.0,
+                trades=12,
+                session_id="test",
+                sequence_id=6,
+                timestamp=datetime(2024, 1, 2, 10, 0, tzinfo=UTC),
+                known_to=datetime(2024, 1, 2, 11, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+    real_replace = Path.replace
+    replace_calls = 0
+
+    def _fail_second_replace(self_path: Path, target: Path | str) -> Path:
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            raise OSError("injected second replace failure")
+        return real_replace(self_path, target)
+
+    try:
+        before_day_one = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day_one, day_one, closed_only=True
+        )
+        before_day_two = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day_two, day_two, closed_only=True
+        )
+        assert len(before_day_one) == 1
+        assert len(before_day_two) == 1
+
+        monkeypatch.setattr(Path, "replace", _fail_second_replace)
+        with pytest.raises(OSError, match="injected second replace failure"):
+            CandleAuditArchiver(repo, tmp_path).export(
+                timeframe="1m",
+                day_start=day_one,
+                day_end=day_two,
+                closed_only=True,
+                purge=True,
+            )
+
+        year_dir = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
+        assert [p.name for p in year_dir.iterdir()] == ["2024-01-01.csv"]
+        assert (
+            repo.get_candle_versions_for_archive(
+                instrument_id, "1m", day_one, day_one, closed_only=True
+            )
+            == before_day_one
+        )
+        assert (
+            repo.get_candle_versions_for_archive(
+                instrument_id, "1m", day_two, day_two, closed_only=True
+            )
+            == before_day_two
+        )
+    finally:
+        repo.dispose()
+
+
+def _symlinks_supported() -> bool:
+    """Probe at runtime whether creating filesystem symlinks is permitted."""
+    if not hasattr(os, "symlink"):
+        return False
+    with TemporaryDirectory(prefix=".symlink-probe-") as probe_dir:
+        root = Path(probe_dir)
+        target = root / "target.txt"
+        link = root / "link.txt"
+        target.write_text("ok", encoding="utf-8")
+        try:
+            os.symlink(target, link)
+        except OSError:
+            return False
+        return link.is_symlink()
+
+
+def _candle_dir_sentinels(
+    csv_dir: Path,
+    base_dir: Path,
+    *,
+    extra_ancestors: tuple[Path, ...] = (),
+) -> dict[Path, int]:
+    """Map ``csv_dir`` through ``base_dir.parent`` plus optional higher ancestors to fake FDs."""
+    chain = [
+        csv_dir,
+        base_dir / "archive" / "candles" / "polygon" / "BTC-USD",
+        base_dir / "archive" / "candles" / "polygon",
+        base_dir / "archive" / "candles",
+        base_dir / "archive",
+        base_dir,
+        base_dir.parent,
+        *extra_ancestors,
+    ]
+    return {directory: 987654321 + index for index, directory in enumerate(chain)}
+
+
+def _install_dir_fsync_spy(
+    monkeypatch: pytest.MonkeyPatch,
+    dir_sentinels: dict[Path, int],
+    *,
+    fail_on_dir: Path | None = None,
+) -> tuple[list[Path], list[Path], list[Path], list[tuple[str, Path | None]]]:
+    """Install ``os.open``/``os.fsync``/``os.close``/``Path.replace`` spies for dir fsyncs."""
+    sentinel_to_dir = {sentinel: directory for directory, sentinel in dir_sentinels.items()}
+    real_open = os.open
+    real_fsync = os.fsync
+    real_close = os.close
+    real_replace = Path.replace
+    opened_dirs: list[Path] = []
+    synced_dirs: list[Path] = []
+    closed_dirs: list[Path] = []
+    events: list[tuple[str, Path | None]] = []
+
+    def _fake_open(
+        target: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        """Record tracked directory opens and pass ``dir_fd`` through for rmtree cleanup."""
+        if dir_fd is None:
+            sentinel = dir_sentinels.get(Path(target))
+            if sentinel is not None:
+                opened_dirs.append(Path(target))
+                events.append(("open_dir", Path(target)))
+                return sentinel
+        return real_open(target, flags, mode, dir_fd=dir_fd)
+
+    def _fake_fsync(descriptor: int) -> None:
+        directory = sentinel_to_dir.get(descriptor)
+        if directory is not None:
+            if directory == fail_on_dir:
+                raise OSError("injected directory fsync failure")
+            synced_dirs.append(directory)
+            events.append(("fsync_dir", directory))
+            return
+        events.append(("fsync_file", None))
+        real_fsync(descriptor)
+
+    def _fake_close(descriptor: int) -> None:
+        directory = sentinel_to_dir.get(descriptor)
+        if directory is not None:
+            closed_dirs.append(directory)
+            events.append(("close_dir", directory))
+            return
+        real_close(descriptor)
+
+    def _track_replace(self_path: Path, target: Path | str) -> Path:
+        events.append(("replace", None))
+        return real_replace(self_path, target)
+
+    monkeypatch.setattr(os, "open", _fake_open)
+    monkeypatch.setattr(os, "fsync", _fake_fsync)
+    monkeypatch.setattr(os, "close", _fake_close)
+    monkeypatch.setattr(Path, "replace", _track_replace)
+    return opened_dirs, synced_dirs, closed_dirs, events
+
+
+def test_candle_audit_export_fsyncs_staged_file_and_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candle audit CSV publication flushes and fsyncs staged CSV and every ancestor directory.
+
+    Given: A SQLite DB with a closed candle version and both supported and unsupported
+        directory-fsync capabilities.
+    When: ``CandleAuditArchiver.export`` writes the CSV file into a new archive subtree.
+    Then: ``os.fsync`` is called for the staged file before ``Path.replace``, and after
+        ``Path.replace`` for the CSV parent directory and every ancestor directory up to
+        and including ``base_dir`` only when directory fsync is supported.
+    """
+    assert _directory_fsync_supported() == (os.name != "nt")
+    _fsync_directory(tmp_path)
+
+    repo, _ = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_dir = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
+    dir_sentinels = _candle_dir_sentinels(csv_dir, tmp_path)
+    expected_dirs = list(dir_sentinels.keys())
+    try:
+        opened_dirs, synced_dirs, closed_dirs, events = _install_dir_fsync_spy(
+            monkeypatch, dir_sentinels
+        )
+        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+        CandleAuditArchiver(repo, tmp_path).export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True
+        )
+        assert opened_dirs == expected_dirs
+        assert synced_dirs == expected_dirs
+        assert closed_dirs == expected_dirs
+        expected_dir_events = [
+            (tag, directory)
+            for directory in expected_dirs
+            for tag in ("open_dir", "fsync_dir", "close_dir")
+        ]
+        assert events == [("fsync_file", None), ("replace", None), *expected_dir_events]
+
+        opened_dirs.clear()
+        synced_dirs.clear()
+        closed_dirs.clear()
+        events.clear()
+        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: False)
+        _fsync_directory(tmp_path)
+        CandleAuditArchiver(repo, tmp_path).export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True
+        )
+        assert opened_dirs == []
+        assert synced_dirs == []
+        assert closed_dirs == []
+        assert events == [("fsync_file", None), ("replace", None)]
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_file_fsync_failure_propagates_and_skips_purge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure during staged file ``os.fsync`` propagates, cleans staging, and skips DB purge.
+
+    Given: An archived 1m CSV file on disk and a closed 5m candle pending purge in SQLite.
+    When: ``os.fsync`` raises ``OSError`` on the staged CSV descriptor during the 5m export
+        with ``purge=True``.
+    Then: The ``OSError`` propagates, existing CSV bytes and permissions remain untouched,
+        no ``.ca-*`` directory survives, and the pending 5m DB row remains unpurged.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_path = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024" / "2024-01-01.csv"
+    archiver = CandleAuditArchiver(repo, tmp_path)
+
+    def _fail_file_fsync(descriptor: int) -> None:
+        _ = descriptor
+        raise OSError("injected file fsync failure")
+
+    try:
+        first = archiver.export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+        )
+        assert first == ExportResult(files_written=1, rows_exported=1, rows_purged=1)
+        csv_path.chmod(0o600)
+        original_mode = csv_path.stat().st_mode
+        original_bytes = csv_path.read_bytes()
+        _insert_closed_five_minute_candle(repo, instrument_id)
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "5m", day, day, closed_only=True
+        )
+        assert len(pending) == 1
+
+        monkeypatch.setattr(os, "fsync", _fail_file_fsync)
+        with pytest.raises(OSError, match="injected file fsync failure"):
+            archiver.export(
+                timeframe="5m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert csv_path.read_bytes() == original_bytes
+        assert csv_path.stat().st_mode == original_mode
+        assert list(csv_path.parent.iterdir()) == [csv_path]
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "5m", day, day, closed_only=True)
+            == pending
+        )
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_directory_fsync_failure_propagates_and_skips_purge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure during ancestor directory ``os.fsync`` propagates and skips DB purge.
+
+    Given: A SQLite DB with a closed 1m candle version and directory fsync enabled.
+    When: ``os.fsync`` raises ``OSError`` on an ancestor directory during ``export(purge=True)``.
+    Then: The ``OSError`` propagates, opened directory descriptors are closed, and the closed
+        1m DB row remains unpurged.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_dir = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
+    failing_ancestor = tmp_path / "archive"
+    dir_sentinels = _candle_dir_sentinels(csv_dir, tmp_path)
+    try:
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day, day, closed_only=True
+        )
+        assert len(pending) == 1
+        opened_dirs, synced_dirs, closed_dirs, _ = _install_dir_fsync_spy(
+            monkeypatch, dir_sentinels, fail_on_dir=failing_ancestor
+        )
+        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+
+        with pytest.raises(OSError, match="injected directory fsync failure"):
+            CandleAuditArchiver(repo, tmp_path).export(
+                timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert closed_dirs == opened_dirs
+        assert failing_ancestor in opened_dirs
+        assert failing_ancestor not in synced_dirs
+        assert tmp_path not in opened_dirs
+        assert list(csv_dir.iterdir()) == [csv_dir / "2024-01-01.csv"]
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "1m", day, day, closed_only=True)
+            == pending
+        )
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_dry_run_with_purge_and_closed_only_false_raises(tmp_path: Path) -> None:
+    """Validation rejects ``dry_run=True, purge=True, closed_only=False`` without side effects.
+
+    Given: A SQLite DB with closed and active candle versions.
+    When: ``export`` is called with ``dry_run=True``, ``purge=True``, and ``closed_only=False``.
+    Then: It raises ``ValueError`` matching ``closed_only`` without writing files or purging DB.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    try:
+        before = repo.get_candle_versions_for_archive(instrument_id, "1m", day, day)
+        with pytest.raises(ValueError, match="closed_only"):
+            CandleAuditArchiver(repo, tmp_path).export(
+                timeframe="1m",
+                day_start=day,
+                day_end=day,
+                closed_only=False,
+                dry_run=True,
+                purge=True,
+            )
+
+        assert not (tmp_path / "archive").exists()
+        assert repo.get_candle_versions_for_archive(instrument_id, "1m", day, day) == before
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_export_into_missing_base_fsyncs_full_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Export into a missing base dir fsyncs CSV parent through ``base_dir.parent``.
+
+    Given: A SQLite DB with a closed candle version and a missing ``base_dir``
+        whose parent directory ``tmp_path`` already exists.
+    When: ``CandleAuditArchiver(repo, missing_base).export`` creates the tree and writes.
+    Then: The directory fsync chain covers CSV parent through ``missing_base`` and
+        ``missing_base.parent`` and touches nothing above ``missing_base.parent``.
+    """
+    repo, _ = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    missing_base = tmp_path / "missing_output"
+    csv_dir = missing_base / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
+    dir_sentinels = _candle_dir_sentinels(csv_dir, missing_base, extra_ancestors=(tmp_path.parent,))
+    expected_dirs = [directory for directory in dir_sentinels if directory != tmp_path.parent]
+    try:
+        opened_dirs, synced_dirs, closed_dirs, _ = _install_dir_fsync_spy(
+            monkeypatch, dir_sentinels
+        )
+        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+
+        CandleAuditArchiver(repo, missing_base).export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True
+        )
+
+        assert opened_dirs == expected_dirs
+        assert synced_dirs == expected_dirs
+        assert closed_dirs == expected_dirs
+        assert missing_base in synced_dirs
+        assert missing_base.parent in synced_dirs
+        assert tmp_path.parent not in opened_dirs
+        assert tmp_path.parent not in synced_dirs
+        assert (csv_dir / "2024-01-01.csv").is_file()
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_purge_into_missing_base_fails_closed_before_io(tmp_path: Path) -> None:
+    """A purging export refuses to start when the archive base directory does not exist.
+
+    Given: A SQLite DB with a closed candle version and a base directory two
+        levels below ``tmp_path`` where neither level exists yet.
+    When: ``CandleAuditArchiver(repo, nested_base).export(purge=True)`` runs.
+    Then: It raises ``ValueError`` naming the missing directory, creates nothing,
+        and purges no DB rows, so every directory a purging export creates lies
+        inside an existing, durable base.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    nested_base = tmp_path / "new1" / "new2"
+    try:
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day, day, closed_only=True
+        )
+        with pytest.raises(ValueError, match="existing archive directory"):
+            CandleAuditArchiver(repo, nested_base).export(
+                timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert not (tmp_path / "new1").exists()
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "1m", day, day, closed_only=True)
+            == pending
+        )
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_fsync_chain_uses_resolved_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relative base with an absolute destination still yields the full resolved chain.
+
+    Given: A base directory configured as a relative path and a CSV parent given
+        as the equivalent absolute path.
+    When: ``_fsync_directory_tree`` runs with directory fsync supported.
+    Then: It syncs the resolved CSV parent up through the resolved ``base.parent``
+        without raising, because both paths are resolved before ``relative_to``.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "rel_base" / "sub").mkdir(parents=True)
+    synced: list[Path] = []
+    monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+    monkeypatch.setattr("snapper.data.archiver._fsync_directory", synced.append)
+
+    _fsync_directory_tree((tmp_path / "rel_base" / "sub").resolve(), Path("rel_base"))
+
+    resolved_root = tmp_path.resolve()
+    assert synced == [
+        resolved_root / "rel_base" / "sub",
+        resolved_root / "rel_base",
+        resolved_root,
+    ]
+
+
+def test_candle_audit_export_with_existing_dirs_fsyncs_full_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Export into a pre-existing directory tree still fsyncs CSV parent through ``base_dir.parent``.
+
+    Given: A SQLite DB with a closed candle version and the entire archive subtree
+        already created on disk before the export begins.
+    When: ``CandleAuditArchiver(repo, tmp_path).export`` publishes the CSV file.
+    Then: The full directory chain from the CSV parent through ``tmp_path`` and
+        ``tmp_path.parent`` is opened, fsynced, and closed after replacement.
+    """
+    repo, _ = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_dir = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    dir_sentinels = _candle_dir_sentinels(csv_dir, tmp_path)
+    expected_dirs = list(dir_sentinels.keys())
+    try:
+        opened_dirs, synced_dirs, closed_dirs, events = _install_dir_fsync_spy(
+            monkeypatch, dir_sentinels
+        )
+        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+
+        CandleAuditArchiver(repo, tmp_path).export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True
+        )
+
+        assert opened_dirs == expected_dirs
+        assert synced_dirs == expected_dirs
+        assert closed_dirs == expected_dirs
+        expected_dir_events = [
+            (tag, directory)
+            for directory in expected_dirs
+            for tag in ("open_dir", "fsync_dir", "close_dir")
+        ]
+        assert events == [("fsync_file", None), ("replace", None), *expected_dir_events]
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_dir_fsync_failure_then_retry_with_purge_fsyncs_full_chain_and_purges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Directory fsync failure preserves DB rows, and retrying with ``purge=True`` syncs and purges.
+
+    Given: A SQLite DB with a closed 1m candle version and directory fsync enabled.
+    When: The first ``export(purge=True)`` raises ``OSError`` during ancestor directory
+        fsync, and a second ``export(purge=True)`` retries without fault injection.
+    Then: The first run skips the DB purge, and the retry fsyncs the entire chain
+        from CSV parent through ``base_dir.parent`` and purges the DB row once.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_dir = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
+    failing_ancestor = tmp_path / "archive"
+    dir_sentinels = _candle_dir_sentinels(csv_dir, tmp_path)
+    expected_dirs = list(dir_sentinels.keys())
+    try:
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day, day, closed_only=True
+        )
+        assert len(pending) == 1
+
+        opened_first, synced_first, closed_first, _ = _install_dir_fsync_spy(
+            monkeypatch, dir_sentinels, fail_on_dir=failing_ancestor
+        )
+        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+
+        with pytest.raises(OSError, match="injected directory fsync failure"):
+            CandleAuditArchiver(repo, tmp_path).export(
+                timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert closed_first == opened_first
+        assert failing_ancestor not in synced_first
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "1m", day, day, closed_only=True)
+            == pending
+        )
+
+        opened_retry, synced_retry, closed_retry, _ = _install_dir_fsync_spy(
+            monkeypatch, dir_sentinels
+        )
+        retried = CandleAuditArchiver(repo, tmp_path).export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+        )
+
+        assert retried == ExportResult(files_written=1, rows_exported=1, rows_purged=1)
+        retry_dirs = [*expected_dirs, tmp_path, tmp_path.parent]
+        assert opened_retry == retry_dirs
+        assert synced_retry == retry_dirs
+        assert closed_retry == retry_dirs
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "1m", day, day, closed_only=True)
+            == []
+        )
+    finally:
+        repo.dispose()
+
+
+@pytest.mark.parametrize("via_resolver_absolute", [False, True])
+def test_candle_audit_rejects_out_of_base_destination_before_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    via_resolver_absolute: bool,
+) -> None:
+    """Escaping ``..`` DB traversal and absolute destinations fail before reading, writing, or purging.
+
+    Given: A SQLite DB whose instrument ``exchange`` uses ``..`` traversal or whose
+        resolved event path points to an absolute destination outside ``base_dir``.
+    When: ``CandleAuditArchiver(repo, base_dir).export(purge=True)`` runs.
+    Then: It raises ``ValueError`` before reading existing CSVs, creating anything under
+        ``base_dir``, writing or altering outside files, or purging any DB rows.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    escaped_root = tmp_path / "base_escaped"
+    outside_csv = (escaped_root / "2024-01-01.csv").resolve()
+    read_calls: list[Path] = []
+    monkeypatch.setattr("snapper.data.archiver._read_existing_csv", read_calls.append)
+    try:
+        if via_resolver_absolute:
+            escaped_root.mkdir(parents=True, exist_ok=True)
+            outside_csv.write_text("do-not-read-or-replace\n", encoding="utf-8")
+            monkeypatch.setattr(
+                "snapper.data.archiver._resolve_event_path",
+                lambda *_args, **_kwargs: outside_csv,
+            )
+        else:
+            with repo.get_session() as session:
+                inst = session.execute(
+                    select(Instrument).where(Instrument.public_id == instrument_id)
+                ).scalar_one()
+                inst.exchange = "../../../../base_escaped"
+                session.commit()
+
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day, day, closed_only=True
+        )
+        assert len(pending) == 1
+
+        with pytest.raises(ValueError, match="escapes archiver base"):
+            CandleAuditArchiver(repo, base_dir).export(
+                timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert read_calls == []
+        assert list(base_dir.iterdir()) == []
+        if via_resolver_absolute:
+            assert outside_csv.read_text(encoding="utf-8") == "do-not-read-or-replace\n"
+        else:
+            assert not escaped_root.exists()
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "1m", day, day, closed_only=True)
+            == pending
+        )
+    finally:
+        repo.dispose()
+
+
+@pytest.mark.skipif(
+    not _symlinks_supported(), reason="filesystem symlinks unavailable or unpermitted"
+)
+def test_candle_audit_rejects_symlink_leaf_before_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A symlink day-CSV destination pointing into ``base_dir`` is rejected before any I/O.
+
+    Given: An outside directory holding a symlink named like the day CSV targeting
+        an existing file inside ``base_dir``, returned by ``_resolve_event_path``.
+    When: ``CandleAuditArchiver(repo, base_dir).export(purge=True)`` executes.
+    Then: It raises ``ValueError`` before reading or altering either the symlink or
+        target file, creates no archive dirs, and leaves DB rows unpurged.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    base_dir = tmp_path / "base"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    inside_target = base_dir / "protected.csv"
+    inside_target.write_text("inside-sentinel\n", encoding="utf-8")
+    outside_dir = tmp_path / "outside_sym"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    outside_link = outside_dir / "2024-01-01.csv"
+    os.symlink(inside_target, outside_link)
+    read_calls: list[Path] = []
+    monkeypatch.setattr("snapper.data.archiver._read_existing_csv", read_calls.append)
+    monkeypatch.setattr(
+        "snapper.data.archiver._resolve_event_path",
+        lambda *_args, **_kwargs: outside_link,
+    )
+    try:
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day, day, closed_only=True
+        )
+        assert len(pending) == 1
+
+        with pytest.raises(ValueError, match="escapes archiver base"):
+            CandleAuditArchiver(repo, base_dir).export(
+                timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert read_calls == []
+        assert outside_link.is_symlink()
+        assert inside_target.read_text(encoding="utf-8") == "inside-sentinel\n"
+        assert not (base_dir / "archive").exists()
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "1m", day, day, closed_only=True)
+            == pending
+        )
+    finally:
+        repo.dispose()
+
+
+def test_fsync_base_ancestors_syncs_every_resolved_ancestor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before a purge, the base and every ancestor up to the root are synced.
+
+    Given: An existing base directory and directory fsync reported as supported.
+    When: ``_fsync_base_ancestors`` runs.
+    Then: It syncs the resolved base, then each resolved ancestor in order up to
+        the filesystem root.
+    """
+    base = tmp_path / "base"
+    base.mkdir()
+    synced: list[Path] = []
+    monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+    monkeypatch.setattr("snapper.data.archiver._fsync_directory", synced.append)
+
+    _fsync_base_ancestors(base)
+
+    resolved = base.resolve()
+    assert synced == [resolved, *resolved.parents]
+
+
+def test_fsync_base_ancestors_tolerates_unsyncable_high_ancestors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only refusal above ``base.parent`` is tolerated and the walk continues.
+
+    Given: Directory fsync that raises ``EROFS`` for every directory above
+        ``base.parent``.
+    When: ``_fsync_base_ancestors`` runs.
+    Then: It returns normally after attempting every ancestor.
+    """
+    base = tmp_path / "base"
+    base.mkdir()
+    resolved = base.resolve()
+    attempted: list[Path] = []
+
+    def _fsync(directory: Path) -> None:
+        """Refuse every directory above the base's parent as read-only."""
+        attempted.append(directory)
+        if directory not in (resolved, resolved.parent):
+            raise OSError(errno.EROFS, "read-only file system")
+
+    monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+    monkeypatch.setattr("snapper.data.archiver._fsync_directory", _fsync)
+
+    _fsync_base_ancestors(base)
+
+    assert attempted == [resolved, *resolved.parents]
+
+
+@pytest.mark.parametrize("failing", ["base", "parent", "unexpected", "permission"])
+def test_fsync_base_ancestors_propagates_strict_or_unexpected_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: str,
+) -> None:
+    """Errors at the base, its parent, or with an unexpected errno block the purge.
+
+    Given: Directory fsync that fails at the base, at its parent with a tolerated
+        errno, or above the parent with an errno outside the tolerated set,
+        including a permission refusal on a directory that may hold a new entry.
+    When: ``_fsync_base_ancestors`` runs.
+    Then: The ``OSError`` propagates.
+    """
+    base = tmp_path / "base"
+    base.mkdir()
+    resolved = base.resolve()
+    targets = {
+        "base": (resolved, errno.EROFS),
+        "parent": (resolved.parent, errno.EROFS),
+        "unexpected": (resolved.parent.parent, errno.EIO),
+        "permission": (resolved.parent.parent, errno.EACCES),
+    }
+    failing_dir, failing_errno = targets[failing]
+
+    def _fsync(directory: Path) -> None:
+        """Fail only at the selected directory with the selected errno."""
+        if directory == failing_dir:
+            raise OSError(failing_errno, "injected directory fsync failure")
+
+    monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+    monkeypatch.setattr("snapper.data.archiver._fsync_directory", _fsync)
+
+    with pytest.raises(OSError, match="injected directory fsync failure"):
+        _fsync_base_ancestors(base)
+
+
+def test_fsync_base_ancestors_is_a_no_op_without_directory_fsync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Platforms without directory fsync skip the ancestor walk entirely.
+
+    Given: Directory fsync reported as unsupported.
+    When: ``_fsync_base_ancestors`` runs.
+    Then: No directory is synced.
+    """
+    synced: list[Path] = []
+    monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: False)
+    monkeypatch.setattr("snapper.data.archiver._fsync_directory", synced.append)
+
+    _fsync_base_ancestors(tmp_path)
+
+    assert synced == []

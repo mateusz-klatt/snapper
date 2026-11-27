@@ -16,7 +16,9 @@ Event archive structure:
 """
 
 import csv
+import errno
 import json
+import os
 from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Iterable
@@ -691,25 +693,169 @@ def _merge_and_dedup_events(
     return sorted(seen.values(), key=lambda r: r[1])
 
 
+def _directory_fsync_supported() -> bool:
+    """Report whether this platform can open a directory and fsync its descriptor.
+
+    POSIX opens a directory read-only and syncs it so newly created directory
+    entries and atomic replacements are durable. Windows exposes no
+    directory-fsync primitive and refuses ``os.open`` on directories with
+    ``PermissionError``, so on ``os.name == "nt"`` crash durability stops at
+    the flushed and fsynced staged CSV file.
+    """
+    return os.name != "nt"
+
+
+def _fsync_directory(path: Path) -> None:
+    """Make directory entry updates durable when the platform supports dir fsync.
+
+    On POSIX, opens ``path`` read-only and calls ``os.fsync``. On Windows
+    (``os.name == "nt"``), returns without touching the directory because
+    directory descriptors cannot be opened; durability there ends at the synced
+    file itself.
+    """
+    if not _directory_fsync_supported():
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_directory_tree(target_dir: Path, base_dir: Path) -> None:
+    """Fsync ``target_dir`` and each ancestor up to and including ``base_dir.parent``.
+
+    Both paths are resolved first, which matches what
+    :func:`_validate_archive_destination` checked, so the walk terminates by
+    construction. Purge requires ``base_dir`` to exist before the export starts
+    (see :meth:`CandleAuditArchiver.export`), so every directory a purging
+    export creates lies inside ``base_dir``, and this fixed chain makes each
+    new entry durable on every retry as well. When directory fsync is
+    unsupported (Windows ``os.name == "nt"``), returns without walking, so
+    crash durability there stops at the flushed and fsynced staged CSV file.
+
+    Args:
+        target_dir: Immediate parent directory of the published CSV file.
+        base_dir: Configured archiver base directory.
+    """
+    if not _directory_fsync_supported():
+        return
+    resolved_target = target_dir.resolve()
+    steps = len(resolved_target.relative_to(base_dir.resolve()).parts) + 2
+    current = resolved_target
+    for _ in range(steps):
+        _fsync_directory(current)
+        current = current.parent
+
+
+_UNSYNCABLE_DIRECTORY_ERRNOS = frozenset({errno.EROFS, errno.EINVAL})
+
+
+def _fsync_base_ancestors(base_dir: Path) -> None:
+    """Make the archive base durable in every ancestor directory before a purge.
+
+    A non-purging export may have created ``base_dir`` several levels deep
+    without syncing the directories that hold those new entries, and a later
+    purge would otherwise see an existing base and stop its per-file chain at
+    ``base_dir.parent``. Syncing every ancestor of the resolved base, up to the
+    filesystem root, closes that gap for first runs and retries alike at a
+    cost bounded by the path depth. Ancestors above ``base_dir.parent`` may sit
+    on read-only or special filesystems that refuse a directory fsync. Only
+    ``EROFS`` and ``EINVAL`` are tolerated there, because a read-only or
+    sync-incapable directory cannot have gained a new entry; any other error,
+    including a permission refusal, and any error at ``base_dir`` or
+    ``base_dir.parent``, propagates and blocks the purge. On Windows
+    (``os.name == "nt"``) this is a no-op, like every directory fsync here.
+
+    Args:
+        base_dir: Configured archiver base directory, which must exist.
+    """
+    if not _directory_fsync_supported():
+        return
+    resolved_base = base_dir.resolve()
+    strict = (resolved_base, resolved_base.parent)
+    for directory in (resolved_base, *resolved_base.parents):
+        try:
+            _fsync_directory(directory)
+        except OSError as exc:
+            if directory in strict or exc.errno not in _UNSYNCABLE_DIRECTORY_ERRNOS:
+                raise
+
+
+def _validate_archive_destination(path: Path, base_dir: Path) -> None:
+    """Ensure ``path`` resolves safely inside ``base_dir`` and is not a symlink.
+
+    Checks before creating directories or reading/writing existing files that
+    ``path.parent.resolve()`` stays within ``base_dir.resolve()``, that
+    ``path.resolve()`` is strictly inside ``base_dir.resolve()`` (not equal to
+    it), and that the target leaf ``path`` is not a symlink.
+
+    Args:
+        path: Candidate CSV destination path.
+        base_dir: Configured archiver base directory.
+
+    Raises:
+        ValueError: When the destination is a symlink or escapes ``base_dir``.
+    """
+    resolved_base = base_dir.resolve()
+    resolved_parent = path.parent.resolve()
+    resolved_target = path.resolve()
+    if (
+        path.is_symlink()
+        or not resolved_parent.is_relative_to(resolved_base)
+        or not resolved_target.is_relative_to(resolved_base)
+        or resolved_target == resolved_base
+    ):
+        raise ValueError(f"Archive destination {path} escapes archiver base {resolved_base}")
+
+
 def _write_event_csv(
     path: Path,
     header: tuple[str, ...],
     rows: list[tuple[str, ...]],
+    *,
+    fsync: bool = False,
 ) -> None:
     """Write event rows to CSV file with header.
 
-    Creates parent directories as needed.
+    Creates parent directories as needed. When ``fsync`` is True, flushes
+    and syncs the file descriptor before closing so staged writes are durable
+    before atomic replacement.
 
     Args:
         path: Target file path.
         header: Column names for the header row.
         rows: Pre-formatted string tuples to write.
+        fsync: Whether to flush and ``os.fsync`` the file descriptor.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
         writer.writerow(header)
         writer.writerows(rows)
+        if fsync:
+            handle.flush()
+            os.fsync(handle.fileno())
+
+
+def _publish_candle_audit_csv(path: Path, rows: list[tuple[str, ...]], base_dir: Path) -> None:
+    """Validate destination, stage, fsync, replace, and sync directory chain.
+
+    Verifies via :func:`_validate_archive_destination` that ``path`` resolves
+    inside ``base_dir`` and is not a symlink before any ``mkdir`` or write.
+    Stages, flushes, and fsyncs the temporary CSV before atomic replacement,
+    then calls :func:`_fsync_directory_tree` to sync ``path.parent`` through
+    ``base_dir.parent`` on POSIX (no-op on Windows).
+    """
+    _validate_archive_destination(path, base_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=path.parent, prefix=".ca-") as staging_dir:
+        staged_csv = Path(staging_dir) / "archive.tmp"
+        _write_event_csv(staged_csv, _CANDLE_AUDIT_COLUMNS, rows, fsync=True)
+        if path.is_file():
+            copymode(path, staged_csv)
+        staged_csv.replace(path)
+    _fsync_directory_tree(path.parent, base_dir)
 
 
 def _resolve_event_path(
@@ -1089,10 +1235,16 @@ class CandleAuditArchiver:
             ExportResult with file, row, and purge counts.
 
         Raises:
-            ValueError: If purge requested without closed_only.
+            ValueError: If purge requested without closed_only, purge requested
+                while the archive base directory does not exist yet, or a
+                destination fails archive boundary validation.
         """
         if purge and not closed_only:
             raise ValueError("Purge requires closed_only=True for candle audit")
+        if purge and not dry_run and not self._base_dir.is_dir():
+            raise ValueError(
+                f"Purge requires an existing archive directory: {self._base_dir} does not exist"
+            )
 
         inst_map = self._repo.get_instrument_archive_map()
         files_written = 0
@@ -1120,6 +1272,7 @@ class CandleAuditArchiver:
 
         rows_purged = 0
         if purge and not dry_run and all_row_ids:
+            _fsync_base_ancestors(self._base_dir)
             rows_purged = self._repo.delete_rows_by_id(Candle, all_row_ids)
 
         return ExportResult(
@@ -1141,8 +1294,13 @@ class CandleAuditArchiver:
     ) -> tuple[int, int, list[int]]:
         """Export candle audit rows for one instrument.
 
-        Publish each full merged CSV by replacement after its write completes.
-        A partial write must leave previously archived, purged versions intact.
+        Validates each destination inside ``_base_dir`` before reading any
+        existing CSV or creating directories. Publishes each merged CSV by
+        atomic replacement after flushing and fsyncing the staged CSV, then
+        syncs ``path.parent`` through ``_base_dir.parent`` on platforms that
+        support directory fsync (POSIX; skipped on Windows). A partial write
+        or failed fsync must propagate before any DB purge and leave
+        previously archived, purged versions intact.
 
         Args:
             instrument_public_id: Instrument to export.
@@ -1187,15 +1345,10 @@ class CandleAuditArchiver:
                 exchange_name,
                 archive_symbol,
             )
+            _validate_archive_destination(path, self._base_dir)
             existing = _read_existing_csv(path)
             merged = _merge_and_dedup_events(existing, by_day[day])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with TemporaryDirectory(dir=path.parent, prefix=".ca-") as staging_dir:
-                staged_csv = Path(staging_dir) / "archive.tmp"
-                _write_event_csv(staged_csv, _CANDLE_AUDIT_COLUMNS, merged)
-                if path.is_file():
-                    copymode(path, staged_csv)
-                staged_csv.replace(path)
+            _publish_candle_audit_csv(path, merged, self._base_dir)
             files_written += 1
 
         return files_written, len(row_ids), row_ids

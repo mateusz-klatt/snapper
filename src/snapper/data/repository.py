@@ -391,6 +391,7 @@ from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import AlertListCursor
+from snapper.data.repository_types import ApnsAdmissionContext
 from snapper.data.repository_types import AtomicResolveResult
 from snapper.data.repository_types import CancelClaimResult
 from snapper.data.repository_types import CandleIdentityRow
@@ -10160,6 +10161,26 @@ class Repository(ABC):
     @abstractmethod
     async def list_user_alert_defaults(self, user_public_id: str) -> list[UserAlertDefaultRow]:
         """Active user-level fallback prefs per alert type."""
+        ...
+
+    @abstractmethod
+    async def get_apns_admission_context(
+        self,
+        user_public_id: str,
+        device_public_id: str,
+    ) -> ApnsAdmissionContext:
+        """Read active APNs device, device prefs, and user defaults in one session.
+
+        Args:
+            user_public_id: Owning user public ID on the queued delivery.
+            device_public_id: Target device public ID on the queued delivery.
+
+        Returns:
+            ``ApnsAdmissionContext`` with the active APNs device (or ``None``
+            when inactive, missing, non-APNs, or owned by another user),
+            active ``DeviceAlertPrefRow`` rows filtered to ``device_public_id``,
+            and active ``UserAlertDefaultRow`` rows for ``user_public_id``.
+        """
         ...
 
     @abstractmethod
@@ -40214,6 +40235,58 @@ class SQLAlchemyRepository(Repository):
                 )
             )
             return [self._user_alert_default_row_from(r) for r in result.scalars().all()]
+
+    async def get_apns_admission_context(
+        self,
+        user_public_id: str,
+        device_public_id: str,
+    ) -> ApnsAdmissionContext:
+        """Read active APNs device, device prefs, and user defaults in one session.
+
+        Args:
+            user_public_id: Owning user public ID on the queued delivery.
+            device_public_id: Target device public ID on the queued delivery.
+
+        Returns:
+            ``ApnsAdmissionContext`` with the active APNs device (or ``None``),
+            that device's active ``DeviceAlertPrefRow`` rows, and the user's
+            active ``UserAlertDefaultRow`` rows.
+        """
+        async with self.session() as s:
+            device_model = (
+                await s.execute(
+                    select(NotificationDevice).where(
+                        NotificationDevice.user_public_id == user_public_id,
+                        NotificationDevice.public_id == device_public_id,
+                        NotificationDevice.known_to == KNOWN_TO_MAX,
+                        NotificationDevice.token_status == "active",
+                        NotificationDevice.provider == "apns",
+                    )
+                )
+            ).scalar_one_or_none()
+            if device_model is None:
+                return ApnsAdmissionContext(device=None, device_prefs=[], user_defaults=[])
+            prefs_result = await s.execute(
+                select(DeviceAlertPref).where(
+                    DeviceAlertPref.device_public_id == device_public_id,
+                    DeviceAlertPref.known_to == KNOWN_TO_MAX,
+                )
+            )
+            defaults_result = await s.execute(
+                select(UserAlertDefault).where(
+                    UserAlertDefault.user_public_id == user_public_id,
+                    UserAlertDefault.known_to == KNOWN_TO_MAX,
+                )
+            )
+            return ApnsAdmissionContext(
+                device=self._notification_device_row_from(device_model),
+                device_prefs=[
+                    self._device_alert_pref_row_from(r) for r in prefs_result.scalars().all()
+                ],
+                user_defaults=[
+                    self._user_alert_default_row_from(r) for r in defaults_result.scalars().all()
+                ],
+            )
 
     @staticmethod
     def _active_user_alert_default_query(
