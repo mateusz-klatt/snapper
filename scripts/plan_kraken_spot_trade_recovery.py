@@ -6,10 +6,12 @@ import hashlib
 import io
 import json
 import math
+import os
 import sys
 from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Sequence
+from contextlib import suppress
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -31,6 +33,30 @@ from snapper.application.updaters.historical.kraken_spot_trade_reconciliation im
 
 _MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
 _STORED_COLUMNS = ["instrument_public_id", "trade_id", "executed_at", "price", "size", "side"]
+
+
+def _confined_input(root: Path, candidate: Path) -> Path:
+    """Resolve an input to a regular file within the allowed directory.
+
+    Args:
+        root: The canonical input directory.
+        candidate: An absolute path or a path relative to the input directory.
+
+    Returns:
+        The canonical file path.
+
+    Raises:
+        OSError: If the candidate cannot be resolved.
+        ValueError: If the resolved candidate is outside the root or is not a file.
+    """
+    root_path = str(root)
+    resolved = os.path.realpath(root / candidate, strict=True)
+    with suppress(ValueError):
+        if os.path.commonpath([root_path, resolved]) == root_path:
+            path = Path(resolved)
+            if path.is_file():
+                return path
+    raise ValueError("Input path must be a regular file inside the input root")
 
 
 def _read_evidence(path: Path, expected_digest: str) -> list[KrakenSpotTradeEvidence]:
@@ -124,6 +150,12 @@ def main(argv: list[str] | None = None) -> int:
         Zero for a completed comparison, or one for an invalid input.
     """
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--input-root",
+        type=Path,
+        default=Path("."),
+        help="Input directory (default: current directory)",
+    )
     parser.add_argument("--evidence", required=True, type=Path, help="Kraken Spot evidence CSV")
     parser.add_argument("--evidence-sha256", required=True, help="Expected digest of evidence CSV")
     parser.add_argument(
@@ -134,9 +166,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        evidence = _read_evidence(args.evidence, args.evidence_sha256)
+        root = args.input_root.resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError("Input root must be a directory")
+        evidence_path = _confined_input(root, args.evidence)
+        stored_path = _confined_input(root, args.stored_trades)
+        evidence = _read_evidence(evidence_path, args.evidence_sha256)
         _check_evidence_scope(evidence, _utc_bound(args.start), _utc_bound(args.end))
-        plan = plan_kraken_spot_trade_recovery(evidence, _stored_trades(args.stored_trades))
+        plan = plan_kraken_spot_trade_recovery(evidence, _stored_trades(stored_path))
     except (OSError, ValueError, csv.Error) as error:
         print(f"Kraken Spot trade recovery plan failed: {error}", file=sys.stderr)
         return 1

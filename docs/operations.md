@@ -1442,8 +1442,13 @@ intended database and includes all candidate identities before using the
 reported absence as evidence. The comparison reports duplicates and
 discrepancies as errors.
 
+Both CSVs must resolve to regular files inside `--input-root`, which defaults
+to the current working directory. Relative CSV paths are resolved from that
+root.
+
 ```bash
 .venv/bin/python -m scripts.plan_kraken_spot_trade_recovery \
+  --input-root . \
   --evidence missing-trades.csv \
   --evidence-sha256 "$TRADE_EVIDENCE_SHA256" \
   --stored-trades trade-snapshot.csv \

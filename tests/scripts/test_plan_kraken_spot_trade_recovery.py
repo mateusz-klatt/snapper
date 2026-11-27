@@ -3,6 +3,7 @@
 import hashlib
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -45,6 +46,8 @@ def _args(tmp_path: Path, evidence: str, stored: str) -> list[str]:
         "2026-01-01T00:00:00Z",
         "--end",
         "2026-01-01T00:01:00Z",
+        "--input-root",
+        str(tmp_path),
     ]
 
 
@@ -70,6 +73,86 @@ def test_reports_present_and_missing_without_touching_inputs(
     }
     assert output.err == ""
     assert {file.name: file.read_bytes() for file in tmp_path.iterdir()} == before
+
+
+def test_accepts_relative_inputs_under_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Use the working directory as the default input root.
+
+    Given: Relative CSV paths in a subdirectory of the working directory.
+    When: The planner runs without an explicit input root.
+    Then: It reads both files and reports the stored trade.
+    """
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    argv = _args(inputs, _BTC_EVIDENCE, _STORED_HEADER + _BTC_STORED)
+    argv[argv.index("--evidence") + 1] = "inputs/evidence.csv"
+    argv[argv.index("--stored-trades") + 1] = "inputs/stored.csv"
+    root_index = argv.index("--input-root")
+    del argv[root_index : root_index + 2]
+    monkeypatch.chdir(tmp_path)
+
+    assert planner.main(argv) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)["already_present"] == 1
+    assert output.err == ""
+
+
+@pytest.mark.parametrize("option", ["--evidence", "--stored-trades"])
+@pytest.mark.parametrize(
+    ("candidate", "message"),
+    [
+        ("../inputs-other/outside.csv", "Input path must be a regular file inside the input root"),
+        ("linked.csv", "Input path must be a regular file inside the input root"),
+        ("directory", "Input path must be a regular file inside the input root"),
+        ("missing.csv", "missing.csv"),
+    ],
+)
+def test_rejects_invalid_paths_before_opening_either_input(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], option: str, candidate: str, message: str
+) -> None:
+    """Require each input path to identify a regular file inside the root.
+
+    Given: Either CSV argument escapes the root or names a directory or missing file.
+    When: The planner validates both paths.
+    Then: It reports the failure and exits without opening either input.
+    """
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    sibling = tmp_path / "inputs-other"
+    sibling.mkdir()
+    outside = sibling / "outside.csv"
+    outside.write_text("outside\n", encoding="utf-8")
+    (inputs / "linked.csv").symlink_to(outside)
+    (inputs / "directory").mkdir()
+    argv = _args(inputs, _BTC_EVIDENCE, _STORED_HEADER)
+    argv[argv.index(option) + 1] = candidate
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", Mock(side_effect=AssertionError("An input was opened")))
+        assert planner.main(argv) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert message in output.err
+
+
+def test_rejects_a_file_as_the_input_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Require the input root to resolve to a directory.
+
+    Given: A regular file supplied as the input root.
+    When: The planner resolves the root.
+    Then: It reports the invalid root and exits without a plan.
+    """
+    argv = _args(tmp_path, _BTC_EVIDENCE, _STORED_HEADER)
+    argv[argv.index("--input-root") + 1] = str(tmp_path / "evidence.csv")
+
+    assert planner.main(argv) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "Input root must be a directory" in output.err
 
 
 def _fixture_rows(template: str, count: int) -> str:
