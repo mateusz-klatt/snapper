@@ -10,7 +10,10 @@ from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
+from typing import Final
 from uuid import UUID
+
+import typer
 
 from snapper.application.updaters.historical.kraken_spot_trade_evidence import (
     KrakenSpotTradeEvidence,
@@ -24,8 +27,15 @@ from snapper.application.updaters.historical.kraken_spot_trade_reconciliation im
     StoredKrakenSpotTrade,
 )
 from snapper.application.updaters.historical.kraken_spot_trade_reconciliation import (
-    plan_kraken_spot_trade_recovery,
+    plan_kraken_spot_trade_recovery as reconcile_trades,
 )
+
+PLAN_KRAKEN_SPOT_TRADE_RECOVERY_CONTEXT: Final[dict[str, object]] = {
+    "allow_extra_args": True,
+    "ignore_unknown_options": True,
+    "help_option_names": [],
+}
+"""Click settings that forward the command's arguments and help to argparse."""
 
 _STORED_COLUMNS = ["instrument_public_id", "trade_id", "executed_at", "price", "size", "side"]
 
@@ -83,7 +93,9 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Zero for a completed comparison, or one for an invalid input.
     """
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="snapper plan-kraken-spot-trade-recovery", description=__doc__
+    )
     parser.add_argument(
         "--input-root",
         type=Path,
@@ -106,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
         window = load_kraken_spot_trade_evidence(
             evidence_path, args.evidence_sha256, args.start, args.end
         )
-        plan = plan_kraken_spot_trade_recovery(window.rows, _stored_trades(stored_path))
+        plan = reconcile_trades(window.rows, _stored_trades(stored_path))
     except (OSError, ValueError, csv.Error) as error:
         print(f"Kraken Spot trade recovery plan failed: {error}", file=sys.stderr)
         return 1
@@ -124,5 +136,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def plan_kraken_spot_trade_recovery(ctx: typer.Context) -> None:
+    """Compare verified Kraken Spot trade evidence with an offline snapshot.
+
+    Args:
+        ctx: Context whose extra arguments are passed to argparse.
+
+    Raises:
+        typer.Exit: With the planner's exit code.
+    """
+    raise typer.Exit(code=main(list(ctx.args)))

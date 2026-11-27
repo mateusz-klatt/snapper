@@ -47,6 +47,8 @@ Data Updates:
     - ``rebuild-synthesized-candles``: Rebuild and verify higher candles from recorded repairs
     - ``void-candles``: Void the active candles of retired Kraken instruments under the candle fence
     - ``check-candle-identities``: Check read-only that stored candle ids are deterministic
+    - ``plan-kraken-spot-trade-recovery``: Compare Kraken Spot trade evidence with a snapshot
+    - ``import-kraken-spot-trades``: Preview or import missing Kraken Spot trades
     - ``update-kraken-futures-funding-rates``: Backfill funding rates
 
 Example:
@@ -88,6 +90,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
+from typer._click.globals import get_current_context
 
 from snapper.application.ai_review.service import _BUS_AI_REVIEW_DECISION_TOPIC
 from snapper.application.ai_review.service import get_ai_review_service
@@ -159,6 +162,8 @@ from snapper.cli.daily_partitions import daily_partitions_app
 from snapper.cli.dev_pat import dev_mint_pat
 from snapper.cli.execution_annulment import annulment_app
 from snapper.cli.fx_proofs import fx_proofs_app
+from snapper.cli.kraken_spot_trade_commands import KRAKEN_SPOT_TRADE_COMMANDS
+from snapper.cli.kraken_spot_trade_commands import register_kraken_spot_trade_commands
 from snapper.cli.mcp_oauth import mcp_oauth_app
 from snapper.cli.pnl_minimum_activation_gate import pnl_minimum_gate_app
 from snapper.cli.synthesized_candle_rebuild import rebuild_synthesized_candles
@@ -234,6 +239,7 @@ _FORCE_UPDATE_HELP = "Force update even if recently updated"
 _CLI_SYMBOL_SOURCE_ALL_MAPPED = "all mapped"
 _CLI_SYMBOL_SOURCE_SETTINGS = "specified/settings"
 _CLI_RESUME_FLAG = "--resume/--no-resume"
+
 
 app = typer.Typer(add_completion=False, help="Snapper CLI")
 app.command(name="audit-candles")(audit_candles)
@@ -352,8 +358,10 @@ def _alembic_cfg(db_url: str) -> Config:
 
 @app.callback()
 def main_callback() -> None:
-    """Initialize global encryption before any CLI command runs."""
-    get_encryption_service()
+    """Initialize global encryption for commands that use normal CLI setup."""
+    context = get_current_context(silent=True)
+    if context is None or context.invoked_subcommand not in KRAKEN_SPOT_TRADE_COMMANDS:
+        get_encryption_service()
 
 
 @app.command(name="trade-zmq")
@@ -3108,6 +3116,7 @@ app.command(name="rebuild-synthesized-candles", context_settings=REPAIR_CANDLES_
 )
 app.command(name="void-candles", context_settings=VOID_CANDLES_CONTEXT)(void_candles)
 app.command(name="check-candle-identities")(check_candle_identities)
+register_kraken_spot_trade_commands(app)
 app.command(name="retire-accruals")(retire_accruals)
 app.command(name="retire-trade-projection-checkpoints")(retire_trade_projection_checkpoints)
 app.command(name="repair-cancel-targets")(repair_cancel_targets)

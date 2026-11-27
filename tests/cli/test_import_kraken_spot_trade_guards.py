@@ -1,8 +1,6 @@
 """Exercise importer refusal paths and transaction setup without PostgreSQL."""
 
 import json
-import runpy
-import sys
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -14,8 +12,8 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from typer.testing import CliRunner
 
-from scripts import import_kraken_spot_trades as importer
 from snapper.application.updaters.historical.kraken_spot_trade_evidence import (
     KrakenSpotTradeEvidence,
 )
@@ -25,6 +23,8 @@ from snapper.application.updaters.historical.kraken_spot_trade_evidence import (
 from snapper.application.updaters.historical.kraken_spot_trade_reconciliation import (
     KrakenSpotTradeRecoveryPlan,
 )
+from snapper.cli import kraken_spot_trade_import as importer
+from snapper.cli.app import app
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 
@@ -71,22 +71,23 @@ def _repository_mock(dialect: str) -> tuple[MagicMock, AsyncMock]:
         (["--apply", "--expect-digest", _SHA], "requires --receipt"),
         (["--expect-digest", _SHA], "require --apply"),
         (["--receipt", "receipt.json"], "require --apply"),
+        (
+            ["--", "--apply", "--expect-digest", _SHA, "--receipt", "receipt.json"],
+            "unrecognized arguments: -- --apply",
+        ),
     ],
 )
-def test_apply_options_require_both_guards(
-    flags: list[str], message: str, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_apply_options_require_both_guards(flags: list[str], message: str) -> None:
     """Require approval and a new receipt path when applying.
 
-    Given: Write options are incomplete or supplied without apply.
+    Given: Write options are incomplete, supplied without apply, or after ``--``.
     When: The operator runs the importer.
     Then: The parser refuses with usage status.
     """
-    with pytest.raises(SystemExit) as exit_info:
-        importer.main([*_INPUT_ARGS, *flags])
+    result = CliRunner().invoke(app, ["import-kraken-spot-trades", *_INPUT_ARGS, *flags])
 
-    assert exit_info.value.code == 2
-    assert message in capsys.readouterr().err
+    assert result.exit_code == 2
+    assert message in result.stderr
 
 
 @pytest.mark.asyncio
@@ -288,21 +289,16 @@ def test_main_redacts_database_failures(
     assert capsys.readouterr().err == "Trade import failed: SQLAlchemyError\n"
 
 
-def test_module_exposes_the_script_help(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Expose help through the script module entry point.
+def test_import_command_exposes_argparse_help() -> None:
+    """Expose the importer's argparse help through the Snapper CLI.
 
-    Given: The operator invokes the module with help.
-    When: The parser handles the request.
+    Given: The operator invokes the import command with --help.
+    When: Typer forwards the request to argparse.
     Then: The command explains where the receipt belongs and exits successfully.
     """
-    monkeypatch.setattr(sys, "argv", ["import_kraken_spot_trades", "--help"])
+    result = CliRunner().invoke(app, ["import-kraken-spot-trades", "--help"])
 
-    with pytest.raises(SystemExit) as exit_info:
-        runpy.run_path(str(importer.__file__), run_name="__main__")
-
-    assert exit_info.value.code == 0
-    help_text = capsys.readouterr().out
-    assert "--expect-digest" in help_text
-    assert "New apply receipt file inside --input-root" in " ".join(help_text.split())
+    assert result.exit_code == 0
+    assert result.stdout.startswith("usage: snapper import-kraken-spot-trades ")
+    assert "--expect-digest" in result.stdout
+    assert "New apply receipt file inside --input-root" in " ".join(result.stdout.split())

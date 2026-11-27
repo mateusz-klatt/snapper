@@ -23,8 +23,14 @@ Note:
 
 import os
 import sys
+from collections.abc import Callable
+from importlib import import_module
+from typing import cast
 
-from snapper.cli.app import app
+import typer
+
+from snapper.cli.kraken_spot_trade_commands import KRAKEN_SPOT_TRADE_COMMANDS
+from snapper.cli.kraken_spot_trade_commands import register_kraken_spot_trade_commands
 from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
 from snapper.utils.logging import DEFAULT_LOGFILE
 from snapper.utils.logging import LOGFILE_ENV_VAR
@@ -105,12 +111,19 @@ def _resolve_logfile(argv: list[str]) -> str:
     return DEFAULT_LOGFILE
 
 
+def app() -> None:
+    """Load and invoke the full CLI after recovery-only dispatch is ruled out."""
+    cast(typer.Typer, import_module("snapper.cli.app").app)()
+
+
 def main() -> int:
     """Initialize logging and launch the Snapper CLI application.
 
     Sets up the logging subsystem with sensible defaults (INFO level,
     human-readable format, file output) and then invokes the Typer
-    CLI application to process command-line arguments.
+    CLI application to process command-line arguments. The Kraken Spot trade
+    recovery commands use their own CLI without loading server configuration
+    or writing startup logs.
 
     The function configures:
         - Log level: INFO
@@ -128,16 +141,25 @@ def main() -> int:
     Returns:
         Exit code (always 0 on success).
     """
-    logfile = resolve_logfile_from_environment(_resolve_logfile(sys.argv))
-    os.environ[LOGFILE_ENV_VAR] = logfile
-    setup_logging(
-        level="INFO",
-        json_logs=False,
-        logfile=logfile,
-        console_to_stderr=_machine_stdout_requested(sys.argv),
-    )
-    log_kraken_sdk_patches_status()
-    app()
+    words = sys.argv[1:]
+    if words[:1] == ["--"]:
+        words = words[1:]
+    run: Callable[[], None] = app
+    if words and words[0] in KRAKEN_SPOT_TRADE_COMMANDS:
+        recovery_cli = typer.Typer(add_completion=False)
+        register_kraken_spot_trade_commands(recovery_cli)
+        run = recovery_cli
+    else:
+        logfile = resolve_logfile_from_environment(_resolve_logfile(sys.argv))
+        os.environ[LOGFILE_ENV_VAR] = logfile
+        setup_logging(
+            level="INFO",
+            json_logs=False,
+            logfile=logfile,
+            console_to_stderr=_machine_stdout_requested(sys.argv),
+        )
+        log_kraken_sdk_patches_status()
+    run()
     return 0
 
 

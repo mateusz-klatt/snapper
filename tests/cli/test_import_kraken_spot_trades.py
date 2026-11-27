@@ -18,8 +18,10 @@ from uuid import uuid7
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from typer.testing import CliRunner
 
-from scripts import import_kraken_spot_trades as importer
+from snapper.cli import kraken_spot_trade_import as importer
+from snapper.cli.app import app
 from snapper.config.settings import get_bootstrap_settings
 from snapper.core.json_types import JsonObject
 from snapper.data.models import KNOWN_TO_MAX
@@ -309,9 +311,13 @@ def test_apply_refuses_a_stale_digest(
     asyncio.run(_insert(database, _STORED_BTC))
     receipt = tmp_path / "receipt.json"
 
-    assert importer.main(_apply_args(argv, digest, receipt)) == 2
+    result = CliRunner().invoke(
+        app, ["import-kraken-spot-trades", *_apply_args(argv, digest, receipt)]
+    )
+
+    assert result.exit_code == 2
     assert not receipt.exists()
-    assert "digest" in capsys.readouterr().err.lower()
+    assert "digest" in result.stderr.lower()
     trades, obligations = asyncio.run(_stored(database))
     assert [trade.public_id for trade in trades] == [_STORED_BTC["public_id"]]
     assert obligations == []
@@ -334,10 +340,13 @@ def test_apply_writes_only_missing_trades_and_their_obligations(
     receipt = tmp_path / "receipt.json"
     started = datetime.now(UTC)
 
-    assert importer.main(_apply_args(argv, digest, Path(receipt.name))) == 0
+    result = CliRunner().invoke(
+        app, ["import-kraken-spot-trades", *_apply_args(argv, digest, Path(receipt.name))]
+    )
+    assert result.exit_code == 0
     finished = datetime.now(UTC)
     recorded = cast(JsonObject, json.loads(receipt.read_text(encoding="utf-8")))
-    assert json.loads(capsys.readouterr().out) == recorded
+    assert json.loads(result.stdout) == recorded
     assert recorded["plan_digest"] == digest
     assert recorded["evidence_sha256"] == argv[argv.index("--evidence-sha256") + 1].lower()
     assert recorded["chunks"] == [{"inserted": 3, "already_present": 0}]
@@ -430,7 +439,7 @@ def test_apply_refuses_an_existing_receipt(
 
 
 def test_apply_refuses_an_outside_receipt_before_database_access(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Reject an output path outside the configured root before planning.
 
@@ -443,10 +452,14 @@ def test_apply_refuses_an_outside_receipt_before_database_access(
     configure_repository = Mock()
     monkeypatch.setattr(importer, "configured_repository", configure_repository)
 
-    assert importer.main(_apply_args(_args(inputs), "0" * 64, Path("../receipt.json"))) == 1
+    argv = _apply_args(_args(inputs), "0" * 64, Path("../receipt.json"))
+    result = CliRunner().invoke(app, ["import-kraken-spot-trades", *argv])
 
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.startswith("Trade import refused:")
     configure_repository.assert_not_called()
-    assert "input root" in capsys.readouterr().err
+    assert "input root" in result.stderr
     assert not (tmp_path / "receipt.json").exists()
 
 
