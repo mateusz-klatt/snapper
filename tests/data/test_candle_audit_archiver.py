@@ -999,11 +999,14 @@ def test_candle_audit_export_fsyncs_staged_file_and_directory(
     real_replace = Path.replace
     events: list[str] = []
 
-    def _fake_open(target: str | Path, flags: int, mode: int = 0o777) -> int:
-        if Path(target) == csv_dir:
+    def _fake_open(
+        target: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        """Record the archive directory open and delegate every other open, including rmtree's."""
+        if dir_fd is None and Path(target) == csv_dir:
             events.append("open_dir")
             return dir_sentinel
-        return real_open(target, flags, mode)
+        return real_open(target, flags, mode, dir_fd=dir_fd)
 
     def _fake_fsync(descriptor: int) -> None:
         if descriptor == dir_sentinel:
