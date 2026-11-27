@@ -1102,16 +1102,17 @@ and `--scope` flags.
 
 ### Connecting Claude.ai and ChatGPT
 
-Exact button and field labels vary by assistant plan and UI version, but
-the connection flow is the same:
+Exact buttons, fields and step order vary by assistant, plan and UI
+version. The general flow is below; for the sequence observed in
+Claude.ai, see its note after the list:
 
 1. Open the assistant's connectors or apps settings and start creating a
     custom remote MCP connector or app.
 2. Copy the OAuth callback / redirect URI shown by the assistant and
     ensure a dedicated Snapper OAuth client is provisioned for that exact
     URI (one client per assistant).
-3. Set the MCP server URL to `https://<your-snapper-host>/api/mcp` and
-    select OAuth authentication.
+3. Set the MCP server URL to `https://<your-snapper-host>/api/mcp` and,
+    where the assistant offers a choice, select OAuth authentication.
 4. Enter the `client_id` and `client_secret` from `provision-client` in
     the assistant's OAuth client fields (often under advanced or OAuth
     settings).
@@ -1122,12 +1123,38 @@ the connection flow is the same:
 
 Assistant-specific notes:
 
-- **Claude.ai** — Add a custom connector pointing at
-    `https://<your-snapper-host>/api/mcp` using OAuth and its dedicated
-    provisioned client. Once active, live calls to read-only tools such as
-    `get_ohlcv`, `list_positions`, `list_orders`, `list_recent_signals`,
-    and `list_instruments` return data from your accessible wallets and
-    markets.
+- **Claude.ai** — Connector settings live under the sidebar's
+    **Plugins** page (`/settings/connectors` redirects there), and
+    active connectors are listed under **Your plugins**. UI labels,
+    navigation paths, and dialog steps may change across plans and
+    releases; production UAT observed the following flow:
+
+    - **Opening the dialog:** **Add** opens a menu, and **Add custom
+        connector** opens a dialog titled "Add custom connector, Step 1
+        of 2".
+    - **Step 1 of 2:** Has exactly two required fields — **Name**
+        ("Shown in the connectors list") and **MCP server URL** ("The
+        HTTPS address where the server accepts MCP requests", set to
+        `https://<your-snapper-host>/api/mcp`) — then **Continue**. Step
+        1 has no authentication choice.
+    - **Step 2 of 2 (not verified):** Step 2 was not observed during
+        UAT. OAuth client fields (client ID and client secret) are
+        expected there, but that step and its labels are **not
+        verified**.
+    - **One connector per URL per organization:** If the URL is already
+        used by another connector in the same Claude.ai organization,
+        Step 1 shows "A connector with this URL already exists in your
+        organization. Use the existing connector instead of adding it
+        again." and **Continue** stays disabled. Reuse or edit the
+        existing connector. Whether a different Claude.ai organization
+        can hold a second, separately provisioned client was not
+        verified.
+    - **Active connector and live calls:** An existing connector shows
+        in the list as `<Name> / Custom connector / <host>`. Live
+        read-only tool calls through it worked in UAT (`get_ohlcv`,
+        `list_positions`), returning data from your accessible markets
+        and wallets.
+
 - **ChatGPT** — Enable developer mode if required, add a custom app or
     connector at `https://<your-snapper-host>/api/mcp` with OAuth
     authentication and its dedicated provisioned client, then complete the
@@ -1220,6 +1247,14 @@ token or bridge entry directly.)
     delegate first). `409` means an active grant exists for the same
     `(owner, operator, client_id)` with a different resource or scope
     set; confirm replacement or revoke the prior delegate first.
+- **Claude.ai duplicate URL ("A connector with this URL already exists
+    in your organization. Use the existing connector instead of adding
+    it again.")** — In Claude.ai, Step 1 disables **Continue** when
+    another connector in the same organization already uses
+    `https://<your-snapper-host>/api/mcp` (an organization can have only
+    one connector per MCP URL). Reuse or edit the existing connector.
+    Using a different organization for a second client was not
+    verified.
 
 ### Security notes
 
