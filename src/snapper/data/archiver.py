@@ -721,71 +721,65 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _find_existing_ancestor(target_dir: Path) -> Path:
-    """Walk up from ``target_dir`` to the first directory that already exists.
+def _fsync_directory_tree(target_dir: Path, base_dir: Path, created: tuple[Path, ...] = ()) -> None:
+    """Fsync ``target_dir`` up through ``base_dir.parent`` plus parents of created dirs.
 
-    Must run before ``target_dir.mkdir(parents=True, exist_ok=True)`` so the
-    returned directory is the holding parent whose entry records the newly
-    created top-level directory (including ``base_dir`` itself when exported
-    into a missing output directory). When ``target_dir`` already exists,
-    returns ``target_dir`` itself so only the CSV parent is synced.
-
-    Args:
-        target_dir: Intended parent directory of the published CSV file.
-
-    Returns:
-        First pre-existing directory at or above ``target_dir``.
-    """
-    current = target_dir
-    while not current.is_dir():
-        current = current.parent
-    return current
-
-
-def _fsync_directory_tree(target_dir: Path, stop_dir: Path) -> None:
-    """Fsync ``target_dir`` and each ancestor up to and including ``stop_dir``.
-
-    Walks upward from ``target_dir`` through ``stop_dir`` (the first directory
-    that already existed before ``mkdir(parents=True, exist_ok=True)``) so
-    every newly created directory entry—including a newly created output base
-    directory inside its parent—and the atomic file replacement are durable
-    before any database purge commits. When all directories already existed
-    (``stop_dir == target_dir``), only ``target_dir`` is synced. On Windows
-    (``os.name == "nt"``), directory fsync is a no-op via
-    :func:`_fsync_directory`, so crash durability is bounded by the flushed
-    and fsynced staged CSV file.
+    When directory fsync is unsupported (Windows ``os.name == "nt"``), returns
+    immediately without walking directories, so crash durability there stops
+    at the flushed and fsynced staged CSV file. On POSIX, computes walk depth
+    from ``target_dir.relative_to(base_dir).parts`` so the walk terminates by
+    construction and syncs ``target_dir``, ``base_dir``, and ``base_dir.parent``
+    unconditionally, which also covers a retry after an earlier directory
+    fsync failed. It then syncs the parent of every directory in ``created``
+    that the fixed chain does not already cover, so an output base created
+    several levels deep records each new entry in the directory holding it.
 
     Args:
         target_dir: Immediate parent directory of the published CSV file.
-        stop_dir: First pre-existing ancestor directory where the sync stops.
+        base_dir: Configured archiver base directory.
+        created: Directories that did not exist before this publication's mkdir.
     """
-    steps = len(target_dir.relative_to(stop_dir).parts) + 1
+    if not _directory_fsync_supported():
+        return
+    steps = len(target_dir.relative_to(base_dir).parts) + 2
+    synced: list[Path] = []
     current = target_dir
     for _ in range(steps):
         _fsync_directory(current)
+        synced.append(current)
         current = current.parent
+    for directory in created:
+        holder = directory.parent
+        if holder not in synced:
+            _fsync_directory(holder)
+            synced.append(holder)
 
 
 def _validate_archive_destination(path: Path, base_dir: Path) -> None:
-    """Ensure ``path`` resolves strictly inside ``base_dir`` before any I/O.
+    """Ensure ``path`` resolves safely inside ``base_dir`` and is not a symlink.
 
-    Uses a whole-component prefix check on resolved paths so persisted absolute
-    paths, ``..`` traversal components, or symlinks escaping ``base_dir`` raise
-    ``ValueError`` before creating directories, reading, writing, or replacing.
+    Checks before creating directories or reading/writing existing files that
+    ``path.parent.resolve()`` stays within ``base_dir.resolve()``, that
+    ``path.resolve()`` is strictly inside ``base_dir.resolve()`` (not equal to
+    it), and that the target leaf ``path`` is not a symlink.
 
     Args:
         path: Candidate CSV destination path.
         base_dir: Configured archiver base directory.
 
     Raises:
-        ValueError: When the resolved destination equals or falls outside ``base_dir``.
+        ValueError: When the destination is a symlink or escapes ``base_dir``.
     """
     resolved_base = base_dir.resolve()
+    resolved_parent = path.parent.resolve()
     resolved_target = path.resolve()
-    if resolved_target == resolved_base or not resolved_target.is_relative_to(resolved_base):
-        raise ValueError(
-            f"Archive destination {resolved_target} escapes archiver base {resolved_base}"
-        )
+    if (
+        path.is_symlink()
+        or not resolved_parent.is_relative_to(resolved_base)
+        or not resolved_target.is_relative_to(resolved_base)
+        or resolved_target == resolved_base
+    ):
+        raise ValueError(f"Archive destination {path} escapes archiver base {resolved_base}")
 
 
 def _write_event_csv(
@@ -818,18 +812,19 @@ def _write_event_csv(
 
 
 def _publish_candle_audit_csv(path: Path, rows: list[tuple[str, ...]], base_dir: Path) -> None:
-    """Validate destination, stage, fsync, replace, and sync created dirs.
+    """Validate destination, stage, fsync, replace, and sync directory chain.
 
-    Verifies that ``path`` resolves inside ``base_dir`` before any directory
-    creation. Captures the first pre-existing ancestor of ``path.parent`` before
-    ``mkdir(parents=True, exist_ok=True)`` and, after atomic replacement on
-    POSIX, syncs ``path.parent`` through that holding ancestor via
-    :func:`_fsync_directory_tree`. On Windows (``os.name == "nt"``), the staged
-    file is flushed and fsynced before replacement, while directory fsync is a
-    documented no-op.
+    Verifies via :func:`_validate_archive_destination` that ``path`` resolves
+    inside ``base_dir`` and is not a symlink before any ``mkdir`` or write.
+    Stages, flushes, and fsyncs the temporary CSV before atomic replacement,
+    then calls :func:`_fsync_directory_tree` to sync ``path.parent`` through
+    ``base_dir.parent`` and the parent of every directory this call created
+    on POSIX (no-op on Windows).
     """
     _validate_archive_destination(path, base_dir)
-    stop_dir = _find_existing_ancestor(path.parent)
+    created = tuple(
+        directory for directory in (path.parent, *path.parent.parents) if not directory.exists()
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=path.parent, prefix=".ca-") as staging_dir:
         staged_csv = Path(staging_dir) / "archive.tmp"
@@ -837,7 +832,7 @@ def _publish_candle_audit_csv(path: Path, rows: list[tuple[str, ...]], base_dir:
         if path.is_file():
             copymode(path, staged_csv)
         staged_csv.replace(path)
-    _fsync_directory_tree(path.parent, stop_dir)
+    _fsync_directory_tree(path.parent, base_dir, created)
 
 
 def _resolve_event_path(
@@ -1159,25 +1154,6 @@ _CANDLE_AUDIT_COLUMNS = (
 )
 
 
-@dataclass(frozen=True)
-class _CandleAuditQuery:
-    """Filter parameters for selecting one instrument's candle audit versions."""
-
-    timeframe: str
-    day_start: date
-    day_end: date
-    closed_only: bool
-
-
-@dataclass(frozen=True)
-class _CandleAuditPlan:
-    """Validated per-day rows and destination paths for one instrument export."""
-
-    row_ids: list[int]
-    by_day: dict[date, list[tuple[str, ...]]]
-    days_and_paths: list[tuple[date, Path]]
-
-
 class CandleAuditArchiver:
     """Export all candle SCD2 versions to per-day CSV archive files.
 
@@ -1221,9 +1197,6 @@ class CandleAuditArchiver:
     ) -> ExportResult:
         """Export candle audit rows for a date range to CSV.
 
-        Resolves and validates every destination inside ``_base_dir`` before
-        creating directories, reading existing files, writing, or replacing.
-
         Args:
             exchange: Filter by exchange (optional).
             archive_symbol: Filter by archive_symbol (optional).
@@ -1239,21 +1212,14 @@ class CandleAuditArchiver:
             ExportResult with file, row, and purge counts.
 
         Raises:
-            ValueError: If purge requested without closed_only or any target
-                destination resolves outside ``_base_dir``.
+            ValueError: If purge requested without closed_only or a destination
+                fails archive boundary validation.
         """
         if purge and not closed_only:
             raise ValueError("Purge requires closed_only=True for candle audit")
 
         inst_map = self._repo.get_instrument_archive_map()
-        query = _CandleAuditQuery(
-            timeframe=timeframe,
-            day_start=day_start,
-            day_end=day_end,
-            closed_only=closed_only,
-        )
-        plans: list[_CandleAuditPlan] = []
-        planned_files = 0
+        files_written = 0
         rows_exported = 0
         all_row_ids: list[int] = []
 
@@ -1262,27 +1228,22 @@ class CandleAuditArchiver:
                 continue
             if archive_symbol is not None and arch_sym != archive_symbol:
                 continue
-            plan = self._plan_instrument_export(inst_pub_id, arch_sym, exch, query)
-            if plan is None:
-                continue
-            plans.append(plan)
-            planned_files += len(plan.days_and_paths)
-            rows_exported += len(plan.row_ids)
-            all_row_ids.extend(plan.row_ids)
-
-        if dry_run:
-            return ExportResult(
-                files_written=planned_files,
-                rows_exported=rows_exported,
-                rows_purged=0,
+            fw, re, ids = self._export_instrument(
+                inst_pub_id,
+                arch_sym,
+                exch,
+                timeframe,
+                day_start,
+                day_end,
+                closed_only,
+                dry_run,
             )
-
-        files_written = 0
-        for plan in plans:
-            files_written += self._publish_instrument_plan(plan)
+            files_written += fw
+            rows_exported += re
+            all_row_ids.extend(ids)
 
         rows_purged = 0
-        if purge and all_row_ids:
+        if purge and not dry_run and all_row_ids:
             rows_purged = self._repo.delete_rows_by_id(Candle, all_row_ids)
 
         return ExportResult(
@@ -1291,33 +1252,49 @@ class CandleAuditArchiver:
             rows_purged=rows_purged,
         )
 
-    def _plan_instrument_export(
+    def _export_instrument(
         self,
         instrument_public_id: str,
         archive_symbol: str,
         exchange_name: str,
-        query: _CandleAuditQuery,
-    ) -> _CandleAuditPlan | None:
-        """Load rows and pre-validate all day destinations for one instrument.
+        timeframe: str,
+        day_start: date,
+        day_end: date,
+        closed_only: bool,
+        dry_run: bool,
+    ) -> tuple[int, int, list[int]]:
+        """Export candle audit rows for one instrument.
+
+        Validates each destination inside ``_base_dir`` before reading any
+        existing CSV or creating directories. Publishes each merged CSV by
+        atomic replacement after flushing and fsyncing the staged CSV, then
+        syncs ``path.parent`` through ``_base_dir.parent`` on platforms that
+        support directory fsync (POSIX; skipped on Windows). A partial write
+        or failed fsync must propagate before any DB purge and leave
+        previously archived, purged versions intact.
 
         Args:
             instrument_public_id: Instrument to export.
             archive_symbol: Stable archive symbol for path.
             exchange_name: Exchange name for path.
-            query: Timeframe, date range, and closed-only filter.
+            timeframe: Candle timeframe.
+            day_start: First day (inclusive).
+            day_end: Last day (inclusive).
+            closed_only: Only closed versions.
+            dry_run: Count only.
 
         Returns:
-            Validated export plan, or ``None`` when no matching rows exist.
+            Tuple of (files_written, rows_exported, row_ids).
         """
         db_rows = self._repo.get_candle_versions_for_archive(
             instrument_public_id,
-            query.timeframe,
-            query.day_start,
-            query.day_end,
-            query.closed_only,
+            timeframe,
+            day_start,
+            day_end,
+            closed_only,
         )
         if not db_rows:
-            return None
+            return 0, 0, []
 
         by_day: dict[date, list[tuple[str, ...]]] = defaultdict(list)
         row_ids: list[int] = []
@@ -1327,24 +1304,11 @@ class CandleAuditArchiver:
             open_at: datetime = row[7]
             by_day[open_at.date()].append(csv_values)
 
-        days_and_paths = self._build_validated_day_paths(
-            exchange_name, archive_symbol, by_day.keys()
-        )
-        return _CandleAuditPlan(
-            row_ids=row_ids,
-            by_day=by_day,
-            days_and_paths=days_and_paths,
-        )
+        if dry_run:
+            return len(by_day), len(row_ids), row_ids
 
-    def _build_validated_day_paths(
-        self,
-        exchange_name: str,
-        archive_symbol: str,
-        days: Iterable[date],
-    ) -> list[tuple[date, Path]]:
-        """Resolve and validate every day CSV destination inside ``_base_dir``."""
-        days_and_paths: list[tuple[date, Path]] = []
-        for day in sorted(days):
+        files_written = 0
+        for day in sorted(by_day):
             path = _resolve_event_path(
                 self._base_dir,
                 "candles",
@@ -1353,31 +1317,12 @@ class CandleAuditArchiver:
                 archive_symbol,
             )
             _validate_archive_destination(path, self._base_dir)
-            days_and_paths.append((day, path))
-        return days_and_paths
-
-    def _publish_instrument_plan(self, plan: _CandleAuditPlan) -> int:
-        """Publish each pre-validated CSV in ``plan`` atomically.
-
-        Flushes and fsyncs the staged CSV before replacement and syncs the
-        parent and newly created ancestor directories up to the first
-        pre-existing holding ancestor afterward on platforms that support
-        directory fsync (POSIX; skipped on Windows). A partial write or failed
-        fsync propagates before any DB purge commits.
-
-        Args:
-            plan: Validated per-day rows and destination paths.
-
-        Returns:
-            Number of CSV files published for this instrument.
-        """
-        files_written = 0
-        for day, path in plan.days_and_paths:
             existing = _read_existing_csv(path)
-            merged = _merge_and_dedup_events(existing, plan.by_day[day])
+            merged = _merge_and_dedup_events(existing, by_day[day])
             _publish_candle_audit_csv(path, merged, self._base_dir)
             files_written += 1
-        return files_written
+
+        return files_written, len(row_ids), row_ids
 
 
 _TEMPORAL_ORDER = ("public_id", "timestamp", "known_to", "session_id", "sequence_id")
