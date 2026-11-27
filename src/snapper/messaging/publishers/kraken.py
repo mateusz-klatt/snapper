@@ -1481,23 +1481,26 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         no longer running so a storm restart that overlaps :meth:`stop`
         cannot re-establish a WebSocket after shutdown has begun.
 
-        Opens a minute-completion feed break before the teardown so no minute
-        spanning the restart is asserted as observed.
+        Preserve an existing SDK socket during VPN exhaustion. Once the
+        slot is empty, let the normal connect path wait in process for a
+        public route. Open a minute-completion feed break before teardown.
         """
         async with self._restart_lock:
             client = self._exchange_client
-            if client is None or not self._can_restart_public_ws():
+            if client is None:
                 return
-            self._suspend_candle_synthesis_across_break()
-            self._mark_minute_feed_break()
-            try:
-                await client.disconnect_websocket()
-            except Exception:
-                logger.exception("kraken publisher: disconnect_websocket failed during restart")
-            await asyncio.sleep(_FORCE_WS_RESTART_BACKOFF_S)
-            if not self.running or not self._can_restart_public_ws():
-                return
-            await client._ensure_ws_connected()
+            if client._ws_client is not None:
+                if not self._can_restart_public_ws():
+                    return
+                self._suspend_candle_synthesis_across_break()
+                self._mark_minute_feed_break()
+                try:
+                    await client.disconnect_websocket()
+                except Exception:
+                    logger.exception("kraken publisher: disconnect_websocket failed during restart")
+                await asyncio.sleep(_FORCE_WS_RESTART_BACKOFF_S)
+            if self.running:
+                await client._ensure_ws_connected()
 
     def _can_restart_public_ws(self) -> bool:
         """Leave a waiting SDK client in place during public route exhaustion."""

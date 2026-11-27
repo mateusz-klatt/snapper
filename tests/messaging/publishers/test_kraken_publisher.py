@@ -32,6 +32,7 @@ from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBrea
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreakReason
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleItem
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleMark
+from snapper.infrastructure.network import egress_pool
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
@@ -1168,6 +1169,7 @@ class TestKrakenReconnectWatchdog:
     async def test_spot_forced_and_liveness_restarts_leave_waiting_ws_intact(self) -> None:
         """Both restart callers leave the same SDK client in place during a VPN wait."""
         publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False))
         publisher.running = True
         client = MagicMock(disconnect_websocket=AsyncMock(), _ensure_ws_connected=AsyncMock())
         publisher._exchange_client = client
@@ -1185,6 +1187,71 @@ class TestKrakenReconnectWatchdog:
             await publisher._attempt_liveness_recovery("stale")
         client.disconnect_websocket.assert_not_awaited()
         client._ensure_ws_connected.assert_not_awaited()
+
+    @pytest.mark.parametrize("has_socket", [False, True])
+    async def test_spot_recovery_waits_for_route_before_reporting_recovered(
+        self, has_socket: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Recovery waits through a loss during backoff or at entry with an empty slot."""
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.settings = cast(AppSettings, _ShadowSettings(False))
+        publisher.running = True
+        client = KrakenExchangeClient()
+        publisher._exchange_client = client
+        old_sdk = MagicMock(close=AsyncMock())
+        client._ws_client = old_sdk if has_socket else None
+        client._ws_connected = has_socket
+        pool = EgressPool(
+            EgressPoolConfig(
+                routes=[RouteConfig(id="vpn", kind="socks5", proxy_url="socks5h://egress:1081")]
+            )
+        )
+        monkeypatch.setattr(egress_pool, "_POOL_HOLDER", [pool])
+        new_sdk = MagicMock(start=AsyncMock(), close=AsyncMock())
+        monkeypatch.setattr(
+            "snapper.infrastructure.exchanges.implementations.kraken.SpotWSClient",
+            MagicMock(return_value=new_sdk),
+        )
+        waiting, released = asyncio.Event(), asyncio.Event()
+        quarantine_until = datetime.now(UTC) + timedelta(seconds=30)
+        if not has_socket:
+            pool._quarantine_route("vpn", quarantine_until, "http-429")
+
+        async def sleep(delay: float) -> None:
+            """Withdraw the route during backoff, then hold the real egress waiter."""
+            if delay == kraken_module._FORCE_WS_RESTART_BACKOFF_S:
+                pool._quarantine_route("vpn", quarantine_until, "http-429")
+            else:
+                waiting.set()
+                await released.wait()
+
+        async def observe_progress(baseline: float, candle_baseline: float | None) -> bool:
+            """Simulate one fresh frame once the new SDK is running."""
+            assert client._ws_client is new_sdk
+            assert client._ws_connected
+            publisher._last_message_at = baseline + 1
+            return publisher._recovery_progress_made(baseline, candle_baseline)
+
+        monkeypatch.setattr(egress_pool.asyncio, "sleep", sleep)
+        progress = AsyncMock(side_effect=observe_progress)
+        monkeypatch.setattr(publisher, "_await_recovery_progress", progress)
+        recovery = asyncio.create_task(publisher._run_recovery_under_lock("stale"))
+        try:
+            await asyncio.wait_for(waiting.wait(), timeout=1.0)
+            assert pool.is_waiting_for_public_vpn("kraken")
+            assert not client._ws_connected
+            progress.assert_not_awaited()
+            new_sdk.start.assert_not_awaited()
+            pool._states["vpn"].quarantine_until = None
+            released.set()
+            await asyncio.wait_for(recovery, timeout=1.0)
+            assert old_sdk.close.await_count == int(has_socket)
+            new_sdk.start.assert_awaited_once()
+            progress.assert_awaited_once()
+        finally:
+            recovery.cancel()
+            await asyncio.gather(recovery, return_exceptions=True)
+            await client.disconnect_websocket()
 
     @pytest.mark.asyncio
     async def test_attempt_liveness_recovery_calls_force_ws_restart(self) -> None:
