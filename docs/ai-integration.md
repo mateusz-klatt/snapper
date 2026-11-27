@@ -1179,8 +1179,8 @@ Assistant-specific notes:
             supported auth methods (`OAuth`), auth method used
             (`OAuth`), and verification status (`DEVELOPMENT`);
         - app-management controls to edit the app name and description,
-            run **Refresh tools** (loads the latest tools from the app's
-            MCP server), and delete the app.
+            a **Refresh tools** control (described in the UI as loading the
+            latest tools from the app's MCP server), and delete the app.
 
     - **Launching a chat and live calls:** The plugin's detail page has
         a button to open a new chat with the plugin attached. A live
@@ -1199,9 +1199,9 @@ Assistant-specific notes:
         completing the browser consent redirect — was **not verified**
         in this UAT; UI labels, navigation paths, and fields vary.
     - **Refreshing tools after a deploy:** After a Snapper deploy that
-        changes the MCP tool list, use **Refresh tools** on the plugin's
-        settings page so ChatGPT loads the latest tools from Snapper's
-        MCP server.
+        changes the MCP tool list, the plugin's **Refresh tools** control is
+        the intended way to reload the tool list. UAT saw the control but did
+        not use it, so its effect after a deploy is **not verified**.
 
 ### Gemini status
 
