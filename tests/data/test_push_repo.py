@@ -3583,9 +3583,11 @@ class TestAdmitAndChargeApnsDeliveryRepo:
     ) -> None:
         """Admitting predicate increments attempt once and returns refreshed device.
 
-        Given: A queued APNs delivery whose device was refreshed to token ``tok-fresh``.
+        Given: A queued APNs delivery whose device registration was refreshed in place
+            (same token, so the same device public id) from ``sandbox`` to ``prod``.
         When: ``admit_and_charge_apns_delivery`` runs with a predicate returning ``True``.
-        Then: It commits attempt 1 once and returns ``ApnsAdmissionCharge`` with the fresh device.
+        Then: It commits attempt 1 once and returns ``ApnsAdmissionCharge`` carrying the
+            refreshed registration read inside the admission transaction.
         """
         device_pid = await _seed_user_and_device(
             repo, user_public_id="user-adm-ok", device_token="tok-old", sequence_id=1
@@ -3593,10 +3595,10 @@ class TestAdmitAndChargeApnsDeliveryRepo:
         delivery_pid = await _seed_queued_apns_delivery(
             repo, user_public_id="user-adm-ok", device_public_id=device_pid
         )
-        await repo.upsert_notification_device(
+        refreshed_pid = await repo.upsert_notification_device(
             NotificationDeviceUpsertRow(
                 user_public_id="user-adm-ok",
-                device_token="tok-fresh",
+                device_token="tok-old",
                 device_id="device-1",
                 env="prod",
                 registered_at=_ts(0),
@@ -3618,9 +3620,11 @@ class TestAdmitAndChargeApnsDeliveryRepo:
             )
         )
 
+        assert refreshed_pid == device_pid
         assert isinstance(outcome, ApnsAdmissionCharge)
         assert outcome.attempt == 1
-        assert outcome.device["device_token"] == "tok-fresh"
+        assert outcome.device["public_id"] == device_pid
+        assert outcome.device["device_token"] == "tok-old"
         assert outcome.device["env"] == "prod"
         versions = await _delivery_versions(repo, delivery_pid)
         assert [v.attempt_count for v in versions] == [0, 1]
