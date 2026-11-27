@@ -6,6 +6,7 @@ with compile-time type checking — no Pydantic overhead for trusted internal
 data transfer.
 """
 
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -4153,6 +4154,58 @@ class ApnsAdmissionContext(TypedDict):
     user_defaults: list[UserAlertDefaultRow]
 
 
+ApnsAdmissionRefusalCode = Literal["not_queued", "device_inactive", "routing_suppressed"]
+
+
+@dataclass(frozen=True, slots=True)
+class ApnsAdmissionRequest:
+    """Parameters and synchronous routing predicate for atomic APNs admission.
+
+    ``admits`` MUST be pure and synchronous (no I/O, no ``await``) because the
+    repository invokes it inside the admission transaction while the delivery
+    row is locked on PostgreSQL or while SQLite holds its writer lock.
+    Quiet-hours evaluation may load timezone data from ``zoneinfo`` on a first
+    cache miss and may log a warning for an invalid stored timezone; both are
+    synchronous and bounded.
+    """
+
+    delivery_public_id: str
+    user_public_id: str
+    device_public_id: str
+    transition_at: datetime
+    session_id: str
+    sequence_id: int
+    admits: Callable[[ApnsAdmissionContext], bool]
+
+
+@dataclass(frozen=True, slots=True)
+class ApnsAdmissionCharge:
+    """Committed attempt charge and refreshed APNs device returned on admission."""
+
+    attempt: int
+    device: NotificationDeviceRow
+
+
+@dataclass(frozen=True, slots=True)
+class ApnsAdmissionRefusal:
+    """Refusal returned when atomic queued APNs admission declines to charge.
+
+    ``attempt_count`` and ``version_id`` record the observed queued
+    ``AlertDelivery`` row's attempt counter and SCD2 primary key (``id``) when
+    a queued row was inspected (``device_inactive`` or ``routing_suppressed``)
+    so terminal refusal writes require that exact SCD2 version and leave any
+    newer attempt or schedule rewrite untouched; both are ``None`` for
+    ``not_queued``.
+    """
+
+    refusal: ApnsAdmissionRefusalCode
+    attempt_count: int | None = None
+    version_id: int | None = None
+
+
+type ApnsAdmissionResult = ApnsAdmissionCharge | ApnsAdmissionRefusal
+
+
 class AlertListCursor(TypedDict):
     """Opaque keyset cursor for ``list_recent_alerts_for_user`` (SCD2-stable).
 
@@ -4268,6 +4321,31 @@ class AlertDeliveryRetryScheduleWrite(TypedDict):
     attempt_count: int
     next_attempt_at: datetime | None
     error_reason: str | None
+    transition_at: datetime
+    session_id: str
+    sequence_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class AlertDeliveryAttemptCancelWrite:
+    """Guarded cancellation payload pinned to an exact observed SCD2 version."""
+
+    public_id: str
+    reason: str
+    expected_version_id: int
+    expected_attempt_count: int
+    transition_at: datetime
+    session_id: str
+    sequence_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class AlertDeliveryAttemptUnregisterWrite:
+    """Guarded unregister payload pinned to an exact observed SCD2 version."""
+
+    public_id: str
+    expected_version_id: int
+    expected_attempt_count: int
     transition_at: datetime
     session_id: str
     sequence_id: int
