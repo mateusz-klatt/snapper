@@ -6,6 +6,7 @@ from datetime import date
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from typing import TextIO
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -573,6 +574,147 @@ def test_candle_audit_integration_closed_only_purge(tmp_path: Path) -> None:
     assert len(remaining) == 1
     assert remaining[0][3] == KNOWN_TO_MAX
     repo.dispose()
+
+
+def test_candle_audit_dry_run_with_purge_preserves_database(tmp_path: Path) -> None:
+    """Count eligible versions without changing the database or archive.
+
+    Given: A SQLite database with an active and a closed version of the same candle.
+    When: A closed-only audit export requests both a dry run and purge.
+    Then: The dry run counts the closed version, leaves both versions, and creates no CSV.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    try:
+        before = repo.get_candle_versions_for_archive(instrument_id, "1m", day, day)
+        result = CandleAuditArchiver(repo, tmp_path).export(
+            timeframe="1m",
+            day_start=day,
+            day_end=day,
+            closed_only=True,
+            dry_run=True,
+            purge=True,
+        )
+
+        assert not (tmp_path / "archive").exists()
+        assert repo.get_candle_versions_for_archive(instrument_id, "1m", day, day) == before
+        assert result == ExportResult(files_written=1, rows_exported=1, rows_purged=0)
+    finally:
+        repo.dispose()
+
+
+def _insert_closed_five_minute_candle(repo: DatabaseRepository, instrument_id: str) -> None:
+    """Create a pending 5m version for the same day and instrument as the fixture."""
+    with repo.get_session() as session:
+        session.add(
+            Candle(
+                public_id="candle-5m",
+                instrument_public_id=instrument_id,
+                open_at=datetime(2024, 1, 1, 14, 30, tzinfo=UTC),
+                timeframe="5m",
+                open=200.0,
+                high=220.0,
+                low=180.0,
+                close=210.0,
+                volume=2468.0,
+                vwap=206.0,
+                trades=84,
+                session_id="test",
+                sequence_id=5,
+                timestamp=datetime(2024, 1, 1, 16, 0, tzinfo=UTC),
+                known_to=datetime(2024, 1, 1, 17, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+
+def test_candle_audit_interrupted_csv_write_preserves_purged_history(tmp_path: Path) -> None:
+    """A failed archive write keeps previously purged rows safe for replay.
+
+    Given: A purged 1m version in the CSV and a closed 5m version still in SQLite.
+    When: Writing the 5m export raises after its CSV header is written.
+    Then: The original CSV and pending row survive, and replay preserves both versions.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_path = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024" / "2024-01-01.csv"
+    archiver = CandleAuditArchiver(repo, tmp_path)
+    original_writer = csv.writer
+
+    def fail_writing_rows(handle: TextIO, *, lineterminator: str, quoting: int) -> MagicMock:
+        """Write the header to the real file before simulating failed data serialization."""
+        writer = MagicMock(
+            wraps=original_writer(handle, lineterminator=lineterminator, quoting=quoting)
+        )
+        writer.writerows.side_effect = OSError("injected CSV write failure")
+        return writer
+
+    try:
+        first = archiver.export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+        )
+        assert first == ExportResult(files_written=1, rows_exported=1, rows_purged=1)
+        assert not repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day, day, closed_only=True
+        )
+        csv_path.chmod(0o600)
+        original_mode = csv_path.stat().st_mode
+        original = csv_path.read_bytes()
+        with csv_path.open(encoding="utf-8", newline="") as handle:
+            previous_rows = list(csv.reader(handle))
+
+        _insert_closed_five_minute_candle(repo, instrument_id)
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "5m", day, day, closed_only=True
+        )
+        assert len(pending) == 1
+        with (
+            patch("snapper.data.archiver.csv.writer", side_effect=fail_writing_rows),
+            pytest.raises(OSError, match="injected CSV write failure"),
+        ):
+            archiver.export(
+                timeframe="5m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert csv_path.read_bytes() == original
+        assert list(csv_path.parent.iterdir()) == [csv_path]
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "5m", day, day, closed_only=True)
+            == pending
+        )
+
+        replay = archiver.export(
+            timeframe="5m", day_start=day, day_end=day, closed_only=True, purge=True
+        )
+        assert replay == ExportResult(files_written=1, rows_exported=1, rows_purged=1)
+        assert not repo.get_candle_versions_for_archive(instrument_id, "5m", day, day)
+        remaining = repo.get_candle_versions_for_archive(instrument_id, "1m", day, day)
+        assert len(remaining) == 1
+        assert remaining[0][3] == KNOWN_TO_MAX
+        assert csv_path.stat().st_mode == original_mode
+        with csv_path.open(encoding="utf-8", newline="") as handle:
+            assert list(csv.reader(handle)) == [
+                *previous_rows,
+                [
+                    "candle-5m",
+                    "2024-01-01T16:00:00+00:00",
+                    "2024-01-01T17:00:00+00:00",
+                    "test",
+                    "5",
+                    instrument_id,
+                    "2024-01-01T14:30:00+00:00",
+                    "5m",
+                    "200",
+                    "220",
+                    "180",
+                    "210",
+                    "2468",
+                    "206",
+                    "84",
+                ],
+            ]
+    finally:
+        repo.dispose()
 
 
 def test_candle_audit_integration_idempotent(tmp_path: Path) -> None:

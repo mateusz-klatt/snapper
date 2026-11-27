@@ -1400,6 +1400,89 @@ class TestDrainOutbox:
         apns.send.assert_awaited_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("unregister", "final_status"),
+        [(False, "cancelled_scope"), (True, "unregistered")],
+        ids=["opt-out", "device-removed"],
+    )
+    async def test_drain_rechecks_policy_after_previous_send(
+        self, repo: SQLAlchemyRepository, unregister: bool, final_status: str
+    ) -> None:
+        """Read current policy for the next queued APNs delivery.
+
+        Given: Two ordered deliveries for active devices allowed to receive alerts.
+        When: The first APNs call changes the second device's preference or registration.
+        Then: Only the first push is sent and the second row terminates without an attempt.
+        """
+        first_user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        second_user = "019dbb34-f439-77bd-afa8-ee5321d60308"
+        for user in (first_user, second_user):
+            await _seed_user(repo, user)
+        first_device = await _seed_device(repo, first_user)
+        second_device = await _seed_device(repo, second_user, device_token="b" * 64)
+        first_event = await _seed_alert_event(repo, first_user)
+        second_event = await _seed_alert_event(repo, second_user)
+        first_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=first_event["public_id"],
+            device_public_id=first_device,
+            user_public_id=first_user,
+        )
+        second_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="seed",
+                sequence_id=2,
+                timestamp=_ts(1),
+                alert_event_public_id=second_event["public_id"],
+                device_public_id=second_device,
+                user_public_id=second_user,
+                status="queued",
+                created_at=_ts(1),
+            )
+        )
+        drain_at = _ts(2)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: drain_at)
+
+        async def send_then_update_policy(**kwargs: object) -> ApnsSendResult:
+            """Record a policy change while the first provider request is in flight."""
+            if kwargs["device_token"] == "a" * 64:
+                if unregister:
+                    await repo.deactivate_notification_device_scd2(
+                        second_device,
+                        reason="user_unregistered",
+                        timestamp=drain_at,
+                        session_id="policy-change",
+                        sequence_id=1,
+                    )
+                else:
+                    await repo.upsert_device_alert_pref(
+                        DeviceAlertPrefUpsertRow(
+                            session_id="policy-change",
+                            sequence_id=1,
+                            timestamp=drain_at,
+                            device_public_id=second_device,
+                            alert_type="order_fill_full",
+                            enabled=False,
+                        )
+                    )
+            return ApnsSendResult(
+                status_code=200, status="success", apns_id="apns-id", description=""
+            )
+
+        apns.send = AsyncMock(side_effect=send_then_update_policy)
+
+        await sidecar._drain_outbox(drain_at)
+
+        apns.send.assert_awaited_once()
+        assert apns.send.await_args.kwargs["device_token"] == "a" * 64
+        first = await repo.get_delivery_by_public_id(first_pid)
+        second = await repo.get_delivery_by_public_id(second_pid)
+        assert first is not None and first["status"] == "sent"
+        assert second is not None and second["status"] == final_status
+        assert second["attempt_count"] == 0
+        assert second["error_reason"] == (None if unregister else "routing_suppressed")
+
+    @pytest.mark.asyncio
     async def test_drain_skips_queued_when_device_gone(self, repo: SQLAlchemyRepository) -> None:
         """Queued delivery whose device was later deactivated is marked unregistered."""
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
@@ -1454,19 +1537,14 @@ class TestAttemptOnQueuedRowNoCache:
     """``_attempt_on_queued_row`` falls back to per-row repo lookups when caches are absent."""
 
     @pytest.mark.asyncio
-    async def test_per_row_device_lookup_when_devices_cache_missing(
+    async def test_per_row_device_lookup_without_batch_cache(
         self, repo: SQLAlchemyRepository
     ) -> None:
-        """Calling without a ``devices_cache`` triggers the per-user fallback fetch.
+        """Look up a registered device for a standalone delivery.
 
-        Given: A queued delivery for a registered user/device and an event
-            cache that hits but no devices_cache passed,
-        When: ``_attempt_on_queued_row`` is invoked directly (the
-            cancellation handler path that processes a single delivery
-            without a surrounding batch),
-        Then: The per-user
-            ``list_active_notification_devices_for_user`` fallback runs
-            and APNs is invoked exactly once.
+        Given: A queued delivery for a registered user and device.
+        When: ``_attempt_on_queued_row`` is invoked without a surrounding batch.
+        Then: The device is read from the repository and APNs is invoked once.
         """
         user = "019dbb34-f439-77bd-afa8-ee5321d60307"
         await _seed_user(repo, user)

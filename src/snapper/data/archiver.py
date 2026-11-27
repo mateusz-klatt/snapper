@@ -30,6 +30,8 @@ from datetime import date
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from shutil import copymode
+from tempfile import TemporaryDirectory
 from typing import Any
 from typing import TextIO
 
@@ -1079,7 +1081,7 @@ class CandleAuditArchiver:
             day_start: First day (inclusive) of ``open_at`` range.
             day_end: Last day (inclusive) of ``open_at`` range.
             closed_only: If True, only closed versions (known_to < now).
-            dry_run: If True, count rows without writing files.
+            dry_run: If True, count rows without writing files or purging versions.
             purge: If True, delete exported rows from DB.
                 Only allowed with ``closed_only=True``.
 
@@ -1117,7 +1119,7 @@ class CandleAuditArchiver:
             all_row_ids.extend(ids)
 
         rows_purged = 0
-        if purge and all_row_ids:
+        if purge and not dry_run and all_row_ids:
             rows_purged = self._repo.delete_rows_by_id(Candle, all_row_ids)
 
         return ExportResult(
@@ -1138,6 +1140,9 @@ class CandleAuditArchiver:
         dry_run: bool,
     ) -> tuple[int, int, list[int]]:
         """Export candle audit rows for one instrument.
+
+        Publish each full merged CSV by replacement after its write completes.
+        A partial write must leave previously archived, purged versions intact.
 
         Args:
             instrument_public_id: Instrument to export.
@@ -1184,7 +1189,13 @@ class CandleAuditArchiver:
             )
             existing = _read_existing_csv(path)
             merged = _merge_and_dedup_events(existing, by_day[day])
-            _write_event_csv(path, _CANDLE_AUDIT_COLUMNS, merged)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with TemporaryDirectory(dir=path.parent, prefix=".ca-") as staging_dir:
+                staged_csv = Path(staging_dir) / "archive.tmp"
+                _write_event_csv(staged_csv, _CANDLE_AUDIT_COLUMNS, merged)
+                if path.is_file():
+                    copymode(path, staged_csv)
+                staged_csv.replace(path)
             files_written += 1
 
         return files_written, len(row_ids), row_ids
