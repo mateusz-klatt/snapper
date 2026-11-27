@@ -11,6 +11,7 @@ from itertools import count
 from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import call
 
 import pytest
 from loguru import logger
@@ -1981,7 +1982,7 @@ class TestOutboxRetryBackoff:
         assert cas_kwargs["new_status"] == TradeCommandStatusEnum.EXPIRED
         assert "btc-own-retry" in dispatcher._retry
         assert "btc-stale-evidence" in dispatcher._retry
-        assert dispatcher._retry["btc-stale-evidence"].blocks_shard is True
+        assert dispatcher._retry["btc-stale-evidence"].kind is outbox_module._RetryKind.EXPIRY_PROBE
 
         clock.advance(0.25)
         queue[0] = [own_retry_stale]
@@ -2195,7 +2196,10 @@ class TestOutboxRetryBackoff:
         repo.cas_trade_command_status.assert_not_awaited()
         expire_fn.assert_not_awaited()
         assert "btc-stale-create" in dispatcher._retry
-        assert dispatcher._retry["btc-stale-create"].blocks_shard is False
+        assert (
+            dispatcher._retry["btc-stale-create"].kind
+            is outbox_module._RetryKind.NONBLOCKING_FAILURE
+        )
 
     @pytest.mark.asyncio
     async def test_dispatch_batch_commits_dispatches_before_expire_only_probes(
@@ -2292,7 +2296,7 @@ class TestOutboxRetryBackoff:
             same-shard submit whose evidence probe returns True,
         When: Ticks run initially, during the 0.25 s cooldown, and once the
             cooldown expires,
-        Then: Attempt 1 probes evidence once, records a shard-blocking backoff
+        Then: Attempt 1 probes evidence once, records an expiry probe cooldown
             entry, and emits one INFO log without ERROR/traceback; the cooldown
             tick skips the evidence probe silently; the due retry re-probes with
             WARNING cadence; and the command never publishes.
@@ -2340,7 +2344,10 @@ class TestOutboxRetryBackoff:
             assert publish_fn.await_count == publish_calls_before
             expire_fn.assert_not_awaited()
             assert "btc-stale-evidence" in dispatcher._retry
-            assert dispatcher._retry["btc-stale-evidence"].blocks_shard is True
+            assert (
+                dispatcher._retry["btc-stale-evidence"].kind
+                is outbox_module._RetryKind.EXPIRY_PROBE
+            )
             assert [(entry.level, entry.has_exception) for entry in logs] == [("INFO", False)]
             assert "stale with submit evidence; waiting behind shard head" in logs[0].message
             logs.clear()
@@ -2362,6 +2369,79 @@ class TestOutboxRetryBackoff:
             assert published == []
         finally:
             logger.remove(handler_id)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("evidence_remains", [True, False])
+    async def test_evidence_probe_cooldown_does_not_hold_dispatch_after_head_clears(
+        self, monkeypatch: pytest.MonkeyPatch, evidence_remains: bool
+    ) -> None:
+        """Recheck and handle the stale follower as soon as its shard clears.
+
+        Given: A cancel in backoff, a stale submit with evidence, and a later fresh create,
+        When: A repeat head failure still blocks the shard, then the head disappears before
+            the stale submit's expiry probe cooldown ends,
+        Then: No repeat probe runs while blocked. Once clear, the submit is rechecked and
+            either publishes before the create or expires before the create publishes.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        wall_now = datetime(2026, 1, 1, tzinfo=UTC)
+        monkeypatch.setattr(
+            outbox_module, "datetime", MagicMock(now=MagicMock(return_value=wall_now))
+        )
+        head = _make_backoff_row(
+            "btc-cancel-head", command_type="cancel", created_at=wall_now - timedelta(minutes=3)
+        )
+        stale = _make_backoff_row("btc-stale", created_at=wall_now - timedelta(minutes=2))
+        fresh = _make_backoff_row(
+            "btc-fresh", command_type="create", created_at=wall_now - timedelta(seconds=5)
+        )
+        queue = [[head]]
+        repo = _make_queue_repo(queue)
+        repo.has_order_submit_evidence = AsyncMock(side_effect=[True, evidence_remains])
+        publish_fn = AsyncMock(
+            side_effect=[RuntimeError("ZMQ down"), RuntimeError("ZMQ down"), None, None]
+        )
+        expire_fn = AsyncMock()
+        dispatcher = OutboxDispatcher(
+            repository=repo, publish_fn=publish_fn, dispatch_ttl_s=30.0, expire_fn=expire_fn
+        )
+        await dispatcher._dispatch_batch()
+
+        clock.advance(0.05)
+        queue[0] = [head, stale, fresh]
+        await dispatcher._dispatch_batch()
+        publish_fn.assert_awaited_once_with(head)
+        repo.has_order_submit_evidence.assert_awaited_once_with(stale["client_order_id"])
+        expire_fn.assert_not_awaited()
+
+        clock.advance(0.20)
+        await dispatcher._dispatch_batch()
+        assert [attempt.args[0] for attempt in publish_fn.await_args_list] == [head, head]
+        repo.has_order_submit_evidence.assert_awaited_once_with(stale["client_order_id"])
+        expire_fn.assert_not_awaited()
+
+        clock.advance(0.01)
+        queue[0] = [stale, fresh]
+        repo.cas_trade_command_status.reset_mock()
+        effects = MagicMock()
+        effects.attach_mock(publish_fn, "publish")
+        effects.attach_mock(expire_fn, "expire")
+        await dispatcher._dispatch_batch()
+
+        assert [attempt.args[0] for attempt in repo.has_order_submit_evidence.await_args_list] == [
+            stale["client_order_id"],
+            stale["client_order_id"],
+        ]
+        if evidence_remains:
+            assert effects.mock_calls == [call.publish(stale), call.publish(fresh)]
+            repo.cas_trade_command_status.assert_not_awaited()
+        else:
+            assert effects.mock_calls == [call.expire(stale), call.publish(fresh)]
+            repo.cas_trade_command_status.assert_awaited_once()
+            expiry = repo.cas_trade_command_status.await_args.kwargs
+            assert expiry["public_id"] == stale["public_id"]
+            assert expiry["expected_status"] == TradeCommandStatusEnum.CREATED
+            assert expiry["new_status"] == TradeCommandStatusEnum.EXPIRED
 
     @pytest.mark.asyncio
     async def test_keyset_cursor_missing_id_raises_key_error(self) -> None:
