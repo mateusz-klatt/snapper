@@ -1102,16 +1102,17 @@ and `--scope` flags.
 
 ### Connecting Claude.ai and ChatGPT
 
-Exact button and field labels vary by assistant plan and UI version, but
-the connection flow is the same:
+Exact buttons, fields and step order vary by assistant, plan and UI
+version. The general flow is below; for the sequence observed in
+Claude.ai, see its note after the list:
 
 1. Open the assistant's connectors or apps settings and start creating a
     custom remote MCP connector or app.
 2. Copy the OAuth callback / redirect URI shown by the assistant and
     ensure a dedicated Snapper OAuth client is provisioned for that exact
     URI (one client per assistant).
-3. Set the MCP server URL to `https://<your-snapper-host>/api/mcp` and
-    select OAuth authentication.
+3. Set the MCP server URL to `https://<your-snapper-host>/api/mcp` and,
+    where the assistant offers a choice, select OAuth authentication.
 4. Enter the `client_id` and `client_secret` from `provision-client` in
     the assistant's OAuth client fields (often under advanced or OAuth
     settings).
@@ -1145,8 +1146,9 @@ Assistant-specific notes:
         Step 1 shows "A connector with this URL already exists in your
         organization. Use the existing connector instead of adding it
         again." and **Continue** stays disabled. Reuse or edit the
-        existing connector, or use a different Claude.ai organization
-        for a second, separately provisioned client.
+        existing connector. Whether a different Claude.ai organization
+        can hold a second, separately provisioned client was not
+        verified.
     - **Active connector and live calls:** An existing connector shows
         in the list as `<Name> / Custom connector / <host>`. Live
         read-only tool calls through it worked in UAT (`get_ohlcv`,
@@ -1250,9 +1252,9 @@ token or bridge entry directly.)
     it again.")** — In Claude.ai, Step 1 disables **Continue** when
     another connector in the same organization already uses
     `https://<your-snapper-host>/api/mcp` (an organization can have only
-    one connector per MCP URL). Reuse or edit the existing connector, or
-    use a different Claude.ai organization for a second, separately
-    provisioned client.
+    one connector per MCP URL). Reuse or edit the existing connector.
+    Using a different organization for a second client was not
+    verified.
 
 ### Security notes
 
