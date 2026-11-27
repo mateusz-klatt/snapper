@@ -1,23 +1,31 @@
-"""Refresh Python dependency constraints without fighting exact upstream pins.
+"""Refresh Python dependency constraints without fighting upstream or direct pins.
 
 ``poetry up --latest`` raises every direct constraint's floor to the newest
-release. That breaks whenever one of our dependencies pins another of our direct
-dependencies to an EXACT version: ccxt 4.5.67 requires ``aiohttp==3.14.1``, so
-bumping our own ``aiohttp`` floor to ``^3.14.2`` makes the solver unsatisfiable::
+release and rewrites ranged caps into open caret ranges. That breaks in two
+cases:
 
-    because snapper depends on both aiohttp (^3.14.2) and ccxt (^4.5.67),
-    version solving failed
+1. One of our dependencies pins another of our direct dependencies to an EXACT
+   version: ccxt 4.5.67 requires ``aiohttp==3.14.1``, so bumping our own
+   ``aiohttp`` floor to ``^3.14.2`` makes the solver unsatisfiable::
 
-Worse, ``poetry up`` has already rewritten ``pyproject.toml`` by the time the
-solve fails, leaving the tree wedged.
+       because snapper depends on both aiohttp (^3.14.2) and ccxt (^4.5.67),
+       version solving failed
+
+   Worse, ``poetry up`` has already rewritten ``pyproject.toml`` by the time the
+   solve fails, leaving the tree wedged.
+2. One of our own direct dependencies in ``pyproject.toml`` carries an explicit
+   upper-bound cap (such as ``aioapns = ">=4.0,<4.1"``) or exact pin to guard
+   wrapped internals; ``poetry up --latest`` silently loosens ``>=4.0,<4.1``
+   into ``^4.0``.
 
 This script DERIVES the set of constraints that must not be auto-bumped instead
-of hard-coding package names: it reads the lock file, finds every dependency that
-some other package pins exactly, intersects that with our own direct
-dependencies, and excludes exactly those from the bump. Nothing here names a
-specific library, so the exclusion set follows the dependency graph as it changes
-— when ccxt relaxes its pin, aiohttp starts being bumped again with no edit here
-and none in the Makefile, which stays free of dependency detail.
+of hard-coding package names: it combines direct dependencies that some other
+locked package pins exactly with direct dependencies whose own ``pyproject.toml``
+constraint carries an explicit upper bound (``<`` / ``<=``) or exact pin, and
+excludes exactly those from ``poetry up --latest``. Nothing here names a
+specific library, so the exclusion set follows the dependency graph and declared
+caps automatically — while ``poetry update`` still refreshes patch versions
+within any retained range.
 """
 
 import subprocess
@@ -92,6 +100,48 @@ def _group_tables(poetry_table: dict[str, object]) -> list[dict[str, object]]:
     return tables
 
 
+def _has_upper_cap_or_exact(spec: object) -> bool:
+    """Report whether a direct constraint pins an exact version or upper bound.
+
+    Args:
+        spec: The raw requirement value from a ``pyproject.toml`` dependency table.
+
+    Returns:
+        ``True`` when the version constraint is exact or carries an explicit
+        ``<``/``<=`` upper bound that ``poetry up --latest`` would replace.
+    """
+    version = spec.get("version") if isinstance(spec, dict) else spec
+    if not isinstance(version, str):
+        return False
+    return "<" in version or _is_exact(version)
+
+
+def capped_direct_dependencies(project_text: str) -> list[str]:
+    """Return direct dependencies declaring an explicit upper bound or exact pin.
+
+    ``poetry up --latest`` rewrites ranged caps such as ``>=4.0,<4.1`` into an
+    open caret constraint (``^4.0``), stripping intentional compatibility caps.
+    Excluding those packages from the constraint bump preserves their cap while
+    ``poetry update`` still refreshes compatible releases inside it.
+
+    Args:
+        project_text: Full text of ``pyproject.toml``.
+
+    Returns:
+        Sorted normalized names of direct dependencies (excluding ``python``)
+        that declare an explicit upper bound or exact version pin.
+    """
+    data = tomllib.loads(project_text)
+    poetry_table = data.get("tool", {}).get("poetry", {})
+    capped: set[str] = set()
+    for group in (poetry_table.get("dependencies", {}), *_group_tables(poetry_table)):
+        for name, spec in group.items():
+            normalized = str(name).lower().replace("_", "-")
+            if normalized != "python" and _has_upper_cap_or_exact(spec):
+                capped.add(normalized)
+    return sorted(capped)
+
+
 def exactly_pinned_dependencies(lock_text: str, direct_names: set[str]) -> list[str]:
     """Return our direct dependencies that some locked package pins exactly.
 
@@ -137,7 +187,7 @@ def build_command(excluded: list[str]) -> list[str]:
 
 
 def main() -> int:
-    """Bump direct constraints, skipping those an upstream package pins exactly.
+    """Bump direct constraints, preserving upstream exact pins and declared caps.
 
     Returns:
         Process exit status; the bump itself is advisory, so a failure there is
@@ -150,10 +200,14 @@ def main() -> int:
     if not lock_path.is_file() or not project_path.is_file():
         print("refresh-python-deps: no lock or project file; nothing to bump")
     else:
-        direct_names = direct_dependency_names(project_path.read_text(encoding="utf-8"))
-        excluded = exactly_pinned_dependencies(lock_path.read_text(encoding="utf-8"), direct_names)
+        project_text = project_path.read_text(encoding="utf-8")
+        direct_names = direct_dependency_names(project_text)
+        excluded = sorted(
+            set(exactly_pinned_dependencies(lock_path.read_text(encoding="utf-8"), direct_names))
+            | set(capped_direct_dependencies(project_text))
+        )
         if excluded:
-            print(f"refresh-python-deps: holding exactly-pinned constraints: {', '.join(excluded)}")
+            print(f"refresh-python-deps: holding pinned constraints: {', '.join(excluded)}")
         completed = subprocess.run(build_command(excluded), cwd=root, check=False)
         if completed.returncode != 0:
             print(f"refresh-python-deps: constraint bump reported {completed.returncode}")

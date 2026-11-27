@@ -16,6 +16,7 @@ import pytest
 
 from scripts.refresh_python_deps import _default_root
 from scripts.refresh_python_deps import build_command
+from scripts.refresh_python_deps import capped_direct_dependencies
 from scripts.refresh_python_deps import direct_dependency_names
 from scripts.refresh_python_deps import exactly_pinned_dependencies
 from scripts.refresh_python_deps import main
@@ -131,6 +132,52 @@ class TestExactlyPinnedDependencies:
         assert exactly_pinned_dependencies('package = "not-a-list"\n', {"b"}) == []
 
 
+class TestCappedDirectDependencies:
+    """Cover direct constraints in ``pyproject.toml`` that carry upper caps or exact pins."""
+
+    def test_detects_upper_bound_and_exact_direct_constraints(self) -> None:
+        """Upper-bounded and exact direct pins are held while open ranges stay bumpable.
+
+        Given: A ``pyproject.toml`` containing ranged upper caps, exact pins,
+            inline-table constraints, open ranges, and a capped ``python`` entry.
+        When: Extracting capped direct dependencies.
+        Then: Only non-python packages with ``<``/``<=`` upper bounds or exact
+            pins are returned, normalized and sorted.
+        """
+        project = """
+[tool.poetry.dependencies]
+python = ">=3.14,<3.15"
+aioapns = ">=4.0,<4.1"
+httpx = {extras = ["http2"], version = "^0.29.0"}
+PyYAML = ">=6.0.4"
+My_Capped_Extra = {extras = ["tls"], version = ">=1.0,<=1.2"}
+exact_bare = "2.0.0"
+exact_eq = "==3.0.0"
+local_pkg = {path = "../local"}
+multi_spec = [{version = "^1.0", markers = "sys_platform == 'linux'"}]
+
+[tool.poetry.group.dev.dependencies]
+playwright = "~1.65.2"
+dev_cap = "<2.0"
+"""
+        assert capped_direct_dependencies(project) == [
+            "aioapns",
+            "dev-cap",
+            "exact-bare",
+            "exact-eq",
+            "my-capped-extra",
+        ]
+
+    def test_missing_tables_yield_no_capped_dependencies(self) -> None:
+        """A project without dependency tables reports no capped dependencies.
+
+        Given: A ``pyproject.toml`` declaring no dependency tables.
+        When: Extracting capped direct dependencies.
+        Then: An empty list is returned.
+        """
+        assert capped_direct_dependencies("[tool.poetry]\nname = 'x'\n") == []
+
+
 class TestBuildCommand:
     """Cover the constructed Poetry invocation."""
 
@@ -154,15 +201,28 @@ class TestMain:
         (root / "poetry.lock").write_text(_LOCK, encoding="utf-8")
 
     def test_derived_exclusion_reaches_the_command(self, tmp_path: Path) -> None:
-        """The discovered pin is passed to Poetry without being hard-coded."""
+        """Both upstream exact pins and direct upper caps reach Poetry's ``--exclude`` list.
+
+        Given: A project with an upstream-pinned ``aiohttp`` and a direct upper-capped
+            ``aioapns`` dependency.
+        When: Running ``main()``.
+        Then: Both ``aioapns`` and ``aiohttp`` are excluded from ``poetry up --latest``.
+        """
         self._write(tmp_path)
+        (tmp_path / "pyproject.toml").write_text(
+            _PROJECT.replace(
+                'loguru = "^0.7.0"\n',
+                'loguru = "^0.7.0"\naioapns = ">=4.0,<4.1"\n',
+            ),
+            encoding="utf-8",
+        )
         run = MagicMock(return_value=MagicMock(returncode=0))
         with (
             patch("scripts.refresh_python_deps._default_root", return_value=tmp_path),
             patch("scripts.refresh_python_deps.subprocess.run", run),
         ):
             assert main() == 0
-        assert run.call_args.args[0][-2:] == ["--exclude", "aiohttp"]
+        assert run.call_args.args[0][-4:] == ["--exclude", "aioapns", "--exclude", "aiohttp"]
 
     def test_missing_files_are_a_no_op(self, tmp_path: Path) -> None:
         """Without a lock or project file the step does nothing and succeeds."""
