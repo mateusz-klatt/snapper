@@ -779,14 +779,15 @@ async def enforce_wallet_grant_exists(
         repository: SQL repository with scope-grant reads.
         operator_public_id: Operator that will launch the strategy.
         wallet_public_id: Resolved wallet that will be passed to the strategy.
-        as_of: Temporal anchor for active grant reads.
+        as_of: Retained for caller compatibility. The check uses current grants.
 
     Raises:
         StrategyGrantScopeError: The operator has no active grant on the wallet.
     """
+    del as_of
     grants = await repository.list_active_scope_grants_for_wallet(
         wallet_public_id=wallet_public_id,
-        as_of=as_of,
+        as_of=None,
     )
     matching = [grant for grant in grants if grant["operator_public_id"] == operator_public_id]
     if matching:
@@ -826,7 +827,7 @@ async def enforce_strategy_outputs_covered(
     covered = await repository.list_grant_covered_instrument_public_ids(
         operator_public_id=operator_public_id,
         wallet_public_id=wallet_public_id,
-        as_of=as_of,
+        as_of=None,
     )
     uncovered = await find_uncovered_outputs(
         repository,

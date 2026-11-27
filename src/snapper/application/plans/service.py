@@ -1337,10 +1337,7 @@ class PlanExecutorService(RegisterableProcess):
         """
         if not isinstance(self.repository, SQLAlchemyRepository):
             return False
-        current = await self.repository.get_execution_plan(
-            plan_public_id,
-            datetime.now(UTC),
-        )
+        current = await self.repository.get_execution_plan(plan_public_id, as_of=None)
         if current is not None and current["status"] not in TERMINAL_EXECUTION_PLAN_STATUSES:
             return False
         logger.info(
@@ -1563,9 +1560,8 @@ class PlanExecutorService(RegisterableProcess):
         required = evaluator_cls().requires_capabilities()
         if not required:
             return []
-        now = datetime.now(UTC)
         rows = await self.repository.get_instrument_capabilities(
-            as_of=now,
+            as_of=None,
             exchange=exchange,
             instrument_public_id=instrument_public_id,
         )
@@ -1587,10 +1583,9 @@ class PlanExecutorService(RegisterableProcess):
         Returns:
             True if cycle exists and status is open, False otherwise.
         """
-        now = datetime.now(UTC)
         try:
             cycle = await self.repository.get_position_cycle_by_public_id(
-                cycle_public_id, as_of=now
+                cycle_public_id, as_of=None
             )
         except Exception as exc:
             logger.error("Cycle lookup failed for {}: {}", cycle_public_id, exc)

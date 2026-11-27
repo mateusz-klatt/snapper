@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 
 from snapper.data.models import KNOWN_TO_MAX
@@ -245,6 +246,28 @@ class TestListAccessibleWalletsForOperators:
         rows = await repo.list_accessible_wallets_for_operators([ids["carol"]], datetime.now(UTC))
 
         assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_trade_scope_excludes_grant_revoked_ahead_of_reader(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A committed grant revocation immediately removes a wallet from trade scope.
+
+        Given: An operator's sole grant is closed by a writer two seconds ahead.
+        When: Trade scope is checked at the slower reader's time.
+        Then: The wallet is excluded even though the closed grant covered that time.
+        """
+        ids = await _seed_wallets_and_grants(repo)
+        as_of = datetime.now(UTC)
+        async with repo.session() as session:
+            await session.execute(
+                update(WalletOperatorScopeGrant)
+                .where(WalletOperatorScopeGrant.operator_public_id == ids["alice"])
+                .values(known_to=as_of + timedelta(seconds=2))
+            )
+            await session.commit()
+
+        assert await repo.list_accessible_wallets_for_operators([ids["alice"]], as_of) == []
 
 
 class TestCreateWallet:

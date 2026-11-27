@@ -193,22 +193,22 @@ async def test_tokenized_margin_flags_are_refused_as_a_client_cash_path_limit(
     repo.get_instrument_spec.assert_not_awaited()
 
 
-async def test_valid_limit_terms_use_exact_identity_and_temporal_catalog_reads(
+async def test_valid_limit_terms_use_exact_identity_and_current_order_constraints(
     repo: MagicMock, terms: ManualOrderTerms
 ) -> None:
     """Accept valid token precision without requiring derivative unit certification.
 
     Given: Complete online token metadata with unit_certified false,
     When: A valid tokenized cash limit order is evaluated,
-    Then: Exact symbol, UUID and venue reads use one shared evaluation instant.
+    Then: The identity uses the evaluation instant and both order constraints use current state.
     """
     assert await manual_order_terms_refusal(repo, terms, _NOW) is None
     repo.get_instrument_public_id_by_symbol.assert_awaited_once_with(
         terms.instrument, terms.exchange, _NOW
     )
-    repo.get_instrument_spec.assert_awaited_once_with(terms.instrument_public_id, _NOW)
+    repo.get_instrument_spec.assert_awaited_once_with(terms.instrument_public_id, as_of=None)
     repo.get_instrument_capabilities.assert_awaited_once_with(
-        _NOW, exchange=terms.exchange, instrument_public_id=terms.instrument_public_id
+        None, exchange=terms.exchange, instrument_public_id=terms.instrument_public_id
     )
 
 

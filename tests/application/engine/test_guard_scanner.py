@@ -883,7 +883,7 @@ async def test_scanner_run_survives_cycle_error(_repo: SQLAlchemyRepository) -> 
     """
     scanner = _scanner(_repo)
     failing_repo = MagicMock()
-    failing_repo.list_active_paired_execution_groups = AsyncMock(side_effect=RuntimeError("boom"))
+    failing_repo.list_current_paired_execution_groups = AsyncMock(side_effect=RuntimeError("boom"))
     scanner._repo = failing_repo
     task = asyncio.create_task(scanner.run())
     await asyncio.sleep(0.05)
@@ -960,6 +960,63 @@ async def test_sweep_halts_projects_durable_halt_and_mirrors_owned_shard(
     assert halt["group_public_id"] == "grp-1"
     assert halt["reason"] == "fill timeout"
     assert trade_service.is_halted(_BTC_SHARD) is True
+
+
+async def test_scanner_breaks_and_halts_pair_using_future_stamped_state(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A lagging scanner acts on a committed rejection without waiting for its clock.
+
+    Given: A current armed version and a rejected sibling leg stamped ahead of
+        the scanner's clock, alongside a partially filled leg.
+    When: The scanner checks the armed group and projects halts.
+    Then: It breaks the group immediately and mirrors the durable halt.
+    """
+    trade_service = TradeService()
+    await _insert_group(_repo, public_id="grp-1")
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        status="partially_filled",
+        filled_signed_qty=0.5,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id=None,
+    )
+    assert await _repo.cas_paired_execution_group_status(
+        "grp-1", "assembling", "armed", _T1, _SESSION, 2
+    )
+    assert await _repo.cas_paired_execution_leg_status(
+        "leg-1", "pending", "working", _T1, _SESSION, 3
+    )
+    assert await _repo.cas_paired_execution_leg_status(
+        "leg-1", "working", "rejected", _T0, _SESSION, 4
+    )
+    scanner = _scanner(_repo, trade_service=trade_service)
+    await scanner._sweep_armed(_T0)
+    await scanner._sweep_halts(_T0)
+
+    group = await _repo.get_paired_execution_group("grp-1", _T1)
+    assert group is not None
+    assert group["status"] == "broken"
+    assert group["timestamp"] == _T1
+    legs = await _repo.get_paired_execution_legs("grp-1", _T1)
+    assert legs[1]["status"] == "rejected"
+    assert legs[1]["timestamp"] == _T1
+    assert await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY)
+    assert trade_service.is_halted(_BTC_SHARD)
+    assert trade_service.is_halted(_ETH_SHARD)
 
 
 async def test_sweep_halts_projects_for_compensating_group_without_fills(

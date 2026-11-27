@@ -5925,8 +5925,8 @@ class TestRecoverySettlementAndCheckpointDedup:
             `plan_recovery_auto_settle_enabled` is `False`.
         When: `_recover_plans()` runs under the default flag, and
             `_prepare_plan_for_dispatch` runs while `trailing_stop` is `armed`,
-            after it is externally settled to `completed`, and for a missing DB
-            plan id.
+            after it is externally settled by a coordinator with an ahead clock,
+            and for a missing DB plan id.
         Then: `_recover_plans()` leaves the eligible plan unsettled in DB, and
             `_prepare_plan_for_dispatch` allows the `armed` plan once, then
             unregisters and aborts dispatch when durable DB state is terminal or
@@ -6022,14 +6022,18 @@ class TestRecoverySettlementAndCheckpointDedup:
             prepared_ok = await service._prepare_plan_for_dispatch(trail_pid)
             assert prepared_ok is not None and prepared_ok["status"] == "active"
 
+            before_settlement = datetime.now(UTC)
+            settled_at = before_settlement + timedelta(minutes=5)
             await repo.update_execution_plan_status(
                 public_id=trail_pid,
                 new_status="completed",
-                bus_time=datetime.now(UTC),
+                bus_time=settled_at,
                 session_id="cli-ext",
                 sequence_id=9,
-                completed_at=datetime.now(UTC),
+                completed_at=settled_at,
             )
+            historical = await repo.get_execution_plan(trail_pid, as_of=before_settlement)
+            assert historical is not None and historical["status"] == "active"
             assert await service._prepare_plan_for_dispatch(trail_pid) is None
             assert trail_pid not in service.plans
 

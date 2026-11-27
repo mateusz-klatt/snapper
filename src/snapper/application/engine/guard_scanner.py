@@ -205,8 +205,8 @@ class PairedExecutionGuardScanner:
 
     async def _sweep_assembling(self, now: datetime) -> None:
         """Break expired assembling groups and retry arming complete ones."""
-        assembling = await self._repo.list_active_paired_execution_groups(
-            [PairedExecutionGroupStatusEnum.ASSEMBLING.value], now
+        assembling = await self._repo.list_current_paired_execution_groups(
+            [PairedExecutionGroupStatusEnum.ASSEMBLING.value]
         )
         for group in assembling:
             if group["policy"] != PairedExecutionPolicyEnum.SIMULTANEOUS.value:
@@ -256,20 +256,18 @@ class PairedExecutionGuardScanner:
         A HEALTHY armed group whose every leg is fully ``filled`` is the happy
         path: it is COMPLETED via the locked settled check, so a succeeded
         pair leaves every scanner listing instead of staying armed
-        forever. The temporal leg read here is only a cheap hint — the
-        completion DAL re-reads the CURRENT active leg set under the group
-        lock and re-validates, so a stale read can only delay completion by a
-        cycle, never complete a wrong set.
+        forever. The completion DAL re-reads the current leg set under the
+        group lock and re-validates before marking it settled.
         """
-        armed = await self._repo.list_active_paired_execution_groups(
-            [PairedExecutionGroupStatusEnum.ARMED.value], now
+        armed = await self._repo.list_current_paired_execution_groups(
+            [PairedExecutionGroupStatusEnum.ARMED.value]
         )
         for group in armed:
             if group["policy"] != PairedExecutionPolicyEnum.SIMULTANEOUS.value:
                 continue
-            legs = await self._repo.get_paired_execution_legs(group["public_id"], now)
+            legs = await self._repo.get_current_paired_execution_legs(group["public_id"])
             if await self._project_durable_terminals_onto_legs(legs, now):
-                legs = await self._repo.get_paired_execution_legs(group["public_id"], now)
+                legs = await self._repo.get_current_paired_execution_legs(group["public_id"])
             reason = self._armed_break_reason(group, legs, now)
             if reason is not None:
                 await self._break_armed_group(group, now, reason)
@@ -374,15 +372,14 @@ class PairedExecutionGuardScanner:
         owned legs must still run, or a held-``created`` / no-command leg owned
         by that sibling would linger ``pending`` forever.
         """
-        broken = await self._repo.list_active_paired_execution_groups(
+        broken = await self._repo.list_current_paired_execution_groups(
             [
                 PairedExecutionGroupStatusEnum.BROKEN.value,
                 PairedExecutionGroupStatusEnum.COMPENSATING.value,
-            ],
-            now,
+            ]
         )
         for group in broken:
-            legs = await self._repo.get_paired_execution_legs(group["public_id"], now)
+            legs = await self._repo.get_current_paired_execution_legs(group["public_id"])
             for leg in legs:
                 if not self._ownership.owns(leg["shard_key"]):
                     continue
@@ -442,17 +439,16 @@ class PairedExecutionGuardScanner:
         CAS loser, a re-scan, or a leg that turns live after the group flipped
         is still handled. Scoped to ``simultaneous`` policy.
         """
-        groups = await self._repo.list_active_paired_execution_groups(
+        groups = await self._repo.list_current_paired_execution_groups(
             [
                 PairedExecutionGroupStatusEnum.BROKEN.value,
                 PairedExecutionGroupStatusEnum.COMPENSATING.value,
-            ],
-            now,
+            ]
         )
         for group in groups:
             if group["policy"] != PairedExecutionPolicyEnum.SIMULTANEOUS.value:
                 continue
-            legs = await self._repo.get_paired_execution_legs(group["public_id"], now)
+            legs = await self._repo.get_current_paired_execution_legs(group["public_id"])
             for leg in legs:
                 if not self._ownership.owns(leg["shard_key"]):
                     continue
@@ -684,7 +680,7 @@ class PairedExecutionGuardScanner:
         instrument_public_id = await self._repo.get_instrument_public_id_by_symbol(
             leg["instrument"], leg["exchange"], now
         )
-        flatten_qty = await self._resolve_flatten_qty(leg, instrument_public_id, open_qty, now)
+        flatten_qty = await self._resolve_flatten_qty(leg, instrument_public_id, open_qty)
         if flatten_qty is None:
             await self._escalate_to_manual(group, leg, now)
             return
@@ -708,7 +704,6 @@ class PairedExecutionGuardScanner:
         leg: PairedExecutionLegRow,
         instrument_public_id: str | None,
         open_qty: float,
-        now: datetime,
     ) -> float | None:
         """Return the lot-rounded reduce-only flatten qty, or None to escalate.
 
@@ -722,11 +717,11 @@ class PairedExecutionGuardScanner:
         if instrument_public_id is None:
             return None
         caps = await self._repo.get_instrument_capabilities(
-            now, exchange=leg["exchange"], instrument_public_id=instrument_public_id
+            None, exchange=leg["exchange"], instrument_public_id=instrument_public_id
         )
         if not caps or not caps[0]["supports_reduce_only"]:
             return None
-        spec = await self._repo.get_instrument_spec(instrument_public_id, now)
+        spec = await self._repo.get_instrument_spec(instrument_public_id, as_of=None)
         if spec is None:
             return None
         lot_size = spec["lot_size"]
@@ -848,16 +843,15 @@ class PairedExecutionGuardScanner:
         with no legs is corruption (``mode`` is derived from a leg) — it is
         skipped and logged loudly rather than guessed.
         """
-        groups = await self._repo.list_active_paired_execution_groups(
+        groups = await self._repo.list_current_paired_execution_groups(
             [
                 PairedExecutionGroupStatusEnum.BROKEN.value,
                 PairedExecutionGroupStatusEnum.COMPENSATING.value,
                 PairedExecutionGroupStatusEnum.MANUAL_INTERVENTION.value,
-            ],
-            now,
+            ]
         )
         for group in groups:
-            legs = await self._repo.get_paired_execution_legs(group["public_id"], now)
+            legs = await self._repo.get_current_paired_execution_legs(group["public_id"])
             if not self._group_has_exposure(group, legs):
                 continue
             if not legs:
