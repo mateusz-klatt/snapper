@@ -523,8 +523,8 @@ class TradingCapsEnforcer:
 
         Computes ``USDConverter.to_usd(valuation_pid, quantity)`` —
         the current-mark valuation that works for market orders (no
-        submit price required), keyed by the SOURCE identity so paper
-        strategy emits price against the real venue's snapshot — and
+        submit price required), keyed by the source identity so paper
+        submissions use the real venue's price evidence, and
         quantizes the result UPWARD to whole cents so later
         ``NUMERIC(18,2)`` accounting reproduces admission semantics
         without under-counting. The comparison value survives even

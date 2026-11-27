@@ -4631,7 +4631,36 @@ def _candle_key_batches(keys: Sequence[CandleVersionKey]) -> list[Sequence[Candl
 
 type _MarketSnapshotRefreshProjection = tuple[str, str, str, str, str | None, str]
 type _MarketSnapshotFreshnessProjection = tuple[str, datetime, float | None]
-type _UsdFxCandleProjection = tuple[str, str, str, str, str | None, float, datetime]
+type _UsdFxCandleProjection = tuple[
+    str | None, str, str, str, str | None, float | None, datetime | None
+]
+
+
+def _latest_active_1m_candle_query(
+    instrument_public_id: str | ColumnElement[str],
+) -> Select[str, str, float, datetime]:
+    """Build an index-ordered lookup for one instrument's newest active 1m row.
+
+    The active sentinel and row limit are SQL literals so PostgreSQL generic
+    plans can use the partial index and cost the single-row lookup. The unique
+    index key guarantees one active row per open time.
+
+    Args:
+        instrument_public_id: Exact instrument ID or correlated outer column.
+
+    Returns:
+        Select of the newest active 1m row, including provisional bars.
+    """
+    return (
+        select(Candle.public_id, Candle.instrument_public_id, Candle.close, Candle.open_at)
+        .where(
+            Candle.instrument_public_id == instrument_public_id,
+            Candle.timeframe == "1m",
+            Candle.known_to == literal(KNOWN_TO_MAX, type_=TZDateTime(), literal_execute=True),
+        )
+        .order_by(Candle.open_at.desc())
+        .limit(literal(1, literal_execute=True))
+    )
 
 
 def _active_usd_fx_candle_candidates_query(
@@ -4639,39 +4668,30 @@ def _active_usd_fx_candle_candidates_query(
 ) -> Select[*_UsdFxCandleProjection]:
     """Build the clock-free active 1m candle query for USD forex planes.
 
-    Joins active non-paper forex instruments with market-data capability to
-    each instrument's newest active 1m candle without a caller-clock cutoff,
-    so reader clock lag cannot hide freshly persisted bars.
+    Each candle field is an index probe correlated to an eligible plane.
+    Keeping candles out of the outer FROM prevents the planner from driving
+    the catalog join from candle history. The probes share the statement's
+    read snapshot and identify the same unique active row.
 
     Args:
         currency: Quote currency paired directly or inversely with USD.
 
     Returns:
-        SQLAlchemy select yielding one row per eligible forex instrument with
-        at least one active 1m candle.
+        One row per eligible forex instrument, with null candle fields where
+        the instrument has no active 1m candle.
     """
-    latest_candle = aliased(Candle, name="latest_fx_candle")
-    latest_open_at = (
-        select(latest_candle.open_at)
-        .where(
-            latest_candle.instrument_public_id == Instrument.public_id,
-            latest_candle.timeframe == "1m",
-            latest_candle.known_to == KNOWN_TO_MAX,
-        )
-        .order_by(latest_candle.open_at.desc(), latest_candle.id.desc())
-        .limit(1)
-        .correlate(Instrument)
-        .scalar_subquery()
+    latest_candle = _latest_active_1m_candle_query(Instrument.public_id.expression).correlate(
+        Instrument
     )
     return (
         select(
-            Candle.public_id,
+            latest_candle.with_only_columns(Candle.public_id).scalar_subquery(),
             Instrument.public_id,
             Instrument.exchange,
             Symbol.base,
             Symbol.quote,
-            Candle.close,
-            Candle.open_at,
+            latest_candle.with_only_columns(Candle.close).scalar_subquery(),
+            latest_candle.with_only_columns(Candle.open_at).scalar_subquery(),
         )
         .select_from(Instrument)
         .join(Symbol, Symbol.public_id == Instrument.symbol_public_id)
@@ -4679,13 +4699,6 @@ def _active_usd_fx_candle_candidates_query(
             SymbolExchangeCapability,
             (SymbolExchangeCapability.symbol_public_id == Symbol.public_id)
             & (SymbolExchangeCapability.exchange == Instrument.exchange),
-        )
-        .join(
-            Candle,
-            (Candle.instrument_public_id == Instrument.public_id)
-            & (Candle.timeframe == "1m")
-            & (Candle.known_to == KNOWN_TO_MAX)
-            & (Candle.open_at == latest_open_at),
         )
         .where(
             Instrument.known_to == KNOWN_TO_MAX,
@@ -4699,7 +4712,7 @@ def _active_usd_fx_candle_candidates_query(
                 (Symbol.base == "USD") & (Symbol.quote == currency),
             ),
         )
-        .order_by(Instrument.public_id.asc(), Candle.id.desc())
+        .order_by(Instrument.public_id.asc())
     )
 
 
@@ -5139,7 +5152,7 @@ class Repository(ABC):
     async def get_active_usd_fx_snapshot_candidates(
         self, currency: str
     ) -> list[UsdFxSnapshotCandidateRow]:
-        """Read every active, non-paper market-data forex plane against USD.
+        """Read deprecated transitional snapshots for non-paper USD forex planes.
 
         Args:
             currency: Quote currency requiring current USD conversion evidence.
@@ -13158,7 +13171,7 @@ class SQLAlchemyRepository(Repository):
     async def get_active_usd_fx_snapshot_candidates(
         self, currency: str
     ) -> list[UsdFxSnapshotCandidateRow]:
-        """Join current forex metadata, venue capability and snapshot evidence.
+        """Read deprecated transitional snapshots with current forex metadata.
 
         Args:
             currency: Quote currency paired directly or inversely with USD.
@@ -13228,15 +13241,16 @@ class SQLAlchemyRepository(Repository):
             result = await session.execute(_active_usd_fx_candle_candidates_query(currency))
             return [
                 UsdFxCandleCandidateRow(
-                    candle_public_id=row[0],
+                    candle_public_id=cast(str, row[0]),
                     instrument_public_id=row[1],
                     exchange=row[2],
                     base=row[3],
                     quote=cast(str, row[4]),
-                    close=row[5],
+                    close=cast(float, row[5]),
                     open_at=row[6],
                 )
                 for row in result.all()
+                if row[6] is not None
             ]
 
     async def get_active_market_snapshot_price(
@@ -13279,21 +13293,7 @@ class SQLAlchemyRepository(Repository):
             Newest active 1m candle row, or ``None`` when no active 1m row exists.
         """
         async with self.session() as session:
-            result = await session.execute(
-                select(
-                    Candle.public_id,
-                    Candle.instrument_public_id,
-                    Candle.close,
-                    Candle.open_at,
-                )
-                .where(
-                    Candle.instrument_public_id == instrument_public_id,
-                    Candle.timeframe == "1m",
-                    Candle.known_to == KNOWN_TO_MAX,
-                )
-                .order_by(Candle.open_at.desc(), Candle.id.desc())
-                .limit(1)
-            )
+            result = await session.execute(_latest_active_1m_candle_query(instrument_public_id))
             row = result.one_or_none()
             if row is None:
                 return None

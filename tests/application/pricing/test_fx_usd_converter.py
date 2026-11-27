@@ -51,7 +51,7 @@ class _Market:
     can_market_data: bool = True
     snapshot: bool = True
     closed: str = ""
-    capability_exchange: str = "kraken"
+    capability_exchange: str | None = None
 
 
 async def _seed(repo: SQLAlchemyRepository, market: _Market) -> None:
@@ -75,7 +75,7 @@ async def _seed(repo: SQLAlchemyRepository, market: _Market) -> None:
     capability = SymbolExchangeCapability(
         public_id=f"cap-{market.identity}",
         symbol_public_id=symbol.public_id,
-        exchange=market.capability_exchange,
+        exchange=market.capability_exchange or market.exchange,
         can_market_data=market.can_market_data,
         created_at=_NOW,
         **common,
@@ -605,10 +605,10 @@ async def _seed_fx_candle(
     *,
     open_at: datetime,
     complete: bool = True,
-    timeframe: str = "1m",
+    snapshot_price: float | None = None,
 ) -> None:
-    """Persist metadata + active/closed candle for an FX plane without snapshot."""
-    await _seed(repo, replace(market, snapshot=False))
+    """Persist an FX plane with a candle and optionally a same-plane snapshot."""
+    await _seed(repo, replace(market, snapshot=snapshot_price is not None, price=snapshot_price))
     close_price = market.price if market.price is not None else 1.25
     async with repo.session() as session:
         session.add(
@@ -616,7 +616,7 @@ async def _seed_fx_candle(
                 public_id=f"candle-{market.identity}-{int(open_at.timestamp())}",
                 instrument_public_id=market.identity,
                 open_at=open_at,
-                timeframe=timeframe,
+                timeframe="1m",
                 open=close_price,
                 high=close_price,
                 low=close_price,
@@ -670,10 +670,10 @@ async def test_fx_plane_conflict_between_candle_and_snapshot_at_equal_timestamps
 ) -> None:
     """Refuse equal-freshness FX candle and snapshot rates that disagree after normalization.
 
-    Given: an active 1m candle closed at _NOW (1.25) and a MarketSnapshot at
-        _NOW (1.20, or inverse 1.25 vs 1.25),
+    Given: an active 1m candle closed at _NOW (1.25) and a snapshot on a
+        different venue at _NOW (1.20),
     When: the oracle selects the FX rate,
-    Then: ``fx_plane_conflict`` refuses admission rather than picking one arbitrarily.
+    Then: ``fx_plane_conflict`` refuses admission.
     """
     await _seed_fx_candle(
         repo,
@@ -690,65 +690,41 @@ async def test_fx_plane_conflict_between_candle_and_snapshot_at_equal_timestamps
         await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(2))
 
 
-async def test_fx_candle_beats_stale_snapshot_and_fresher_snapshot_wins(
+@pytest.mark.parametrize("candle_open_age", [60, 120, STALENESS_THRESHOLD_SECONDS + 61])
+async def test_fx_candle_displaces_same_plane_snapshot_only(
     repo: SQLAlchemyRepository,
+    candle_open_age: int,
 ) -> None:
-    """FX conversion uses the fresher of active 1m candle and MarketSnapshot.
+    """Same-plane snapshots are ignored even when the candle is stale.
 
-    Given: a 16h-stale FX snapshot and a fresh 1m FX candle, followed by a
-        fresher FX snapshot on a later instrument,
+    Given: an FX candle and a fresh snapshot for one plane, followed by
+        another plane with only a usable snapshot,
     When: EUR exposure is converted to USD,
-    Then: the fresh candle beats the stale snapshot, and a fresher snapshot
-        beats an older fresh candle.
+    Then: the first plane returns the candle rate or raises ``fx_price_stale``.
+        The second plane's snapshot is eligible once it is added.
     """
-    await _seed(
+    await _seed_fx_candle(
         repo,
-        _Market(
-            "fx-pair",
-            base="EUR",
-            quote="USD",
-            price=1.10,
-            timestamp=_NOW - timedelta(hours=16),
-            exchange="kraken",
-        ),
+        _Market("fx-pair", price=1.25, timestamp=_NOW - timedelta(seconds=5)),
+        open_at=_NOW - timedelta(seconds=candle_open_age),
+        snapshot_price=1.10,
     )
-    async with repo.session() as session:
-        session.add(
-            Candle(
-                public_id="candle-fx-pair",
-                instrument_public_id="fx-pair",
-                open_at=_NOW - timedelta(seconds=120),
-                timeframe="1m",
-                open=1.25,
-                high=1.25,
-                low=1.25,
-                close=1.25,
-                volume=1.0,
-                vwap=1.25,
-                trades=1,
-                source="calculated",
-                complete=True,
-                timestamp=_NOW - timedelta(seconds=60),
-                known_to=KNOWN_TO_MAX,
-                session_id="test",
-                sequence_id=1,
-            )
-        )
-        await session.commit()
-    assert await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(2)) == Decimal("250")
-
+    converter = USDConverter(repo, now=lambda: _NOW)
+    if candle_open_age > STALENESS_THRESHOLD_SECONDS + 60:
+        with pytest.raises(PriceUnavailableError, match="fx_price_stale"):
+            await converter.to_usd("main", Decimal(2))
+    else:
+        assert await converter.to_usd("main", Decimal(2)) == Decimal("250")
     await _seed(
         repo,
         _Market(
-            "fx-newer-snap",
-            base="EUR",
-            quote="USD",
+            "fx-snapshot-only",
             price=1.50,
-            timestamp=_NOW - timedelta(seconds=10),
+            timestamp=_NOW + timedelta(seconds=1),
             exchange="walutomat",
         ),
     )
-    assert await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(2)) == Decimal("300")
+    assert await converter.to_usd("main", Decimal(2)) == Decimal("300")
 
 
 async def test_fx_candle_staleness_invalid_and_naive_guards(
@@ -766,6 +742,7 @@ async def test_fx_candle_staleness_invalid_and_naive_guards(
         repo,
         _Market("fx-stale", base="EUR", quote="USD", price=1.25),
         open_at=_NOW - timedelta(seconds=STALENESS_THRESHOLD_SECONDS + 61),
+        snapshot_price=1.5,
     )
     with pytest.raises(PriceUnavailableError, match="fx_price_stale"):
         await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(1))

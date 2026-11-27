@@ -4,8 +4,8 @@ Pins both new reads on :class:`SQLAlchemyRepository`:
     - :meth:`get_active_latest_1m_candle_price`
     - :meth:`get_active_usd_fx_candle_candidates`
 
-Also compiles the FX candle candidate query against the PostgreSQL dialect so
-SQLite runtime behavior and PostgreSQL query structure are both verified.
+Also compiles the FX query for SQLite and PostgreSQL to check correlation and
+the literal active predicate needed by the partial candle index.
 """
 
 from collections.abc import AsyncIterator
@@ -17,6 +17,8 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy.dialects.postgresql import dialect as postgresql_dialect
+from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
+from sqlalchemy.engine import Dialect
 
 from snapper.data import repository as repository_module
 from snapper.data.models import KNOWN_TO_MAX
@@ -40,7 +42,7 @@ class _FxPlane:
     asset_type: str = "forex"
     can_market_data: bool = True
     closed: str = ""
-    capability_exchange: str = "kraken"
+    capability_exchange: str | None = None
     timeframe: str = "1m"
     has_candle: bool = True
 
@@ -124,7 +126,7 @@ async def _seed_fx_plane(repo: SQLAlchemyRepository, plane: _FxPlane) -> None:
     capability = SymbolExchangeCapability(
         public_id=f"cap-{plane.identity}",
         symbol_public_id=symbol.public_id,
-        exchange=plane.capability_exchange,
+        exchange=plane.capability_exchange or plane.exchange,
         can_market_data=plane.can_market_data,
         created_at=_NOW,
         timestamp=_NOW,
@@ -238,9 +240,20 @@ async def test_get_active_usd_fx_candle_candidates_enforces_eligibility_and_late
         direct plane also has an older 1m candle, plus one excluded plane,
     When: ``get_active_usd_fx_candle_candidates('EUR')`` runs,
     Then: only the two eligible planes are returned with their newest active
-        1m candle close and open_at.
+        1m candle close and open_at, including a provisional candle with bus-time lag.
     """
-    await _seed_fx_plane(repo, _FxPlane("direct"))
+    await _seed_fx_plane(repo, _FxPlane("direct", has_candle=False))
+    await _add_candle(
+        repo,
+        _CandleSpec(
+            public_id="candle-direct",
+            instrument_public_id="direct",
+            open_at=_NOW - timedelta(minutes=1),
+            close=1.25,
+            complete=False,
+            timestamp=_NOW + timedelta(seconds=30),
+        ),
+    )
     await _add_candle(
         repo,
         _CandleSpec(
@@ -260,18 +273,33 @@ async def test_get_active_usd_fx_candle_candidates_enforces_eligibility_and_late
     assert all(row["open_at"].tzinfo is not None for row in rows)
 
 
-def test_fx_candle_query_compiles_for_postgresql_with_latest_subquery() -> None:
-    """PostgreSQL compilation binds active sentinel and correlated latest 1m subquery.
+@pytest.mark.parametrize(
+    "dialect,active_sentinel",
+    [
+        (sqlite_dialect(), "'9999-12-31 23:59:59.000000'"),
+        (postgresql_dialect(), "'9999-12-31 23:59:59+00:00'"),
+    ],
+)
+def test_fx_candle_query_compiles_to_index_ordered_correlated_probes(
+    dialect: Dialect, active_sentinel: str
+) -> None:
+    """Match the candle index key and active predicate on both databases.
 
     Given: the SQLAlchemy query built for ``get_active_usd_fx_candle_candidates``,
-    When: compiled against the PostgreSQL dialect,
-    Then: the SQL selects from ``instruments``, ``symbols``, ``symbol_exchange_capabilities``,
-        and ``candles`` with the correlated ``ORDER BY ... DESC LIMIT 1`` subquery.
+    When: compiled against SQLite or PostgreSQL with late literals rendered,
+    Then: candle access uses only instrument-correlated, index-ordered probes.
     """
     query = repository_module._active_usd_fx_candle_candidates_query("EUR")
-    compiled = " ".join(str(query.compile(dialect=postgresql_dialect())).split())
+    compiled = " ".join(
+        str(query.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})).split()
+    )
     assert "FROM instruments JOIN symbols" in compiled
     assert "JOIN symbol_exchange_capabilities" in compiled
-    assert "JOIN candles" in compiled
-    assert "latest_fx_candle.timeframe =" in compiled
-    assert "ORDER BY latest_fx_candle.open_at DESC, latest_fx_candle.id DESC LIMIT" in compiled
+    assert "JOIN candles" not in compiled
+    assert (
+        compiled.count("FROM candles WHERE candles.instrument_public_id = instruments.public_id")
+        == 3
+    )
+    assert compiled.count("candles.timeframe =") == 3
+    assert compiled.count(f"candles.known_to = {active_sentinel}") == 3
+    assert compiled.count("ORDER BY candles.open_at DESC LIMIT 1") == 3
