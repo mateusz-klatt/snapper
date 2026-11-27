@@ -1683,6 +1683,63 @@ class TestPreflightRoutes:
 
 
 @pytest.mark.asyncio
+class _GreetingWriter:
+    """Writer stub for the SOCKS5 greeting probe that discards every call."""
+
+    def write(self, _data: bytes) -> None:
+        """Accept the greeting bytes."""
+
+    async def drain(self) -> None:
+        """Pretend the greeting was flushed."""
+
+    def close(self) -> None:
+        """Pretend the socket closed."""
+
+    async def wait_closed(self) -> None:
+        """Pretend the close completed."""
+
+
+class _GreetingReader:
+    """Reader stub that returns a fixed greeting reply or ends the stream early."""
+
+    def __init__(self, reply: bytes | None) -> None:
+        """Store the reply, where ``None`` means the listener closes mid-reply."""
+        self._reply = reply
+
+    async def readexactly(self, n: int) -> bytes:
+        """Return the stored reply, or raise ``IncompleteReadError`` when it is ``None``."""
+        if self._reply is None:
+            raise asyncio.IncompleteReadError(partial=b"\x05", expected=n)
+        return self._reply
+
+
+def _install_greeting_probe(monkeypatch: pytest.MonkeyPatch, reply: bytes | None) -> None:
+    """Patch DNS, the TCP dial and python-socks discovery for one greeting reply.
+
+    Args:
+        monkeypatch: Pytest fixture used to install the fakes.
+        reply: Bytes the listener answers with, or ``None`` to close mid-reply.
+    """
+
+    async def fake_open_connection(
+        host: object, port: object
+    ) -> tuple[_GreetingReader, _GreetingWriter]:
+        return _GreetingReader(reply), _GreetingWriter()
+
+    async def fake_getaddrinfo(*_a: object, **_kw: object) -> list[object]:
+        return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
+
+    loop = MagicMock()
+    loop.getaddrinfo = fake_getaddrinfo
+    monkeypatch.setattr(pool_module.asyncio, "get_running_loop", lambda: loop)
+    monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
+    monkeypatch.setattr(
+        pool_module.importlib.util,
+        "find_spec",
+        lambda name: MagicMock() if name == "python_socks" else None,
+    )
+
+
 class TestSocks5GreetingProbe:
     """Tests for the SOCKS5 listener reachability probe.
 
@@ -1829,37 +1886,7 @@ class TestSocks5GreetingProbe:
         When _preflight_one_route runs,
         Then the route is quarantined.
         """
-
-        async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
-            class _R:
-                async def readexactly(self, n: int) -> bytes:
-                    return b"HT"
-
-            class _W:
-                def write(self, _data: bytes) -> None: ...
-                async def drain(self) -> None: ...
-                def close(self) -> None: ...
-                async def wait_closed(self) -> None: ...
-
-            return _R(), _W()
-
-        async def fake_getaddrinfo(*_a: object, **_kw: object) -> list[object]:
-            return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
-
-        loop = MagicMock()
-        loop.getaddrinfo = fake_getaddrinfo
-
-        def fake_get_running_loop() -> MagicMock:
-            return loop
-
-        def fake_find_spec(name: str) -> object | None:
-            if name == "python_socks":
-                return MagicMock()
-            return None
-
-        monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
-        monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
-        monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        _install_greeting_probe(monkeypatch, b"HT")
         config = _two_route_config()
         effective, quarantined = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
@@ -1877,37 +1904,7 @@ class TestSocks5GreetingProbe:
         When _preflight_one_route runs,
         Then the route is quarantined (IncompleteReadError path).
         """
-
-        async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
-            class _R:
-                async def readexactly(self, n: int) -> bytes:
-                    raise asyncio.IncompleteReadError(partial=b"\x05", expected=n)
-
-            class _W:
-                def write(self, _data: bytes) -> None: ...
-                async def drain(self) -> None: ...
-                def close(self) -> None: ...
-                async def wait_closed(self) -> None: ...
-
-            return _R(), _W()
-
-        async def fake_getaddrinfo(*_a: object, **_kw: object) -> list[object]:
-            return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
-
-        loop = MagicMock()
-        loop.getaddrinfo = fake_getaddrinfo
-
-        def fake_get_running_loop() -> MagicMock:
-            return loop
-
-        def fake_find_spec(name: str) -> object | None:
-            if name == "python_socks":
-                return MagicMock()
-            return None
-
-        monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
-        monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
-        monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        _install_greeting_probe(monkeypatch, None)
         config = _two_route_config()
         effective, quarantined = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
