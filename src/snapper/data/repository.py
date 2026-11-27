@@ -78,6 +78,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
 from contextlib import asynccontextmanager
+from contextlib import nullcontext
 from contextlib import suppress
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -5484,7 +5485,7 @@ class Repository(ABC):
             rows: Trade rows to insert.
             session: Optional caller-managed session.
             enqueue_integrity_work: Whether the same transaction must
-                enqueue exact M1 and M2 obligations for historical writes.
+                enqueue exact M1 and M2 obligations for newly inserted historical trades.
 
         Returns:
             Number of inserted rows.
@@ -13746,16 +13747,15 @@ class SQLAlchemyRepository(Repository):
         model: type[Base],
         rows: list[Any],
         index_elements: list[str],
-    ) -> Any | None:
+    ) -> Insert | None:
         """Build a native conflict-do-nothing statement when supported.
 
         This builder carries no immutable-ledger guard of its own by
         design. It is a pure statement factory with no sole append-only
         harm — ``on_conflict_do_nothing`` can neither delete a sealed row
-        nor free ``max(scope_sequence)`` — and its only caller is
-        :meth:`_upsert_batch`, which refuses immutable-ledger targets
-        before this method runs. Adding a second guard here would be a
-        redundant call-site check, not an independent theorem.
+        nor free ``max(scope_sequence)``. :meth:`_upsert_batch` refuses
+        immutable-ledger targets before calling this helper, and the
+        integrity-work path only passes the Trade model.
 
         Args:
             model: SQLAlchemy model class to insert into.
@@ -15362,58 +15362,53 @@ class SQLAlchemyRepository(Repository):
         committing so the writer task can batch many flushes onto a
         single pinned :class:`AsyncConnection`. Omit ``session`` for
         ad-hoc / test paths that want an inline commit. Historical
-        replay callers set ``enqueue_integrity_work`` so the trade and
-        exact monitor obligations share that transaction.
+        replay callers set ``enqueue_integrity_work`` so newly inserted
+        trades and their exact monitor obligations share that transaction.
         """
         if not rows:
             return 0
+        index_elements = ["instrument_public_id", "trade_id", "executed_at"]
         if not enqueue_integrity_work:
-            return await self._upsert_batch(
-                Trade,
-                rows,
-                ["instrument_public_id", "trade_id", "executed_at"],
-                session=session,
-            )
+            return await self._upsert_batch(Trade, rows, index_elements, session=session)
         if session is not None:
-            inserted = await self._upsert_batch(
-                Trade,
-                rows,
-                ["instrument_public_id", "trade_id", "executed_at"],
-                session=session,
-            )
-            await self._enqueue_trade_integrity_work(session, rows)
-            return inserted
+            return await self._upsert_trades_with_integrity_work(rows, index_elements, session)
         async with self.session() as owned_session:
-            inserted = await self._upsert_batch(
-                Trade,
-                rows,
-                ["instrument_public_id", "trade_id", "executed_at"],
-                session=owned_session,
+            inserted = await self._upsert_trades_with_integrity_work(
+                rows, index_elements, owned_session
             )
-            await self._enqueue_trade_integrity_work(owned_session, rows)
             await owned_session.commit()
             return inserted
 
-    @staticmethod
-    async def _enqueue_trade_integrity_work(
-        session: AsyncSession,
+    async def _upsert_trades_with_integrity_work(
+        self,
         rows: list[TradeUpsertRow],
-    ) -> None:
-        """Enqueue exact historical trade identities before their commit."""
-        work_items: list[TradeIntegrityWorkItemInsertRow] = []
-        for row in rows:
-            trade_id = row.get("trade_id")
-            work_items.append(
-                TradeIntegrityWorkItemInsertRow(
-                    public_id=row["public_id"],
-                    instrument_public_id=row["instrument_public_id"],
-                    trade_id=trade_id,
-                    executed_at=row["executed_at"],
-                    m1_pending=trade_id is not None,
-                    m2_pending=True,
-                )
+        index_elements: list[str],
+        session: AsyncSession,
+    ) -> int:
+        """Count and enqueue only trade identities returned by the insert."""
+        self._ensure_public_ids(rows)
+        statement = self._build_conflict_do_nothing_statement(Trade, rows, index_elements)
+        if statement is None:
+            raise NotImplementedError("Trade integrity work requires PostgreSQL or SQLite")
+        result = await session.execute(
+            statement.returning(
+                Trade.public_id, Trade.instrument_public_id, Trade.trade_id, Trade.executed_at
             )
-        await session.execute(insert(TradeIntegrityWorkItem), work_items)
+        )
+        work_items = [
+            TradeIntegrityWorkItemInsertRow(
+                public_id=public_id,
+                instrument_public_id=instrument_public_id,
+                trade_id=trade_id,
+                executed_at=executed_at,
+                m1_pending=trade_id is not None,
+                m2_pending=True,
+            )
+            for public_id, instrument_public_id, trade_id, executed_at in result
+        ]
+        if work_items:
+            await session.execute(insert(TradeIntegrityWorkItem), work_items)
+        return len(work_items)
 
     async def run_trade_integrity_monitor(
         self,
@@ -38384,6 +38379,8 @@ class SQLAlchemyRepository(Repository):
         native_symbols: set[str],
         exchange: str,
         as_of: datetime,
+        *,
+        session: AsyncSession | None = None,
     ) -> dict[str, str]:
         """Resolve native symbols on an exchange to instrument public IDs.
 
@@ -38391,13 +38388,14 @@ class SQLAlchemyRepository(Repository):
             native_symbols: Native symbol strings to resolve.
             exchange: Exchange name.
             as_of: Point-in-time for temporal query.
+            session: Optional caller-owned session for a shared snapshot.
 
         Returns:
             Mapping from native symbol to active instrument public ID.
             Missing symbols and symbols without an active exchange
             instrument are omitted.
         """
-        async with self.session() as s:
+        async with self.session() if session is None else nullcontext(session) as s:
             s_ts, s_kt = where_active(Symbol, as_of)
             i_ts, i_kt = where_active(Instrument, as_of)
             result = await s.execute(

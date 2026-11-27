@@ -3,14 +3,21 @@
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import AsyncMock
+from uuid import uuid7
 
 import pytest
 from sqlalchemy import event
+from sqlalchemy import select
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from snapper.data.archiver import ArchiveRestorer
 from snapper.data.models import Base
+from snapper.data.models import Trade
+from snapper.data.models import TradeIntegrityWorkItem
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeUpsertRow
@@ -18,6 +25,22 @@ from snapper.data.repository_types import TradeUpsertRow
 
 class _ForcedRestoreRollbackError(RuntimeError):
     """Raised by the test transaction immediately before commit."""
+
+
+def _trade_row(trade_id: str) -> TradeUpsertRow:
+    """Build a candidate for a fixed instrument and execution time."""
+    return TradeUpsertRow(
+        public_id=str(uuid7()),
+        instrument_public_id="44000000-0000-0000-0000-000000000001",
+        timestamp=datetime(2026, 7, 29, 10, 0, tzinfo=UTC),
+        executed_at=datetime(2026, 7, 28, 10, 0, tzinfo=UTC),
+        price=100.0,
+        size=1.0,
+        side="buy",
+        trade_id=trade_id,
+        session_id="45000000-0000-0000-0000-000000000001",
+        sequence_id=1,
+    )
 
 
 def _write_trade_archive(path: Path) -> None:
@@ -194,3 +217,115 @@ async def test_replay_upsert_owned_session_commits_trade_and_worklog(
     assert trade_count == 1
     assert tuple(work_item) == (row["public_id"], 1, 1)
     await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_replay_upsert_enqueues_only_inserted_trades(tmp_path: Path) -> None:
+    """Use the identities returned by a real SQLite insert.
+
+    Given: A stored trade and a batch with that identity and two new trades.
+    When: Replay requests integrity work and then resubmits the batch.
+    Then: Only the two new trade rows get one exact M1 and M2 obligation each.
+    """
+    repository = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'replay-conflict.db'}")
+    await repository.create_all()
+    stored = _trade_row("stored")
+    conflict = _trade_row("stored")
+    first = _trade_row("first")
+    second = _trade_row("second")
+    del second["public_id"]
+    batch = [conflict, first, second]
+
+    try:
+        assert await repository.upsert_trades([stored]) == 1
+        assert await repository.upsert_trades(batch, enqueue_integrity_work=True) == 2
+        assert await repository.upsert_trades(batch, enqueue_integrity_work=True) == 0
+
+        async with repository.session() as session:
+            work_items = (await session.scalars(select(TradeIntegrityWorkItem))).all()
+            trades = (await session.scalars(select(Trade))).all()
+
+        assert {trade.public_id for trade in trades} == {
+            stored["public_id"],
+            first["public_id"],
+            second["public_id"],
+        }
+        assert len(work_items) == 2
+        assert {
+            (item.public_id, item.instrument_public_id, item.trade_id, item.executed_at)
+            for item in work_items
+        } == {
+            (row["public_id"], row["instrument_public_id"], row["trade_id"], row["executed_at"])
+            for row in (first, second)
+        }
+        assert all(item.m1_pending and item.m2_pending for item in work_items)
+    finally:
+        await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_postgresql_trade_insert_returns_worklog_identities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check PostgreSQL statement and result handling without a server.
+
+    Given: A PostgreSQL session double returns the identity of one inserted trade.
+    When: Replay requests integrity work using its caller-owned session.
+    Then: The statement returns identities and work represents only the returned row.
+    """
+    repository = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    monkeypatch.setattr(SQLAlchemyRepository, "dialect_name", "postgresql")
+    session = AsyncMock(spec=AsyncSession)
+    row = _trade_row("attempted")
+    returned = (row["public_id"], row["instrument_public_id"], None, row["executed_at"])
+    session.execute.side_effect = [[returned], None]
+
+    try:
+        count = await repository.upsert_trades([row], session=session, enqueue_integrity_work=True)
+
+        assert count == 1
+        trade_call, worklog_call = session.execute.await_args_list
+        sql = str(trade_call.args[0].compile(dialect=postgresql.dialect()))
+        assert "ON CONFLICT (instrument_public_id, trade_id, executed_at) DO NOTHING" in sql
+        assert (
+            "RETURNING trades.public_id, trades.instrument_public_id,"
+            " trades.trade_id, trades.executed_at" in sql
+        )
+        assert worklog_call.args[1] == [
+            {
+                "public_id": returned[0],
+                "instrument_public_id": returned[1],
+                "trade_id": None,
+                "executed_at": returned[3],
+                "m1_pending": False,
+                "m2_pending": True,
+            }
+        ]
+        session.commit.assert_not_awaited()
+    finally:
+        await repository.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_replay_upsert_refuses_an_unsupported_returning_dialect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require a reviewed insert path for historical trade obligations.
+
+    Given: The repository dialect does not support the native conflict insert.
+    When: Replay requests transactional integrity work.
+    Then: The repository raises before executing a trade or worklog statement.
+    """
+    repository = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    monkeypatch.setattr(SQLAlchemyRepository, "dialect_name", "unsupported")
+    session = AsyncMock(spec=AsyncSession)
+
+    try:
+        with pytest.raises(NotImplementedError, match="requires PostgreSQL or SQLite"):
+            await repository.upsert_trades(
+                [_trade_row("trade")], session=session, enqueue_integrity_work=True
+            )
+
+        session.execute.assert_not_awaited()
+    finally:
+        await repository.engine.dispose()
