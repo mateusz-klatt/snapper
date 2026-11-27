@@ -1,6 +1,9 @@
-"""Read held Kraken Spot trade evidence for offline reconciliation."""
+"""Read and validate held Kraken Spot trade recovery evidence."""
 
 import csv
+import hashlib
+import io
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC
@@ -9,6 +12,7 @@ from datetime import timedelta
 from decimal import Decimal
 from decimal import InvalidOperation
 from math import inf
+from pathlib import Path
 from typing import Literal
 from typing import TextIO
 
@@ -16,6 +20,7 @@ from snapper.infrastructure.exchanges.adapters.kraken_timestamps import normaliz
 
 MAX_KRAKEN_SPOT_TRADE_EVIDENCE_ROWS = 10_000
 
+_MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
 _CSV_HEADER = [
     "exchange",
     "symbol",
@@ -55,6 +60,110 @@ class KrakenSpotTradeEvidence:
     price: Decimal
     size: Decimal
     side: Literal["buy", "sell"]
+
+
+@dataclass(frozen=True, slots=True)
+class KrakenSpotTradeEvidenceWindow:
+    """Attested evidence scoped to an inclusive start and exclusive end."""
+
+    rows: tuple[KrakenSpotTradeEvidence, ...]
+    start: datetime
+    end: datetime
+    evidence_sha256: str
+
+
+def resolve_input_root(root: Path) -> Path:
+    """Resolve the directory allowed to contain operator inputs.
+
+    Args:
+        root: Operator-supplied input directory.
+
+    Returns:
+        The canonical directory path.
+
+    Raises:
+        OSError: If the root cannot be resolved.
+        ValueError: If the resolved root is not a directory.
+    """
+    resolved = root.resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError("Input root must be a directory")
+    return resolved
+
+
+def confined_input(root: Path, candidate: Path) -> Path:
+    """Resolve an input to a regular file within the allowed directory.
+
+    Args:
+        root: The canonical input directory.
+        candidate: An absolute path or a path relative to the input directory.
+
+    Returns:
+        The canonical file path.
+
+    Raises:
+        OSError: If the candidate cannot be resolved.
+        ValueError: If the resolved candidate is outside the root or is not a file.
+    """
+    path = Path(os.path.realpath(root / candidate, strict=True))
+    if path.is_relative_to(root) and path.is_file():
+        return path
+    raise ValueError("Input path must be a regular file inside the input root")
+
+
+def load_kraken_spot_trade_evidence(
+    path: Path, expected_digest: str, start: str, end: str
+) -> KrakenSpotTradeEvidenceWindow:
+    """Read the attested bytes of a confined CSV and validate their scope.
+
+    Args:
+        path: Evidence file resolved within the input root.
+        expected_digest: Expected SHA-256 of the entire CSV file.
+        start: Inclusive millisecond-aligned UTC bound.
+        end: Exclusive millisecond-aligned UTC bound.
+
+    Returns:
+        Canonical evidence rows, execution bounds, and verified digest.
+
+    Raises:
+        OSError: If the file cannot be read.
+        ValueError: If the file, digest, or window is invalid.
+    """
+    with path.open("rb") as stream:
+        data = stream.read(_MAX_EVIDENCE_BYTES + 1)
+    if len(data) > _MAX_EVIDENCE_BYTES:
+        raise ValueError("Evidence file exceeds the size limit")
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != expected_digest.lower():
+        raise ValueError("Evidence SHA-256 differs from the manifest")
+    rows = tuple(read_kraken_spot_trade_evidence(io.StringIO(data.decode("utf-8"), newline="")))
+    window = KrakenSpotTradeEvidenceWindow(rows, _utc_bound(start), _utc_bound(end), digest)
+    _check_evidence_scope(window)
+    return window
+
+
+def _utc_bound(value: str) -> datetime:
+    """Parse a UTC window bound aligned to the stored execution-time precision."""
+    bound = datetime.fromisoformat(value)
+    if bound.utcoffset() != timedelta(0) or bound.microsecond % 1000:
+        raise ValueError("Window bounds must be UTC and millisecond-aligned")
+    return bound
+
+
+def _check_evidence_scope(window: KrakenSpotTradeEvidenceWindow) -> None:
+    """Require in-window rows and a one-to-one instrument mapping in the evidence."""
+    if window.start >= window.end:
+        raise ValueError("Window start must precede end")
+    by_symbol: dict[str, str] = {}
+    by_instrument: dict[str, str] = {}
+    for row in window.rows:
+        if not window.start <= row.executed_at < window.end:
+            raise ValueError("Evidence includes an execution outside the requested window")
+        if (
+            by_symbol.setdefault(row.symbol, row.instrument_public_id) != row.instrument_public_id
+            or by_instrument.setdefault(row.instrument_public_id, row.symbol) != row.symbol
+        ):
+            raise ValueError("Evidence contains an ambiguous symbol or instrument assignment")
 
 
 def read_kraken_spot_trade_evidence(stream: TextIO) -> list[KrakenSpotTradeEvidence]:

@@ -1461,6 +1461,58 @@ missing set. Assess full venue coverage separately. The planner reads two
 local files and leaves any historical insert or candle repair to a separate
 operation.
 
+### Import verified Kraken Spot trades
+
+Use the importer with the investigated evidence and the original half-open UTC
+window. The evidence CSV must resolve to a regular file under `--input-root`,
+which defaults to the current directory. The importer validates the evidence
+SHA-256 and requires millisecond-aligned UTC bounds. It connects to the
+database configured by `DB_URL` and makes no Kraken API calls.
+
+1. Preview the import plan against the intended database.
+
+        .venv/bin/python -m scripts.import_kraken_spot_trades \
+          --input-root . \
+          --evidence missing-trades.csv \
+          --evidence-sha256 "$TRADE_EVIDENCE_SHA256" \
+          --start 2026-01-01T00:00:00Z --end 2026-01-01T00:07:00Z
+
+    The default run is read-only. It checks each candidate's instrument UUID
+    and trade ID against the configured database. Duplicate or conflicting
+    stored trades cause a refusal. Review the JSON counts in
+    `missing_by_symbol` and `total_missing` and save `plan_digest`, which
+    binds the sorted missing rows to the window and evidence SHA-256.
+
+2. Supply the reviewed digest and a new receipt path to apply the plan.
+
+        .venv/bin/python -m scripts.import_kraken_spot_trades \
+          --input-root . \
+          --evidence missing-trades.csv \
+          --evidence-sha256 "$TRADE_EVIDENCE_SHA256" \
+          --start 2026-01-01T00:00:00Z --end 2026-01-01T00:07:00Z \
+          --apply --expect-digest "$PLAN_DIGEST" --receipt import-receipt.json
+
+    Apply recomputes the live plan and exits with status 2 if the digest
+    differs. The receipt path must be unused. Each transaction handles up to
+    500 trades and enqueues their historical trade-integrity work through the
+    repository. PostgreSQL briefly locks out other trade writers while each
+    chunk rechecks absence and writes, with a two-second lock timeout and a
+    15-second statement timeout. The command reads back each chunk and then
+    verifies that the live plan has zero missing trades after apply.
+
+3. Retain the JSON receipt with the evidence and dry-run output.
+
+    The receipt records the window, evidence SHA-256, approved plan digest,
+    committed chunk counts, totals, UTC timestamps, and the final
+    `verified_missing` count. A null count means verification did not
+    finish. An interrupted process can leave an incomplete receipt and
+    committed chunks. Run a fresh dry run to review the remaining rows and
+    use its digest with a new receipt path. After a complete import, a fresh
+    dry run reports zero missing and an apply with that digest inserts zero rows.
+
+The importer leaves existing trades untouched. Full venue coverage assessment
+and candle regeneration remain separate operations.
+
 ## Portfolio P&L minimum-activation report
 
 `snapper pnl-minimum-gate report` (and `check` / `inspect`) reads current
