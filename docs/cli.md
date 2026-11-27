@@ -1707,6 +1707,25 @@ snapper verify-candle-coverage --exchange kraken --cut-date 2026-06-16 -s FET-US
 snapper verify-candle-coverage -e kraken --cut-date 2026-06-16 -s FET-USD -t 1d
 ```
 
+### `plan-kraken-spot-trade-recovery`
+
+Compare verified Kraken Spot trade evidence with an offline trade snapshot.
+The command takes `--evidence`, `--evidence-sha256`, `--stored-trades`, and
+the original `--start` and `--end` UTC bounds. Both CSV paths resolve inside
+`--input-root`, which defaults to the current directory. The JSON report
+counts exact matches and lists missing trade IDs by symbol. See the
+[snapshot export and planner examples](operations.md#kraken-spot-trade-recovery-evidence).
+
+### `import-kraken-spot-trades`
+
+Preview a verified Kraken Spot trade import against the configured `DB_URL`.
+Supply `--evidence`, `--evidence-sha256`, and the original `--start` and
+`--end` UTC bounds. The JSON preview includes a `plan_digest`. To apply the
+reviewed plan, add `--apply --expect-digest <digest> --receipt <path>`. The
+receipt path must name a new file inside a writable `--input-root`. The
+command exits 2 if the recomputed digest differs. See the
+[import procedure and container examples](operations.md#import-verified-kraken-spot-trades).
+
 ### `kraken-futures-backfill-candles`
 
 Backfills historical OHLCV candles for Kraken Futures perpetuals.

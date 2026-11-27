@@ -520,6 +520,8 @@ snapper polygon-load-csv --all       # Step 2: load the CSV cache into the datab
 snapper polygon-backfill-grouped
 snapper polygon-load-grouped-candles
 snapper verify-candle-coverage
+snapper plan-kraken-spot-trade-recovery --help  # Compare evidence with an offline snapshot
+snapper import-kraken-spot-trades --help       # Preview or apply a verified trade import
 snapper kraken-futures-backfill-candles
 snapper kraken-equities-backfill-candles
 snapper update-kraken-futures-funding-rates

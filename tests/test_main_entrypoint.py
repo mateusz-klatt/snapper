@@ -124,6 +124,8 @@ def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
     [
         (["snapper", "audit-candles", "--json"], True),
         (["snapper", "audit-candles"], False),
+        (["snapper", "plan-kraken-spot-trade-recovery"], True),
+        (["snapper", "import-kraken-spot-trades"], True),
         (["snapper", "server", "--json"], False),
         (["snapper", "mcp-oauth", "provision-client", "--name", "x"], True),
         (["snapper", "mcp-oauth", "list-clients"], False),

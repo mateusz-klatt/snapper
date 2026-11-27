@@ -6,9 +6,11 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from typer.testing import CliRunner
 
-from scripts import plan_kraken_spot_trade_recovery as planner
 from snapper.application.updaters.historical import kraken_spot_trade_evidence
+from snapper.cli import kraken_spot_trade_recovery as planner
+from snapper.cli.app import app
 
 _BTC = "00000000-0000-4000-8000-000000000001"
 _ETH = "00000000-0000-4000-8000-000000000002"
@@ -52,9 +54,22 @@ def _args(tmp_path: Path, evidence: str, stored: str) -> list[str]:
     ]
 
 
-def test_reports_present_and_missing_without_touching_inputs(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_planner_command_exposes_argparse_help() -> None:
+    """Expose the offline planner's argparse help through the Snapper CLI.
+
+    Given: The operator invokes the planner command with --help.
+    When: Typer forwards the request to argparse.
+    Then: The command documents the stored snapshot argument and exits successfully.
+    """
+    result = CliRunner().invoke(app, ["plan-kraken-spot-trade-recovery", "--help"])
+
+    assert result.exit_code == 0
+    assert result.stdout.startswith("usage: snapper plan-kraken-spot-trade-recovery ")
+    assert "--stored-trades" in result.stdout
+    assert "Stored trade snapshot CSV" in result.stdout
+
+
+def test_reports_present_and_missing_without_touching_inputs(tmp_path: Path) -> None:
     """Compare equal public trade IDs on different instruments independently.
 
     Given: Two instruments with the same public trade ID and one stored row.
@@ -64,15 +79,16 @@ def test_reports_present_and_missing_without_touching_inputs(
     argv = _args(tmp_path, _BTC_EVIDENCE + _ETH_EVIDENCE, _STORED_HEADER + _BTC_STORED)
     before = {file.name: file.read_bytes() for file in tmp_path.iterdir()}
 
-    assert planner.main(argv) == 0
-    output = capsys.readouterr()
-    assert json.loads(output.out) == {
+    result = CliRunner().invoke(app, ["plan-kraken-spot-trade-recovery", *argv])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
         "already_present": 1,
         "evidence_rows": 2,
         "missing_from_snapshot": 1,
         "missing_trade_ids_by_symbol": {"ETH-USD": ["999001"]},
     }
-    assert output.err == ""
+    assert result.stderr == ""
     assert {file.name: file.read_bytes() for file in tmp_path.iterdir()} == before
 
 
@@ -138,9 +154,7 @@ def test_rejects_invalid_paths_before_opening_either_input(
     assert message in output.err
 
 
-def test_rejects_a_file_as_the_input_root(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_rejects_a_file_as_the_input_root(tmp_path: Path) -> None:
     """Require the input root to resolve to a directory.
 
     Given: A regular file supplied as the input root.
@@ -150,10 +164,11 @@ def test_rejects_a_file_as_the_input_root(
     argv = _args(tmp_path, _BTC_EVIDENCE, _STORED_HEADER)
     argv[argv.index("--input-root") + 1] = str(tmp_path / "evidence.csv")
 
-    assert planner.main(argv) == 1
-    output = capsys.readouterr()
-    assert output.out == ""
-    assert "Input root must be a directory" in output.err
+    result = CliRunner().invoke(app, ["plan-kraken-spot-trade-recovery", *argv])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "Input root must be a directory" in result.stderr
 
 
 def _fixture_rows(template: str, count: int) -> str:

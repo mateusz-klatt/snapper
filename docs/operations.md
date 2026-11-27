@@ -1447,8 +1447,29 @@ to the current working directory. Relative CSV paths are resolved from that
 root.
 
 ```bash
-.venv/bin/python -m scripts.plan_kraken_spot_trade_recovery \
+snapper plan-kraken-spot-trade-recovery \
   --input-root . \
+  --evidence missing-trades.csv \
+  --evidence-sha256 "$TRADE_EVIDENCE_SHA256" \
+  --stored-trades trade-snapshot.csv \
+  --start 2026-01-01T00:00:00Z --end 2026-01-01T00:07:00Z
+```
+
+To use the labelled image configured for the `snapper` API service, set
+`TRADE_EVIDENCE_DIR` to the absolute host path holding both CSVs. Mount that
+directory read-only and pass its container path as `--input-root`. Compose
+passes the command to the image's `snapper` entrypoint.
+`SNAPPER_LOG_FILE` points the startup log at a container-local file, because
+the shared `./data` log directory belongs to the service user. Like every
+`snapper` command, these commands initialize the service's encryption
+settings at startup, so run them with the service's environment.
+
+```bash
+docker compose run --rm --no-deps --pull never -T \
+  --user "$(id -u):$(id -g)" -e SNAPPER_LOG_FILE=/tmp/kraken-spot-trade-recovery.log \
+  -v "$TRADE_EVIDENCE_DIR:/recovery:ro" \
+  snapper plan-kraken-spot-trade-recovery \
+  --input-root /recovery \
   --evidence missing-trades.csv \
   --evidence-sha256 "$TRADE_EVIDENCE_SHA256" \
   --stored-trades trade-snapshot.csv \
@@ -1470,12 +1491,18 @@ SHA-256 and requires millisecond-aligned UTC bounds. It treats `BTC/USD` and
 `BTC-USD` as the same native symbol. Both modes verify the symbol and
 instrument UUID against active Kraken Spot listings in the database configured
 by `DB_URL`. A catalog mismatch causes a refusal before trade planning. The
-importer makes no Kraken API calls.
+importer makes no Kraken API calls. Run `snapper import-kraken-spot-trades`
+locally with the same options, using the host input path for `--input-root`.
+The examples below use the API service's image and database configuration.
 
-1. Preview the import plan against the intended database.
+1. Preview the import plan against the intended database. Mount the evidence
+    directory read-only and pass `/recovery` as `--input-root`.
 
-        .venv/bin/python -m scripts.import_kraken_spot_trades \
-          --input-root . \
+        docker compose run --rm --no-deps --pull never -T \
+          --user "$(id -u):$(id -g)" -e SNAPPER_LOG_FILE=/tmp/kraken-spot-trade-recovery.log \
+          -v "$TRADE_EVIDENCE_DIR:/recovery:ro" \
+          snapper import-kraken-spot-trades \
+          --input-root /recovery \
           --evidence missing-trades.csv \
           --evidence-sha256 "$TRADE_EVIDENCE_SHA256" \
           --start 2026-01-01T00:00:00Z --end 2026-01-01T00:07:00Z
@@ -1486,27 +1513,35 @@ importer makes no Kraken API calls.
     `missing_by_symbol` and `total_missing` and save `plan_digest`, which
     binds the sorted missing rows to the window and evidence SHA-256.
 
-2. Supply the reviewed digest and a new receipt path to apply the plan.
+2. Supply the reviewed digest and a new receipt path to apply the plan. Use
+    a writable input root containing a copy of the evidence. The receipt
+    must be a new file in an existing directory inside `--input-root` and
+    can be specified relative to that root. A read-only mount causes receipt
+    reservation to fail with `EROFS` before any trade write.
 
-        .venv/bin/python -m scripts.import_kraken_spot_trades \
-          --input-root . \
+        TRADE_IMPORT_DIR="$(mktemp -d)"
+        cp "$TRADE_EVIDENCE_DIR/missing-trades.csv" "$TRADE_IMPORT_DIR/"
+        docker compose run --rm --no-deps --pull never -T \
+          --user "$(id -u):$(id -g)" -e SNAPPER_LOG_FILE=/tmp/kraken-spot-trade-recovery.log \
+          -v "$TRADE_IMPORT_DIR:/recovery:rw" \
+          snapper import-kraken-spot-trades \
+          --input-root /recovery \
           --evidence missing-trades.csv \
           --evidence-sha256 "$TRADE_EVIDENCE_SHA256" \
           --start 2026-01-01T00:00:00Z --end 2026-01-01T00:07:00Z \
           --apply --expect-digest "$PLAN_DIGEST" --receipt import-receipt.json
 
     Apply recomputes the live plan and exits with status 2 if the digest
-    differs. The receipt must be a new file in an existing directory inside
-    `--input-root`. Relative receipt paths resolve from that root. The command
-    reserves the file before writing any trades. Each transaction handles up
-    to 500 trades and enqueues historical trade-integrity work only for rows it
-    inserts. Existing trades stay intact, and a matching trade the live feed
-    stores concurrently is counted as already present. PostgreSQL takes no
-    explicit table lock and uses a two-second lock timeout and a 15-second
-    statement timeout. The command reads back each chunk and then verifies
-    that the live plan has zero missing trades after apply.
+    differs. Each transaction handles up to 500 trades and enqueues historical
+    trade-integrity work only for rows it inserts. Existing trades stay intact,
+    and a matching trade the live feed stores concurrently is counted as
+    already present. PostgreSQL takes no explicit table lock and uses a
+    two-second lock timeout and a 15-second statement timeout. The command
+    reads back each chunk and then verifies that the live plan has zero
+    missing trades after apply.
 
-3. Retain the JSON receipt with the evidence and dry-run output.
+3. Retain `$TRADE_IMPORT_DIR/import-receipt.json` with the evidence and dry-run
+    output.
 
     The receipt records the window, evidence SHA-256, approved plan digest,
     committed chunk counts, totals, UTC timestamps, and the final

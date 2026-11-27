@@ -11,11 +11,13 @@ from datetime import UTC
 from datetime import datetime
 from itertools import batched
 from pathlib import Path
+from typing import Final
 from typing import TextIO
 from typing import TypedDict
 from typing import cast
 from uuid import uuid7
 
+import typer
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -53,6 +55,13 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import TradeUpsertRow
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.topics.builders import market_topic
+
+IMPORT_KRAKEN_SPOT_TRADES_CONTEXT: Final[dict[str, object]] = {
+    "allow_extra_args": True,
+    "ignore_unknown_options": True,
+    "help_option_names": [],
+}
+"""Click settings that forward the command's arguments and help to argparse."""
 
 _CHUNK_SIZE = 500
 
@@ -93,7 +102,9 @@ class _Receipt(TypedDict):
 
 def _arguments(argv: list[str] | None) -> _Arguments:
     """Parse the evidence and require both guards for an apply."""
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        prog="snapper import-kraken-spot-trades", description=__doc__, allow_abbrev=False
+    )
     parser.add_argument(
         "--input-root", type=Path, default=Path("."), help="Allowed input directory"
     )
@@ -399,5 +410,13 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def import_kraken_spot_trades(ctx: typer.Context) -> None:
+    """Preview or import missing trades from verified Kraken Spot evidence.
+
+    Args:
+        ctx: Context whose extra arguments are passed to argparse.
+
+    Raises:
+        typer.Exit: With the importer's exit code.
+    """
+    raise typer.Exit(code=main(list(ctx.args)))

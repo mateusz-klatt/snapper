@@ -43,12 +43,15 @@ _COMMAND_LOGFILES: dict[str, str] = {
 _MACHINE_STDOUT_COMMANDS: dict[tuple[str, ...], str | None] = {
     ("audit-candles",): "--json",
     ("mcp-oauth", "provision-client"): None,
+    ("plan-kraken-spot-trade-recovery",): None,
+    ("import-kraken-spot-trades",): None,
 }
 """Invocations whose stdout is one machine-readable document, not a console.
 
 Keyed by the leading argv words that identify the command; the value is a flag
-that must also be present, or ``None`` when the command always writes a
-document. ``mcp-oauth provision-client`` prints a client secret that is shown
+that must also be present, or ``None`` when stdout is reserved without a flag.
+Both Kraken Spot trade recovery commands report JSON on stdout.
+``mcp-oauth provision-client`` prints a client secret that is shown
 once and never recoverable, so a log line landing on stdout ahead of it does not
 merely look untidy — it makes the output unparseable and the secret lost."""
 
