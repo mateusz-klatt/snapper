@@ -59,6 +59,7 @@ from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import NotificationDeviceUpsertRow
+from snapper.data.repository_types import UserAlertDefaultUpsertRow
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.schemas.data import AlertEventData
@@ -3845,3 +3846,526 @@ class TestReviewRegressionFixes:
         assert current["attempt_count"] == 2
         assert current["next_attempt_at"] is None
         assert any("skipping rejected retry schedule after lost race" in msg for msg in info_logs)
+
+
+class TestQueuedAdmissionRecheckAndPrefetch:
+    """Pre-send admission rechecks, retry-loop policy enforcement, fallbacks, and FCM skip."""
+
+    @pytest.mark.asyncio
+    async def test_pre_send_recheck_blocks_deactivated_device_between_routing_and_send(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deactivating a device after pre-routing stops send and marks unregistered.
+
+        Given: A queued APNs delivery whose device is active during pre-routing.
+        When: The device is deactivated immediately after ``begin_delivery_attempt``.
+        Then: ``apns.send`` is never called and the delivery becomes ``unregistered``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
+        original_bump = repo.begin_delivery_attempt
+
+        async def _deactivate_after_bump(
+            public_id: str,
+            *,
+            transition_at: datetime,
+            session_id: str,
+            sequence_id: int,
+        ) -> int | None:
+            count = await original_bump(
+                public_id,
+                transition_at=transition_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+            )
+            await repo.deactivate_notification_device_scd2(
+                device_pid,
+                reason="user_unregistered",
+                timestamp=_ts(1),
+                session_id="revoke-mid-attempt",
+                sequence_id=99,
+            )
+            return count
+
+        monkeypatch.setattr(repo, "begin_delivery_attempt", _deactivate_after_bump)
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+
+        await sidecar._attempt_on_queued_row(row, _ts(1))
+
+        apns.send.assert_not_awaited()
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "unregistered"
+        assert final_row["attempt_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_pre_send_recheck_blocks_disabled_prefs_between_routing_and_send(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Disabling alert prefs after pre-routing stops send and cancels scope.
+
+        Given: A queued APNs delivery admitted by pre-routing preferences.
+        When: A device preference disables the alert type right after ``begin_delivery_attempt``.
+        Then: ``apns.send`` is not called and the delivery becomes ``cancelled_scope``
+            with reason ``routing_suppressed``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
+        original_bump = repo.begin_delivery_attempt
+
+        async def _disable_pref_after_bump(
+            public_id: str,
+            *,
+            transition_at: datetime,
+            session_id: str,
+            sequence_id: int,
+        ) -> int | None:
+            count = await original_bump(
+                public_id,
+                transition_at=transition_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+            )
+            await repo.upsert_device_alert_pref(
+                DeviceAlertPrefUpsertRow(
+                    session_id="pref-mid-attempt",
+                    sequence_id=99,
+                    timestamp=_ts(1),
+                    device_public_id=device_pid,
+                    alert_type="order_fill_full",
+                    enabled=False,
+                )
+            )
+            return count
+
+        monkeypatch.setattr(repo, "begin_delivery_attempt", _disable_pref_after_bump)
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+
+        await sidecar._attempt_on_queued_row(row, _ts(1))
+
+        apns.send.assert_not_awaited()
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "cancelled_scope"
+        assert final_row["error_reason"] == "routing_suppressed"
+        assert final_row["attempt_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_pre_send_recheck_blocks_push_beta_exclusion_at_send_time(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Excluding the user from push-beta before send cancels without sending.
+
+        Given: A queued APNs delivery initially admitted by the active push-beta gate.
+        When: Push-beta removes the user after ``begin_delivery_attempt`` commits.
+        Then: ``apns.send`` is not called and the delivery becomes ``cancelled_scope``
+            with reason ``routing_suppressed``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        beta = PushBetaConfig(enabled=True, user_public_ids=(user,))
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
+        sidecar._push_beta_provider = lambda: beta
+        original_bump = repo.begin_delivery_attempt
+
+        async def _exclude_user_after_bump(
+            public_id: str,
+            *,
+            transition_at: datetime,
+            session_id: str,
+            sequence_id: int,
+        ) -> int | None:
+            nonlocal beta
+            count = await original_bump(
+                public_id,
+                transition_at=transition_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+            )
+            beta = PushBetaConfig(enabled=True, user_public_ids=())
+            return count
+
+        monkeypatch.setattr(repo, "begin_delivery_attempt", _exclude_user_after_bump)
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+
+        await sidecar._attempt_on_queued_row(row, _ts(1))
+
+        apns.send.assert_not_awaited()
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "cancelled_scope"
+        assert final_row["error_reason"] == "routing_suppressed"
+        assert final_row["attempt_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_queued_apns_happy_path_sends_once_using_single_read_admission(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Queued APNs happy path sends once via single-session admission reads.
+
+        Given: A queued APNs delivery with an active device and eligible preferences.
+        When: ``_attempt_on_queued_row`` runs.
+        Then: ``apns.send`` is awaited once, status becomes ``sent``,
+            ``get_apns_admission_context`` performs both checks (pre-routing and pre-send),
+            and legacy three-call user listing methods are never awaited.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
+        admission_spy = AsyncMock(wraps=repo.get_apns_admission_context)
+        legacy_devices = AsyncMock(side_effect=AssertionError("unexpected legacy devices read"))
+        legacy_prefs = AsyncMock(side_effect=AssertionError("unexpected legacy prefs read"))
+        legacy_defaults = AsyncMock(side_effect=AssertionError("unexpected legacy defaults read"))
+        monkeypatch.setattr(repo, "get_apns_admission_context", admission_spy)
+        monkeypatch.setattr(repo, "list_active_notification_devices_for_user", legacy_devices)
+        monkeypatch.setattr(repo, "list_device_alert_prefs_for_user", legacy_prefs)
+        monkeypatch.setattr(repo, "list_user_alert_defaults", legacy_defaults)
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+
+        await sidecar._attempt_on_queued_row(row, _ts(1))
+
+        apns.send.assert_awaited_once()
+        assert admission_spy.await_count == 2
+        legacy_devices.assert_not_awaited()
+        legacy_prefs.assert_not_awaited()
+        legacy_defaults.assert_not_awaited()
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "sent"
+        assert final_row["attempt_count"] == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("unregister", "final_status"),
+        [(False, "cancelled_scope"), (True, "unregistered")],
+        ids=["opt-out", "device-removed"],
+    )
+    async def test_retry_loop_rechecks_revocation_and_opt_out(
+        self,
+        repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+        unregister: bool,
+        final_status: str,
+    ) -> None:
+        """Retry loop exercises revocation and preference opt-out across queued rows.
+
+        Given: Two ready queued APNs rows in ``_process_retry_queue_loop``.
+        When: Sending the first row revokes the second device or disables its preference.
+        Then: Only the first push sends, and the second terminates in the retry loop
+            as ``unregistered`` or ``cancelled_scope`` (``routing_suppressed``).
+        """
+        first_user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        second_user = "019dbb34-f439-77bd-afa8-ee5321d60308"
+        for user in (first_user, second_user):
+            await _seed_user(repo, user)
+        first_device = await _seed_device(repo, first_user, device_token="a" * 64)
+        second_device = await _seed_device(repo, second_user, device_token="b" * 64)
+        first_event = await _seed_alert_event(repo, first_user)
+        second_event = await _seed_alert_event(repo, second_user)
+        past = datetime(2020, 1, 1, tzinfo=UTC)
+        first_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="seed",
+                sequence_id=1,
+                timestamp=_ts(0),
+                alert_event_public_id=first_event["public_id"],
+                device_public_id=first_device,
+                user_public_id=first_user,
+                status="queued",
+                next_attempt_at=past,
+                expires_at=_ts(60),
+                created_at=_ts(0),
+            )
+        )
+        second_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="seed",
+                sequence_id=2,
+                timestamp=_ts(0),
+                alert_event_public_id=second_event["public_id"],
+                device_public_id=second_device,
+                user_public_id=second_user,
+                status="queued",
+                next_attempt_at=past + timedelta(seconds=5),
+                expires_at=_ts(60),
+                created_at=_ts(0),
+            )
+        )
+        tick_at = _ts(2)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: tick_at)
+
+        async def _send_then_mutate_policy(**kwargs: object) -> ApnsSendResult:
+            if kwargs["device_token"] == "a" * 64:
+                if unregister:
+                    await repo.deactivate_notification_device_scd2(
+                        second_device,
+                        reason="user_unregistered",
+                        timestamp=tick_at,
+                        session_id="retry-policy",
+                        sequence_id=10,
+                    )
+                else:
+                    await repo.upsert_device_alert_pref(
+                        DeviceAlertPrefUpsertRow(
+                            session_id="retry-policy",
+                            sequence_id=10,
+                            timestamp=tick_at,
+                            device_public_id=second_device,
+                            alert_type="order_fill_full",
+                            enabled=False,
+                        )
+                    )
+            return ApnsSendResult(
+                status_code=200, status="success", apns_id="apns-retry", description=""
+            )
+
+        apns.send = AsyncMock(side_effect=_send_then_mutate_policy)
+        original_safe = sidecar._safe_attempt_on_queued_row
+
+        async def _stop_after_second(
+            row: AlertDeliveryRow,
+            now: datetime,
+            *,
+            caches: _PrefetchedBatchCaches | None = None,
+        ) -> None:
+            await original_safe(row, now, caches=caches)
+            if row["public_id"] == second_pid:
+                await sidecar.stop()
+
+        monkeypatch.setattr(sidecar, "_safe_attempt_on_queued_row", _stop_after_second)
+        monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 0.01)
+
+        await asyncio.wait_for(sidecar._process_retry_queue_loop(), timeout=2.0)
+
+        apns.send.assert_awaited_once()
+        first = await repo.get_delivery_by_public_id(first_pid)
+        second = await repo.get_delivery_by_public_id(second_pid)
+        assert first is not None and first["status"] == "sent"
+        assert second is not None and second["status"] == final_status
+        assert second["attempt_count"] == 0
+        assert second["error_reason"] == (None if unregister else "routing_suppressed")
+
+    @pytest.mark.asyncio
+    async def test_queued_row_without_device_pref_falls_back_to_user_default_suppression(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """A queued row with no device prefs respects UserAlertDefault suppression.
+
+        Given: An active APNs device with zero ``DeviceAlertPref`` rows and a
+            ``UserAlertDefault`` disabling ``order_fill_full``.
+        When: ``_drain_outbox`` evaluates the queued row.
+        Then: ``apns.send`` is not called and the delivery becomes ``cancelled_scope``
+            with reason ``routing_suppressed``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        await repo.upsert_user_alert_default(
+            UserAlertDefaultUpsertRow(
+                session_id="seed",
+                sequence_id=3,
+                timestamp=_ts(0),
+                user_public_id=user,
+                alert_type="order_fill_full",
+                enabled=False,
+            )
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
+
+        await sidecar._drain_outbox(_ts(1))
+
+        apns.send.assert_not_awaited()
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "cancelled_scope"
+        assert final_row["error_reason"] == "routing_suppressed"
+        assert final_row["attempt_count"] == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("via_retry_loop", [False, True], ids=["drain", "retry-loop"])
+    @pytest.mark.parametrize("seed_user_row", [True, False], ids=["null-lang", "missing-user"])
+    async def test_drain_and_retry_fall_back_to_english_when_user_language_missing(
+        self,
+        repo: SQLAlchemyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+        via_retry_loop: bool,
+        seed_user_row: bool,
+    ) -> None:
+        """Missing or null recipient language falls back to EN in drain and retry.
+
+        Given: A localized alert event whose recipient either has ``default_language=None``
+            or has no active ``User`` row in the database.
+        When: ``_drain_outbox`` or ``_process_retry_queue_loop`` dispatches the queued row.
+        Then: ``apns.send`` receives the stored English ``title`` and ``body``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        if seed_user_row:
+            await _seed_user(repo, user, default_language=None)
+        device_pid = await _seed_device(repo, user)
+        event_pid = await repo.insert_alert_event(
+            AlertEventInsertRow(
+                session_id="t",
+                sequence_id=1,
+                timestamp=_ts(0),
+                user_public_id=user,
+                alert_type="order_fill_full",
+                priority="medium",
+                title="Order filled",
+                body="BUY 100 BTCUSD @ $50000.00 filled on Kraken",
+                payload={
+                    "title_loc_key": "alerts.title.order_fill_full",
+                    "body_loc_key": "alerts.body.order_fill_full",
+                    "body_loc_args": ["BUY", "100", "BTCUSD", "50000.00", "Kraken"],
+                },
+            )
+        )
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=2,
+                timestamp=_ts(0),
+                alert_event_public_id=event_pid,
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                next_attempt_at=datetime(2020, 1, 1, tzinfo=UTC),
+                expires_at=_ts(60),
+                created_at=_ts(0),
+            )
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
+
+        if via_retry_loop:
+            original_safe = sidecar._safe_attempt_on_queued_row
+
+            async def _stop_after_row(
+                row: AlertDeliveryRow,
+                now: datetime,
+                *,
+                caches: _PrefetchedBatchCaches | None = None,
+            ) -> None:
+                await original_safe(row, now, caches=caches)
+                if row["public_id"] == delivery_pid:
+                    await sidecar.stop()
+
+            monkeypatch.setattr(sidecar, "_safe_attempt_on_queued_row", _stop_after_row)
+            monkeypatch.setattr("snapper.application.notify.sidecar._RETRY_LOOP_INTERVAL_S", 0.01)
+            await asyncio.wait_for(sidecar._process_retry_queue_loop(), timeout=2.0)
+        else:
+            await sidecar._drain_outbox(_ts(1))
+
+        apns.send.assert_awaited_once()
+        sent_alert = apns.send.await_args.kwargs["payload"]["aps"]["alert"]
+        assert sent_alert["title"] == "Order filled"
+        assert sent_alert["body"] == "BUY 100 BTCUSD @ $50000.00 filled on Kraken"
+
+    @pytest.mark.asyncio
+    async def test_prefetch_caches_skips_fcm_rows(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Batch prefetch skips ``provider='fcm'`` rows completely.
+
+        Given: An FCM-only queued batch and a mixed APNs+FCM queued batch.
+        When: ``_prefetch_caches_for_rows`` runs on each batch.
+        Then: FCM-only runs zero bulk queries and the mixed batch prefetches only APNs IDs.
+        """
+        sidecar, _ = _make_sidecar(repo)
+        events_spy = AsyncMock(return_value={})
+        langs_spy = AsyncMock(return_value={})
+        monkeypatch.setattr(repo, "get_alert_events_by_public_ids", events_spy)
+        monkeypatch.setattr(repo, "get_default_languages_for_users", langs_spy)
+
+        fcm_row: AlertDeliveryRow = {
+            "public_id": "del-fcm",
+            "session_id": "s",
+            "sequence_id": 1,
+            "timestamp": _ts(0),
+            "known_to": KNOWN_TO_MAX,
+            "alert_event_public_id": "evt-fcm",
+            "device_public_id": "dev-fcm",
+            "user_public_id": "user-fcm",
+            "operator_public_id": None,
+            "wallet_public_id": None,
+            "status": "queued",
+            "attempt_count": 0,
+            "last_attempt_at": None,
+            "next_attempt_at": None,
+            "provider": "fcm",
+            "apns_id": None,
+            "error_reason": None,
+            "created_at": _ts(0),
+        }
+        apns_row: AlertDeliveryRow = {
+            "public_id": "del-apns",
+            "session_id": "s",
+            "sequence_id": 2,
+            "timestamp": _ts(0),
+            "known_to": KNOWN_TO_MAX,
+            "alert_event_public_id": "evt-apns",
+            "device_public_id": "dev-apns",
+            "user_public_id": "user-apns",
+            "operator_public_id": None,
+            "wallet_public_id": None,
+            "status": "queued",
+            "attempt_count": 0,
+            "last_attempt_at": None,
+            "next_attempt_at": None,
+            "provider": "apns",
+            "apns_id": None,
+            "error_reason": None,
+            "created_at": _ts(0),
+        }
+
+        fcm_only_caches = await sidecar._prefetch_caches_for_rows([fcm_row])
+        assert fcm_only_caches == _PrefetchedBatchCaches(events={}, languages={})
+        events_spy.assert_not_awaited()
+        langs_spy.assert_not_awaited()
+
+        await sidecar._prefetch_caches_for_rows([fcm_row, apns_row])
+        events_spy.assert_awaited_once_with(["evt-apns"])
+        langs_spy.assert_awaited_once_with(["user-apns"])

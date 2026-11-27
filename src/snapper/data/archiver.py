@@ -17,6 +17,7 @@ Event archive structure:
 
 import csv
 import json
+import os
 from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Iterable
@@ -691,25 +692,61 @@ def _merge_and_dedup_events(
     return sorted(seen.values(), key=lambda r: r[1])
 
 
+def _directory_fsync_supported() -> bool:
+    """Report whether this platform can open a directory and fsync its descriptor."""
+    return os.name != "nt"
+
+
+def _fsync_directory(path: Path) -> None:
+    """Make a staged archive file replacement durable in its containing directory."""
+    if not _directory_fsync_supported():
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _write_event_csv(
     path: Path,
     header: tuple[str, ...],
     rows: list[tuple[str, ...]],
+    *,
+    fsync: bool = False,
 ) -> None:
     """Write event rows to CSV file with header.
 
-    Creates parent directories as needed.
+    Creates parent directories as needed. When ``fsync`` is True, flushes
+    and syncs the file descriptor before closing so staged writes are durable
+    before atomic replacement.
 
     Args:
         path: Target file path.
         header: Column names for the header row.
         rows: Pre-formatted string tuples to write.
+        fsync: Whether to flush and ``os.fsync`` the file descriptor.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
         writer.writerow(header)
         writer.writerows(rows)
+        if fsync:
+            handle.flush()
+            os.fsync(handle.fileno())
+
+
+def _publish_candle_audit_csv(path: Path, rows: list[tuple[str, ...]]) -> None:
+    """Stage, flush/fsync, and atomically replace one candle audit CSV file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=path.parent, prefix=".ca-") as staging_dir:
+        staged_csv = Path(staging_dir) / "archive.tmp"
+        _write_event_csv(staged_csv, _CANDLE_AUDIT_COLUMNS, rows, fsync=True)
+        if path.is_file():
+            copymode(path, staged_csv)
+        staged_csv.replace(path)
+    _fsync_directory(path.parent)
 
 
 def _resolve_event_path(
@@ -1189,13 +1226,7 @@ class CandleAuditArchiver:
             )
             existing = _read_existing_csv(path)
             merged = _merge_and_dedup_events(existing, by_day[day])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with TemporaryDirectory(dir=path.parent, prefix=".ca-") as staging_dir:
-                staged_csv = Path(staging_dir) / "archive.tmp"
-                _write_event_csv(staged_csv, _CANDLE_AUDIT_COLUMNS, merged)
-                if path.is_file():
-                    copymode(path, staged_csv)
-                staged_csv.replace(path)
+            _publish_candle_audit_csv(path, merged)
             files_written += 1
 
         return files_written, len(row_ids), row_ids

@@ -1,6 +1,7 @@
 """Tests for candle audit archiver (all SCD2 versions with temporal metadata)."""
 
 import csv
+import os
 from datetime import UTC
 from datetime import date
 from datetime import datetime
@@ -17,6 +18,8 @@ from snapper.cli.app import app
 from snapper.data.archiver import _CANDLE_AUDIT_COLUMNS
 from snapper.data.archiver import CandleAuditArchiver
 from snapper.data.archiver import ExportResult
+from snapper.data.archiver import _directory_fsync_supported
+from snapper.data.archiver import _fsync_directory
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Base
 from snapper.data.models import Candle
@@ -833,3 +836,236 @@ def test_cli_archive_candles_audit_purge_without_closed_only_rejected() -> None:
     )
     assert result.exit_code == 1
     assert "closed-only" in result.output.lower()
+
+
+def test_candle_audit_replace_failure_preserves_target_cleans_staging_and_skips_purge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure inside ``Path.replace`` preserves existing CSV, cleans ``.ca-*``, and skips purge.
+
+    Given: An archived 1m CSV file on disk and a closed 5m candle pending purge in SQLite.
+    When: ``Path.replace`` raises ``OSError`` during the 5m export with ``purge=True``.
+    Then: The existing CSV bytes and permissions are untouched, no ``.ca-*`` directory remains,
+        and the pending 5m DB version stays unpurged.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_path = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024" / "2024-01-01.csv"
+    archiver = CandleAuditArchiver(repo, tmp_path)
+    real_replace = Path.replace
+
+    def _fail_replace(self_path: Path, target: Path | str) -> Path:
+        if Path(target) == csv_path:
+            raise OSError("injected replace failure")
+        return real_replace(self_path, target)
+
+    try:
+        first = archiver.export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+        )
+        assert first == ExportResult(files_written=1, rows_exported=1, rows_purged=1)
+        csv_path.chmod(0o600)
+        original_mode = csv_path.stat().st_mode
+        original_bytes = csv_path.read_bytes()
+        _insert_closed_five_minute_candle(repo, instrument_id)
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "5m", day, day, closed_only=True
+        )
+        assert len(pending) == 1
+
+        monkeypatch.setattr(Path, "replace", _fail_replace)
+        with pytest.raises(OSError, match="injected replace failure"):
+            archiver.export(
+                timeframe="5m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert csv_path.read_bytes() == original_bytes
+        assert csv_path.stat().st_mode == original_mode
+        assert list(csv_path.parent.iterdir()) == [csv_path]
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "5m", day, day, closed_only=True)
+            == pending
+        )
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_multi_file_later_replace_failure_skips_all_purges(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure on a later day/instrument file skips database purge for ALL exported rows.
+
+    Given: Closed candle versions across two days (2024-01-01 and 2024-01-02) in SQLite.
+    When: ``Path.replace`` succeeds on the first day and fails on the second day.
+    Then: Neither day's closed DB rows are purged and no ``.ca-*`` staging dirs remain.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day_one = date(2024, 1, 1)
+    day_two = date(2024, 1, 2)
+    with repo.get_session() as session:
+        session.add(
+            Candle(
+                public_id="candle-day-two",
+                instrument_public_id=instrument_id,
+                open_at=datetime(2024, 1, 2, 10, 0, tzinfo=UTC),
+                timeframe="1m",
+                open=110.0,
+                high=120.0,
+                low=105.0,
+                close=115.0,
+                volume=500.0,
+                vwap=112.0,
+                trades=12,
+                session_id="test",
+                sequence_id=6,
+                timestamp=datetime(2024, 1, 2, 10, 0, tzinfo=UTC),
+                known_to=datetime(2024, 1, 2, 11, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+    real_replace = Path.replace
+    replace_calls = 0
+
+    def _fail_second_replace(self_path: Path, target: Path | str) -> Path:
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            raise OSError("injected second replace failure")
+        return real_replace(self_path, target)
+
+    try:
+        before_day_one = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day_one, day_one, closed_only=True
+        )
+        before_day_two = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day_two, day_two, closed_only=True
+        )
+        assert len(before_day_one) == 1
+        assert len(before_day_two) == 1
+
+        monkeypatch.setattr(Path, "replace", _fail_second_replace)
+        with pytest.raises(OSError, match="injected second replace failure"):
+            CandleAuditArchiver(repo, tmp_path).export(
+                timeframe="1m",
+                day_start=day_one,
+                day_end=day_two,
+                closed_only=True,
+                purge=True,
+            )
+
+        year_dir = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
+        assert [p.name for p in year_dir.iterdir()] == ["2024-01-01.csv"]
+        assert (
+            repo.get_candle_versions_for_archive(
+                instrument_id, "1m", day_one, day_one, closed_only=True
+            )
+            == before_day_one
+        )
+        assert (
+            repo.get_candle_versions_for_archive(
+                instrument_id, "1m", day_two, day_two, closed_only=True
+            )
+            == before_day_two
+        )
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_export_fsyncs_staged_file_and_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candle audit CSV publication flushes and fsyncs the staged file and parent directory.
+
+    Given: A SQLite DB with a closed candle version and both supported and unsupported
+        directory-fsync capabilities.
+    When: ``CandleAuditArchiver.export`` writes the CSV file.
+    Then: ``os.fsync`` is called for the staged file before ``Path.replace``, and for the
+        parent directory after ``Path.replace`` only when directory fsync is supported.
+    """
+    assert _directory_fsync_supported() == (os.name != "nt")
+    _fsync_directory(tmp_path)
+
+    repo, _ = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_dir = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
+    dir_sentinel = 987654321
+    real_open = os.open
+    real_fsync = os.fsync
+    real_close = os.close
+    real_replace = Path.replace
+    events: list[str] = []
+
+    def _fake_open(target: str | Path, flags: int, mode: int = 0o777) -> int:
+        if Path(target) == csv_dir:
+            events.append("open_dir")
+            return dir_sentinel
+        return real_open(target, flags, mode)
+
+    def _fake_fsync(descriptor: int) -> None:
+        if descriptor == dir_sentinel:
+            events.append("fsync_dir")
+            return
+        events.append("fsync_file")
+        real_fsync(descriptor)
+
+    def _fake_close(descriptor: int) -> None:
+        if descriptor == dir_sentinel:
+            events.append("close_dir")
+            return
+        real_close(descriptor)
+
+    def _track_replace(self_path: Path, target: Path | str) -> Path:
+        events.append("replace")
+        return real_replace(self_path, target)
+
+    try:
+        monkeypatch.setattr(os, "open", _fake_open)
+        monkeypatch.setattr(os, "fsync", _fake_fsync)
+        monkeypatch.setattr(os, "close", _fake_close)
+        monkeypatch.setattr(Path, "replace", _track_replace)
+
+        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+        CandleAuditArchiver(repo, tmp_path).export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True
+        )
+        assert events == ["fsync_file", "replace", "open_dir", "fsync_dir", "close_dir"]
+
+        events.clear()
+        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: False)
+        CandleAuditArchiver(repo, tmp_path).export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True
+        )
+        assert events == ["fsync_file", "replace"]
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_dry_run_with_purge_and_closed_only_false_raises(tmp_path: Path) -> None:
+    """Validation rejects ``dry_run=True, purge=True, closed_only=False`` without side effects.
+
+    Given: A SQLite DB with closed and active candle versions.
+    When: ``export`` is called with ``dry_run=True``, ``purge=True``, and ``closed_only=False``.
+    Then: It raises ``ValueError`` matching ``closed_only`` without writing files or purging DB.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    try:
+        before = repo.get_candle_versions_for_archive(instrument_id, "1m", day, day)
+        with pytest.raises(ValueError, match="closed_only"):
+            CandleAuditArchiver(repo, tmp_path).export(
+                timeframe="1m",
+                day_start=day,
+                day_end=day,
+                closed_only=False,
+                dry_run=True,
+                purge=True,
+            )
+
+        assert not (tmp_path / "archive").exists()
+        assert repo.get_candle_versions_for_archive(instrument_id, "1m", day, day) == before
+    finally:
+        repo.dispose()
