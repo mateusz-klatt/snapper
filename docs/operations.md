@@ -1495,10 +1495,12 @@ database configured by `DB_URL` and makes no Kraken API calls.
     Apply recomputes the live plan and exits with status 2 if the digest
     differs. The receipt path must be unused. Each transaction handles up to
     500 trades and enqueues their historical trade-integrity work through the
-    repository. PostgreSQL briefly locks out other trade writers while each
-    chunk rechecks absence and writes, with a two-second lock timeout and a
-    15-second statement timeout. The command reads back each chunk and then
-    verifies that the live plan has zero missing trades after apply.
+    repository. The insert never updates an existing trade and takes no table
+    lock, so live trade writers keep running. A trade the live feed stores
+    concurrently is counted as already present. PostgreSQL uses a two-second
+    lock timeout and a 15-second statement timeout. The command reads back each
+    chunk and then verifies that the live plan has zero missing trades after
+    apply.
 
 3. Retain the JSON receipt with the evidence and dry-run output.
 
