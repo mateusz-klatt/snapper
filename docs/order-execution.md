@@ -126,15 +126,20 @@ instrument and each FX plane, the newest active 1m candle supplies the price.
 This includes `calculated`, `native`, `synthesized`, and provisional rows.
 Freshness uses `open_at + 60s`, capped at `now` for the current minute, and
 uses `open_at` for future-opened candles. The oracle requires a positive finite
-price. `market_snapshots` is a deprecated transitional fallback available only
-when the instrument has no active 1m candle. A stale candle blocks its
-instrument's snapshot fallback even when that snapshot is fresh.
+price. For the main instrument, `market_snapshots` is a deprecated transitional
+fallback available only when that instrument has no active 1m candle.
 
 Non-USD quote exposure uses current market-data-enabled, non-paper forex
-planes against USD. The oracle normalizes direct and inverse rates and chooses
-the newest usable plane after applying candle priority to each instrument.
-Equally recent planes with conflicting normalized rates refuse admission
-with `fx_plane_conflict`. USD quotes need no FX lookup. The oracle excludes
+planes against USD. Any active FX candle for the currency pair excludes all its
+snapshot rows, even if the candle is stale. When the pair has no active FX
+candle, snapshots can supply the rate. The oracle normalizes direct and inverse
+rates and discards any plane (base, quote, exchange) with disagreeing rates at
+the newest usable timestamp. The remaining planes follow the position-display
+venue order. Walutomat comes first for the USD and PLN pair in either
+orientation, with other venues in lexical order. Other pairs use lexical venue
+order, so Kraken comes before Walutomat for EUR-USD and GBP-USD. Within a venue,
+a direct currency-to-USD plane comes first, followed by instrument public ID
+and evidence public ID. USD quotes need no FX lookup. The oracle excludes
 historical and carried P&L conversion rates. General commodity, option, margin
 and collateral valuation remain outside this profile.
 
@@ -145,8 +150,9 @@ metadata and every FX leg on each conversion. Freshness,
 certification and contract expiry are checked again after all awaited reads,
 including cached and USD-only calls. Missing or unsafe evidence reports
 `caps_price_unavailable`, retaining structured reason codes (`snapshot_missing`,
-`price_stale`, `fx_snapshot_missing`, `fx_price_stale`, `fx_plane_conflict`,
-etc.).
+`price_stale`, `fx_snapshot_missing`, `fx_price_stale`, etc.). The reason
+`fx_plane_conflict` applies when every FX plane at the newest usable timestamp
+has disagreeing normalized rates.
 
 Admission stores the converted value in `submitted_notional_usd`, rounded up to
 whole cents by the existing cap enforcer. The rolling 24-hour cap uses that

@@ -16,9 +16,10 @@ from refreshing old bars. The active ``market_snapshots`` row is a deprecated,
 transitional fallback available only for instruments without active 1m candles.
 
 Non-USD quotes require an independently evidenced current direct or inverse
-forex plane against USD. The newest usable plane supplies the rate. Disagreeing
-normalized rates at the newest timestamp cause ``fx_plane_conflict``. FX evidence
-is reread on every conversion. Contract notional measures exposure.
+forex plane against USD. Snapshot fallback requires no active FX candle for the
+currency pair. At the newest usable timestamp, planes with disagreeing rates
+are excluded and the position-display venue order ranks the remaining planes.
+FX evidence is reread on every conversion. Contract notional measures exposure.
 
 Cache + staleness:
 In-process TTL cache (60s) keyed by ``instrument_public_id`` stores
@@ -38,6 +39,7 @@ from datetime import timedelta
 from decimal import Decimal
 from decimal import DecimalException
 
+from snapper.application.portfolio.pnl_timeline_service import _fx_plane_tiebreak
 from snapper.core.contract_valuation import ContractValuation
 from snapper.core.contract_valuation import InverseContractValuation
 from snapper.core.contract_valuation import LinearContractValuation
@@ -73,7 +75,8 @@ class PriceUnavailableError(Exception):
           snapshot exists against USD.
         ``fx_price_stale``: no FX rate satisfies the age and clock-skew bounds.
         ``fx_price_invalid``: no positive finite FX rate or final USD value.
-        ``fx_plane_conflict``: newest FX planes disagree after normalization.
+        ``fx_plane_conflict``: every FX plane at the newest usable timestamp
+          has disagreeing normalized rates.
         ``last_price_invalid``: price is nonpositive or nonfinite.
         ``invalid_quantity``: quantity is not a nonnegative finite Decimal.
         ``contract_valuation_unavailable``: payoff, currency or unit evidence
@@ -199,7 +202,10 @@ def _merge_fx_candidates(
     candle_rows: list[UsdFxCandleCandidateRow],
     now: datetime,
 ) -> list[UsdFxSnapshotCandidateRow]:
-    """Keep candles and deprecated transitional snapshots for candleless FX planes.
+    """Keep candles, or deprecated transitional snapshots only when no FX candle exists.
+
+    Any candle row for the currency excludes every snapshot before the price
+    and freshness checks.
 
     Args:
         snapshot_rows: Active FX rows from ``market_snapshots``.
@@ -207,12 +213,9 @@ def _merge_fx_candidates(
         now: Evaluation wall-clock timestamp (UTC-aware).
 
     Returns:
-        One candidate per eligible instrument, before price and freshness checks.
+        Candle rows in the shared candidate shape, or the snapshot rows.
     """
-    candle_planes = {row["instrument_public_id"] for row in candle_rows}
-    snapshot_fallbacks = [
-        row for row in snapshot_rows if row["instrument_public_id"] not in candle_planes
-    ]
+    snapshot_fallbacks = [] if candle_rows else list(snapshot_rows)
     candle_candidates: list[UsdFxSnapshotCandidateRow] = [
         {
             "snapshot_public_id": f"candle:{row['candle_public_id']}",
@@ -295,7 +298,27 @@ def _select_fx_rate(
     instrument_public_id: str,
     currency: str,
 ) -> _FxRate:
-    """Select the newest usable plane, refusing disagreeing normalized rates."""
+    """Select the newest usable FX rate from candles or snapshot fallbacks.
+
+    Discard planes with disagreeing rates at the newest usable timestamp.
+    Rank the remaining planes by the position-display fiat venue order. For PLN,
+    Walutomat comes first, followed by other venues in lexical order. Other
+    pairs use lexical venue order. Within a venue, direct currency-to-USD
+    orientation comes first, followed by instrument and evidence public IDs.
+
+    Args:
+        rows: Current candles or snapshot fallbacks for the USD pair.
+        now: Final evaluation time for evidence freshness.
+        instrument_public_id: Submitted instrument identity for error context.
+        currency: Non-USD quote currency to convert.
+
+    Returns:
+        The elected USD-per-quote rate with its source evidence.
+
+    Raises:
+        PriceUnavailableError: If no usable rate exists or every plane at the
+            newest usable timestamp carries disagreeing rates.
+    """
     if not rows:
         raise PriceUnavailableError(
             "fx_snapshot_missing", instrument_public_id, f"quote={currency}"
@@ -316,9 +339,45 @@ def _select_fx_rate(
         raise PriceUnavailableError("fx_price_stale", instrument_public_id)
     newest = max(rate.candidate["timestamp"] for rate in fresh)
     planes = [rate for rate in fresh if rate.candidate["timestamp"] == newest]
-    if len({rate.rate for rate in planes}) != 1:
+    agreeing = _drop_conflicting_planes(planes)
+    if not agreeing:
         raise PriceUnavailableError("fx_plane_conflict", instrument_public_id)
-    return min(planes, key=lambda rate: rate.candidate["snapshot_public_id"])
+    return min(
+        agreeing,
+        key=lambda rate: (
+            _fx_plane_tiebreak(
+                _plane(rate),
+                "USD",
+                prefer_walutomat=currency == "PLN",
+            ),
+            rate.candidate["instrument_public_id"],
+            rate.candidate["snapshot_public_id"],
+        ),
+    )
+
+
+def _plane(rate: _FxRate) -> tuple[str, str, str]:
+    """Return the oriented venue key used by the position display."""
+    candidate = rate.candidate
+    return candidate["base"], candidate["quote"], candidate["exchange"]
+
+
+def _drop_conflicting_planes(rates: list[_FxRate]) -> list[_FxRate]:
+    """Remove every plane whose equally recent rows disagree, as ``build_fx_rates`` does.
+
+    A plane is ``(base, quote, exchange)``, the same identity position display
+    keys on. Each remaining plane can participate in election.
+
+    Args:
+        rates: Normalized rates that share the newest usable timestamp.
+
+    Returns:
+        The rates whose plane carries a single agreeing rate.
+    """
+    plane_rates: dict[tuple[str, str, str], set[Decimal]] = {}
+    for rate in rates:
+        plane_rates.setdefault(_plane(rate), set()).add(rate.rate)
+    return [rate for rate in rates if len(plane_rates[_plane(rate)]) == 1]
 
 
 def _require_contract_evidence(
