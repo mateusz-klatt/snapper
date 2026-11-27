@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 from typer.testing import CliRunner
 
 from snapper.cli.app import app
@@ -974,8 +975,13 @@ def test_candle_audit_multi_file_later_replace_failure_skips_all_purges(
         repo.dispose()
 
 
-def _candle_dir_sentinels(csv_dir: Path, base_dir: Path) -> dict[Path, int]:
-    """Map ``csv_dir`` and each ancestor up to ``base_dir`` to fake file descriptors."""
+def _candle_dir_sentinels(
+    csv_dir: Path,
+    base_dir: Path,
+    *,
+    extra_ancestors: tuple[Path, ...] = (),
+) -> dict[Path, int]:
+    """Map ``csv_dir`` through ``base_dir`` plus optional higher ancestors to fake descriptors."""
     chain = [
         csv_dir,
         base_dir / "archive" / "candles" / "polygon" / "BTC-USD",
@@ -983,6 +989,7 @@ def _candle_dir_sentinels(csv_dir: Path, base_dir: Path) -> dict[Path, int]:
         base_dir / "archive" / "candles",
         base_dir / "archive",
         base_dir,
+        *extra_ancestors,
     ]
     return {directory: 987654321 + index for index, directory in enumerate(chain)}
 
@@ -1220,5 +1227,235 @@ def test_candle_audit_dry_run_with_purge_and_closed_only_false_raises(tmp_path: 
 
         assert not (tmp_path / "archive").exists()
         assert repo.get_candle_versions_for_archive(instrument_id, "1m", day, day) == before
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_export_into_missing_base_fsyncs_up_to_existing_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Export into a missing base dir fsyncs through the base and its pre-existing parent.
+
+    Given: A SQLite DB with a closed candle version and a target ``base_dir`` that
+        does not exist yet while its parent directory ``tmp_path`` already exists.
+    When: ``CandleAuditArchiver(repo, base_dir).export`` creates ``base_dir`` and exports.
+    Then: The directory fsync chain includes the CSV parent, intermediate created dirs,
+        ``base_dir`` itself, and ``base_dir.parent``, and touches nothing above it.
+    """
+    repo, _ = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    missing_base = tmp_path / "missing_output"
+    csv_dir = missing_base / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
+    dir_sentinels = _candle_dir_sentinels(
+        csv_dir, missing_base, extra_ancestors=(tmp_path, tmp_path.parent)
+    )
+    expected_dirs = [directory for directory in dir_sentinels if directory != tmp_path.parent]
+    try:
+        opened_dirs, synced_dirs, closed_dirs, _ = _install_dir_fsync_spy(
+            monkeypatch, dir_sentinels
+        )
+        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+
+        CandleAuditArchiver(repo, missing_base).export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True
+        )
+
+        assert opened_dirs == expected_dirs
+        assert synced_dirs == expected_dirs
+        assert closed_dirs == expected_dirs
+        assert missing_base in synced_dirs
+        assert tmp_path in synced_dirs
+        assert tmp_path.parent not in opened_dirs
+        assert tmp_path.parent not in synced_dirs
+        assert (csv_dir / "2024-01-01.csv").is_file()
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_export_with_existing_dirs_fsyncs_only_csv_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Export into a pre-existing directory tree fsyncs only the CSV parent directory.
+
+    Given: A SQLite DB with a closed candle version and all archive directories
+        already created on disk before the export begins.
+    When: ``CandleAuditArchiver(repo, tmp_path).export`` publishes the CSV file.
+    Then: Only the immediate CSV parent directory is opened, fsynced, and closed;
+        no ancestor directory is fsynced.
+    """
+    repo, _ = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_dir = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    dir_sentinels = _candle_dir_sentinels(csv_dir, tmp_path, extra_ancestors=(tmp_path.parent,))
+    try:
+        opened_dirs, synced_dirs, closed_dirs, events = _install_dir_fsync_spy(
+            monkeypatch, dir_sentinels
+        )
+        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+
+        CandleAuditArchiver(repo, tmp_path).export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True
+        )
+
+        assert opened_dirs == [csv_dir]
+        assert synced_dirs == [csv_dir]
+        assert closed_dirs == [csv_dir]
+        assert events == [
+            ("fsync_file", None),
+            ("replace", None),
+            ("open_dir", csv_dir),
+            ("fsync_dir", csv_dir),
+            ("close_dir", csv_dir),
+        ]
+    finally:
+        repo.dispose()
+
+
+@pytest.mark.parametrize("use_absolute", [False, True])
+def test_candle_audit_rejects_out_of_base_destination_before_io(
+    tmp_path: Path,
+    use_absolute: bool,
+) -> None:
+    """Escaping ``..`` traversal and absolute components fail before mkdir, write, or purge.
+
+    Given: A SQLite DB whose instrument ``exchange`` uses ``..`` traversal or an
+        absolute sibling path resolving outside ``base_dir``.
+    When: ``CandleAuditArchiver(repo, base_dir).export(purge=True)`` runs.
+    Then: It raises ``ValueError``, creates neither ``base_dir`` nor escaped dirs,
+        writes no CSV file, and purges no DB rows.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    base_dir = tmp_path / "base"
+    escaped_root = tmp_path / "base_escaped"
+    bad_exchange = str(escaped_root) if use_absolute else "../../../../base_escaped"
+    try:
+        with repo.get_session() as session:
+            inst = session.execute(
+                select(Instrument).where(Instrument.public_id == instrument_id)
+            ).scalar_one()
+            inst.exchange = bad_exchange
+            session.commit()
+
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day, day, closed_only=True
+        )
+        assert len(pending) == 1
+
+        with pytest.raises(ValueError, match="escapes archiver base"):
+            CandleAuditArchiver(repo, base_dir).export(
+                timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert not base_dir.exists()
+        assert not escaped_root.exists()
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "1m", day, day, closed_only=True)
+            == pending
+        )
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_multi_instrument_validation_failure_preserves_existing_archive(
+    tmp_path: Path,
+) -> None:
+    """Validation failure on one instrument leaves an earlier instrument's archive intact.
+
+    Given: A valid archived 1m CSV and closed 5m update for one instrument alongside
+        a second instrument with an escaping ``exchange`` path and closed 5m candle.
+    When: ``CandleAuditArchiver(repo, base_dir).export(purge=True)`` runs for 5m.
+    Then: It raises ``ValueError`` before replacing the valid instrument's CSV or
+        creating escaped directories, and purges neither instrument's DB rows.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    base_dir = tmp_path / "base"
+    escaped_root = tmp_path / "escaped_multi"
+    archiver = CandleAuditArchiver(repo, base_dir)
+    valid_csv = base_dir / "archive" / "candles" / "polygon" / "BTC-USD" / "2024" / "2024-01-01.csv"
+    try:
+        first = archiver.export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+        )
+        assert first == ExportResult(files_written=1, rows_exported=1, rows_purged=1)
+        original_bytes = valid_csv.read_bytes()
+
+        _insert_closed_five_minute_candle(repo, instrument_id)
+        ts = datetime(2024, 1, 1, 16, 0, tzinfo=UTC)
+        with repo.get_session() as session:
+            session.add(
+                Symbol(
+                    public_id="sym-evil",
+                    native_symbol="ETH-USD",
+                    base="ETH",
+                    quote="USD",
+                    asset_type="crypto",
+                    session_id="test",
+                    sequence_id=10,
+                    timestamp=ts,
+                    created_at=ts,
+                )
+            )
+            session.flush()
+            session.add(
+                Instrument(
+                    public_id="inst-evil",
+                    symbol_public_id="sym-evil",
+                    exchange="../../../../escaped_multi",
+                    session_id="test",
+                    sequence_id=11,
+                    timestamp=ts,
+                )
+            )
+            session.flush()
+            session.add(
+                Candle(
+                    public_id="candle-evil",
+                    instrument_public_id="inst-evil",
+                    open_at=datetime(2024, 1, 1, 14, 30, tzinfo=UTC),
+                    timeframe="5m",
+                    open=10.0,
+                    high=12.0,
+                    low=9.0,
+                    close=11.0,
+                    volume=100.0,
+                    vwap=10.5,
+                    trades=5,
+                    session_id="test",
+                    sequence_id=12,
+                    timestamp=ts,
+                    known_to=datetime(2024, 1, 1, 17, 0, tzinfo=UTC),
+                )
+            )
+            session.commit()
+
+        pending_btc = repo.get_candle_versions_for_archive(
+            instrument_id, "5m", day, day, closed_only=True
+        )
+        pending_evil = repo.get_candle_versions_for_archive(
+            "inst-evil", "5m", day, day, closed_only=True
+        )
+        assert len(pending_btc) == 1
+        assert len(pending_evil) == 1
+
+        with pytest.raises(ValueError, match="escapes archiver base"):
+            archiver.export(
+                timeframe="5m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert valid_csv.read_bytes() == original_bytes
+        assert not escaped_root.exists()
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "5m", day, day, closed_only=True)
+            == pending_btc
+        )
+        assert (
+            repo.get_candle_versions_for_archive("inst-evil", "5m", day, day, closed_only=True)
+            == pending_evil
+        )
     finally:
         repo.dispose()
