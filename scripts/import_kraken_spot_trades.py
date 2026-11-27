@@ -231,13 +231,17 @@ async def _write_chunk(
     candidates: tuple[KrakenSpotTradeEvidence, ...],
     tracker: SequenceTracker,
 ) -> _ChunkCounts:
-    """Fence the absence check, historical upsert, and readback in one transaction."""
+    """Insert one chunk without updating existing rows and verify it by readback.
+
+    PostgreSQL takes no table lock, so live trade writers are never blocked. The
+    insert skips any identity that already exists, and a row the live feed stores
+    concurrently is counted as already present instead of failing the chunk.
+    """
     async with repository.session() as session:
         if repository.dialect_name == "postgresql":
             await session.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
             await session.execute(text("SET LOCAL lock_timeout = '2s'"))
             await session.execute(text("SET LOCAL statement_timeout = '15s'"))
-            await session.execute(text("LOCK TABLE trades IN SHARE ROW EXCLUSIVE MODE"))
         else:
             await session.execute(text("BEGIN IMMEDIATE"))
         before = await _compare(session, candidates)
@@ -248,7 +252,7 @@ async def _write_chunk(
                 rows, session=session, enqueue_integrity_work=True
             )
         after = await _compare(session, candidates)
-        if after.missing or inserted != len(before.missing):
+        if after.missing or inserted > len(before.missing):
             raise ValueError("Trade import chunk did not match its live readback")
         await session.commit()
         return {"inserted": inserted, "already_present": after.already_present - inserted}

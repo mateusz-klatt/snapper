@@ -129,14 +129,15 @@ async def test_read_plan_refuses_unsupported_dialect() -> None:
 
 
 @pytest.mark.asyncio
-async def test_postgresql_chunk_fences_writers_and_skips_a_late_match(
+async def test_postgresql_chunk_skips_a_late_match_without_a_table_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Check for matching trades under the PostgreSQL writer lock.
+    """Recheck candidates on PostgreSQL with bounded timeouts and no table lock.
 
     Given: A matching trade appeared after the original plan.
-    When: The importer rechecks the candidate under the lock.
-    Then: It counts the match as already present and skips the upsert.
+    When: The importer rechecks the candidate inside the chunk transaction.
+    Then: It counts the match as already present, skips the upsert, and never
+        locks the trades table against live writers.
     """
     repository, session = _repository_mock("postgresql")
     statements: list[str] = []
@@ -145,14 +146,13 @@ async def test_postgresql_chunk_fences_writers_and_skips_a_late_match(
     async def compare(
         active_session: AsyncSession, candidates: tuple[KrakenSpotTradeEvidence, ...]
     ) -> KrakenSpotTradeRecoveryPlan:
-        """Check that reads are fenced and return the exact stored match."""
+        """Check the transaction settings and return the exact stored match."""
         assert active_session is session
         assert candidates == _EVIDENCE.rows
         assert statements == [
             "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
             "SET LOCAL lock_timeout = '2s'",
             "SET LOCAL statement_timeout = '15s'",
-            "LOCK TABLE trades IN SHARE ROW EXCLUSIVE MODE",
         ]
         return _PRESENT
 
@@ -166,13 +166,13 @@ async def test_postgresql_chunk_fences_writers_and_skips_a_late_match(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("after", "inserted"), [(_MISSING, 1), (_PRESENT, 0)])
+@pytest.mark.parametrize(("after", "inserted"), [(_MISSING, 1), (_MISSING, 0), (_PRESENT, 2)])
 async def test_chunk_refuses_to_commit_on_inconsistent_readback(
     after: KrakenSpotTradeRecoveryPlan, inserted: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Refuse to commit a chunk whose insert and readback disagree.
 
-    Given: The write count or the readback disagrees with the locked comparison.
+    Given: The readback still misses a trade, or more rows were written than were missing.
     When: The importer attempts the chunk.
     Then: It refuses before committing.
     """
@@ -184,6 +184,26 @@ async def test_chunk_refuses_to_commit_on_inconsistent_readback(
         await importer._write_chunk(repository, _EVIDENCE.rows, SequenceTracker())
 
     session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chunk_counts_a_concurrently_stored_trade_as_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accept a trade that the live feed stored during the chunk.
+
+    Given: A trade was missing at the recheck but the insert skipped it as a duplicate.
+    When: The readback finds the trade present.
+    Then: The chunk commits and counts the trade as already present.
+    """
+    repository, session = _repository_mock("sqlite")
+    repository.upsert_trades.return_value = 0
+    monkeypatch.setattr(importer, "_compare", AsyncMock(side_effect=[_MISSING, _PRESENT]))
+
+    counts = await importer._write_chunk(repository, _EVIDENCE.rows, SequenceTracker())
+
+    assert counts == {"inserted": 0, "already_present": 1}
+    session.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
