@@ -342,6 +342,32 @@ def test_positions_endpoint_keeps_the_threshold_boundary() -> None:
     assert response.json()["payload"][0]["is_dust"] is False
 
 
+def test_position_payload_keeps_stale_mark_without_using_it_for_dust() -> None:
+    """Expose the stale price to the UI while skipping it for dust classification.
+
+    Given: a stale mark below the dust threshold and no usable entry price,
+    When: the positions endpoint builds its payload,
+    Then: the mark, evidence time and stale flag survive and the position is visible.
+    """
+    repo = _SpecRepo({"inst-xrp": {"quote": "USD", "exchange": "kraken", "base": "XRP"}})
+    repo.position_rows = [
+        _row(
+            quantity=1.0,
+            mark_price=0.10,
+            average_price=None,
+            mark_stale=True,
+            mark_as_of=NOW,
+        )
+    ]
+    response = _client(repo).get("/api/positions")
+    assert response.status_code == 200
+    item = response.json()["payload"][0]
+    assert item["mark_price"] == 0.10
+    assert datetime.fromisoformat(item["mark_as_of"]) == NOW
+    assert item["mark_stale"] is True
+    assert item["is_dust"] is False
+
+
 def test_open_cycles_report_precision_and_peak_dust() -> None:
     """GET /position-cycles/open classifies the cycle peak against the spec.
 

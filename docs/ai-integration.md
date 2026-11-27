@@ -810,11 +810,9 @@ optional; `null` means "unbounded on this axis".
     raw submit-time price, no USD re-conversion; prior live market
     orders with no submit price are skipped with a WARN log), plus the
     new submission's USD-converted notional via the USD price oracle
-    (the newest active 1m candle is primary per instrument and FX plane).
-    `market_snapshots` is a deprecated transitional fallback for instruments
-    without an active 1m candle. A stale candle blocks that instrument's snapshot
-    fallback. Stale or missing oracle evidence yields a `price_unavailable`
-    caps violation. The current submission is evaluated regardless of mode.
+    (the newest active 1m candle supplies evidence for each instrument and FX plane).
+    Stale or missing candle evidence yields a `price_unavailable` caps violation.
+    The current submission is evaluated regardless of mode.
     Submit-time commitment basis; partial fills don't change
     accounting.
 - `max_cancels_per_minute` — sliding-window cancel rate.

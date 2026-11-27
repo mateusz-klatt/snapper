@@ -963,7 +963,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         return False
 
     def _verify_persist_policy_safety_rail(self, process_name: str) -> None:
-        """Refuse to start if wildcard + auto + empty scope + empty extra.
+        """Refuse to start if wildcard auto mode has no persistence candidates.
 
         Hard-fails publisher startup when every condition holds at
         once for any data type the publisher emits — a misconfig that
@@ -972,7 +972,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
 
         1. ``parameters.symbols`` is the literal wildcard ``["*"]``.
         2. The policy mode for ``(exchange, data_type)`` is ``"auto"``.
-        3. The wallet-scope-derived set for the exchange is empty.
+        3. The auto base for the exchange and data type is empty.
         4. The ``market_persist_extra`` overlay for ``(exchange, data_type)``
            is also empty.
 
@@ -994,13 +994,12 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         if self._input_symbols != ["*"]:
             return
         exchange = self._get_exchange_name()
-        scope_set = policy.wallet_scope_pairs_for(exchange)
         for data_type in _DATA_TYPES_FOR_RAIL:
             mode = policy.mode_for(exchange, data_type)
             if mode != "auto":
                 continue
             extra_set = policy.extra_for(exchange, data_type)
-            if scope_set or extra_set:
+            if policy.auto_pairs_for(exchange, data_type) or extra_set:
                 continue
             raise RuntimeError(
                 f"Publisher {process_name} configured with wildcard symbols but "

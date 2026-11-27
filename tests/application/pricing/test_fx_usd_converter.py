@@ -1,6 +1,7 @@
 """Exercise current FX evidence, temporal joins and final-clock cap valuation."""
 
 import asyncio
+import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from dataclasses import replace
@@ -33,7 +34,6 @@ from snapper.data.models import UserTradingCaps
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import InstrumentValuationMetadataRow
 from snapper.data.repository_types import UsdFxCandleCandidateRow
-from snapper.data.repository_types import UsdFxSnapshotCandidateRow
 
 _NOW = datetime(2026, 11, 16, 12, tzinfo=UTC)
 
@@ -51,12 +51,13 @@ class _Market:
     asset_type: str = "forex"
     can_market_data: bool = True
     snapshot: bool = True
+    candle: bool = True
     closed: str = ""
     capability_exchange: str | None = None
 
 
 async def _seed(repo: SQLAlchemyRepository, market: _Market) -> None:
-    """Persist explicit currency, capability and snapshot evidence for one plane."""
+    """Persist catalog, capability, and selected pricing evidence for one plane."""
     common = {"timestamp": _NOW, "session_id": "test", "sequence_id": 1}
     symbol = Symbol(
         public_id=f"sym-{market.identity}",
@@ -100,6 +101,13 @@ async def _seed(repo: SQLAlchemyRepository, market: _Market) -> None:
         row.known_to = _NOW if name == market.closed else KNOWN_TO_MAX
     async with repo.session() as session:
         session.add_all(rows.values())
+        if market.candle:
+            open_at = (
+                market.timestamp
+                if market.timestamp > _NOW
+                else market.timestamp - timedelta(minutes=1)
+            )
+            session.add(_candle_row(market, open_at=open_at, complete=True))
         await session.commit()
 
 
@@ -113,39 +121,6 @@ async def repo() -> AsyncIterator[SQLAlchemyRepository]:
     )
     yield repository
     await repository.engine.dispose()
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"closed": "symbol"},
-        {"closed": "instrument"},
-        {"closed": "capability"},
-        {"closed": "snapshot"},
-        {"snapshot": False},
-        {"exchange": "paper", "capability_exchange": "paper"},
-        {"asset_type": "crypto"},
-        {"can_market_data": False},
-        {"base": "GBP"},
-        {"capability_exchange": "walutomat"},
-    ],
-)
-async def test_repository_fx_read_requires_every_current_evidence_plane(
-    repo: SQLAlchemyRepository, change: dict[str, object]
-) -> None:
-    """Exclude an ineligible plane while retaining both current USD orientations.
-
-    Given: two usable forex planes and a third with one invalid eligibility fact.
-    When: current EUR conversion candidates are read from real SQLite joins.
-    Then: only direct and inverse current market-data evidence enters the oracle.
-    """
-    await _seed(repo, _Market("direct"))
-    await _seed(repo, _Market("inverse", base="USD", quote="EUR", price=0.8))
-    await _seed(repo, replace(_Market("excluded"), **change))
-    rows = await repo.get_active_usd_fx_snapshot_candidates("EUR")
-    assert {row["instrument_public_id"] for row in rows} == {"direct", "inverse"}
-    assert {row["snapshot_public_id"] for row in rows} == {"snap-direct", "snap-inverse"}
-    assert all(row["timestamp"] == _NOW for row in rows)
 
 
 @pytest.mark.parametrize("inverse", [False, True])
@@ -164,27 +139,53 @@ async def test_direct_and_inverse_fx_produce_the_same_usd_notional(
     assert await USDConverter(repo, now=lambda: _NOW).to_usd("main", quantity) == quantity * 125
 
 
-@pytest.mark.parametrize(
-    "direct,inverse,expected",
-    [(1.25, 0.8, "250"), (1.25, 1.25, None)],
-)
-async def test_equal_time_planes_compare_normalized_rates(
-    repo: SQLAlchemyRepository, direct: float, inverse: float, expected: str | None
-) -> None:
-    """Deduplicate reciprocal rates and refuse apparently equal raw inverse prices.
+async def test_same_venue_fx_tie_prefers_direct_orientation(repo: SQLAlchemyRepository) -> None:
+    """Prefer direct USD conversion for equal evidence on one venue.
 
-    Given: equally recent direct and inverse planes.
-    When: the oracle compares their USD-per-EUR values.
-    Then: reciprocal prices agree while equal raw prices conflict.
+    Given: a Kraken direct and inverse pair with equal close times and disagreeing rates,
+    When: the oracle values a EUR-quoted order,
+    Then: it selects the direct rate even when the inverse identity sorts first.
     """
-    await _seed(repo, _Market("direct", price=direct))
-    await _seed(repo, _Market("inverse", base="USD", quote="EUR", price=inverse))
-    converter = USDConverter(repo, now=lambda: _NOW)
-    if expected is None:
-        with pytest.raises(PriceUnavailableError, match="fx_plane_conflict"):
-            await converter.to_usd("main", Decimal(2))
-    else:
-        assert await converter.to_usd("main", Decimal(2)) == Decimal(expected)
+    await _seed(repo, _Market("z-direct", price=1.25))
+    await _seed(repo, _Market("a-inverse", base="USD", quote="EUR", price=1.25))
+    assert await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(2)) == 250
+
+
+@pytest.mark.parametrize(
+    "quote,kraken_age,walutomat_age,expected",
+    [
+        ("EUR", 0, 0, 250),
+        ("EUR", 301, 0, 240),
+        ("EUR", 30, 0, 240),
+        ("PLN", 0, 0, 240),
+        ("PLN", 0, 301, 250),
+    ],
+)
+async def test_fx_candle_election_uses_freshness_then_venue(
+    repo: SQLAlchemyRepository, quote: str, kraken_age: int, walutomat_age: int, expected: int
+) -> None:
+    """Rank equal-time cross-venue closes deterministically.
+
+    Given: Kraken and Walutomat publish different USD rates for the same pair,
+    When: both rates enter the live FX query,
+    Then: the newest usable close wins and venue preference breaks a tie.
+    """
+    await _seed(repo, _Market("asset", base="BTC", quote=quote, price=100, asset_type="crypto"))
+    await _seed(
+        repo,
+        _Market("z-kraken", base=quote, price=1.25, timestamp=_NOW - timedelta(seconds=kraken_age)),
+    )
+    await _seed(
+        repo,
+        _Market(
+            "a-walutomat",
+            base=quote,
+            price=1.2,
+            exchange="walutomat",
+            timestamp=_NOW - timedelta(seconds=walutomat_age),
+        ),
+    )
+    assert await USDConverter(repo, now=lambda: _NOW).to_usd("asset", Decimal(2)) == expected
 
 
 async def test_newest_usable_fx_wins_and_main_cache_does_not_cache_fx(
@@ -194,20 +195,20 @@ async def test_newest_usable_fx_wins_and_main_cache_does_not_cache_fx(
 
     Given: older and newer usable FX rates and a 60-second main-price cache.
     When: two orders are valued and the newer rate changes between calls.
-    Then: the main snapshot is loaded once and FX evidence is read twice.
+    Then: the main candle is loaded once and FX evidence is read twice.
     """
     await _seed(repo, _Market("older", price=1.1, timestamp=_NOW - timedelta(seconds=1)))
     await _seed(repo, _Market("newer", price=1.25))
-    main = AsyncMock(wraps=repo.get_active_market_snapshot_price)
-    fx = AsyncMock(wraps=repo.get_active_usd_fx_snapshot_candidates)
-    monkeypatch.setattr(repo, "get_active_market_snapshot_price", main)
-    monkeypatch.setattr(repo, "get_active_usd_fx_snapshot_candidates", fx)
+    main = AsyncMock(wraps=repo.get_active_latest_1m_candle_price)
+    fx = AsyncMock(wraps=repo.get_active_usd_fx_candle_candidates)
+    monkeypatch.setattr(repo, "get_active_latest_1m_candle_price", main)
+    monkeypatch.setattr(repo, "get_active_usd_fx_candle_candidates", fx)
     converter = USDConverter(repo, now=lambda: _NOW)
     assert await converter.to_usd("main", Decimal(2)) == 250
     async with repo.session() as session:
-        snapshot = await session.get(MarketSnapshot, 3)
-        assert snapshot is not None
-        snapshot.last_price = 1.5
+        candle = await session.get(Candle, 3)
+        assert candle is not None
+        candle.close = 1.5
         await session.commit()
     assert await converter.to_usd("main", Decimal(2)) == 300
     assert main.await_count == 1
@@ -220,10 +221,11 @@ async def test_missing_fx_refuses_even_zero_quantity(
 ) -> None:
     """Never bypass the independent FX leg merely because the requested size is zero.
 
-    Given: a fresh main price with no eligible FX snapshot.
+    Given: a fresh main close and an FX plane carrying only a research snapshot.
     When: any supported quantity is converted.
     Then: the unavailable leg is identified without producing USD exposure.
     """
+    await _seed(repo, _Market("research-only", candle=False))
     with pytest.raises(PriceUnavailableError, match="fx_snapshot_missing"):
         await USDConverter(repo, now=lambda: _NOW).to_usd("main", quantity)
 
@@ -259,9 +261,9 @@ async def test_both_legs_obey_inclusive_age_and_future_skew_boundaries(
     await _seed(repo, _Market("fx", timestamp=timestamp if leg == "fx" else _NOW))
     if leg == "main":
         async with repo.session() as session:
-            snapshot = await session.get(MarketSnapshot, 1)
-            assert snapshot is not None
-            snapshot.timestamp = timestamp
+            candle = await session.get(Candle, 1)
+            assert candle is not None
+            candle.open_at = timestamp if age < 0 else timestamp - timedelta(minutes=1)
             await session.commit()
     converter = USDConverter(repo, now=lambda: _NOW)
     if accepted:
@@ -284,22 +286,22 @@ async def test_fx_read_crossing_main_freshness_boundary_refuses(
     """
     await _seed(repo, _Market("fx"))
     async with repo.session() as session:
-        main = await session.get(MarketSnapshot, 1)
+        main = await session.get(Candle, 1)
         assert main is not None
-        main.timestamp = _NOW - timedelta(seconds=299)
+        main.open_at = _NOW - timedelta(seconds=359)
         await session.commit()
     clock = [_NOW]
     converter = USDConverter(repo, now=lambda: clock[0])
     if cached:
         assert await converter.to_usd("main", Decimal(1)) == 125
-    original = repo.get_active_usd_fx_snapshot_candidates
+    original = repo.get_active_usd_fx_candle_candidates
 
-    async def delayed(currency: str) -> list[UsdFxSnapshotCandidateRow]:
+    async def delayed(currency: str) -> list[UsdFxCandleCandidateRow]:
         rows = await original(currency)
         clock[0] += timedelta(seconds=2)
         return rows
 
-    monkeypatch.setattr(repo, "get_active_usd_fx_snapshot_candidates", delayed)
+    monkeypatch.setattr(repo, "get_active_usd_fx_candle_candidates", delayed)
     with pytest.raises(PriceUnavailableError, match="price_stale"):
         await converter.to_usd("main", Decimal(1))
 
@@ -316,14 +318,14 @@ async def test_fx_query_does_not_hold_the_global_main_cache_lock(
     await _seed(repo, _Market("usd-main", base="BTC", price=50, asset_type="crypto"))
     started = asyncio.Event()
     release = asyncio.Event()
-    original = repo.get_active_usd_fx_snapshot_candidates
+    original = repo.get_active_usd_fx_candle_candidates
 
-    async def blocked(currency: str) -> list[UsdFxSnapshotCandidateRow]:
+    async def blocked(currency: str) -> list[UsdFxCandleCandidateRow]:
         started.set()
         await release.wait()
         return await original(currency)
 
-    monkeypatch.setattr(repo, "get_active_usd_fx_snapshot_candidates", blocked)
+    monkeypatch.setattr(repo, "get_active_usd_fx_candle_candidates", blocked)
     converter = USDConverter(repo, now=lambda: _NOW)
     fx_task = asyncio.create_task(converter.to_usd("main", Decimal(1)))
     try:
@@ -352,12 +354,12 @@ async def test_nonfinite_final_usd_is_refused(repo: SQLAlchemyRepository, trap: 
 
 
 @pytest.mark.parametrize("leg", ["main", "fx"])
-async def test_naive_snapshot_timestamps_fail_closed(
+async def test_naive_candle_timestamps_fail_closed(
     repo: SQLAlchemyRepository, leg: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Reject naive boundary timestamps rather than comparing incompatible clocks.
 
-    Given: either current snapshot read returns a naive timestamp at its boundary.
+    Given: either current candle read returns a naive timestamp at its boundary.
     When: the public converter tries to value an EUR-quoted order.
     Then: a structured refusal identifies the unsupported evidence leg.
     """
@@ -365,14 +367,14 @@ async def test_naive_snapshot_timestamps_fail_closed(
     if leg == "main":
         monkeypatch.setattr(
             repo,
-            "get_active_market_snapshot_price",
-            AsyncMock(return_value=(100, _NOW.replace(tzinfo=None))),
+            "get_active_latest_1m_candle_price",
+            AsyncMock(return_value={"close": 100, "open_at": _NOW.replace(tzinfo=None)}),
         )
     else:
-        rows = await repo.get_active_usd_fx_snapshot_candidates("EUR")
-        rows[0]["timestamp"] = _NOW.replace(tzinfo=None)
+        rows = await repo.get_active_usd_fx_candle_candidates("EUR")
+        rows[0]["open_at"] = _NOW.replace(tzinfo=None)
         monkeypatch.setattr(
-            repo, "get_active_usd_fx_snapshot_candidates", AsyncMock(return_value=rows)
+            repo, "get_active_usd_fx_candle_candidates", AsyncMock(return_value=rows)
         )
     reason = "price_stale" if leg == "main" else "fx_price_stale"
     with pytest.raises(PriceUnavailableError, match=reason):
@@ -402,7 +404,7 @@ async def test_usd_only_metadata_await_cannot_extend_main_freshness(
     clock = [_NOW]
     converter = USDConverter(repo, now=lambda: clock[0])
     fx = AsyncMock()
-    monkeypatch.setattr(repo, "get_active_usd_fx_snapshot_candidates", fx)
+    monkeypatch.setattr(repo, "get_active_usd_fx_candle_candidates", fx)
     if cached:
         assert await converter.to_usd("usd", Decimal(1)) == 100
     original = repo.get_active_instrument_valuation_metadata
@@ -500,8 +502,9 @@ async def test_admission_stores_cent_usd_and_rolling_cap_never_revalues_it(
             )
         )
         await session.commit()
-    converter = USDConverter(repo, now=lambda: _NOW)
-    enforcer = TradingCapsEnforcer(repo, converter, now=lambda: _NOW)
+    clock = [_NOW]
+    converter = USDConverter(repo, now=lambda: clock[0])
+    enforcer = TradingCapsEnforcer(repo, converter, now=lambda: clock[0])
     submission = TradeCommandSubmission(
         user_public_id="user",
         operator_public_id="operator",
@@ -549,13 +552,20 @@ async def test_admission_stores_cent_usd_and_rolling_cap_never_revalues_it(
     history = await repo.get_user_recent_submits("user", _NOW - timedelta(hours=24))
     assert [row["submitted_notional_usd"] for row in history] == [1.26]
     async with repo.session() as session:
-        snapshot = await session.get(MarketSnapshot, 2)
-        assert snapshot is not None
-        snapshot.last_price = 0.5
+        candle = await session.get(Candle, 2)
+        assert candle is not None
+        candle.close = 0.5
         await session.commit()
     with pytest.raises(CapsViolationError, match="max_daily_notional_usd"):
         async with enforcer.guard(submission):
             pytest.fail("Stored USD history must consume the configured cap")
+
+    clock[0] += timedelta(seconds=301)
+    with pytest.raises(CapsViolationError) as refused:
+        async with enforcer.guard(submission):
+            pytest.fail("Admission must refuse an aged candle")
+    assert refused.value.cap_type == "price_unavailable"
+    assert "price_stale" in refused.value.detail
 
 
 @pytest.mark.parametrize("price", [1e-308, 1e308])
@@ -584,7 +594,7 @@ async def test_metadata_change_during_cold_load_refuses_mixed_quote_evidence(
 ) -> None:
     """Reject a main definition removed or relabeled between its separate reads.
 
-    Given: a valid main quote and snapshot whose subsequent current metadata differs.
+    Given: a valid main quote and candle whose subsequent current metadata differs.
     When: the converter assembles a cold main-price entry.
     Then: no mixed-currency identity enters the cache or produces USD exposure.
     """
@@ -609,31 +619,38 @@ async def _seed_fx_candle(
     snapshot_price: float | None = None,
 ) -> None:
     """Persist an FX plane with a candle and optionally a same-plane snapshot."""
-    await _seed(repo, replace(market, snapshot=snapshot_price is not None, price=snapshot_price))
-    close_price = market.price if market.price is not None else 1.25
+    await _seed(
+        repo,
+        replace(market, candle=False, snapshot=snapshot_price is not None, price=snapshot_price),
+    )
     async with repo.session() as session:
-        session.add(
-            Candle(
-                public_id=f"candle-{market.identity}-{int(open_at.timestamp())}",
-                instrument_public_id=market.identity,
-                open_at=open_at,
-                timeframe="1m",
-                open=close_price,
-                high=close_price,
-                low=close_price,
-                close=close_price,
-                volume=1.0,
-                vwap=close_price,
-                trades=1,
-                source="calculated",
-                complete=complete,
-                timestamp=open_at,
-                known_to=_NOW if market.closed == "candle" else KNOWN_TO_MAX,
-                session_id="test",
-                sequence_id=1,
-            )
-        )
+        session.add(_candle_row(market, open_at=open_at, complete=complete))
         await session.commit()
+
+
+def _candle_row(market: _Market, *, open_at: datetime, complete: bool) -> Candle:
+    """Construct one persisted candle in the FX test plane."""
+    price = market.price
+    close = 0.0 if price is None or math.isnan(price) else price
+    return Candle(
+        public_id=f"candle-{market.identity}-{int(open_at.timestamp())}",
+        instrument_public_id=market.identity,
+        open_at=open_at,
+        timeframe="1m",
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume=1.0,
+        vwap=close,
+        trades=1,
+        source="calculated",
+        complete=complete,
+        timestamp=open_at,
+        known_to=_NOW if market.closed == "candle" else KNOWN_TO_MAX,
+        session_id="test",
+        sequence_id=1,
+    )
 
 
 @pytest.mark.parametrize(
@@ -666,33 +683,8 @@ async def test_fx_leg_from_candles_in_both_orientations(
     )
 
 
-async def test_fx_plane_conflict_between_candle_and_snapshot_at_equal_timestamps(
-    repo: SQLAlchemyRepository,
-) -> None:
-    """Refuse equal-freshness FX candle and snapshot rates that disagree after normalization.
-
-    Given: an active 1m candle closed at _NOW (1.25) and a snapshot on a
-        different venue at _NOW (1.20),
-    When: the oracle selects the FX rate,
-    Then: ``fx_plane_conflict`` refuses admission.
-    """
-    await _seed_fx_candle(
-        repo,
-        _Market("fx-candle", base="EUR", quote="USD", price=1.25, exchange="kraken"),
-        open_at=_NOW - timedelta(seconds=60),
-    )
-    await _seed(
-        repo,
-        _Market(
-            "fx-snap", base="EUR", quote="USD", price=1.20, timestamp=_NOW, exchange="walutomat"
-        ),
-    )
-    with pytest.raises(PriceUnavailableError, match="fx_plane_conflict"):
-        await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(2))
-
-
 @pytest.mark.parametrize("candle_open_age", [60, 120, STALENESS_THRESHOLD_SECONDS + 61])
-async def test_fx_candle_displaces_same_plane_snapshot_only(
+async def test_fx_pricing_ignores_same_and_other_plane_snapshots(
     repo: SQLAlchemyRepository,
     candle_open_age: int,
 ) -> None:
@@ -702,7 +694,7 @@ async def test_fx_candle_displaces_same_plane_snapshot_only(
         another plane with only a usable snapshot,
     When: EUR exposure is converted to USD,
     Then: the first plane returns the candle rate or raises ``fx_price_stale``.
-        The second plane's snapshot is eligible once it is added.
+        The second plane's snapshot does not affect selection.
     """
     await _seed_fx_candle(
         repo,
@@ -720,12 +712,17 @@ async def test_fx_candle_displaces_same_plane_snapshot_only(
         repo,
         _Market(
             "fx-snapshot-only",
+            candle=False,
             price=1.50,
             timestamp=_NOW + timedelta(seconds=1),
             exchange="walutomat",
         ),
     )
-    assert await converter.to_usd("main", Decimal(2)) == Decimal("300")
+    if candle_open_age > STALENESS_THRESHOLD_SECONDS + 60:
+        with pytest.raises(PriceUnavailableError, match="fx_price_stale"):
+            await converter.to_usd("main", Decimal(2))
+    else:
+        assert await converter.to_usd("main", Decimal(2)) == Decimal("250")
 
 
 async def test_fx_candle_staleness_invalid_and_naive_guards(
@@ -778,38 +775,6 @@ async def test_fx_candle_staleness_invalid_and_naive_guards(
         await USDConverter(repo, now=lambda: _NOW).to_usd("main", Decimal(1))
 
 
-@pytest.mark.parametrize("inverse_price,expected", [(0.8, "250"), (1.25, None)])
-async def test_equal_time_candle_and_snapshot_compare_normalized_fx_rates(
-    repo: SQLAlchemyRepository,
-    inverse_price: float,
-    expected: str | None,
-) -> None:
-    """Equal-time inverse FX candle and direct snapshot agree or conflict after normalization.
-
-    Given: a USD-EUR 1m candle closed at _NOW and an EUR-USD snapshot at _NOW,
-    When: normalized USD-per-EUR rates are compared,
-    Then: reciprocal rates succeed deterministically while equal raw rates raise
-        ``fx_plane_conflict``.
-    """
-    await _seed_fx_candle(
-        repo,
-        _Market("fx-inv-candle", base="USD", quote="EUR", price=inverse_price, exchange="kraken"),
-        open_at=_NOW - timedelta(seconds=60),
-    )
-    await _seed(
-        repo,
-        _Market(
-            "fx-dir-snap", base="EUR", quote="USD", price=1.25, timestamp=_NOW, exchange="walutomat"
-        ),
-    )
-    converter = USDConverter(repo, now=lambda: _NOW)
-    if expected is None:
-        with pytest.raises(PriceUnavailableError, match="fx_plane_conflict"):
-            await converter.to_usd("main", Decimal(2))
-    else:
-        assert await converter.to_usd("main", Decimal(2)) == Decimal(expected)
-
-
 async def test_fx_candles_are_reread_per_call_and_skipped_for_usd(
     repo: SQLAlchemyRepository,
     monkeypatch: pytest.MonkeyPatch,
@@ -846,16 +811,16 @@ def test_inverse_fx_normalization_overflow_is_refused() -> None:
     When: the rate is normalized with overflow trapping enabled.
     Then: no rate is produced instead of the exception escaping.
     """
-    candidate: UsdFxSnapshotCandidateRow = {
-        "snapshot_public_id": "snap-overflow",
+    candidate: UsdFxCandleCandidateRow = {
+        "candle_public_id": "candle-overflow",
         "instrument_public_id": "usd-pln",
         "exchange": "walutomat",
         "base": "USD",
         "quote": "PLN",
-        "last_price": 1e-300,
-        "timestamp": _NOW,
+        "close": 1e-300,
+        "open_at": _NOW,
     }
     with localcontext() as context:
         context.Emax = 4
         context.traps[Overflow] = True
-        assert _normalized_fx_rate(candidate) is None
+        assert _normalized_fx_rate(candidate, _NOW) is None

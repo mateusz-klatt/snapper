@@ -60,11 +60,13 @@ def _build_policy(
     settings: dict[str, Any] | None = None,
     operators: list[OperatorRow] | None = None,
     pairs: set[tuple[str, str]] | None = None,
+    fx_pairs: set[tuple[str, str]] | None = None,
 ) -> tuple[MarketPersistPolicy, MagicMock, _StubSettingsService]:
     """Construct a policy wired against AsyncMock repo + stub settings."""
     repo = MagicMock()
     repo.list_active_operators = AsyncMock(return_value=operators or [])
     repo.list_scope_grant_instrument_pairs = AsyncMock(return_value=pairs or set())
+    repo.list_active_usd_fx_instrument_pairs = AsyncMock(return_value=fx_pairs or set())
     stub_settings = _StubSettingsService(settings or {})
     policy = MarketPersistPolicy(
         repository=cast(Any, repo),
@@ -139,6 +141,56 @@ class TestAutoModeResolution:
         await policy.initial_rebuild()
         assert policy.should_persist(ExchangeEnum.KRAKEN, "ticks", "BTC-USD") is False
         assert policy.wallet_scope_pairs_for(ExchangeEnum.KRAKEN) == frozenset()
+
+    @pytest.mark.asyncio
+    async def test_auto_candles_include_usd_fx_without_wallet_scope(self) -> None:
+        """Retain the USD FX candle dependencies of capped orders.
+
+        Given: no scope grants and USD FX instruments on two venues, including an excluded symbol,
+        When: the policy refreshes in auto mode,
+        Then: both candles persist and tick, trade, and wallet-scope policy stays empty.
+        """
+        policy, _, _ = _build_policy(
+            settings={"market_persist_exclude": {"candles": {"kraken": ["EUR-USD"]}}},
+            fx_pairs={("kraken", "EUR-USD"), ("walutomat", "USD-PLN")},
+        )
+        await policy.initial_rebuild()
+
+        assert policy.should_persist(ExchangeEnum.KRAKEN, "candles", "EUR-USD")
+        assert policy.should_persist(ExchangeEnum.WALUTOMAT, "candles", "USD-PLN")
+        assert not policy.should_persist(ExchangeEnum.KRAKEN, "ticks", "EUR-USD")
+        assert not policy.should_persist(ExchangeEnum.KRAKEN, "trades", "EUR-USD")
+        assert policy.wallet_scope_pairs_for(ExchangeEnum.KRAKEN) == frozenset()
+        assert policy.auto_pairs_for(ExchangeEnum.KRAKEN, "candles") == frozenset({"EUR-USD"})
+        assert policy.auto_pairs_for(ExchangeEnum.KRAKEN, "trades") == frozenset()
+
+    @pytest.mark.asyncio
+    async def test_fx_candle_pairs_refresh_when_candle_mode_changes(self) -> None:
+        """Respect the explicit candle allowlist until auto mode is enabled.
+
+        Given: an explicit candle allowlist and a catalog USD FX pair outside it,
+        When: a settings event switches candles to auto and an admin event refreshes the catalog,
+        Then: auto picks up the current FX pair and drops the previous active pair.
+        """
+        policy, repo, settings = _build_policy(
+            settings={
+                "market_persist_candles": {"mode": "explicit", "exchanges": {"kraken": ["BTC-USD"]}}
+            },
+            fx_pairs={("kraken", "EUR-USD")},
+        )
+        await policy.initial_rebuild()
+        repo.list_active_usd_fx_instrument_pairs.assert_not_awaited()
+        assert policy.should_persist(ExchangeEnum.KRAKEN, "candles", "BTC-USD")
+        assert not policy.should_persist(ExchangeEnum.KRAKEN, "candles", "EUR-USD")
+
+        settings._values["market_persist_candles"] = {"mode": "auto"}
+        await policy._dispatch_topic("system.settings")
+        assert policy.should_persist(ExchangeEnum.KRAKEN, "candles", "EUR-USD")
+
+        repo.list_active_usd_fx_instrument_pairs.return_value = {("kraken", "GBP-USD")}
+        await policy._dispatch_topic("admin.scope_granted")
+        assert policy.should_persist(ExchangeEnum.KRAKEN, "candles", "GBP-USD")
+        assert not policy.should_persist(ExchangeEnum.KRAKEN, "candles", "EUR-USD")
 
 
 class TestExplicitModeResolution:

@@ -1,6 +1,6 @@
 ---
 name: run-static
-description: Refresh Snapper symbols, underlying mappings, and market snapshots with make run-static. Use when local static reference data needs updating.
+description: Refresh Snapper symbols and underlying mappings with make run-static. Use when local static reference data needs updating.
 ---
 
 Before running the pipeline:
@@ -17,9 +17,9 @@ make run-static
 ```
 
 This executes in order:
+
 1. Symbol updaters (Kraken spot, Kraken Futures, Kraken Equities, Walutomat, Polygon)
 2. Underlying asset mapping update
-3. Market snapshots (Kraken spot, Kraken Futures, Kraken Equities, Walutomat)
 
 The Polygon symbol updater is best-effort and may fail without stopping the pipeline. Report that failure separately if it appears in the output.
 If another step fails, check which step failed and report the error.

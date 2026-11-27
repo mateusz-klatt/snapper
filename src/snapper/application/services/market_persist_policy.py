@@ -15,6 +15,9 @@ under per-data-type mode resolution + overlays:
   (``admin.scope_revoked`` / ``admin.scope_granted`` /
   ``admin.scope_handed_over``) trigger an asynchronous rebuild so
   the persist set tracks live RBAC changes within one event cycle.
+  Auto candle persistence also includes every active non-paper, market-data-enabled
+  forex instrument with a USD leg. These conversion dependencies bypass candle
+  exclusions in auto mode.
 
 - **Explicit mode**: the operator hard-codes a per-exchange allowlist
   via ``market_persist_{ticks|trades|candles}["exchanges"]``. The
@@ -22,10 +25,9 @@ under per-data-type mode resolution + overlays:
   that data type.
 
 - **Overlays**: ``market_persist_extra`` always **adds** symbols on
-  top of the base set; ``market_persist_exclude`` always **subtracts**
-  them. Both overlays are per-data-type per-exchange so an operator
-  can persist extra candles for chart liquidity without bloating tick
-  storage on the same instrument.
+  top of the base set. The exclude overlay subtracts optional instruments.
+  Both overlays apply per data type and exchange, so operators can add candles
+  for chart liquidity without increasing tick storage on the same instrument.
 
 The policy is **stateful** (cached mode + overlay + scope-pair maps)
 and refreshes through two atomic branches under a single lock:
@@ -194,6 +196,7 @@ class MarketPersistPolicy:
             "candles": {},
         }
         self._scope_pairs_by_exchange: dict[AllExchange, frozenset[str]] = {}
+        self._usd_fx_candles: dict[AllExchange, frozenset[str]] = {}
         self._listen_task: asyncio.Task[None] | None = None
         self._listener_lock = asyncio.Lock()
         self._running = False
@@ -280,6 +283,21 @@ class MarketPersistPolicy:
         """
         del exchange
         return self._modes.get(data_type, _DEFAULT_MODE)
+
+    def auto_pairs_for(self, exchange: AllExchange, data_type: MarketDataType) -> frozenset[str]:
+        """Return auto persistence candidates for the publisher startup check.
+
+        Args:
+            exchange: Publisher's venue.
+            data_type: Market data category being checked.
+
+        Returns:
+            Scope-derived symbols, plus required USD FX symbols for candles.
+        """
+        scope = self.wallet_scope_pairs_for(exchange)
+        if data_type == "candles":
+            return scope | self._usd_fx_candles.get(exchange, frozenset())
+        return scope
 
     def wallet_scope_pairs_for(self, exchange: AllExchange) -> frozenset[str]:
         """Return the wallet-scope-derived ``native_symbol`` set for ``exchange``.
@@ -491,14 +509,14 @@ class MarketPersistPolicy:
             )
             return
         async with self._lock:
+            if any(parsed_modes[t] == "auto" for t in _DATA_TYPES):
+                await self._refresh_auto_pairs_unlocked(
+                    include_fx=parsed_modes["candles"] == "auto"
+                )
             self._modes = parsed_modes
             self._explicit_by_type = parsed_explicit
             self._extra_by_type = parsed_extra
             self._exclude_by_type = parsed_exclude
-            if any(parsed_modes[t] == "auto" for t in _DATA_TYPES):
-                self._scope_pairs_by_exchange = self._index_pairs_by_exchange(
-                    await self._query_active_scope_pairs()
-                )
             self._rebuild_persist_maps_unlocked()
 
     async def _refresh_from_scope_grants(self) -> None:
@@ -510,9 +528,15 @@ class MarketPersistPolicy:
         coroutines yield while we await the repository.
         """
         async with self._lock:
-            pairs = await self._query_active_scope_pairs()
-            self._scope_pairs_by_exchange = self._index_pairs_by_exchange(pairs)
+            await self._refresh_auto_pairs_unlocked(include_fx=self._modes["candles"] == "auto")
             self._rebuild_persist_maps_unlocked()
+
+    async def _refresh_auto_pairs_unlocked(self, *, include_fx: bool) -> None:
+        """Refresh scope and required FX pairs together under the policy lock."""
+        scope = await self._query_active_scope_pairs()
+        fx = await self.repository.list_active_usd_fx_instrument_pairs() if include_fx else set()
+        self._scope_pairs_by_exchange = self._index_pairs_by_exchange(scope)
+        self._usd_fx_candles = self._index_pairs_by_exchange(fx)
 
     async def _query_active_scope_pairs(self) -> set[tuple[str, str]]:
         """Query active operators + project to scope-grant ``(exchange, symbol)`` pairs."""
@@ -569,34 +593,20 @@ class MarketPersistPolicy:
         explicit_for_type = self._explicit_by_type.get(data_type, {})
         extra_for_type = self._extra_by_type.get(data_type, {})
         exclude_for_type = self._exclude_by_type.get(data_type, {})
-        candidate_exchanges = self._candidate_exchanges(
-            mode, explicit_for_type, extra_for_type, exclude_for_type
-        )
-        resolved: dict[AllExchange, frozenset[str]] = {}
-        for exchange in candidate_exchanges:
-            if mode == "explicit":
-                base = explicit_for_type.get(exchange, frozenset())
-            else:
-                base = self._scope_pairs_by_exchange.get(exchange, frozenset())
-            extra = extra_for_type.get(exchange, frozenset())
-            exclude = exclude_for_type.get(exchange, frozenset())
-            resolved[exchange] = frozenset((base | extra) - exclude)
-        return resolved
-
-    def _candidate_exchanges(
-        self,
-        mode: Literal["auto", "explicit"],
-        explicit_for_type: dict[AllExchange, frozenset[str]],
-        extra_for_type: dict[AllExchange, frozenset[str]],
-        exclude_for_type: dict[AllExchange, frozenset[str]],
-    ) -> set[AllExchange]:
-        """Union of every exchange contributing to the final resolved map."""
-        candidates: set[AllExchange] = set(extra_for_type) | set(exclude_for_type)
-        if mode == "explicit":
-            candidates |= set(explicit_for_type)
-        else:
-            candidates |= set(self._scope_pairs_by_exchange)
-        return candidates
+        base = explicit_for_type if mode == "explicit" else self._scope_pairs_by_exchange
+        required = self._usd_fx_candles if mode == "auto" and data_type == "candles" else {}
+        empty: frozenset[str] = frozenset()
+        return {
+            exchange: (
+                (base.get(exchange, empty) | extra_for_type.get(exchange, empty))
+                - exclude_for_type.get(exchange, empty)
+            )
+            | required.get(exchange, empty)
+            for exchange in base.keys()
+            | extra_for_type.keys()
+            | exclude_for_type.keys()
+            | required.keys()
+        }
 
     def _select_persist_map(self, data_type: MarketDataType) -> dict[AllExchange, frozenset[str]]:
         """Return the resolved persist map for ``data_type``."""

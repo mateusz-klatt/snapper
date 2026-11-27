@@ -1395,6 +1395,12 @@ GET /api/executions?limit=100
 
 Fetch current portfolio positions. Requires `read:positions` permission.
 
+Current marks come from the newest valid active 1m candle. A candle whose
+close evidence is older than 300 seconds remains visible with `mark_stale` set
+to `true`. `mark_as_of` is the candle evidence time and matches the existing
+`marked_at` field. A missing or unusable candle yields a null current mark and
+evidence time. An explicit `as_of` reads the stored historical projection.
+
 **Request:**
 
 ```http
@@ -1428,10 +1434,12 @@ GET /api/positions
             "exchange": "kraken",
             "quantity": 0.5,
             "average_price": 41500.0,
-            "unrealized_pnl": 250.0,
+            "unrealized_pnl": 75.0,
             "realized_pnl": 100.0,
             "mark_price": 41650.0,
-            "marked_at": "2026-01-18T11:59:30Z",
+            "marked_at": "2026-01-18T11:54:00Z",
+            "mark_as_of": "2026-01-18T11:54:00Z",
+            "mark_stale": true,
             "source_venue_event_id": 4711,
             "mode": "live",
             "position_cycle_public_id": "019e1a2b-4d5e-7f6a-8b9c-0d1e2f3a4b5c",

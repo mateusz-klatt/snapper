@@ -2136,8 +2136,8 @@ class TestDurableExecutionLineage:
         mock_repo.resolve_source_instrument_public_id = AsyncMock(
             return_value={"valuation_public_id": "src-pid", "is_paper": True, "mapped": True}
         )
-        mock_repo.get_active_market_snapshot_price = AsyncMock(
-            return_value=(50100.0, datetime(2024, 6, 1, tzinfo=UTC))
+        mock_repo.get_active_latest_1m_candle_price = AsyncMock(
+            return_value={"close": 50100.0, "open_at": datetime(2024, 5, 31, 23, 59, tzinfo=UTC)}
         )
         _set_sqlalchemy_repo(coord, mock_repo)
         coord._projection_identities[tagged] = ("inst-pid", "paper", wallet)

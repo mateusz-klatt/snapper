@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import AccrualLedger
+from snapper.data.models import Candle
 from snapper.data.models import Position
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
@@ -390,15 +391,44 @@ async def test_projection_rows_surface_wallet_scoped_with_provenance(tmp_path: P
     assert {r["wallet_public_id"] for r in everything} == {_WALLET, other_wallet}
 
 
-async def test_current_position_read_uses_fresh_tick_without_rewriting_history(
+async def _seed_mark_candle(
+    repo: SQLAlchemyRepository,
+    instrument_public_id: str,
+    close_at: datetime,
+    close: float,
+    sequence_id: int,
+) -> None:
+    """Persist a source candle whose evidence time is its interval end."""
+    async with repo.session() as session:
+        session.add(
+            Candle(
+                instrument_public_id=instrument_public_id,
+                open_at=close_at - timedelta(minutes=1),
+                timeframe="1m",
+                open=close,
+                high=close,
+                low=close,
+                close=close,
+                volume=1.0,
+                source="calculated",
+                complete=True,
+                timestamp=close_at,
+                session_id="s1",
+                sequence_id=sequence_id,
+            )
+        )
+        await session.commit()
+
+
+async def test_current_position_read_flags_aged_candle_without_rewriting_history(
     tmp_path: Path,
 ) -> None:
     """A current read overlays fresh market truth while history stays immutable.
 
     Given: a live instrument whose stored position mark is old and whose
-        durable tick stream has a newer usable price,
+        active 1m candle has a newer usable close,
     When: current and historical position reads run,
-    Then: only the current read returns the tick mark and recomputed
+    Then: only the current read returns the candle mark and recomputed
         unrealized PnL; the stored SCD2 row remains unchanged.
     """
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'current-mark.db'}")
@@ -437,46 +467,29 @@ async def test_current_position_read_uses_fresh_tick_without_rewriting_history(
             marked_at=old_marked_at,
         )
     )
-    tick_at = now + timedelta(minutes=1)
-    await repo.upsert_ticks(
-        [
-            {
-                "instrument_public_id": instrument_public_id,
-                "timestamp": tick_at,
-                "bid": 4.34,
-                "ask": 4.35,
-                "last": 4.345,
-                "volume": 1.0,
-                "session_id": "s1",
-                "sequence_id": 3,
-            }
-        ]
-    )
-    current = (await repo.get_positions(as_of=tick_at, current_marks=True))[0]
-    historical = (await repo.get_positions(as_of=tick_at))[0]
+    close_at = now + timedelta(minutes=1)
+    await _seed_mark_candle(repo, instrument_public_id, close_at, 4.345, 3)
+    current = (await repo.get_positions(as_of=close_at, current_marks=True))[0]
+    historical = (await repo.get_positions(as_of=close_at))[0]
     assert current["mark_price"] == 4.345
-    assert current["marked_at"] == tick_at
+    assert current["marked_at"] == close_at
+    assert current["mark_as_of"] == close_at
+    assert current["mark_stale"] is False
+    assert historical["mark_stale"] is True
     assert current["unrealized_pnl"] == pytest.approx(21.0 * (4.345 - 4.382))
     assert historical["mark_price"] == 4.3239
     assert historical["marked_at"] == old_marked_at
     stored = await _all_rows(repo)
     assert len(stored) == 1
     assert stored[0].mark_price == 4.3239
-    invalid_at = tick_at + timedelta(seconds=1)
-    await repo.upsert_ticks(
-        [
-            {
-                "instrument_public_id": instrument_public_id,
-                "timestamp": invalid_at,
-                "bid": 4.34,
-                "ask": 4.35,
-                "last": 0.0,
-                "volume": 1.0,
-                "session_id": "s1",
-                "sequence_id": 4,
-            }
-        ]
-    )
+    aged_at = close_at + timedelta(seconds=301)
+    aged = (await repo.get_positions(as_of=aged_at, current_marks=True))[0]
+    assert aged["mark_price"] == 4.345
+    assert aged["mark_as_of"] == close_at
+    assert aged["mark_stale"] is True
+    assert aged["unrealized_pnl"] == current["unrealized_pnl"]
+    invalid_at = aged_at + timedelta(minutes=1)
+    await _seed_mark_candle(repo, instrument_public_id, invalid_at, 0.0, 4)
     refused = (await repo.get_positions(as_of=invalid_at, current_marks=True))[0]
     assert refused["mark_price"] is None
     assert refused["unrealized_pnl"] is None
@@ -489,30 +502,18 @@ async def test_current_position_read_uses_fresh_tick_without_rewriting_history(
             unrealized_pnl=None,
         )
     )
-    await repo.upsert_ticks(
-        [
-            {
-                "instrument_public_id": instrument_public_id,
-                "timestamp": entry_unknown_at,
-                "bid": 4.34,
-                "ask": 4.35,
-                "last": 4.345,
-                "volume": 1.0,
-                "session_id": "s1",
-                "sequence_id": 5,
-            }
-        ]
-    )
+    await _seed_mark_candle(repo, instrument_public_id, entry_unknown_at, 4.345, 5)
     entry_unknown = (await repo.get_positions(as_of=entry_unknown_at, current_marks=True))[0]
     assert entry_unknown["mark_price"] == 4.345
     assert entry_unknown["unrealized_pnl"] is None
 
 
-async def test_current_position_read_clears_stale_mark_without_fresh_tick(tmp_path: Path) -> None:
+async def test_current_position_read_clears_stored_mark_without_source_candle(
+    tmp_path: Path,
+) -> None:
     """A current-money read refuses to carry a stale stored mark forward.
 
-    Given: a position with a confident stored valuation but no tick in
-        the ten-minute freshness window,
+    Given: a position with a confident stored valuation but no resolvable source candle,
     When: the current position read runs,
     Then: the mark trio is NULL while entry and quantity remain visible.
     """
@@ -573,15 +574,12 @@ async def test_current_position_read_clears_stale_mark_without_fresh_tick(tmp_pa
         assert await repo._position_valuation_instrument(s, unmapped_public_id) is None
 
 
-async def test_current_position_read_refuses_a_quote_only_tick(tmp_path: Path) -> None:
-    """A tick carrying no traded price cannot value a position.
+async def test_current_position_read_requires_a_candle_even_with_ticks(tmp_path: Path) -> None:
+    """Current position marks require candle evidence.
 
-    Given: a fresh tick inside the freshness window whose bid and ask are
-        present but whose last is NULL, as a quote-only update leaves it,
+    Given: a recent tick with a last price and no active candle,
     When: the current position read runs,
-    Then: the mark trio is NULL rather than derived from a price the venue
-        never traded at, because a confident wrong mark misleads where an
-        absent one merely reports incompleteness.
+    Then: the current position has no mark or unrealized PnL.
     """
     repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'quote-only.db'}")
     await repo.create_all()
@@ -615,7 +613,7 @@ async def test_current_position_read_refuses_a_quote_only_tick(tmp_path: Path) -
                 "timestamp": now,
                 "bid": 4.34,
                 "ask": 4.35,
-                "last": None,
+                "last": 4.345,
                 "volume": 1.0,
                 "session_id": "s1",
                 "sequence_id": 3,

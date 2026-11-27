@@ -579,10 +579,10 @@ class PositionData(PositionDisplayComposition, StrictDataSchema[Literal["positio
             NULL when no usable mark or entry exists.
         realized_pnl: Realized profit/loss (execution-fee-exclusive,
             funding-inclusive).
-        mark_price: Stale-visible mark echoed from the active market
-            snapshot; NULL when no usable mark exists.
-        marked_at: The mark snapshot's own bus timestamp — consumers
-            judge freshness themselves; NULL with mark_price.
+        mark_price: Last valid 1m candle close, including aged closes.
+        marked_at: Compatibility field for the mark's evidence time.
+        mark_as_of: Candle evidence time, null when the mark is unavailable.
+        mark_stale: Whether the displayed mark is older than 300 seconds.
         source_venue_event_id: Maximum durable venue-event watermark
             consumed into this state (a recovery watermark, not the
             exact causal fill); NULL when unknown.
@@ -615,6 +615,8 @@ class PositionData(PositionDisplayComposition, StrictDataSchema[Literal["positio
     realized_pnl: float
     mark_price: float | None = None
     marked_at: datetime | None = None
+    mark_as_of: datetime | None = None
+    mark_stale: bool = Field(default_factory=bool)
     source_venue_event_id: int | None = None
     position_cycle_public_id: str | None = None
     wallet_public_id: str = ""

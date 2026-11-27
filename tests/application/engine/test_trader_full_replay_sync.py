@@ -182,7 +182,7 @@ class TestFullReplaySync:
                 "valuation_public_id": "xrp-instrument",
             }
         )
-        repo.get_active_market_snapshot_price = AsyncMock(return_value=None)
+        repo.get_active_latest_1m_candle_price = AsyncMock(return_value=None)
         repo.get_active_position_identities = AsyncMock(return_value=[])
 
         await coord._recover_engine_state()

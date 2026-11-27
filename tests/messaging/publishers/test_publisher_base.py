@@ -8280,18 +8280,20 @@ def test_verify_persist_policy_safety_rail_explicit_mode_passes() -> None:
     pub._verify_persist_policy_safety_rail("pub:test")
 
 
-def test_verify_persist_policy_safety_rail_extra_satisfies() -> None:
-    """A non-empty ``market_persist_extra`` overlay satisfies the rail.
+@pytest.mark.parametrize("from_extra", [False, True])
+def test_verify_persist_policy_safety_rail_accepts_candidates(from_extra: bool) -> None:
+    """Allow a wildcard publisher with auto persistence candidates.
 
-    Given: Auto mode + empty scope set but a non-empty market_persist_extra overlay.
-    When: _verify_persist_policy_safety_rail runs.
-    Then: The overlay satisfies the rail and no exception is raised.
+    Given: a candidate supplied by the auto base or the extra overlay,
+    When: the wildcard startup rail checks auto mode,
+    Then: the publisher can start.
     """
     pub: Any = DummyPublisher(symbols=["*"])
     policy = MagicMock()
     policy.mode_for.return_value = "auto"
-    policy.wallet_scope_pairs_for.return_value = frozenset()
-    policy.extra_for.return_value = frozenset({"BTC-USD"})
+    candidates = frozenset({"EUR-USD"})
+    policy.auto_pairs_for.return_value = frozenset() if from_extra else candidates
+    policy.extra_for.return_value = candidates if from_extra else frozenset()
     pub._persist_policy = policy
     pub._verify_persist_policy_safety_rail("pub:test")
 
@@ -8306,7 +8308,7 @@ def test_verify_persist_policy_safety_rail_fires_on_all_empty() -> None:
     pub: Any = DummyPublisher(symbols=["*"])
     policy = MagicMock()
     policy.mode_for.return_value = "auto"
-    policy.wallet_scope_pairs_for.return_value = frozenset()
+    policy.auto_pairs_for.return_value = frozenset()
     policy.extra_for.return_value = frozenset()
     pub._persist_policy = policy
     with pytest.raises(RuntimeError, match="wildcard symbols"):

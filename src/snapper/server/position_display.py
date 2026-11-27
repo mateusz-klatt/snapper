@@ -140,7 +140,7 @@ async def load_position_quote_prices(
         if key is None:
             continue
         prices[key] = (
-            optional_float(row.get("mark_price")),
+            _fresh_display_mark(row),
             optional_float(row.get("average_price")),
         )
     return prices
@@ -212,9 +212,16 @@ def _display_for_row(
         quantity=float("nan") if quantity is None else quantity,
         steps=steps,
         notional_threshold=notional_threshold,
-        mark_price=optional_float(row.get("mark_price")),
+        mark_price=_fresh_display_mark(row),
         average_price=optional_float(row.get("average_price")),
     )
+
+
+def _fresh_display_mark(row: Mapping[str, object]) -> float | None:
+    """Use fresh marks for dust classification and preserve the payload price."""
+    if row.get("mark_stale") is True:
+        return None
+    return optional_float(row.get("mark_price"))
 
 
 def _instrument_id(row: Mapping[str, object]) -> str:

@@ -210,6 +210,7 @@ async def test_get_active_latest_1m_candle_price_selects_newest_active_1m(
     assert row["instrument_public_id"] == "inst-1"
     assert row["close"] == 105.5
     assert row["open_at"] == _NOW - timedelta(minutes=1)
+    assert row["timestamp"] == _NOW + timedelta(seconds=30)
     assert row["open_at"].tzinfo is not None
 
 
@@ -303,3 +304,38 @@ def test_fx_candle_query_compiles_to_index_ordered_correlated_probes(
     assert compiled.count("candles.timeframe =") == 3
     assert compiled.count(f"candles.known_to = {active_sentinel}") == 3
     assert compiled.count("ORDER BY candles.open_at DESC LIMIT 1") == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"closed": "symbol"},
+        {"closed": "instrument"},
+        {"closed": "capability"},
+        {"exchange": "paper", "capability_exchange": "paper"},
+        {"asset_type": "crypto"},
+        {"can_market_data": False},
+        {"base": "EUR", "quote": "PLN"},
+        {"base": "USD", "quote": "USD"},
+        {"capability_exchange": "walutomat"},
+    ],
+)
+async def test_active_usd_fx_persist_pairs_use_catalog_without_candles(
+    repo: SQLAlchemyRepository, change: dict[str, object]
+) -> None:
+    """Discover both USD orientations for auto candle persistence before any candle exists.
+
+    Given: two active USD forex sources and an instrument outside the eligible catalog,
+    When: the persistence dependency query runs,
+    Then: it returns the native symbol and venue of each eligible source.
+    """
+    await _seed_fx_plane(repo, _FxPlane("direct", has_candle=False))
+    await _seed_fx_plane(
+        repo, _FxPlane("inverse", base="USD", quote="PLN", exchange="walutomat", has_candle=False)
+    )
+    await _seed_fx_plane(repo, replace(_FxPlane("excluded", has_candle=False), **change))
+    assert await repo.list_active_usd_fx_instrument_pairs() == {
+        ("kraken", "NS-direct"),
+        ("walutomat", "NS-inverse"),
+    }

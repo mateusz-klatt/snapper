@@ -1915,6 +1915,8 @@ class PositionRow(TypedDict):
     realized_pnl: float | None
     mark_price: float | None
     marked_at: datetime | None
+    mark_as_of: NotRequired[datetime | None]
+    mark_stale: NotRequired[bool]
     source_venue_event_id: int | None
     position_cycle_public_id: str | None
     wallet_public_id: str
@@ -2817,25 +2819,14 @@ class PositionDisplayFactRow(TypedDict):
     instrument_kind: str | None
 
 
-class UsdFxSnapshotCandidateRow(TypedDict):
-    """Current forex identity and original direct or inverse USD price evidence."""
-
-    snapshot_public_id: str
-    instrument_public_id: str
-    exchange: str
-    base: str
-    quote: str
-    last_price: float | None
-    timestamp: datetime
-
-
 class ActiveCandlePriceRow(TypedDict):
     """Newest active 1m candle close and opening time for an instrument."""
 
     candle_public_id: str
     instrument_public_id: str
-    close: float
+    close: float | None
     open_at: datetime
+    timestamp: datetime
 
 
 class UsdFxCandleCandidateRow(TypedDict):
@@ -2846,7 +2837,7 @@ class UsdFxCandleCandidateRow(TypedDict):
     exchange: str
     base: str
     quote: str
-    close: float
+    close: float | None
     open_at: datetime
 
 

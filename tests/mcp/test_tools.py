@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
@@ -2601,7 +2602,10 @@ class TestListPositionsTool:
         envelope = _decode_envelope(result)
         assert envelope["success"] is True
         assert envelope["details"]["count"] == 1
-        assert envelope["details"]["positions"][0]["public_id"] == position_row["public_id"]
+        position = envelope["details"]["positions"][0]
+        assert position["public_id"] == position_row["public_id"]
+        assert position["mark_as_of"] is None
+        assert position["mark_stale"] is False
 
     @pytest.mark.asyncio
     async def test_serialised_timestamp_is_iso_string(self) -> None:
@@ -3724,17 +3728,15 @@ class TestListPositionsDelegateScopeRealRepository:
     """M5 consensus test: real-SQLite delegate wallet scoping + provenance."""
 
     @pytest.mark.asyncio
-    async def test_delegate_sees_only_granted_wallet_with_provenance(self, tmp_path: Any) -> None:
+    async def test_delegate_sees_only_granted_wallet_with_provenance(self, tmp_path: Path) -> None:
         """The delegate's grants gate real projection rows end to end.
 
         Given: a REAL repository where the trader's projection writer
             persisted rows for two wallets, and the AI_DELEGATE's
             operator holds a scope grant on only one of them,
         When: the list_positions MCP tool runs against that repository,
-        Then: only the granted wallet's position is serialized, carrying
-            the mark trio (ISO marked_at) and watermark, with the honest
-            NULL unrealized value intact — and the other wallet is
-            excluded.
+        Then: only the granted wallet's position is serialized with the stale
+            candle close, evidence time, recomputed unrealized PnL and watermark.
         """
         repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'mcp_scope.db'}")
         await repo.create_all()
@@ -3817,15 +3819,23 @@ class TestListPositionsDelegateScopeRealRepository:
                     "bus_time": now,
                 }
             )
-        await repo.upsert_ticks(
+        candle_close_at = now - timedelta(seconds=301)
+        await repo.upsert_candles(
             [
                 {
                     "instrument_public_id": inst_pid,
                     "timestamp": now,
-                    "bid": 50190.0,
-                    "ask": 50210.0,
-                    "last": 50200.0,
+                    "open_at": candle_close_at - timedelta(minutes=1),
+                    "timeframe": "1m",
+                    "open": 50200.0,
+                    "high": 50200.0,
+                    "low": 50200.0,
+                    "close": 50200.0,
                     "volume": 1.0,
+                    "vwap": None,
+                    "trades": None,
+                    "source": "calculated",
+                    "complete": True,
                     "session_id": "s1",
                     "sequence_id": 7,
                 }
@@ -3841,5 +3851,7 @@ class TestListPositionsDelegateScopeRealRepository:
         assert position["quantity"] == 1.5
         assert position["unrealized_pnl"] == 300.0
         assert position["mark_price"] == 50200.0
-        assert position["marked_at"] == now.isoformat()
+        assert position["marked_at"] == candle_close_at.isoformat()
+        assert position["mark_as_of"] == candle_close_at.isoformat()
+        assert position["mark_stale"] is True
         assert position["source_venue_event_id"] == 42
