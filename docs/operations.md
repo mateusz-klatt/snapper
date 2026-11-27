@@ -1406,6 +1406,61 @@ contracts (`MNQU6-CME` = Sep 26, etc.) and must be rotated before the
   and its service/repository code from commit `50c98684`
   (`ix_trades_executed_at` from migration 0007 is still in place).
 
+## Kraken Spot trade recovery evidence
+
+Use the offline planner to compare a verified Kraken public Trades evidence
+CSV with a trade snapshot from an isolated copy of the database. Supply the
+capture's SHA-256 and its original half-open UTC window. The evidence format
+retains the venue ID, instrument UUID, raw execution epoch and payload. The
+planner canonicalizes the venue execution time to the same UTC millisecond
+used by the live adapter.
+
+Export the candidate instruments and trade IDs from the isolated database
+copy, including any matching IDs with timestamps outside the capture window
+so that timestamp conflicts are visible. Include this CSV header in order:
+
+```text
+instrument_public_id,trade_id,executed_at,price,size,side
+```
+
+For PostgreSQL, prepare `candidate-trade-ids.csv` from the two identity
+columns in the evidence, with header `instrument_public_id,trade_id`.
+On the isolated copy, run the following in one `psql` session:
+
+```sql
+SET DateStyle TO ISO, YMD;
+SET TIME ZONE 'UTC';
+SET extra_float_digits TO 3;
+CREATE TEMP TABLE candidate_trades (instrument_public_id uuid, trade_id text);
+\copy candidate_trades FROM 'candidate-trade-ids.csv' WITH (FORMAT csv, HEADER true)
+\copy (SELECT t.instrument_public_id, t.trade_id, t.executed_at, t.price, t.size, t.side FROM trades AS t JOIN (SELECT DISTINCT instrument_public_id, trade_id FROM candidate_trades) AS c USING (instrument_public_id, trade_id)) TO 'trade-snapshot.csv' WITH (FORMAT csv, HEADER true)
+```
+
+The UTC export preserves the stored execution precision and includes all
+stored matches for each candidate ID. Confirm the snapshot describes the
+intended database and includes all candidate identities before using the
+reported absence as evidence. The comparison reports duplicates and
+discrepancies as errors.
+
+Both CSVs must resolve to regular files inside `--input-root`, which defaults
+to the current working directory. Relative CSV paths are resolved from that
+root.
+
+```bash
+.venv/bin/python -m scripts.plan_kraken_spot_trade_recovery \
+  --input-root . \
+  --evidence missing-trades.csv \
+  --evidence-sha256 "$TRADE_EVIDENCE_SHA256" \
+  --stored-trades trade-snapshot.csv \
+  --start 2026-01-01T00:00:00Z --end 2026-01-01T00:07:00Z
+```
+
+The JSON output counts exact matches and lists the candidate IDs still absent
+from the supplied snapshot. The input represents an already investigated
+missing set. Assess full venue coverage separately. The planner reads two
+local files and leaves any historical insert or candle repair to a separate
+operation.
+
 ## Portfolio P&L minimum-activation report
 
 `snapper pnl-minimum-gate report` (and `check` / `inspect`) reads current
