@@ -31,6 +31,7 @@ Example:
 
 import json
 from collections.abc import Container
+from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
@@ -39,6 +40,7 @@ from typing import Annotated
 from typing import Any
 from typing import Literal
 from typing import cast
+from typing import get_args
 from uuid import uuid7
 
 from fastapi import APIRouter
@@ -112,6 +114,8 @@ from snapper.auth.schemas.principal import AuthPrincipal
 from snapper.config.settings import AppSettings
 from snapper.config.settings import get_settings
 from snapper.core.json_types import JsonObject
+from snapper.core.types import ExchangeEnum
+from snapper.core.types import OrderExchange
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.core.wallet_resolution import WalletAmbiguousError
@@ -1445,6 +1449,20 @@ def _enforce_desired_state_permission(
     return True
 
 
+def _require_live_strategy_cap(parameters: Mapping[str, object]) -> None:
+    """Report a missing cap on a live strategy config as a state conflict."""
+    exchange = parameters.get("exchange", ExchangeEnum.PAPER)
+    if (
+        exchange in get_args(OrderExchange)
+        and exchange != ExchangeEnum.PAPER
+        and parameters.get("max_order_base_qty") is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="max_order_base_qty must be configured for a live strategy",
+        )
+
+
 async def _desired_state_values(
     config: ProcessConfigModel,
     action: ProcessDesiredStateAction,
@@ -1455,6 +1473,7 @@ async def _desired_state_values(
     """Resolve the persisted enabled flag and restart generation."""
     if action == "enable":
         if config.role is ProcessRoleEnum.STRATEGY:
+            _require_live_strategy_cap(config.parameters)
             await _enforce_strategy_scope(dict(config.parameters), config.role, principal, repo)
         return True, None
     if action == "disable":
@@ -1729,6 +1748,7 @@ async def update_process_scope_config(
         )
         nested.update(scope.reference_identity_params)
         new_parameters["params"] = nested
+    _require_live_strategy_cap(new_parameters)
     await _enforce_strategy_scope(dict(new_parameters), config.role, principal, repo)
     try:
         persisted = await factory.update_process_config_parameters(

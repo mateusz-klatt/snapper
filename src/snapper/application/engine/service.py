@@ -871,7 +871,8 @@ class TradingEngineService:
     ) -> float | None:
         """Recheck live admission before allocating any order identity."""
         if self.exchange == ExchangeEnum.PAPER:
-            assert not isinstance(size, _LiveQuantity)
+            if isinstance(size, _LiveQuantity):
+                raise TypeError("Paper orders require a paper quantity")
             return size
         if not isinstance(size, _LiveQuantity):
             quantity = Decimal(str(size))

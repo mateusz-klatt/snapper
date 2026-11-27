@@ -9,11 +9,14 @@ from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import DEFAULT
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from uuid import UUID
 from uuid import uuid4
 
 import pytest
+from loguru import logger
 from pydantic import ValidationError
 from sqlalchemy import func
 from sqlalchemy import select
@@ -22,19 +25,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.engine.service import InstrumentSpec
 from snapper.application.engine.service import TradingEngineService
+from snapper.application.engine.service import _LiveQuantity
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.process_manager.config_resolver import load_current_process_configs
+from snapper.application.process_manager.config_resolver import read_current_process_configs
 from snapper.application.process_manager.launcher import ProcessLauncherService
 from snapper.application.process_manager.process_parameters import StrategyProcessParameters
 from snapper.application.process_manager.registry_syncer import ProcessRegistrySyncer
+from snapper.application.process_manager.strategy_admission import LiveStrategyScope
 from snapper.application.process_manager.strategy_admission import resolve_live_signal_policy
 from snapper.application.process_manager.strategy_admission import resolve_live_strategy_start
 from snapper.application.process_manager.strategy_scope import StrategyScopeError
+from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
+from snapper.core.partitioning import ShardOwnershipError
 from snapper.core.strategy_order_cap import LiveStrategyOrderPolicy
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Instrument
@@ -50,6 +59,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import begin_process_config_write
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
+from snapper.messaging.infrastructure.validated_socket import ValidatedSubscriber
 from snapper.messaging.schemas.data import SignalData
 from snapper.strategies.models import StrategyConfig
 
@@ -483,6 +493,35 @@ async def test_current_config_loader_uses_open_ended_version(live_db: _Config) -
     assert catalogue["btc"] == current
 
 
+async def _assert_listener_recovers(
+    trader: TraderCoordinator, bad_frame: bytes | list[bytes]
+) -> list[str]:
+    """Run the real listener through a failing frame and a durable follow-up command."""
+    followup = _signal()
+    socket = MagicMock()
+    topic = _TOPIC.encode()
+    socket.recv_multipart = AsyncMock(
+        side_effect=[
+            [topic, bad_frame] if isinstance(bad_frame, bytes) else bad_frame,
+            [topic, followup.publish_to(_TOPIC)],
+            asyncio.CancelledError,
+        ]
+    )
+    trader.signal_subscriber = ValidatedSubscriber(socket)
+    errors: list[str] = []
+    sink = logger.add(errors.append, format="{message}", level="ERROR")
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await trader._listen_signals()
+    finally:
+        logger.remove(sink)
+    assert socket.recv_multipart.await_count == 3
+    async with trader.repository.session() as session:
+        command = (await session.scalars(select(TradeCommand))).one()
+        assert command.signal_public_id == followup.public_id
+    return errors
+
+
 async def test_signal_listener_survives_config_database_error(
     live_db: _Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -493,23 +532,147 @@ async def test_signal_listener_survives_config_database_error(
     Then: It still submits.
     """
     await _create(live_db, "process_btc", enabled=True)
-    trader = _trader(live_db)
-    good = await resolve_live_signal_policy(live_db.repo, _signal())
-    resolve = AsyncMock(side_effect=[SQLAlchemyError("read failed"), good])
-    monkeypatch.setattr("snapper.application.engine.trader.resolve_live_signal_policy", resolve)
-    trader.signal_subscriber = MagicMock()
-    trader.signal_subscriber.recv_multipart = AsyncMock(
-        side_effect=[
-            (_TOPIC, _signal().model_dump_json().encode()),
-            (_TOPIC, _signal().model_dump_json().encode()),
-            asyncio.CancelledError,
-        ]
+    read = AsyncMock(
+        wraps=read_current_process_configs, side_effect=[SQLAlchemyError("read failed"), DEFAULT]
     )
-    with pytest.raises(asyncio.CancelledError):
-        await trader._listen_signals()
-    assert resolve.await_count == 2
-    async with live_db.repo.session() as session:
-        assert await session.scalar(select(func.count()).select_from(TradeCommand)) == 1
+    monkeypatch.setattr(
+        "snapper.application.process_manager.strategy_admission.read_current_process_configs", read
+    )
+    errors = await _assert_listener_recovers(_trader(live_db), _signal().publish_to(_TOPIC))
+    assert read.await_count == 2
+    assert any("reason=read failed" in message for message in errors)
+
+
+@pytest.mark.parametrize(
+    ("site", "error"),
+    [
+        pytest.param("ensure_paired_execution_group", OSError("connection lost"), id="os-error"),
+        pytest.param("insert_trade_command", TimeoutError(), id="timeout"),
+        pytest.param("insert_trade_command", ShardOwnershipError("shard", 0, 2), id="shard"),
+        pytest.param("_get_or_create_signal_engine", RuntimeError("engine conflict"), id="runtime"),
+    ],
+)
+async def test_signal_listener_survives_downstream_refusal(
+    live_db: _Config, monkeypatch: pytest.MonkeyPatch, site: str, error: Exception
+) -> None:
+    """The signal listener survives downstream refusals.
+
+    Given: A downstream operation fails after resolving the real persisted policy.
+    When: Another valid live signal follows the refused signal.
+    Then: The listener logs the refusal and submits only the follow-up order.
+    """
+    await _create(live_db, "process_btc", enabled=True)
+    trader = _trader(live_db)
+    owner = trader if site == "_get_or_create_signal_engine" else live_db.repo
+    operation = AsyncMock(wraps=getattr(owner, site), side_effect=[error, DEFAULT])
+    monkeypatch.setattr(owner, site, operation)
+    signal = _signal(grouped=site == "ensure_paired_execution_group")
+    errors = await _assert_listener_recovers(trader, signal.publish_to(_TOPIC))
+    assert operation.await_count >= 1
+    reason = str(error) or type(error).__name__
+    assert any(
+        f"strategy={signal.strategy_name} instrument={signal.instrument}" in message
+        and f"reason={reason}" in message
+        for message in errors
+    )
+
+
+async def test_signal_listener_survives_ai_cap_refusal(
+    live_db: _Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The signal listener survives an AI-attributed user cap refusal.
+
+    Given: The AI guard rejects an order admitted by the persisted strategy cap.
+    When: A valid live signal follows the refused order.
+    Then: The listener submits only the follow-up order.
+    """
+    await _create(live_db, "process_btc", enabled=True)
+    trader = _trader(live_db)
+    enforcer = trader._build_caps_enforcer()
+    assert enforcer is not None
+    trader._caps_enforcer = enforcer
+    guard = MagicMock()
+    guard.return_value.__aenter__.side_effect = CapsViolationError("max_open_orders")
+    monkeypatch.setattr(enforcer, "guard_with_ai_review_attribution", guard)
+    signal = _signal().model_copy(update={"ai_review_public_id": str(uuid4())})
+    errors = await _assert_listener_recovers(trader, signal.publish_to(_TOPIC))
+    guard.assert_called_once()
+    assert any(
+        f"strategy={signal.strategy_name} instrument={signal.instrument}" in message
+        and "reason=cap max_open_orders violated" in message
+        for message in errors
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        pytest.param(b"\xff", "UnicodeDecodeError", id="payload-utf8"),
+        pytest.param(b"{", "ValidationError", id="invalid-json"),
+        pytest.param(b"{}", "ValidationError", id="invalid-envelope"),
+        pytest.param([b"signals.\xff", b"{}"], "'utf-8' codec can't decode", id="topic-utf8"),
+        pytest.param([b"signals."], "Expected 2-part message", id="multipart"),
+    ],
+)
+async def test_signal_listener_survives_corrupt_frame(
+    live_db: _Config, payload: bytes | list[bytes], reason: str
+) -> None:
+    """The signal listener survives corrupt frames.
+
+    Given: Invalid wire framing, UTF-8, JSON, or signal schema.
+    When: A valid signal follows the corrupt frame.
+    Then: The listener reports a frame error and submits the valid order.
+    """
+    await _create(live_db, "process_btc", enabled=True)
+    errors = await _assert_listener_recovers(_trader(live_db), payload)
+    assert any(f"reason={reason}" in message for message in errors)
+
+
+@pytest.mark.parametrize("error", [TypeError, AttributeError])
+async def test_policy_programming_error_propagates(
+    live_db: _Config, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    """Programming errors in policy resolution propagate.
+
+    Given: A programming error while evaluating the persisted policy.
+    When: The trader routes a live signal.
+    Then: The trader surfaces the original error.
+    """
+    await _create(live_db, "process_btc", enabled=True)
+    read = AsyncMock(side_effect=error("programming error"))
+    monkeypatch.setattr(
+        "snapper.application.process_manager.strategy_admission.read_current_process_configs", read
+    )
+    with pytest.raises(error, match="programming error"):
+        await _trader(live_db)._on_signal(_signal())
+    read.assert_awaited_once()
+
+
+async def test_resolved_live_owner_requires_cap(
+    live_db: _Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resolved live owner still requires a cap.
+
+    Given: A resolved owner whose model bypassed normal cap validation.
+    When: The live policy is constructed.
+    Then: The resolver raises a scope error.
+    """
+    await _create(live_db, "process_btc", enabled=True)
+    parameters = StrategyProcessParameters.model_construct(
+        name="process_btc",
+        inputs=["market.kraken.BTC-EUR.ticks"],
+        outputs=[_INSTRUMENT],
+        exchange=ExchangeEnum.KRAKEN,
+        wallet_public_id=_WALLET,
+        operator_public_id=_OPERATOR,
+    )
+    scope = LiveStrategyScope("process_btc", parameters, UUID(_WALLET))
+    monkeypatch.setattr(
+        "snapper.application.process_manager.strategy_admission._resolve_live_scope",
+        AsyncMock(return_value=scope),
+    )
+    with pytest.raises(StrategyScopeError, match="max_order_base_qty must be configured"):
+        await resolve_live_signal_policy(live_db.repo, _signal())
 
 
 def _engine(
@@ -834,6 +997,20 @@ async def test_live_send_rejects_invalid_internal_policy(cap: str) -> None:
     """
     engine = _engine()
     assert await engine._send_order("buy", _QUANTITY, 100.0, "test", policy=_policy(cap)) is None
+    engine.execution_socket.tracker.next_sequence.assert_not_called()
+
+
+async def test_paper_send_rejects_live_quantity() -> None:
+    """Paper sends reject live quantities.
+
+    Given: A paper engine and a quantity prepared for a live order.
+    When: The quantity reaches the send boundary.
+    Then: The engine raises a type error before allocating order IDs.
+    """
+    engine = _engine()
+    engine.exchange = ExchangeEnum.PAPER
+    with pytest.raises(TypeError, match="Paper orders require a paper quantity"):
+        await engine._send_order("buy", _LiveQuantity(Decimal("0.00006"), _QUANTITY), 100.0, "test")
     engine.execution_socket.tracker.next_sequence.assert_not_called()
 
 

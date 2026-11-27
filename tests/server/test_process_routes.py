@@ -4544,6 +4544,22 @@ class TestSetProcessDesiredState:
             await self._patch("strategy", factory, self._body("enable"))
         assert exc.value.status_code == 409 and "overlap" in exc.value.detail
 
+    async def test_enable_live_strategy_without_cap_returns_conflict(self) -> None:
+        """Enable reports a missing live cap as a conflict.
+
+        Given: A disabled legacy live strategy without a cap.
+        When: An operator requests enable.
+        Then: The route returns 409 before writing desired state.
+        """
+        config = self._config("strategy", enabled=False, role=ProcessRoleEnum.STRATEGY)
+        config.parameters["exchange"] = "kraken"
+        factory = self._factory(config, autostart_includes=True)
+        with pytest.raises(HTTPException) as exc:
+            await self._patch("strategy", factory, self._body("enable"))
+        assert exc.value.status_code == 409
+        assert "max_order_base_qty must be configured" in exc.value.detail
+        factory.update_process_config.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_enable_non_strategy_local_owner(self) -> None:
         """Enabling a locally-owned non-strategy persists enabled=True, not managed_remotely."""
@@ -4979,6 +4995,21 @@ class TestUpdateProcessScopeConfig:
         ):
             await self._invoke("strategy_x", factory, self._body(cap=0.00006))
         assert exc.value.status_code == 409 and "overlap" in exc.value.detail
+
+    async def test_live_scope_edit_without_cap_returns_conflict(self) -> None:
+        """Scope editing reports a missing live cap as a conflict.
+
+        Given: A legacy live strategy without a cap.
+        When: An operator edits scope while leaving the cap unset.
+        Then: The route returns 409 before writing the configuration.
+        """
+        config = self._config("strategy_x", parameters={"exchange": "kraken"})
+        factory = self._factory(config)
+        with pytest.raises(HTTPException) as exc:
+            await self._invoke("strategy_x", factory, self._body())
+        assert exc.value.status_code == 409
+        assert "max_order_base_qty must be configured" in exc.value.detail
+        factory.update_process_config_parameters.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_scope_config_requires_configure_strategies_before_mutation(self) -> None:

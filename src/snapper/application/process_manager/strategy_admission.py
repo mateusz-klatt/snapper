@@ -213,7 +213,8 @@ async def resolve_live_signal_policy(
     ):
         raise StrategyScopeError("Live signal does not match the strategy and operator")
     cap = parameters.max_order_base_qty
-    assert cap is not None
+    if cap is None:
+        raise StrategyScopeError("max_order_base_qty must be configured for a live strategy")
     return LiveStrategyOrderPolicy(
         parameters.name,
         parameters.wallet_public_id,

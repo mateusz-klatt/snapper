@@ -32,6 +32,7 @@ from uuid import uuid7
 import zmq
 import zmq.asyncio
 from loguru import logger
+from pydantic import ValidationError
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import SQLAlchemyError
@@ -62,6 +63,7 @@ from snapper.application.services.settings import SettingsService
 from snapper.application.trade.cancel_target import CancelTargetIdentityReader
 from snapper.application.trade.cancel_target import CancelTargetUnresolvedError
 from snapper.application.trade.cancel_target import cancel_target_exchange_order_id
+from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.command_request import order_request_from_command
 from snapper.application.trade.command_request import parse_shard_key
@@ -80,6 +82,7 @@ from snapper.config.settings import get_settings_service
 from snapper.config.settings import get_settings_with_service
 from snapper.core.paired_execution import paired_halt_reason
 from snapper.core.partitioning import ShardOwnership
+from snapper.core.partitioning import ShardOwnershipError
 from snapper.core.strategy_order_cap import LiveStrategyOrderPolicy
 from snapper.core.types import ORDER_STATUS_REASON_ADOPTED
 from snapper.core.types import ExchangeEnum
@@ -6968,7 +6971,11 @@ class TraderCoordinator(RegisterableProcess):
         logger.info("ZMQTrader: Starting signal listen loop")
         try:
             while True:
-                topic_str, msg_bytes = await self.signal_subscriber.recv_multipart()
+                try:
+                    topic_str, msg_bytes = await self.signal_subscriber.recv_multipart()
+                except ValueError as exc:
+                    logger.error("Subscriber frame refused: reason={}", exc)
+                    continue
                 if topic_str == "system.symbol_aliases":
                     logger.info("ZMQTrader: Received symbol_aliases update, refreshing cache")
                     SymbolMapperService.get_instance().trigger_cache_invalidation(fail_fast=False)
@@ -6992,7 +6999,13 @@ class TraderCoordinator(RegisterableProcess):
 
     async def _handle_signal_message(self, topic: str, payload: bytes) -> None:
         """Decode and deliver one signal."""
-        signal = SignalData.from_json(payload.decode())
+        try:
+            signal = SignalData.from_json(payload.decode())
+        except (UnicodeDecodeError, ValidationError) as exc:
+            logger.error(
+                "Strategy signal frame refused: topic={} reason={}", topic, type(exc).__name__
+            )
+            return
         self._gap_detector.check(
             topic, signal.session_id, signal.sequence_id, wallet_public_id=signal.wallet_public_id
         )
@@ -7001,11 +7014,21 @@ class TraderCoordinator(RegisterableProcess):
         await self._on_signal(signal)
 
     async def _on_signal(self, signal: SignalData) -> None:
-        """Contain config, scope, specification and database errors per signal."""
+        """Contain operational refusals and read or write failures per signal."""
         try:
             await self._route_signal(signal)
-        except (ValueError, KeyError, SQLAlchemyError, InstrumentSpecMissingError) as exc:
-            self._log_signal_refusal(signal, str(exc))
+        except (
+            ValueError,
+            KeyError,
+            SQLAlchemyError,
+            InstrumentSpecMissingError,
+            OSError,
+            TimeoutError,
+            CapsViolationError,
+            ShardOwnershipError,
+            RuntimeError,
+        ) as exc:
+            self._log_signal_refusal(signal, str(exc) or type(exc).__name__)
 
     @staticmethod
     def _log_signal_refusal(signal: SignalData, reason: str) -> None:
@@ -7046,11 +7069,7 @@ class TraderCoordinator(RegisterableProcess):
         ), "execution_publisher not initialized - _setup_external_execution must be called first"
         policy = None
         if context.exchange != ExchangeEnum.PAPER:
-            try:
-                policy = await resolve_live_signal_policy(self.repository, signal)
-            except Exception as exc:
-                self._log_signal_refusal(signal, str(exc))
-                return
+            policy = await resolve_live_signal_policy(self.repository, signal)
         await self._execute_routed_signal(signal, context, policy)
 
     async def _execute_routed_signal(
