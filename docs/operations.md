@@ -1466,8 +1466,11 @@ operation.
 Use the importer with the investigated evidence and the original half-open UTC
 window. The evidence CSV must resolve to a regular file under `--input-root`,
 which defaults to the current directory. The importer validates the evidence
-SHA-256 and requires millisecond-aligned UTC bounds. It connects to the
-database configured by `DB_URL` and makes no Kraken API calls.
+SHA-256 and requires millisecond-aligned UTC bounds. It treats `BTC/USD` and
+`BTC-USD` as the same native symbol. Both modes verify the symbol and
+instrument UUID against active Kraken Spot listings in the database configured
+by `DB_URL`. A catalog mismatch causes a refusal before trade planning. The
+importer makes no Kraken API calls.
 
 1. Preview the import plan against the intended database.
 
@@ -1494,13 +1497,12 @@ database configured by `DB_URL` and makes no Kraken API calls.
 
     Apply recomputes the live plan and exits with status 2 if the digest
     differs. The receipt path must be unused. Each transaction handles up to
-    500 trades and enqueues their historical trade-integrity work through the
-    repository. The insert never updates an existing trade and takes no table
-    lock, so live trade writers keep running. A trade the live feed stores
-    concurrently is counted as already present. PostgreSQL uses a two-second
-    lock timeout and a 15-second statement timeout. The command reads back each
-    chunk and then verifies that the live plan has zero missing trades after
-    apply.
+    500 trades and enqueues historical trade-integrity work only for rows it
+    inserts. Existing trades stay intact, and a matching trade the live feed
+    stores concurrently is counted as already present. PostgreSQL takes no
+    explicit table lock and uses a two-second lock timeout and a 15-second
+    statement timeout. The command reads back each chunk and then verifies
+    that the live plan has zero missing trades after apply.
 
 3. Retain the JSON receipt with the evidence and dry-run output.
 

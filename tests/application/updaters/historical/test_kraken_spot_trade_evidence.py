@@ -83,6 +83,22 @@ def test_preserves_decimal_precision_order_and_duplicate_rows() -> None:
     assert result[0].size.as_tuple() == expected_buy.size.as_tuple()
 
 
+@pytest.mark.parametrize("symbol", ["BTC/USD", "BTC-USD"])
+def test_normalizes_evidence_symbol_to_catalog_spelling(symbol: str) -> None:
+    """Normalize supported evidence spellings to the catalog spelling.
+
+    Given: A Spot trade with a slash-delimited or native symbol.
+    When: The evidence reader parses the trade.
+    Then: The resulting symbol uses the catalog's dash separator.
+    """
+    row = list(_ROW)
+    row[1] = symbol
+
+    [trade] = read_kraken_spot_trade_evidence(_csv(row))
+
+    assert trade.symbol == "BTC-USD"
+
+
 @pytest.mark.parametrize(
     ("iso", "seconds", "normalized_microsecond"),
     [
@@ -159,7 +175,7 @@ def test_rejects_wrong_number_of_columns(row: list[str]) -> None:
     ("column", "replacement", "message"),
     [
         (0, "kraken-futures", "Expected kraken exchange"),
-        (1, "BTC/USD", "Invalid Kraken Spot native symbol"),
+        (1, "BTC/USD:USD", "Invalid Kraken Spot native symbol"),
         (2, "AAAAAAAA-0000-4000-8000-000000000001", "canonical instrument_public_id UUID"),
         (3, "123.0", "positive numeric exchange_trade_id"),
         (3, "00123", "positive numeric exchange_trade_id"),

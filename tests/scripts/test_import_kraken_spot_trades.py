@@ -12,13 +12,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from uuid import UUID
+from uuid import uuid7
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from scripts import import_kraken_spot_trades as importer
 from snapper.config.settings import get_bootstrap_settings
 from snapper.core.json_types import JsonObject
+from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Instrument
+from snapper.data.models import Symbol
 from snapper.data.models import Trade
 from snapper.data.models import TradeIntegrityWorkItem
 from snapper.data.repository import SQLAlchemyRepository
@@ -26,6 +31,9 @@ from snapper.data.repository_types import TradeUpsertRow
 
 _BTC = "00000000-0000-4000-8000-000000000001"
 _ETH = "00000000-0000-4000-8000-000000000002"
+_INACTIVE = "00000000-0000-4000-8000-000000000005"
+_FUTURES = "00000000-0000-4000-8000-000000000006"
+_UNKNOWN = "00000000-0000-4000-8000-000000000007"
 _START = "2026-01-01T00:00:00Z"
 _END = "2026-01-01T00:01:00Z"
 _BTC_EXECUTED_AT = datetime.fromisoformat("2026-01-01T00:00:00.123Z")
@@ -35,7 +43,7 @@ _EVIDENCE_HEADER = (
     "exchange_unix_seconds,price,size,exchange_side,exchange_order_type,exchange_misc\n"
 )
 _BTC_EVIDENCE = (
-    f"kraken,BTC-USD,{_BTC},999001,2026-01-01T00:00:00.123456Z,"
+    f"kraken,BTC/USD,{_BTC},999001,2026-01-01T00:00:00.123456Z,"
     "1767225600.1234561,12345.10000,0.01000000,b,l,\n"
 )
 _ETH_EVIDENCE = (
@@ -56,6 +64,47 @@ _STORED_BTC = TradeUpsertRow(
 )
 
 
+async def _seed_catalog(repository: SQLAlchemyRepository) -> None:
+    """Seed active Spot entries and catalog witnesses that must be refused."""
+    recorded_at = datetime(2020, 1, 1, tzinfo=UTC)
+    retired_at = datetime(2020, 1, 2, tzinfo=UTC)
+    session_id = str(uuid7())
+    entries = (
+        (_BTC, "BTC", "kraken", KNOWN_TO_MAX),
+        (_ETH, "ETH", "kraken", KNOWN_TO_MAX),
+        (_INACTIVE, "SOL", "kraken", retired_at),
+        (_FUTURES, "LTC", "kraken_futures", KNOWN_TO_MAX),
+    )
+    async with repository.session() as session:
+        for sequence_id, (instrument_id, base, exchange, known_to) in enumerate(entries, start=1):
+            symbol_id = str(uuid7())
+            session.add(
+                Symbol(
+                    public_id=symbol_id,
+                    native_symbol=f"{base}-USD",
+                    base=base,
+                    quote="USD",
+                    asset_type="crypto",
+                    created_at=recorded_at,
+                    timestamp=recorded_at,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                )
+            )
+            session.add(
+                Instrument(
+                    public_id=instrument_id,
+                    symbol_public_id=symbol_id,
+                    exchange=exchange,
+                    timestamp=recorded_at,
+                    known_to=known_to,
+                    session_id=session_id,
+                    sequence_id=sequence_id,
+                )
+            )
+        await session.commit()
+
+
 @pytest.fixture
 def database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Use the repository's isolated SQLite template with a fresh file per test.
@@ -70,6 +119,7 @@ def database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
         repository = SQLAlchemyRepository(url)
         try:
             await repository.create_all()
+            await _seed_catalog(repository)
         finally:
             await repository.engine.dispose()
 
@@ -206,6 +256,42 @@ def test_dry_run_does_not_create_a_missing_sqlite_database(
 
     assert "OperationalError" in capsys.readouterr().err
     assert not path.exists()
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_refuses_all_invalid_catalog_pairs(
+    tmp_path: Path, database: str, capsys: pytest.CaptureFixture[str], apply: bool
+) -> None:
+    """Refuse unrelated and unavailable catalog instruments before planning.
+
+    Given: An unknown instrument, a native symbol mismatch, a retired Spot
+        instrument, and a Futures instrument in the evidence.
+    When: The operator previews or attempts to apply the evidence.
+    Then: Every mismatch is reported and no trades, work items, or receipt appear.
+    """
+    mismatches = (
+        ("XRP/USD", _UNKNOWN),
+        ("BTC/USD", _ETH),
+        ("SOL/USD", _INACTIVE),
+        ("LTC/USD", _FUTURES),
+    )
+    evidence = "".join(
+        _BTC_EVIDENCE.replace("BTC/USD", symbol).replace(_BTC, instrument_id)
+        for symbol, instrument_id in mismatches
+    )
+    argv = _args(tmp_path, evidence)
+    receipt = tmp_path / "receipt.json"
+
+    assert importer.main(_apply_args(argv, "0" * 64, receipt) if apply else argv) == 1
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "catalog mismatches" in output.err
+    for symbol, instrument_id in mismatches:
+        assert symbol.replace("/", "-") in output.err
+        assert instrument_id in output.err
+    assert not receipt.exists()
+    assert asyncio.run(_stored(database)) == ([], [])
 
 
 def test_apply_refuses_a_stale_digest(
@@ -425,3 +511,130 @@ def test_apply_respects_the_chunk_boundary(
     assert recorded["verified_missing"] == 0
     trades, obligations = asyncio.run(_stored(database))
     assert len(trades) == len(obligations) == count
+
+
+@pytest.mark.parametrize("changes", [{"price": 12346.1}, {"size": 0.02}, {"side": "sell"}])
+def test_preview_and_apply_refuse_a_conflicting_stored_payload(
+    changes: dict[str, float | str],
+    tmp_path: Path,
+    database: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Refuse a live identity with incompatible trade data.
+
+    Given: An approved plan and a stored trade with a conflicting price, size or side.
+    When: The operator previews again and applies the old digest.
+    Then: Both requests refuse and leave the existing row as the sole stored trade.
+    """
+    argv = _args(tmp_path)
+    digest = cast(str, _dry_run(argv, capsys)["plan_digest"])
+    stored = cast(TradeUpsertRow, {**_STORED_BTC, **changes})
+    asyncio.run(_insert(database, stored))
+    receipt = tmp_path / "receipt.json"
+
+    for arguments in (argv, _apply_args(argv, digest, receipt)):
+        assert importer.main(arguments) == 1
+        output = capsys.readouterr()
+        assert output.out == ""
+        assert "Conflicting stored Kraken Spot trade" in output.err
+
+    trades, obligations = asyncio.run(_stored(database))
+    (trade,) = trades
+    assert trade.public_id == stored["public_id"]
+    assert (trade.price, trade.size, trade.side) == (
+        stored["price"],
+        stored["size"],
+        stored["side"],
+    )
+    assert obligations == []
+    assert not receipt.exists()
+
+
+def _simulate_arrival(monkeypatch: pytest.MonkeyPatch, arrival: TradeUpsertRow) -> None:
+    """Inject a trade after the absence check using SQLite's existing writer transaction."""
+    upsert_trades = SQLAlchemyRepository.upsert_trades
+
+    async def insert_after_recheck(
+        repository: SQLAlchemyRepository,
+        rows: list[TradeUpsertRow],
+        session: AsyncSession | None = None,
+        *,
+        enqueue_integrity_work: bool = False,
+    ) -> int:
+        """Simulate the arrival before forwarding the original import batch."""
+        assert session is not None and enqueue_integrity_work
+        assert [row["instrument_public_id"] for row in rows] == [_BTC, _ETH]
+        assert await upsert_trades(repository, [arrival], session=session) == 1
+        return await upsert_trades(repository, rows, session=session, enqueue_integrity_work=True)
+
+    monkeypatch.setattr(SQLAlchemyRepository, "upsert_trades", insert_after_recheck)
+
+
+def test_apply_counts_a_skipped_matching_trade_without_an_obligation(
+    tmp_path: Path,
+    database: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Commit a chunk that skipped a matching trade.
+
+    Given: A matching trade appears between the chunk's absence check and insert.
+    When: The importer forwards both attempted rows to the real SQLite upsert.
+    Then: The receipt counts one match and only the newly imported trade has an obligation.
+    """
+    argv = _args(tmp_path)
+    digest = cast(str, _dry_run(argv, capsys)["plan_digest"])
+    _simulate_arrival(monkeypatch, _STORED_BTC)
+    receipt_path = tmp_path / "receipt.json"
+
+    assert importer.main(_apply_args(argv, digest, receipt_path)) == 0
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["chunks"] == [{"inserted": 1, "already_present": 1}]
+    assert receipt["total_inserted"] == receipt["total_already_present"] == 1
+    assert receipt["verified_missing"] == 0
+    trades, obligations = asyncio.run(_stored(database))
+    existing, imported = trades
+    assert existing.public_id == _STORED_BTC["public_id"]
+    assert imported.instrument_public_id == _ETH
+    (obligation,) = obligations
+    assert _identity(obligation) == _identity(imported)
+    assert obligation.m1_pending and obligation.m2_pending
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"price": 12346.1},
+        {"executed_at": datetime(2026, 1, 1, 0, 0, 2, tzinfo=UTC)},
+    ],
+)
+def test_apply_rolls_back_a_chunk_after_a_conflicting_arrival(
+    changes: dict[str, float | datetime],
+    tmp_path: Path,
+    database: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Roll back trades and obligations after an incompatible late arrival.
+
+    Given: A conflicting trade appears between the chunk's absence check and readback.
+    When: The importer reads back both candidate identities after the upsert.
+    Then: It refuses, rolls back the chunk, and reports no committed rows.
+    """
+    argv = _args(tmp_path)
+    digest = cast(str, _dry_run(argv, capsys)["plan_digest"])
+    arrival = cast(TradeUpsertRow, {**_STORED_BTC, **changes})
+    _simulate_arrival(monkeypatch, arrival)
+    receipt_path = tmp_path / "receipt.json"
+
+    assert importer.main(_apply_args(argv, digest, receipt_path)) == 1
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "Conflicting stored Kraken Spot trade" in output.err
+    assert asyncio.run(_stored(database)) == ([], [])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["chunks"] == []
+    assert receipt["total_inserted"] == receipt["total_already_present"] == 0
+    assert receipt["verified_missing"] is None
