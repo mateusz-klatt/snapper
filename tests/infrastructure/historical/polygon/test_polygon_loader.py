@@ -660,6 +660,53 @@ async def test_fetch_aggregates_skips_existing_empty_marker(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prior_snapshot", [False, True], ids=["first-write", "replacement"])
+async def test_interrupted_grouped_csv_can_be_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prior_snapshot: bool
+) -> None:
+    """Publish a complete snapshot only after every grouped row has been written.
+
+    Given: A grouped day with or without an existing published snapshot.
+    When: Serialization is interrupted after the first ticker and then retried.
+    Then: The final path stays unchanged until the retry publishes all rows.
+    """
+    day = date(2024, 2, 1)
+    client = _StubPolygonClient(
+        grouped=[SimpleNamespace(ticker="A", open=1), SimpleNamespace(ticker="B", open=2)]
+    )
+    loader = PolygonHistoricalLoader(cast(PolygonExchangeClient, client), tmp_path, 0.0)
+    path = loader.get_grouped_csv_path(day, "crypto", "global")
+    if prior_snapshot:
+        _write_grouped_day(tmp_path, day, [("OLD", 1.0)])
+        path.chmod(0o640)
+    previous = path.read_bytes() if prior_snapshot else None
+    previous_mode = path.stat().st_mode if prior_snapshot else None
+
+    def fail_on_second_row(value: Decimal | None) -> str:
+        """Interrupt serialization after the first complete ticker."""
+        if value == 2:
+            raise OSError("interrupted grouped write")
+        return _format_decimal(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "snapper.infrastructure.historical.polygon.loader._format_decimal", fail_on_second_row
+        )
+        with pytest.raises(OSError, match="interrupted grouped write"):
+            await loader.fetch_grouped_daily(day, market_type="crypto")
+
+    assert list(path.parent.iterdir()) == ([path] if prior_snapshot else [])
+    if previous is not None:
+        assert path.read_bytes() == previous
+
+    await loader.fetch_grouped_daily(day, market_type="crypto")
+    with path.open(encoding="utf-8", newline="") as handle:
+        assert [row["ticker"] for row in csv.DictReader(handle)] == ["A", "B"]
+    if previous_mode is not None:
+        assert path.stat().st_mode == previous_mode
+
+
+@pytest.mark.asyncio
 async def test_fetch_grouped_daily_skips_csv_when_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
