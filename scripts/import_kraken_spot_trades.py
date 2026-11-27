@@ -142,6 +142,31 @@ async def _compare(
     return plan_kraken_spot_trade_recovery(candidates, stored)
 
 
+async def _catalog_checked_plan(
+    repository: SQLAlchemyRepository,
+    session: AsyncSession,
+    evidence: KrakenSpotTradeEvidenceWindow,
+) -> KrakenSpotTradeRecoveryPlan:
+    """Require every canonical evidence pair to match an active Kraken Spot listing."""
+    expected = {row.symbol: row.instrument_public_id for row in evidence.rows}
+    as_of = datetime.now(UTC)
+    mismatches: list[str] = []
+    for symbols in batched(sorted(expected), _CHUNK_SIZE, strict=False):
+        catalog = await repository.get_instrument_public_ids_by_symbols(
+            set(symbols), ExchangeEnum.KRAKEN, as_of, session=session
+        )
+        for symbol in symbols:
+            evidence_id = expected[symbol]
+            if catalog.get(symbol) != evidence_id:
+                catalog_id = catalog.get(symbol, "no active instrument")
+                mismatches.append(f"{symbol} (evidence {evidence_id}, catalog {catalog_id})")
+    if mismatches:
+        raise ValueError(
+            "Kraken Spot instrument catalog mismatches found for " + ", ".join(mismatches)
+        )
+    return await _compare(session, evidence.rows)
+
+
 async def _read_plan(
     repository: SQLAlchemyRepository, evidence: KrakenSpotTradeEvidenceWindow
 ) -> KrakenSpotTradeRecoveryPlan:
@@ -154,7 +179,7 @@ async def _read_plan(
             await session.execute(
                 text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             )
-            return await _compare(session, evidence.rows)
+            return await _catalog_checked_plan(repository, session, evidence)
     if repository.dialect_name != "sqlite":
         raise ValueError("Trade import supports PostgreSQL and SQLite")
 
@@ -168,7 +193,7 @@ async def _read_plan(
     try:
         async with AsyncSession(reader) as session:
             await session.execute(text("BEGIN"))
-            return await _compare(session, evidence.rows)
+            return await _catalog_checked_plan(repository, session, evidence)
     finally:
         await reader.dispose()
 
@@ -233,9 +258,8 @@ async def _write_chunk(
 ) -> _ChunkCounts:
     """Insert one chunk without updating existing rows and verify it by readback.
 
-    PostgreSQL takes no table lock, so live trade writers are never blocked. The
-    insert skips any identity that already exists, and a row the live feed stores
-    concurrently is counted as already present instead of failing the chunk.
+    PostgreSQL takes no explicit table lock and bounds conflict waits. An exact
+    trade the live feed stores concurrently is counted as already present.
     """
     async with repository.session() as session:
         if repository.dialect_name == "postgresql":

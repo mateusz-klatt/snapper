@@ -100,6 +100,8 @@ async def test_postgresql_read_plan_uses_read_only_snapshot(
     Then: The first statement establishes read-only repeatable-read isolation.
     """
     repository, session = _repository_mock("postgresql")
+    catalog = repository.get_instrument_public_ids_by_symbols
+    catalog.return_value = {_TRADE.symbol: _TRADE.instrument_public_id}
     compare = AsyncMock(return_value=_MISSING)
     monkeypatch.setattr(importer, "_compare", compare)
 
@@ -108,6 +110,9 @@ async def test_postgresql_read_plan_uses_read_only_snapshot(
     assert [str(call.args[0]) for call in session.execute.await_args_list] == [
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
     ]
+    catalog.assert_awaited_once()
+    assert catalog.await_args.args[:2] == ({_TRADE.symbol}, "kraken")
+    assert catalog.await_args.kwargs == {"session": session}
     compare.assert_awaited_once_with(session, _EVIDENCE.rows)
     session.commit.assert_not_awaited()
 

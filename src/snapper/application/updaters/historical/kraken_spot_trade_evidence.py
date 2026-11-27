@@ -218,6 +218,7 @@ def _parse_row(fields: list[str]) -> KrakenSpotTradeEvidence:
     ) = fields
     if exchange != "kraken":
         raise ValueError("Expected kraken exchange")
+    symbol = symbol.replace("/", "-")
     if not _SYMBOL.fullmatch(symbol):
         raise ValueError("Invalid Kraken Spot native symbol")
     if not _PUBLIC_ID.fullmatch(instrument_public_id):
