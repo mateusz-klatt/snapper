@@ -16,6 +16,7 @@ Event archive structure:
 """
 
 import csv
+import errno
 import json
 import os
 from collections import defaultdict
@@ -747,6 +748,38 @@ def _fsync_directory_tree(target_dir: Path, base_dir: Path) -> None:
         current = current.parent
 
 
+_UNSYNCABLE_DIRECTORY_ERRNOS = frozenset({errno.EROFS, errno.EINVAL, errno.EBADF, errno.EACCES})
+
+
+def _fsync_base_ancestors(base_dir: Path) -> None:
+    """Make the archive base durable in every ancestor directory before a purge.
+
+    A non-purging export may have created ``base_dir`` several levels deep
+    without syncing the directories that hold those new entries, and a later
+    purge would otherwise see an existing base and stop its per-file chain at
+    ``base_dir.parent``. Syncing every ancestor of the resolved base, up to the
+    filesystem root, closes that gap for first runs and retries alike at a
+    cost bounded by the path depth. Ancestors above ``base_dir.parent`` may sit
+    on read-only or special filesystems that refuse a directory fsync; those
+    specific refusals are tolerated there, while any error at ``base_dir`` or
+    ``base_dir.parent`` propagates and blocks the purge. On Windows
+    (``os.name == "nt"``) this is a no-op, like every directory fsync here.
+
+    Args:
+        base_dir: Configured archiver base directory, which must exist.
+    """
+    if not _directory_fsync_supported():
+        return
+    resolved_base = base_dir.resolve()
+    strict = (resolved_base, resolved_base.parent)
+    for directory in (resolved_base, *resolved_base.parents):
+        try:
+            _fsync_directory(directory)
+        except OSError as exc:
+            if directory in strict or exc.errno not in _UNSYNCABLE_DIRECTORY_ERRNOS:
+                raise
+
+
 def _validate_archive_destination(path: Path, base_dir: Path) -> None:
     """Ensure ``path`` resolves safely inside ``base_dir`` and is not a symlink.
 
@@ -1237,6 +1270,7 @@ class CandleAuditArchiver:
 
         rows_purged = 0
         if purge and not dry_run and all_row_ids:
+            _fsync_base_ancestors(self._base_dir)
             rows_purged = self._repo.delete_rows_by_id(Candle, all_row_ids)
 
         return ExportResult(

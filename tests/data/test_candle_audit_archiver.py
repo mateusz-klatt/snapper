@@ -1,6 +1,7 @@
 """Tests for candle audit archiver (all SCD2 versions with temporal metadata)."""
 
 import csv
+import errno
 import os
 from datetime import UTC
 from datetime import date
@@ -21,6 +22,7 @@ from snapper.data.archiver import _CANDLE_AUDIT_COLUMNS
 from snapper.data.archiver import CandleAuditArchiver
 from snapper.data.archiver import ExportResult
 from snapper.data.archiver import _directory_fsync_supported
+from snapper.data.archiver import _fsync_base_ancestors
 from snapper.data.archiver import _fsync_directory
 from snapper.data.archiver import _fsync_directory_tree
 from snapper.data.models import KNOWN_TO_MAX
@@ -1440,9 +1442,10 @@ def test_candle_audit_dir_fsync_failure_then_retry_with_purge_fsyncs_full_chain_
         )
 
         assert retried == ExportResult(files_written=1, rows_exported=1, rows_purged=1)
-        assert opened_retry == expected_dirs
-        assert synced_retry == expected_dirs
-        assert closed_retry == expected_dirs
+        retry_dirs = [*expected_dirs, tmp_path, tmp_path.parent]
+        assert opened_retry == retry_dirs
+        assert synced_retry == retry_dirs
+        assert closed_retry == retry_dirs
         assert (
             repo.get_candle_versions_for_archive(instrument_id, "1m", day, day, closed_only=True)
             == []
@@ -1565,3 +1568,110 @@ def test_candle_audit_rejects_symlink_leaf_before_io(
         )
     finally:
         repo.dispose()
+
+
+def test_fsync_base_ancestors_syncs_every_resolved_ancestor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Before a purge, the base and every ancestor up to the root are synced.
+
+    Given: An existing base directory and directory fsync reported as supported.
+    When: ``_fsync_base_ancestors`` runs.
+    Then: It syncs the resolved base, then each resolved ancestor in order up to
+        the filesystem root.
+    """
+    base = tmp_path / "base"
+    base.mkdir()
+    synced: list[Path] = []
+    monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+    monkeypatch.setattr("snapper.data.archiver._fsync_directory", synced.append)
+
+    _fsync_base_ancestors(base)
+
+    resolved = base.resolve()
+    assert synced == [resolved, *resolved.parents]
+
+
+def test_fsync_base_ancestors_tolerates_unsyncable_high_ancestors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read-only refusal above ``base.parent`` is tolerated and the walk continues.
+
+    Given: Directory fsync that raises ``EROFS`` for every directory above
+        ``base.parent``.
+    When: ``_fsync_base_ancestors`` runs.
+    Then: It returns normally after attempting every ancestor.
+    """
+    base = tmp_path / "base"
+    base.mkdir()
+    resolved = base.resolve()
+    attempted: list[Path] = []
+
+    def _fsync(directory: Path) -> None:
+        """Refuse every directory above the base's parent as read-only."""
+        attempted.append(directory)
+        if directory not in (resolved, resolved.parent):
+            raise OSError(errno.EROFS, "read-only file system")
+
+    monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+    monkeypatch.setattr("snapper.data.archiver._fsync_directory", _fsync)
+
+    _fsync_base_ancestors(base)
+
+    assert attempted == [resolved, *resolved.parents]
+
+
+@pytest.mark.parametrize("failing", ["base", "parent", "unexpected"])
+def test_fsync_base_ancestors_propagates_strict_or_unexpected_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: str,
+) -> None:
+    """Errors at the base, its parent, or with an unexpected errno block the purge.
+
+    Given: Directory fsync that fails at the base, at its parent with a tolerated
+        errno, or above the parent with an errno outside the tolerated set.
+    When: ``_fsync_base_ancestors`` runs.
+    Then: The ``OSError`` propagates.
+    """
+    base = tmp_path / "base"
+    base.mkdir()
+    resolved = base.resolve()
+    targets = {
+        "base": (resolved, errno.EROFS),
+        "parent": (resolved.parent, errno.EROFS),
+        "unexpected": (resolved.parent.parent, errno.EIO),
+    }
+    failing_dir, failing_errno = targets[failing]
+
+    def _fsync(directory: Path) -> None:
+        """Fail only at the selected directory with the selected errno."""
+        if directory == failing_dir:
+            raise OSError(failing_errno, "injected directory fsync failure")
+
+    monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+    monkeypatch.setattr("snapper.data.archiver._fsync_directory", _fsync)
+
+    with pytest.raises(OSError, match="injected directory fsync failure"):
+        _fsync_base_ancestors(base)
+
+
+def test_fsync_base_ancestors_is_a_no_op_without_directory_fsync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Platforms without directory fsync skip the ancestor walk entirely.
+
+    Given: Directory fsync reported as unsupported.
+    When: ``_fsync_base_ancestors`` runs.
+    Then: No directory is synced.
+    """
+    synced: list[Path] = []
+    monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: False)
+    monkeypatch.setattr("snapper.data.archiver._fsync_directory", synced.append)
+
+    _fsync_base_ancestors(tmp_path)
+
+    assert synced == []

@@ -2040,7 +2040,7 @@ snapper archive [OPTIONS]
 | `--dry-run` | FLAG | False | Report counts without writing files |
 | `--purge` | FLAG | False | Delete exported rows from DB after writing (event tables **except `executions`**, plus `candles-audit`/state tables when combined with `--closed-only`). Refused for `executions` — see the execution exception note below. |
 | `--closed-only` | FLAG | False | Only closed SCD2 versions (`candles-audit` and state tables) |
-| `--output-dir` | str | `data` | Base output directory. For `candles-audit` with `--purge`, it must already exist: the export refuses to start otherwise, so every directory it creates lies inside a durable base before rows are deleted. |
+| `--output-dir` | str | `data` | Base output directory. For a live `candles-audit` `--purge` (not `--dry-run`) it must already exist, or the export refuses to start. Before deleting rows, the export also fsyncs the base and every ancestor directory, so the archive stays reachable after a crash. |
 
 **Output structure:**
 
