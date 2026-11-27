@@ -295,7 +295,7 @@ def test_module_exposes_the_script_help(
 
     Given: The operator invokes the module with help.
     When: The parser handles the request.
-    Then: The command displays the options and exits successfully.
+    Then: The command explains where the receipt belongs and exits successfully.
     """
     monkeypatch.setattr(sys, "argv", ["import_kraken_spot_trades", "--help"])
 
@@ -303,4 +303,6 @@ def test_module_exposes_the_script_help(
         runpy.run_path(str(importer.__file__), run_name="__main__")
 
     assert exit_info.value.code == 0
-    assert "--expect-digest" in capsys.readouterr().out
+    help_text = capsys.readouterr().out
+    assert "--expect-digest" in help_text
+    assert "New apply receipt file inside --input-root" in " ".join(help_text.split())

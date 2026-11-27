@@ -1496,8 +1496,10 @@ importer makes no Kraken API calls.
           --apply --expect-digest "$PLAN_DIGEST" --receipt import-receipt.json
 
     Apply recomputes the live plan and exits with status 2 if the digest
-    differs. The receipt path must be unused. Each transaction handles up to
-    500 trades and enqueues historical trade-integrity work only for rows it
+    differs. The receipt must be a new file in an existing directory inside
+    `--input-root`. Relative receipt paths resolve from that root. The command
+    reserves the file before writing any trades. Each transaction handles up
+    to 500 trades and enqueues historical trade-integrity work only for rows it
     inserts. Existing trades stay intact, and a matching trade the live feed
     stores concurrently is counted as already present. PostgreSQL takes no
     explicit table lock and uses a two-second lock timeout and a 15-second

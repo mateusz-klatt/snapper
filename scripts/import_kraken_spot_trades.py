@@ -11,6 +11,7 @@ from datetime import UTC
 from datetime import datetime
 from itertools import batched
 from pathlib import Path
+from typing import TextIO
 from typing import TypedDict
 from typing import cast
 from uuid import uuid7
@@ -28,6 +29,7 @@ from snapper.application.updaters.historical.kraken_spot_trade_evidence import (
     KrakenSpotTradeEvidenceWindow,
 )
 from snapper.application.updaters.historical.kraken_spot_trade_evidence import confined_input
+from snapper.application.updaters.historical.kraken_spot_trade_evidence import confined_output
 from snapper.application.updaters.historical.kraken_spot_trade_evidence import (
     load_kraken_spot_trade_evidence,
 )
@@ -101,7 +103,7 @@ def _arguments(argv: list[str] | None) -> _Arguments:
     parser.add_argument("--end", required=True, help="Exclusive UTC execution time")
     parser.add_argument("--apply", action="store_true", help="Insert rows from the reviewed plan")
     parser.add_argument("--expect-digest", type=str.lower, help="Reviewed plan SHA-256")
-    parser.add_argument("--receipt", type=Path, help="New file for the apply receipt")
+    parser.add_argument("--receipt", type=Path, help="New apply receipt file inside --input-root")
     args = parser.parse_args(argv, namespace=_Arguments())
     if args.apply:
         if args.expect_digest is None or not re.fullmatch(r"[0-9a-f]{64}", args.expect_digest):
@@ -282,6 +284,13 @@ async def _write_chunk(
         return {"inserted": inserted, "already_present": after.already_present - inserted}
 
 
+def _write_receipt(stream: TextIO, receipt: _Receipt) -> None:
+    """Write the receipt and close its reserved file in the same worker call."""
+    with stream:
+        json.dump(receipt, stream, sort_keys=True)
+        stream.write("\n")
+
+
 async def _apply(
     repository: SQLAlchemyRepository,
     evidence: KrakenSpotTradeEvidenceWindow,
@@ -294,30 +303,27 @@ async def _apply(
     chunks: list[_ChunkCounts] = []
     verified_missing = None
     tracker = SequenceTracker()
-    with receipt_path.open("x", encoding="utf-8") as stream:
-        try:
-            for candidates in batched(plan.missing, _CHUNK_SIZE, strict=False):
-                chunks.append(await _write_chunk(repository, candidates, tracker))
-            verified_missing = len((await _read_plan(repository, evidence)).missing)
-            if verified_missing:
-                raise ValueError(
-                    f"Trade import verification found {verified_missing} missing trades"
-                )
-        finally:
-            receipt = _Receipt(
-                window=_window(evidence),
-                evidence_sha256=evidence.evidence_sha256,
-                plan_digest=digest,
-                chunks=chunks,
-                total_inserted=sum(chunk["inserted"] for chunk in chunks),
-                total_already_present=plan.already_present
-                + sum(chunk["already_present"] for chunk in chunks),
-                started_at=started_at,
-                finished_at=datetime.now(UTC).isoformat(),
-                verified_missing=verified_missing,
-            )
-            json.dump(receipt, stream, sort_keys=True)
-            stream.write("\n")
+    stream = await asyncio.to_thread(receipt_path.open, "x", encoding="utf-8")
+    try:
+        for candidates in batched(plan.missing, _CHUNK_SIZE, strict=False):
+            chunks.append(await _write_chunk(repository, candidates, tracker))
+        verified_missing = len((await _read_plan(repository, evidence)).missing)
+        if verified_missing:
+            raise ValueError(f"Trade import verification found {verified_missing} missing trades")
+    finally:
+        receipt = _Receipt(
+            window=_window(evidence),
+            evidence_sha256=evidence.evidence_sha256,
+            plan_digest=digest,
+            chunks=chunks,
+            total_inserted=sum(chunk["inserted"] for chunk in chunks),
+            total_already_present=plan.already_present
+            + sum(chunk["already_present"] for chunk in chunks),
+            started_at=started_at,
+            finished_at=datetime.now(UTC).isoformat(),
+            verified_missing=verified_missing,
+        )
+        await asyncio.to_thread(_write_receipt, stream, receipt)
     return receipt
 
 
@@ -340,7 +346,9 @@ def _preview(
     )
 
 
-async def _run(args: _Arguments, evidence: KrakenSpotTradeEvidenceWindow) -> int:
+async def _run(
+    evidence: KrakenSpotTradeEvidenceWindow, expect_digest: str | None, receipt_path: Path | None
+) -> int:
     """Plan against the configured database, then run only the approved mode."""
     repository = configured_repository(
         get_bootstrap_settings().db_url, application_name="snapper:import-kraken-spot-trades"
@@ -355,13 +363,13 @@ async def _run(args: _Arguments, evidence: KrakenSpotTradeEvidenceWindow) -> int
         )
         plan = KrakenSpotTradeRecoveryPlan(missing, live.already_present)
         digest = _plan_digest(evidence, plan.missing)
-        if args.receipt is None:
+        if receipt_path is None:
             _preview(evidence, plan, digest)
             return 0
-        if digest != args.expect_digest:
+        if digest != expect_digest:
             print("Trade import refused: plan digest differs from --expect-digest", file=sys.stderr)
             return 2
-        receipt = await _apply(repository, evidence, plan, digest, args.receipt)
+        receipt = await _apply(repository, evidence, plan, digest, receipt_path)
         print(json.dumps(receipt, sort_keys=True))
         return 0
     finally:
@@ -379,9 +387,11 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _arguments(argv)
     try:
-        path = confined_input(resolve_input_root(args.input_root), args.evidence)
+        root = resolve_input_root(args.input_root)
+        path = confined_input(root, args.evidence)
+        receipt_path = None if args.receipt is None else confined_output(root, args.receipt)
         evidence = load_kraken_spot_trade_evidence(path, args.evidence_sha256, args.start, args.end)
-        return asyncio.run(_run(args, evidence))
+        return asyncio.run(_run(evidence, args.expect_digest, receipt_path))
     except (OSError, ValueError) as error:
         print(f"Trade import refused: {error}", file=sys.stderr)
     except SQLAlchemyError as error:

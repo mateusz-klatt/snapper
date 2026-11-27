@@ -111,6 +111,36 @@ def confined_input(root: Path, candidate: Path) -> Path:
     raise ValueError("Input path must be a regular file inside the input root")
 
 
+def confined_output(root: Path, candidate: Path) -> Path:
+    """Resolve a path for a new receipt within the allowed directory.
+
+    Args:
+        root: The canonical input directory.
+        candidate: An absolute path or a path relative to the input directory.
+
+    Returns:
+        The canonical parent directory joined to the unused file name.
+
+    Raises:
+        ValueError: If the parent is invalid or the file name is invalid or already in use.
+    """
+    message = "Receipt path must be a new file inside the input root"
+    try:
+        parent = Path(os.path.realpath((root / candidate).parent, strict=True))
+    except OSError as error:
+        raise ValueError(message) from error
+    if not parent.is_relative_to(root) or not parent.is_dir() or candidate.name in ("", ".."):
+        raise ValueError(message)
+    path = parent / candidate.name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return path
+    except OSError as error:
+        raise ValueError(message) from error
+    raise ValueError(message)
+
+
 def load_kraken_spot_trade_evidence(
     path: Path, expected_digest: str, start: str, end: str
 ) -> KrakenSpotTradeEvidenceWindow:

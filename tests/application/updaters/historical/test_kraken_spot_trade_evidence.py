@@ -5,6 +5,7 @@ from datetime import UTC
 from datetime import datetime
 from decimal import Decimal
 from io import StringIO
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,7 @@ from snapper.application.updaters.historical import kraken_spot_trade_evidence
 from snapper.application.updaters.historical.kraken_spot_trade_evidence import (
     KrakenSpotTradeEvidence,
 )
+from snapper.application.updaters.historical.kraken_spot_trade_evidence import confined_output
 from snapper.application.updaters.historical.kraken_spot_trade_evidence import (
     read_kraken_spot_trade_evidence,
 )
@@ -42,6 +44,72 @@ def _csv(*rows: list[str]) -> StringIO:
     csv.writer(stream).writerows(rows)
     stream.seek(0)
     return stream
+
+
+def test_confines_new_receipts_under_the_input_root(tmp_path: Path) -> None:
+    """Resolve new receipt names under the root without creating files.
+
+    Given: A directory inside the input root with an unused receipt name.
+    When: An operator supplies its relative path or its absolute path.
+    Then: Both resolve to the same unused path inside the root.
+    """
+    root = tmp_path.resolve()
+    relative = Path("receipts/receipt.json")
+    path = root / relative
+    path.parent.mkdir()
+
+    assert confined_output(root, relative) == confined_output(root, path) == path
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "../receipt.json",
+        "outside/receipt.json",
+        "missing/receipt.json",
+        "regular.json/receipt.json",
+        ".",
+        "nested/..",
+        pytest.param("a" * 1024, id="oversize-file-name"),
+    ],
+)
+def test_rejects_receipts_with_invalid_paths(tmp_path: Path, candidate: str) -> None:
+    """Reject receipt paths that escape the root or cannot identify a new file.
+
+    Given: An input root with a nested directory, a regular file, and a link outside.
+    When: An operator supplies a path with an invalid destination.
+    Then: Confinement rejects the receipt.
+    """
+    root = tmp_path.resolve() / "inputs"
+    root.mkdir()
+    (root / "nested").mkdir()
+    (root / "outside").symlink_to(tmp_path, target_is_directory=True)
+    (root / "regular.json").write_text("existing file", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Receipt path must be a new file inside the input root"):
+        confined_output(root, Path(candidate))
+
+
+@pytest.mark.parametrize("dangling_symlink", [False, True])
+def test_rejects_occupied_receipt_names(tmp_path: Path, dangling_symlink: bool) -> None:
+    """Require unused names for receipts.
+
+    Given: A receipt name occupied by a regular file or a dangling symlink.
+    When: An operator supplies that destination.
+    Then: Confinement rejects the name and preserves the existing entry.
+    """
+    root = tmp_path.resolve()
+    path = root / "receipt.json"
+    if dangling_symlink:
+        path.symlink_to(root / "missing.json")
+    else:
+        path.write_text("existing receipt", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Receipt path must be a new file inside the input root"):
+        confined_output(root, path)
+
+    assert path.exists(follow_symlinks=False)
 
 
 def test_preserves_decimal_precision_order_and_duplicate_rows() -> None:

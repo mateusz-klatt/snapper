@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 from uuid import UUID
 from uuid import uuid7
 
@@ -333,7 +334,7 @@ def test_apply_writes_only_missing_trades_and_their_obligations(
     receipt = tmp_path / "receipt.json"
     started = datetime.now(UTC)
 
-    assert importer.main(_apply_args(argv, digest, receipt)) == 0
+    assert importer.main(_apply_args(argv, digest, Path(receipt.name))) == 0
     finished = datetime.now(UTC)
     recorded = cast(JsonObject, json.loads(receipt.read_text(encoding="utf-8")))
     assert json.loads(capsys.readouterr().out) == recorded
@@ -425,6 +426,59 @@ def test_apply_refuses_an_existing_receipt(
         assert not absent.exists()
     else:
         assert receipt.read_text(encoding="utf-8") == "existing receipt"
+    assert asyncio.run(_stored(database)) == ([], [])
+
+
+def test_apply_refuses_an_outside_receipt_before_database_access(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reject an output path outside the configured root before planning.
+
+    Given: Valid evidence under an input root and a relative receipt path escaping it.
+    When: The operator applies the import.
+    Then: The request fails with status one before opening the repository.
+    """
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    configure_repository = Mock()
+    monkeypatch.setattr(importer, "configured_repository", configure_repository)
+
+    assert importer.main(_apply_args(_args(inputs), "0" * 64, Path("../receipt.json"))) == 1
+
+    configure_repository.assert_not_called()
+    assert "input root" in capsys.readouterr().err
+    assert not (tmp_path / "receipt.json").exists()
+
+
+def test_apply_refuses_a_receipt_created_after_validation(
+    tmp_path: Path,
+    database: str,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the database and competing receipt untouched on an exclusive-create collision.
+
+    Given: A competing process creates the receipt after its path passes validation.
+    When: The importer attempts to reserve the receipt for the approved plan.
+    Then: The import fails before writing trades or obligations and leaves the receipt intact.
+    """
+    argv = _args(tmp_path)
+    digest = cast(str, _dry_run(argv, capsys)["plan_digest"])
+    receipt = tmp_path / "receipt.json"
+    validate_output = importer.confined_output
+
+    def create_receipt_after_validation(root: Path, candidate: Path) -> Path:
+        """Create the competing file at the validated path before apply begins."""
+        path = validate_output(root, candidate)
+        path.write_text("competing receipt", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(importer, "confined_output", create_receipt_after_validation)
+
+    assert importer.main(_apply_args(argv, digest, receipt)) == 1
+
+    assert "receipt.json" in capsys.readouterr().err
+    assert receipt.read_text(encoding="utf-8") == "competing receipt"
     assert asyncio.run(_stored(database)) == ([], [])
 
 
