@@ -5000,7 +5000,8 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         apns.send.assert_not_awaited()
         assert any(
             f"delivery={delivery_pid}" in msg
-            and "refusal for attempt 0 superseded by a newer attempt" in msg
+            and "refusal for attempt 0 version" in msg
+            and "superseded by a newer attempt" in msg
             for msg in info_logs
         )
         final_row = await repo.get_delivery_by_public_id(delivery_pid)
@@ -5272,7 +5273,7 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         apns.send.assert_not_awaited()
         assert any(
             f"delivery={delivery_pid}" in msg
-            and "superseded by a newer attempt; leaving it untouched" in msg
+            and "superseded by a newer attempt or delivery version; leaving it untouched" in msg
             for msg in info_logs
         )
         final_row = await repo.get_delivery_by_public_id(delivery_pid)

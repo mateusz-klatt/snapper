@@ -1368,7 +1368,7 @@ class NotifySidecar(RegisterableProcess):
         if not applied:
             logger.info(
                 "sidecar: delivery={pid} refusal for attempt {attempt} version {vid}"
-                " superseded by a newer attempt; leaving it untouched",
+                " superseded by a newer attempt or delivery version; leaving it untouched",
                 pid=delivery_public_id,
                 attempt=expected_attempt_count,
                 vid=expected_version_id,

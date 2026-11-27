@@ -31,6 +31,7 @@ from uuid import uuid7
 import pytest
 from sqlalchemy import delete
 from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -82,6 +83,11 @@ def _resolve_witness_url() -> tuple[URL | None, str]:
         return (
             None,
             f"{_WITNESS_ENV_VAR} must use a postgresql backend (got {url.get_backend_name()!r})",
+        )
+    if url.query:
+        return (
+            None,
+            f"{_WITNESS_ENV_VAR} must not carry query parameters, which could override the database",
         )
     db_name = (url.database or "").strip()
     if not db_name.endswith(("_witness", "_scratch")):
@@ -149,6 +155,11 @@ async def pg_fixture() -> AsyncIterator[_PgAdmissionFixture]:
     device_pid = ""
     try:
         async with repo_primary.session() as session:
+            connected = (await session.execute(text("SELECT current_database()"))).scalar_one()
+            if connected != url.database:
+                pytest.fail(
+                    f"witness connected to {connected!r}, not the validated {url.database!r}; refusing to write"
+                )
             session.add(
                 User(
                     public_id=user_pid,
