@@ -1102,9 +1102,9 @@ and `--scope` flags.
 
 ### Connecting Claude.ai and ChatGPT
 
-Exact buttons, fields and step order vary by assistant, plan and UI
-version. The general flow is below; for the sequence observed in
-Claude.ai, see its note after the list:
+Exact buttons, fields and step order vary by assistant, plan, locale and
+UI version. The general flow is below; for what production UAT observed
+in Claude.ai and ChatGPT, see their notes after the list:
 
 1. Open the assistant's connectors or apps settings and start creating a
     custom remote MCP connector or app.
@@ -1155,12 +1155,53 @@ Assistant-specific notes:
         `list_positions`), returning data from your accessible markets
         and wallets.
 
-- **ChatGPT** — Enable developer mode if required, add a custom app or
-    connector at `https://<your-snapper-host>/api/mcp` with OAuth
-    authentication and its dedicated provisioned client, then complete the
-    browser consent redirect. Provision with
-    `--auth-method client_secret_post` if your client sends credentials in
-    the form body instead of HTTP Basic auth.
+- **ChatGPT** — Connected apps are managed in Settings under
+    **Plugins** (`/settings/plugins-settings`; `#settings/Connectors`
+    redirects there). UI labels, navigation paths, and dialog steps
+    vary across plans, locales, and releases (production UAT observed a
+    localized ChatGPT web UI, so exact English labels may differ).
+    Production UAT observed the following on an installed custom MCP
+    app:
+
+    - **Plugins list:** `/settings/plugins-settings` lists installed
+        plugins, each with its permission level, alongside a button to
+        browse the catalog.
+    - **Installed plugin settings:** An installed custom MCP app appears
+        as a plugin whose settings page shows:
+
+        - an uninstall option;
+        - a per-plugin permissions setting controlling when ChatGPT asks
+            before using tools;
+        - a connected-accounts section with a button to connect another
+            account;
+        - an information block showing connected date, developer, plugin
+            version, URL `https://<your-snapper-host>/api/mcp`,
+            supported auth methods (`OAuth`), auth method used
+            (`OAuth`), and verification status (`DEVELOPMENT`);
+        - app-management controls to edit the app name and description,
+            run **Refresh tools** (loads the latest tools from the app's
+            MCP server), and delete the app.
+
+    - **Launching a chat and live calls:** The plugin's detail page has
+        a button to open a new chat with the plugin attached. A live
+        read-only tool call worked in UAT: asking in chat for `get_ohlcv`
+        on `kraken` `BTC-EUR` `1h` returned the canonical envelope
+        (`success: true`, `"Returned 2 candles."`).
+    - **Creating a new custom app (not verified):** How a new custom app
+        or connector is created — enabling developer mode if required,
+        opening the create dialog, reading the displayed callback /
+        redirect URI, configuring a custom app or connector at
+        `https://<your-snapper-host>/api/mcp` with OAuth authentication
+        and its dedicated provisioned client (`client_id` and
+        `client_secret`; provision with
+        `--auth-method client_secret_post` if your client sends
+        credentials in the form body instead of HTTP Basic auth), and
+        completing the browser consent redirect — was **not verified**
+        in this UAT; UI labels, navigation paths, and fields vary.
+    - **Refreshing tools after a deploy:** After a Snapper deploy that
+        changes the MCP tool list, use **Refresh tools** on the plugin's
+        settings page so ChatGPT loads the latest tools from Snapper's
+        MCP server.
 
 ### Gemini status
 
