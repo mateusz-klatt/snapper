@@ -810,7 +810,9 @@ optional; `null` means "unbounded on this axis".
     raw submit-time price, no USD re-conversion; prior live market
     orders with no submit price are skipped with a WARN log), plus the
     new submission's USD-converted notional via the USD price oracle
-    (`price_unavailable` caps violation when the oracle is stale or
+    (pricing from the fresher of the newest active 1m candle close and
+    `market_snapshots` within the 300s freshness window;
+    `price_unavailable` caps violation when the oracle is stale or
     missing) — the current submission is evaluated regardless of mode.
     Submit-time commitment basis; partial fills don't change
     accounting.

@@ -14,6 +14,7 @@ import pytest
 from snapper.application.pricing.usd_converter import PriceUnavailableError
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Candle
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
 from snapper.data.models import MarketSnapshot
@@ -746,3 +747,56 @@ async def test_native_unit_is_checked_independently_of_certification(
     )
     with pytest.raises(PriceUnavailableError, match="contract_valuation_unavailable"):
         await USDConverter(repo, now=lambda: _NOW).to_usd(_INSTRUMENT, Decimal(1))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model,multiplier,quantity,expected",
+    [
+        ("linear", "1", "0.0001", "10"),
+        ("inverse", "10", "1000", "10000"),
+    ],
+)
+async def test_contract_valuation_works_from_active_1m_candle_without_snapshot(
+    model: str,
+    multiplier: str,
+    quantity: str,
+    expected: str,
+) -> None:
+    """Contract multiplier and inverse valuation stay unchanged when priced from 1m candle.
+
+    Given: a certified derivative instrument with a stale MarketSnapshot removed
+        and a fresh active 1m calculated candle close at 100_000,
+    When: ``to_usd`` runs,
+    Then: explicit linear and inverse payoff math produces the exact USD notional.
+    """
+    repo = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    spec = _spec(model)
+    spec.contract_size = Decimal(multiplier)
+    await _market(repo, spec)
+    async with repo.session() as session:
+        await session.execute(MarketSnapshot.__table__.delete())
+        session.add(
+            Candle(
+                public_id="contract-1m-candle",
+                instrument_public_id=_INSTRUMENT,
+                open_at=_NOW - timedelta(seconds=60),
+                timeframe="1m",
+                open=100_000.0,
+                high=100_000.0,
+                low=100_000.0,
+                close=100_000.0,
+                volume=5.0,
+                vwap=100_000.0,
+                trades=3,
+                source="calculated",
+                complete=True,
+                timestamp=_NOW,
+                known_to=KNOWN_TO_MAX,
+                session_id="test",
+                sequence_id=1,
+            )
+        )
+        await session.commit()
+    converter = USDConverter(repo, now=lambda: _NOW)
+    assert await converter.to_usd(_INSTRUMENT, Decimal(quantity)) == Decimal(expected)

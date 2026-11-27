@@ -2829,6 +2829,27 @@ class UsdFxSnapshotCandidateRow(TypedDict):
     timestamp: datetime
 
 
+class ActiveCandlePriceRow(TypedDict):
+    """Newest active 1m candle close and opening time for an instrument."""
+
+    candle_public_id: str
+    instrument_public_id: str
+    close: float
+    open_at: datetime
+
+
+class UsdFxCandleCandidateRow(TypedDict):
+    """Current forex identity and newest active 1m candle close evidence."""
+
+    candle_public_id: str
+    instrument_public_id: str
+    exchange: str
+    base: str
+    quote: str
+    close: float
+    open_at: datetime
+
+
 class SpotAssetPrecisionEvidenceRow(TypedDict):
     """Active precision evidence for one exact venue asset identity."""
 

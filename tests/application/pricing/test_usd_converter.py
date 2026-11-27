@@ -23,18 +23,22 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 import pytest
 
 from snapper.application.pricing.usd_converter import CACHE_TTL_SECONDS
+from snapper.application.pricing.usd_converter import MAX_FUTURE_SKEW_SECONDS
 from snapper.application.pricing.usd_converter import STALENESS_THRESHOLD_SECONDS
 from snapper.application.pricing.usd_converter import PriceUnavailableError
 from snapper.application.pricing.usd_converter import USDConverter
 from snapper.data.models import KNOWN_TO_MAX
+from snapper.data.models import Candle
 from snapper.data.models import Instrument
 from snapper.data.models import MarketSnapshot
 from snapper.data.models import Symbol
 from snapper.data.repository import SQLAlchemyRepository
+from snapper.data.repository_types import ActiveCandlePriceRow
 
 
 @pytest.fixture
@@ -105,6 +109,39 @@ async def _seed_snapshot(
             last_price=last_price,
         )
         s.add(snap)
+        await s.commit()
+
+
+async def _seed_candle(
+    repo: SQLAlchemyRepository,
+    *,
+    instrument_public_id: str,
+    close: float,
+    open_at: datetime,
+    complete: bool = True,
+) -> None:
+    """Insert an active 1m calculated candle row for the instrument."""
+    async with repo.session() as s:
+        candle = Candle(
+            public_id=f"candle-{instrument_public_id}-{int(open_at.timestamp())}",
+            instrument_public_id=instrument_public_id,
+            open_at=open_at,
+            timeframe="1m",
+            open=close,
+            high=close,
+            low=close,
+            close=close,
+            volume=1.0,
+            vwap=close,
+            trades=1,
+            source="calculated",
+            complete=complete,
+            timestamp=open_at,
+            known_to=KNOWN_TO_MAX,
+            session_id="seed",
+            sequence_id=1,
+        )
+        s.add(candle)
         await s.commit()
 
 
@@ -419,3 +456,228 @@ async def test_price_unavailable_error_carries_context(
     assert exc.value.instrument_public_id == inst_id
     assert "EUR" in exc.value.detail
     assert inst_id in str(exc.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("age_from_open,complete", [(360, True), (15, False)])
+async def test_candle_only_fresh_price_succeeds(
+    repo: SQLAlchemyRepository,
+    age_from_open: int,
+    complete: bool,
+) -> None:
+    """Active 1m candle close within close-time freshness prices without a snapshot.
+
+    Given: an Instrument with no MarketSnapshot row and an active 1m
+        calculated candle (at exact 300s close-time boundary or in-progress
+        provisional minute),
+    When: ``to_usd`` runs,
+    Then: the candle's close prices the order without ``snapshot_missing``.
+    """
+    inst_id = "inst-candle-only"
+    await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
+    await _seed_candle(
+        repo,
+        instrument_public_id=inst_id,
+        close=62_000.0,
+        open_at=_seed_time() - timedelta(seconds=age_from_open),
+        complete=complete,
+    )
+    conv = USDConverter(repo, now=_seed_time)
+    assert await conv.to_usd(inst_id, Decimal("0.25")) == Decimal("15500")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_only_fallback_when_candle_stale(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Fresh snapshot serves as fallback when the newest 1m candle is stale.
+
+    Given: an Instrument with a stale 1m candle (10 minutes old) and a
+        fresh MarketSnapshot,
+    When: ``to_usd`` runs,
+    Then: the fresh MarketSnapshot price is selected.
+    """
+    inst_id = "inst-snapshot-fallback"
+    await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
+    await _seed_candle(
+        repo,
+        instrument_public_id=inst_id,
+        close=40_000.0,
+        open_at=_seed_time() - timedelta(seconds=600),
+    )
+    await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=55_000.0)
+    conv = USDConverter(repo, now=_seed_time)
+    assert await conv.to_usd(inst_id, Decimal("2")) == Decimal("110000")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "snapshot_age,candle_open_age,expected_price",
+    [
+        (57_600, 90, "50000"),
+        (120, 90, "50000"),
+        (10, 180, "48000"),
+        (30, 90, "50000"),
+    ],
+)
+async def test_both_present_fresher_source_wins(
+    repo: SQLAlchemyRepository,
+    snapshot_age: int,
+    candle_open_age: int,
+    expected_price: str,
+) -> None:
+    """When both snapshot and 1m candle exist, the fresher evidence wins.
+
+    Given: an Instrument with both a MarketSnapshot (price 48000) and a
+        1m candle (price 50000) at varying ages, including equal effective
+        timestamps where the live candle takes precedence,
+    When: ``to_usd`` runs,
+    Then: the fresher source determines the USD notional.
+    """
+    inst_id = f"inst-both-{snapshot_age}-{candle_open_age}"
+    await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
+    await _seed_snapshot(
+        repo,
+        instrument_public_id=inst_id,
+        last_price=48_000.0,
+        snapshot_time=_seed_time() - timedelta(seconds=snapshot_age),
+    )
+    await _seed_candle(
+        repo,
+        instrument_public_id=inst_id,
+        close=50_000.0,
+        open_at=_seed_time() - timedelta(seconds=candle_open_age),
+    )
+    conv = USDConverter(repo, now=_seed_time)
+    assert await conv.to_usd(inst_id, Decimal("1")) == Decimal(expected_price)
+
+
+@pytest.mark.asyncio
+async def test_candle_stale_and_snapshot_stale_raises_price_stale(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Both candle and snapshot beyond 300s refuse with ``price_stale``.
+
+    Given: a 1m candle whose close-time is 301s old and a MarketSnapshot
+        that is 400s old,
+    When: ``to_usd`` runs,
+    Then: :class:`PriceUnavailableError` with ``price_stale`` is raised.
+    """
+    inst_id = "inst-both-stale"
+    await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
+    await _seed_candle(
+        repo,
+        instrument_public_id=inst_id,
+        close=50_000.0,
+        open_at=_seed_time() - timedelta(seconds=STALENESS_THRESHOLD_SECONDS + 61),
+    )
+    await _seed_snapshot(
+        repo,
+        instrument_public_id=inst_id,
+        last_price=49_000.0,
+        snapshot_time=_seed_time() - timedelta(seconds=STALENESS_THRESHOLD_SECONDS + 100),
+    )
+    conv = USDConverter(repo, now=_seed_time)
+    with pytest.raises(PriceUnavailableError) as exc:
+        await conv.to_usd(inst_id, Decimal("1"))
+    assert exc.value.reason_code == "price_stale"
+
+
+@pytest.mark.asyncio
+async def test_candle_cache_uses_candle_evidence_timestamp(
+    repo: SQLAlchemyRepository,
+) -> None:
+    """Cached candle entry stores the candle close-time and enforces staleness.
+
+    Given: a candle-only price at 290s close-time age cached on initial load
+        and then deleted from the DB,
+    When: a second call runs 5s later (fresh cache hit) and a third call
+        runs 15s later (still within 60s TTL, now 305s old),
+    Then: the second call uses the cached candle price and the third raises
+        ``price_stale``.
+    """
+    inst_id = "inst-candle-cache"
+    await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
+    await _seed_candle(
+        repo,
+        instrument_public_id=inst_id,
+        close=100.0,
+        open_at=_seed_time() - timedelta(seconds=STALENESS_THRESHOLD_SECONDS + 50),
+    )
+    clock = {"t": _seed_time()}
+    conv = USDConverter(repo, now=lambda: clock["t"])
+    assert await conv.to_usd(inst_id, Decimal("2")) == Decimal("200")
+    async with repo.session() as s:
+        await s.execute(Candle.__table__.delete())
+        await s.commit()
+    clock["t"] = _seed_time() + timedelta(seconds=5)
+    assert await conv.to_usd(inst_id, Decimal("3")) == Decimal("300")
+    clock["t"] = _seed_time() + timedelta(seconds=15)
+    with pytest.raises(PriceUnavailableError) as exc:
+        await conv.to_usd(inst_id, Decimal("1"))
+    assert exc.value.reason_code == "price_stale"
+
+
+@pytest.mark.asyncio
+async def test_candle_future_skew_naive_and_invalid_price_fail_closed(
+    repo: SQLAlchemyRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Future-skewed, naive, and nonpositive candle rows obey fail-closed guards.
+
+    Given: a USD-quoted instrument with candle prices at the skew boundary,
+        beyond future skew, with a naive open_at, or with a zero close,
+    When: ``to_usd`` runs,
+    Then: exact skew is accepted while excessive skew, naive timestamp, and
+        invalid close fail closed; a valid candle also overrides a NULL snapshot.
+    """
+    inst_id = "inst-candle-guards"
+    await _seed_instrument(repo, instrument_public_id=inst_id, quote="USD")
+    await _seed_snapshot(repo, instrument_public_id=inst_id, last_price=None)
+    await _seed_candle(
+        repo,
+        instrument_public_id=inst_id,
+        close=250.0,
+        open_at=_seed_time() + timedelta(seconds=MAX_FUTURE_SKEW_SECONDS),
+    )
+    assert await USDConverter(repo, now=_seed_time).to_usd(inst_id, Decimal("2")) == Decimal("500")
+
+    bad_future: ActiveCandlePriceRow = {
+        "candle_public_id": "c-future",
+        "instrument_public_id": inst_id,
+        "close": 250.0,
+        "open_at": _seed_time() + timedelta(seconds=MAX_FUTURE_SKEW_SECONDS + 1),
+    }
+    monkeypatch.setattr(
+        repo, "get_active_latest_1m_candle_price", AsyncMock(return_value=bad_future)
+    )
+    with pytest.raises(PriceUnavailableError, match="price_stale"):
+        await USDConverter(repo, now=_seed_time).to_usd(inst_id, Decimal("1"))
+
+    naive_row: ActiveCandlePriceRow = {
+        "candle_public_id": "c-naive",
+        "instrument_public_id": inst_id,
+        "close": 250.0,
+        "open_at": _seed_time().replace(tzinfo=None),
+    }
+    monkeypatch.setattr(
+        repo, "get_active_latest_1m_candle_price", AsyncMock(return_value=naive_row)
+    )
+    with pytest.raises(PriceUnavailableError, match="price_stale"):
+        await USDConverter(repo, now=_seed_time).to_usd(inst_id, Decimal("1"))
+
+    invalid_row: ActiveCandlePriceRow = {
+        "candle_public_id": "c-zero",
+        "instrument_public_id": inst_id,
+        "close": 0.0,
+        "open_at": _seed_time(),
+    }
+    monkeypatch.setattr(
+        repo, "get_active_latest_1m_candle_price", AsyncMock(return_value=invalid_row)
+    )
+    with pytest.raises(PriceUnavailableError, match="last_price_null"):
+        await USDConverter(repo, now=_seed_time).to_usd(inst_id, Decimal("1"))
+
+    monkeypatch.setattr(repo, "get_active_market_snapshot_price", AsyncMock(return_value=None))
+    with pytest.raises(PriceUnavailableError, match="last_price_invalid"):
+        await USDConverter(repo, now=_seed_time).to_usd(inst_id, Decimal("1"))

@@ -6,15 +6,32 @@ base-denominated multiplier; inverse contracts use quote-denominated value per
 contract independently of the current underlying price. Missing derivative
 semantics never fall back to spot arithmetic.
 
+Price sourcing (both instrument and FX legs):
+For each leg, evidence is the fresher positive finite price between:
+
+1. The newest active 1m candle close in ``candles`` for that exact
+   instrument/exchange (including ``calculated``, ``native``,
+   ``synthesized``, and provisional ``complete=False`` bars). Freshness is
+   evaluated against the bar's close-time (``open_at + 60s``, capped at
+   ``now`` while the current minute bar is still open, and retaining
+   ``open_at`` when future-dated so excessive skew fails closed) rather
+   than persistence ``Candle.timestamp``, so historical backfills or repairs
+   cannot mark days-old bars as live prices.
+2. The active ``market_snapshots`` row (``last_price``, ``timestamp``).
+
 Non-USD quotes require an independently evidenced current direct or inverse
-forex snapshot against USD. FX evidence is reread on every conversion.
-Contract notional is exposure, not collateral, initial margin or account equity.
+forex plane against USD (selecting the newest fresh candidate across both
+active 1m candles and ``market_snapshots``, and refusing disagreeing normalized
+rates at the newest timestamp as ``fx_plane_conflict``). FX evidence is reread
+on every conversion. Contract notional is exposure, not collateral, initial
+margin or account equity.
 
 Cache + staleness:
 In-process TTL cache (60s) keyed by ``instrument_public_id`` stores
-the price and original venue identity. Prices older than 300 seconds are
-unavailable. Contract metadata is reread on each cache hit, so a revocation,
-expiry or obsolete interpretation cannot borrow the price cache's lifetime.
+the price, evidence timestamp, and original venue identity. Prices older than
+300 seconds are unavailable. Contract metadata is reread on each cache hit, so
+a revocation, expiry or obsolete interpretation cannot borrow the price cache's
+lifetime.
 """
 
 import asyncio
@@ -23,6 +40,7 @@ from dataclasses import dataclass
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from decimal import Decimal
 from decimal import DecimalException
 
@@ -32,13 +50,16 @@ from snapper.core.contract_valuation import LinearContractValuation
 from snapper.core.contract_valuation import quote_notional
 from snapper.data.repository import Repository
 from snapper.data.repository import is_effective_unit_certified
+from snapper.data.repository_types import ActiveCandlePriceRow
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.data.repository_types import InstrumentValuationMetadataRow
+from snapper.data.repository_types import UsdFxCandleCandidateRow
 from snapper.data.repository_types import UsdFxSnapshotCandidateRow
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_ETL_VERSION
 from snapper.infrastructure.exchanges.futures_spec_provenance import FUTURES_SPEC_SOURCE
 
 CACHE_TTL_SECONDS = 60
+CANDLE_INTERVAL_SECONDS = 60
 STALENESS_THRESHOLD_SECONDS = 300
 MAX_FUTURE_SKEW_SECONDS = 5
 
@@ -50,13 +71,14 @@ class PriceUnavailableError(Exception):
     error_code ``caps_price_unavailable`` with appropriate context.
     Reasons
         ``instrument_not_found``: no active Instrument row.
-        ``snapshot_missing``: Instrument exists but no active
-          MarketSnapshot row (market data pipeline hasn't produced
-          a tick yet).
-        ``last_price_null``: MarketSnapshot row exists but
-          ``last_price`` is NULL (venue never reported a trade).
-        ``price_stale``: snapshot timestamp is older than 300s.
-        ``fx_snapshot_missing``: no eligible current forex snapshot against USD.
+        ``snapshot_missing``: Instrument exists but neither an active
+          1m candle nor an active MarketSnapshot row exists.
+        ``last_price_null``: MarketSnapshot row exists with
+          ``last_price`` NULL and no valid 1m candle is available.
+        ``price_stale``: neither 1m candle nor snapshot evidence satisfies
+          the 300s age and 5s future-skew bounds.
+        ``fx_snapshot_missing``: no eligible current forex 1m candle or
+          snapshot exists against USD.
         ``fx_price_stale``: no FX rate satisfies the age and clock-skew bounds.
         ``fx_price_invalid``: no positive finite FX rate or final USD value.
         ``fx_plane_conflict``: newest FX planes disagree after normalization.
@@ -99,6 +121,59 @@ class _FxRate:
     rate: Decimal
 
 
+@dataclass(frozen=True)
+class _MainPriceCandidate:
+    """Parsed main-instrument price with its raw timestamp and source kind."""
+
+    price: Decimal
+    raw_timestamp: datetime
+    is_candle: bool
+
+
+def _candle_evidence_timestamp(open_at: datetime, now: datetime) -> datetime:
+    """Return the freshness reference for a 1m candle opened at ``open_at``.
+
+    A 1m candle opened at ``T`` covers market activity through ``T + 60s``.
+    For completed bars (``T + 60s <= now``) the effective time is ``T + 60s``.
+    For an in-progress current-minute bar (``T <= now < T + 60s``), capping at
+    ``now`` prevents the unelapsed portion of the minute from tripping
+    :data:`MAX_FUTURE_SKEW_SECONDS`. Future-opened bars (``T > now``) retain
+    ``open_at`` so excessive clock skew fails closed. Naive datetimes pass
+    through unchanged so :func:`_assert_timestamp_fresh` rejects them.
+
+    Args:
+        open_at: Candle interval start timestamp.
+        now: Evaluation wall-clock timestamp (UTC-aware).
+
+    Returns:
+        Effective UTC timestamp for staleness and cross-source comparison.
+    """
+    if open_at.utcoffset() is None:
+        return open_at
+    close_at = open_at + timedelta(seconds=CANDLE_INTERVAL_SECONDS)
+    return max(open_at, min(close_at, now))
+
+
+def _parse_positive_decimal(raw_price: object) -> Decimal | None:
+    """Parse a positive finite Decimal price, or return ``None`` when invalid.
+
+    Args:
+        raw_price: Numeric or string price candidate from repository evidence.
+
+    Returns:
+        Positive finite :class:`decimal.Decimal`, or ``None``.
+    """
+    if raw_price is None:
+        return None
+    try:
+        parsed = Decimal(str(raw_price))
+    except DecimalException:
+        return None
+    if not parsed.is_finite() or parsed <= 0:
+        return None
+    return parsed
+
+
 def _assert_timestamp_fresh(
     timestamp: datetime, now: datetime, instrument_public_id: str, reason: str
 ) -> None:
@@ -115,16 +190,132 @@ def _assert_timestamp_fresh(
 
 def _normalized_fx_rate(candidate: UsdFxSnapshotCandidateRow) -> _FxRate | None:
     """Normalize a positive raw FX price before comparison across orientations."""
+    raw = _parse_positive_decimal(candidate["last_price"])
+    if raw is None:
+        return None
     try:
-        raw = Decimal(str(candidate["last_price"]))
-        if not raw.is_finite() or raw <= 0:
-            return None
         rate = Decimal(1) / raw if candidate["base"] == "USD" else raw
         if not rate.is_finite() or rate <= 0:
             return None
         return _FxRate(candidate, rate)
     except DecimalException:
         return None
+
+
+def _merge_fx_candidates(
+    snapshot_rows: list[UsdFxSnapshotCandidateRow],
+    candle_rows: list[UsdFxCandleCandidateRow],
+    now: datetime,
+) -> list[UsdFxSnapshotCandidateRow]:
+    """Merge FX market snapshots and newest active 1m candle closes for selection.
+
+    Candle candidates carry a distinct deterministic ``candle:<public_id>``
+    identity so tie-breaking never collides with snapshot public IDs.
+
+    Args:
+        snapshot_rows: Active FX rows from ``market_snapshots``.
+        candle_rows: Newest active 1m candle FX rows from ``candles``.
+        now: Evaluation wall-clock timestamp (UTC-aware).
+
+    Returns:
+        Combined candidate list ready for :func:`_select_fx_rate`.
+    """
+    candle_candidates: list[UsdFxSnapshotCandidateRow] = [
+        {
+            "snapshot_public_id": f"candle:{row['candle_public_id']}",
+            "instrument_public_id": row["instrument_public_id"],
+            "exchange": row["exchange"],
+            "base": row["base"],
+            "quote": row["quote"],
+            "last_price": row["close"],
+            "timestamp": _candle_evidence_timestamp(row["open_at"], now),
+        }
+        for row in candle_rows
+    ]
+    return [*snapshot_rows, *candle_candidates]
+
+
+def _collect_main_candidates(
+    snapshot_row: tuple[float | None, datetime] | None,
+    candle_row: ActiveCandlePriceRow | None,
+    instrument_public_id: str,
+) -> list[_MainPriceCandidate]:
+    """Validate and collect main-leg candidates from snapshot and 1m candle.
+
+    Args:
+        snapshot_row: Active ``(last_price, timestamp)`` tuple, or ``None``.
+        candle_row: Newest active 1m candle row, or ``None``.
+        instrument_public_id: Identity attached to any refusal.
+
+    Returns:
+        Non-empty list of positive finite candidates before freshness checks.
+
+    Raises:
+        PriceUnavailableError: When neither source exists, snapshot price is
+            NULL with no valid candle, or no candidate has a positive finite price.
+    """
+    if snapshot_row is None and candle_row is None:
+        raise PriceUnavailableError("snapshot_missing", instrument_public_id)
+    candidates: list[_MainPriceCandidate] = []
+    snapshot_null = False
+    if snapshot_row is not None:
+        snap_price, snap_ts = snapshot_row
+        if snap_price is None:
+            snapshot_null = True
+        else:
+            parsed_snap = _parse_positive_decimal(snap_price)
+            if parsed_snap is not None:
+                candidates.append(_MainPriceCandidate(parsed_snap, snap_ts, is_candle=False))
+    if candle_row is not None:
+        parsed_candle = _parse_positive_decimal(candle_row["close"])
+        if parsed_candle is not None:
+            candidates.append(
+                _MainPriceCandidate(parsed_candle, candle_row["open_at"], is_candle=True)
+            )
+    if candidates:
+        return candidates
+    if snapshot_null:
+        raise PriceUnavailableError("last_price_null", instrument_public_id)
+    raise PriceUnavailableError("last_price_invalid", instrument_public_id)
+
+
+def _select_main_candidate(
+    candidates: list[_MainPriceCandidate],
+    now: datetime,
+    instrument_public_id: str,
+) -> tuple[Decimal, datetime]:
+    """Select the freshest valid main-leg price within the staleness bounds.
+
+    Args:
+        candidates: Positive finite snapshot and/or 1m candle candidates.
+        now: Wall-clock evaluation time after all repository awaits.
+        instrument_public_id: Identity attached to any refusal.
+
+    Returns:
+        ``(price, evidence_timestamp)`` for the freshest valid source; equal
+        timestamps prefer the live 1m candle plane.
+
+    Raises:
+        PriceUnavailableError: When no candidate satisfies the age and skew bounds.
+    """
+    fresh: list[tuple[Decimal, datetime, bool]] = []
+    errors: list[PriceUnavailableError] = []
+    for candidate in candidates:
+        evidence_ts = (
+            _candle_evidence_timestamp(candidate.raw_timestamp, now)
+            if candidate.is_candle
+            else candidate.raw_timestamp
+        )
+        try:
+            _assert_timestamp_fresh(evidence_ts, now, instrument_public_id, "price_stale")
+        except PriceUnavailableError as exc:
+            errors.append(exc)
+            continue
+        fresh.append((candidate.price, evidence_ts, candidate.is_candle))
+    if not fresh:
+        raise errors[-1]
+    chosen_price, chosen_ts, _ = max(fresh, key=lambda item: (item[1], item[2]))
+    return chosen_price, chosen_ts
 
 
 def _select_fx_rate(
@@ -305,16 +496,17 @@ class USDConverter:
         """
         entry = await self._price_entry(instrument_public_id)
         currency = entry.valuation_metadata["quote"]
-        rows = (
-            await self._repository.get_active_usd_fx_snapshot_candidates(currency)
-            if currency != "USD"
-            else []
-        )
+        fx_snapshots: list[UsdFxSnapshotCandidateRow] = []
+        fx_candles: list[UsdFxCandleCandidateRow] = []
+        if currency != "USD":
+            fx_snapshots = await self._repository.get_active_usd_fx_snapshot_candidates(currency)
+            fx_candles = await self._repository.get_active_usd_fx_candle_candidates(currency)
         now = self._now()
         self._assert_fresh(entry, now, instrument_public_id)
         notional = self._notional(entry, quantity, now, instrument_public_id)
         if currency == "USD":
             return notional
+        rows = _merge_fx_candidates(fx_snapshots, fx_candles, now)
         try:
             rate = _select_fx_rate(rows, now, instrument_public_id, currency)
             result = notional * rate.rate
@@ -407,45 +599,38 @@ class USDConverter:
         _assert_timestamp_fresh(entry.snapshot_timestamp, now, instrument_public_id, "price_stale")
 
     async def _load_and_cache(self, instrument_public_id: str, now: datetime) -> _CacheEntry:
-        """Read the CURRENT Instrument quote + MarketSnapshot, validate, cache.
+        """Read the CURRENT Instrument quote, 1m candle close and MarketSnapshot.
 
         ``quote`` lives on the :class:`Symbol` table; resolved via the
         repository's clock-free active-row reads (the current-version
         sentinel filter) — a caller-clock temporal read here could
         miss a freshly-written active row when this process's clock
         lags the writer's bus time (the Phase-0 kill-switch clock-skew
-        class of bug). Staleness is still enforced against the
-        snapshot's own timestamp below.
+        class of bug). Both the active ``MarketSnapshot`` row and the
+        newest active 1m candle close are read clock-free; freshness is
+        enforced against ``self._now()`` after all awaits and the
+        fresher valid source wins.
         """
         quote = await self._repository.get_active_instrument_quote_currency(instrument_public_id)
         if quote is None:
             raise PriceUnavailableError("instrument_not_found", instrument_public_id)
-        row = await self._repository.get_active_market_snapshot_price(instrument_public_id)
-        if row is None:
-            raise PriceUnavailableError("snapshot_missing", instrument_public_id)
-        last_price, ts = row
-        if last_price is None:
-            raise PriceUnavailableError("last_price_null", instrument_public_id)
-
-        try:
-            parsed_price = Decimal(str(last_price))
-        except DecimalException as exc:
-            raise PriceUnavailableError("last_price_invalid", instrument_public_id) from exc
-        if not parsed_price.is_finite() or parsed_price <= 0:
-            raise PriceUnavailableError("last_price_invalid", instrument_public_id)
+        snapshot_row = await self._repository.get_active_market_snapshot_price(instrument_public_id)
+        candle_row = await self._repository.get_active_latest_1m_candle_price(instrument_public_id)
+        candidates = _collect_main_candidates(snapshot_row, candle_row, instrument_public_id)
         metadata = await self._repository.get_active_instrument_valuation_metadata(
             instrument_public_id
         )
         if metadata is None or metadata["quote"] != quote:
             raise PriceUnavailableError("instrument_not_found", instrument_public_id)
-
+        chosen_price, chosen_ts = _select_main_candidate(
+            candidates, self._now(), instrument_public_id
+        )
         entry = _CacheEntry(
-            last_price=parsed_price,
-            snapshot_timestamp=ts,
+            last_price=chosen_price,
+            snapshot_timestamp=chosen_ts,
             cached_at=now,
             valuation_metadata=metadata,
         )
-        self._assert_fresh(entry, self._now(), instrument_public_id)
         self._cache[instrument_public_id] = entry
         return entry
 
