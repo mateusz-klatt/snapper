@@ -1560,3 +1560,30 @@ and candle regeneration remain separate operations.
 `PNL_SAMPLE_CALC_VERSION` sample rows without `require_reconciled`. After a
 sample-version bump, the minimum-activation report counts as evidence only once
 the new version's correction frontier has passed the entire report window.
+
+
+## Enable the market snapshot refresher
+
+`market_snapshot_refresher` keeps the `market_snapshots` table fresher than `USDConverter`'s 300-second staleness window (`STALENESS_THRESHOLD_SECONDS`), preventing AI-delegate orders with daily notional caps from failing `price_stale` when no one-shot CLI refresh has run recently. It calls the same public market-data paths as the one-shot CLI snapshot commands (`kraken`, `kraken_futures`, `kraken_equities`, `walutomat`) using public tickers only and never touches private/authenticated exchange APIs, orders, or balances.
+
+Because deploying a new periodic production process requires explicit operator consent, `market_snapshot_refresher` is **disabled by default** (`enabled=False` in the process registry, persisted under the `process_market_snapshot_refresher` setting row on startup). In split-container deployments its tags (`market-data`, `snapshots`, `maintenance`) do not include `publisher`, so `snapper` (`PROCESS_AUTOSTART_PROFILE=api` or `all`) owns and reconciles it rather than `snapper-feed` or `snapper-delegate`.
+
+Its parameter schema (`MarketSnapshotRefresherParameters`) validates `interval_seconds` in strict mode with default `120.0` seconds and bounds `[30.0, 290.0]` seconds (always below the 300-second staleness cutoff):
+
+```bash
+# Inspect registered parameters and schema
+curl -sS https://<host>/api/processes/schema/market_snapshot_refresher \
+  -H "Authorization: Bearer <token>"
+
+# Enable persistently across restarts (requires MANAGE_PROCESSES permission)
+curl -sS -X PATCH https://<host>/api/processes/market_snapshot_refresher/desired-state \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "process_desired_state_request", "payload": {"action": "enable"}}'
+
+# Optional one-off runtime start with an explicit valid interval override (30..290 s)
+curl -sS -X POST https://<host>/api/processes/market_snapshot_refresher/start \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"type": "process_start_request", "payload": {"parameters": {"interval_seconds": 120}}}'
+```

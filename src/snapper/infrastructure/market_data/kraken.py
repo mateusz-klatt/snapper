@@ -231,3 +231,13 @@ async def _async_update_snapshots() -> None:
     finally:
         await exchange_client.disconnect()
         logger.debug("Exchange client disconnected")
+
+
+async def async_update_snapshots() -> None:
+    """Execute asynchronous Kraken spot market snapshot collection.
+
+    Delegates to the shared coroutine used by the one-shot CLI command so
+    long-running async callers run within the active event loop without
+    calling ``asyncio.run``.
+    """
+    await _async_update_snapshots()

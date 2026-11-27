@@ -360,3 +360,17 @@ class StrategyProcessParameters(StrictBody):
     params: JsonObject | None = None
     wallet_public_id: str = ""
     operator_public_id: str = ""
+
+
+class MarketSnapshotRefresherParameters(StrictBody):
+    """Parameters for MarketSnapshotRefresherProcess.
+
+    Keeps ``market_snapshots`` fresher than USDConverter's 300-second
+    staleness threshold via bounded periodic refresh intervals.
+
+    Attributes:
+        interval_seconds: Seconds between tick starts (30 to 290,
+            default 120).
+    """
+
+    interval_seconds: float = Field(default=120.0, ge=30.0, le=290.0, allow_inf_nan=False)
