@@ -2081,6 +2081,50 @@ class TestInitializeEgressPool:
     """End-to-end tests for ``initialize_egress_pool``."""
 
     @pytest.mark.parametrize(
+        ("raw_pool", "opt_in", "expected_warnings"),
+        [
+            (None, False, 1),
+            ("{invalid JSON", False, 1),
+            ({"enabled": True, "routes": []}, False, 1),
+            ({"enabled": False}, False, 1),
+            (_two_route_config().model_dump(mode="json"), False, 0),
+            (None, True, 0),
+        ],
+        ids=["absent", "invalid-json", "invalid-schema", "disabled", "enabled", "dev-opt-in"],
+    )
+    async def test_startup_warns_once_when_public_egress_has_no_pool_or_opt_in(
+        self,
+        raw_pool: object,
+        opt_in: bool,
+        expected_warnings: int,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Warn once for an unpooled process that must wait, including across reinitialization."""
+        service = MagicMock()
+        service.get_setting.side_effect = {
+            "egress_pool": raw_pool,
+            "public_direct_allowed": opt_in,
+        }.get
+
+        async def keep_config(config: EgressPoolConfig) -> tuple[EgressPoolConfig, list[str]]:
+            """Keep valid routes for this policy test without making network requests."""
+            return config, []
+
+        monkeypatch.setattr(pool_module, "_preflight_routes", keep_config)
+        messages: list[str] = []
+        sink = logger.add(messages.append, level="WARNING", format="{level} {message}")
+        try:
+            for _ in range(2):
+                await initialize_egress_pool(service)
+        finally:
+            logger.remove(sink)
+        warning = (
+            "WARNING no egress_pool configured: public market data will wait for a VPN route; "
+            "set public_direct_allowed=true on dev hosts only\n"
+        )
+        assert messages.count(warning) == expected_warnings
+
+    @pytest.mark.parametrize(
         "raw_pool",
         [
             None,
@@ -2337,6 +2381,28 @@ def test_dev_direct_has_separate_state_from_configured_private_routes() -> None:
     private = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
     assert private.route_id == "public-dev-direct"
     private.release()
+
+
+def test_configuring_then_clearing_pool_preserves_dev_direct_opt_in() -> None:
+    """Pool reconfiguration retains the explicit process policy until it is overridden."""
+    config = _two_route_config()
+    assert configure_egress_pool(config, public_direct_allowed=True) is not None
+    unpooled = public_egress_pool(None)
+    reconfigured = configure_egress_pool(config)
+    assert reconfigured is not None
+    assert reconfigured.size() == len(config.routes) + 1
+
+    disabled = config.model_copy(update={"enabled": False})
+    assert configure_egress_pool(disabled) is None
+    assert get_egress_pool() is None
+    assert public_egress_pool(None) is unpooled
+    reservation = public_egress_pool(get_egress_pool()).reserve(exchange="kraken", purpose="http")
+    assert reservation.route_id == "public-dev-direct"
+    assert reservation.proxy_url is None
+    reservation.release()
+
+    assert configure_egress_pool(disabled, public_direct_allowed=False) is None
+    assert not public_egress_pool(None).has_available(exchange="kraken")
 
 
 @pytest.mark.parametrize("already_configured", [False, True])

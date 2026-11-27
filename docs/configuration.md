@@ -512,7 +512,7 @@ through the Settings API/UI:
 | --- | ------- | ----------- |
 | `ai_integration_enabled` | `true` | Feature gate for `/api/mcp`, `/api/ai-delegates/*`, and `/api/ai-researchers`; `false` returns `503 {"error_code":"feature_disabled"}` from `/api/mcp` and hides AI integration in the frontend |
 | `feed_egress_enabled` | `false` | Load each feed publisher’s process-local VPN routes at startup. Public feeds wait when an eligible route is unavailable. |
-| `public_direct_allowed` | `false` | Dev hosts only. The JSON boolean `true` permits a direct public reservation when no public VPN is usable. Production never sets this. |
+| `public_direct_allowed` | `false` | Dev hosts only. The JSON boolean `true` permits a direct public reservation when no public VPN is usable. Production never sets this. Hosts without an `egress_pool` wait for a VPN route unless the dev opt-in is enabled. |
 | `kraken_equities_realtime_ws_enabled` | `false` | Use Kraken Equities authenticated realtime market-data WS when token mint succeeds; fallback remains the public delayed feed |
 | `kraken_equities_realtime_wallet_public_id` | `""` | Optional wallet pin whose `exchange='kraken'` Spot API key/secret mints Kraken Equities realtime WS tokens: a wallet public id used verbatim, or `label:<wallet-label>` resolved at runtime to the single matching live wallet (fails closed to the delayed feed on zero/multiple matches); empty auto-selects an active Kraken Spot `api_key_secret` wallet |
 | `egress_pool` | unset | JSON tunnel-pool definition, validated as `EgressPoolConfig` at startup. The `private_fallback_route_id` is reserved for private traffic. An absent, invalid, or disabled pool supplies no public VPN routes. See [snapper-egress.md](snapper-egress.md) |

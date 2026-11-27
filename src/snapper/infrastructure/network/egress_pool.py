@@ -985,16 +985,41 @@ identity is the source of truth read by ``get_egress_pool``.
 _UNPOOLED_PUBLIC_HOLDER: list[EgressPool] = [EgressPool(EgressPoolConfig())]
 """Process-local public routing when there is no configured VPN pool."""
 
+_UNPOOLED_PUBLIC_WARNING_LOCK = threading.Lock()
+_UNPOOLED_PUBLIC_WARNING_LOGGED: list[bool] = [False]
 
-def initialize_public_egress_policy(settings_service: SettingsService) -> bool:
-    """Load the dev-only opt-in independently of the configured VPN pool."""
+
+def initialize_public_egress_policy(
+    settings_service: SettingsService, *, pool_enabled: bool | None = None
+) -> bool:
+    """Load the dev-only opt-in and warn once when public traffic must wait.
+
+    Args:
+        settings_service: Cached settings for this process.
+        pool_enabled: Whether startup is loading an enabled pool. When
+            omitted, check whether this process already has a pool.
+
+    Returns:
+        Whether public traffic can use the dev fallback.
+    """
     allowed = settings_service.get_setting("public_direct_allowed") is True
     _UNPOOLED_PUBLIC_HOLDER[0] = EgressPool(EgressPoolConfig(), public_direct_allowed=allowed)
+    if pool_enabled is None:
+        pool_enabled = get_egress_pool() is not None
     if allowed:
         logger.warning(
             "egress_pool: dev-only public_direct_allowed=true. "
             "public market data may leave from the host's own IP"
         )
+    elif not pool_enabled:
+        with _UNPOOLED_PUBLIC_WARNING_LOCK:
+            warn = not _UNPOOLED_PUBLIC_WARNING_LOGGED[0]
+            _UNPOOLED_PUBLIC_WARNING_LOGGED[0] = True
+        if warn:
+            logger.warning(
+                "no egress_pool configured: public market data will wait for a VPN route; "
+                "set public_direct_allowed=true on dev hosts only"
+            )
     return allowed
 
 
@@ -1062,7 +1087,7 @@ def configure_egress_pool(
     config: EgressPoolConfig,
     *,
     initial_quarantine_route_ids: Sequence[str] = (),
-    public_direct_allowed: bool = False,
+    public_direct_allowed: bool | None = None,
 ) -> EgressPool | None:
     """Install the module-level singleton from a validated config.
 
@@ -1074,11 +1099,19 @@ def configure_egress_pool(
         config: The validated config to install.
         initial_quarantine_route_ids: Enabled routes with transient preflight
             failures. Their retry deadlines start when the pool is installed.
-        public_direct_allowed: Whether public traffic can use the dev fallback.
+        public_direct_allowed: Override the process's dev fallback policy.
+            When omitted, retain the current policy across pool changes.
 
     Returns:
         The new ``EgressPool`` instance, or ``None`` when disabled.
     """
+    current_opt_in = _UNPOOLED_PUBLIC_HOLDER[0]._public_direct is not None
+    if public_direct_allowed is None:
+        public_direct_allowed = current_opt_in
+    elif public_direct_allowed != current_opt_in:
+        _UNPOOLED_PUBLIC_HOLDER[0] = EgressPool(
+            EgressPoolConfig(), public_direct_allowed=public_direct_allowed
+        )
     if not config.enabled:
         _POOL_HOLDER[0] = None
         logger.info("egress_pool: disabled")
@@ -1112,6 +1145,8 @@ def reset_egress_pool() -> None:
     """Clear the singleton. Test fixture only."""
     _POOL_HOLDER[0] = None
     _UNPOOLED_PUBLIC_HOLDER[0] = EgressPool(EgressPoolConfig())
+    with _UNPOOLED_PUBLIC_WARNING_LOCK:
+        _UNPOOLED_PUBLIC_WARNING_LOGGED[0] = False
     _PYTHON_SOCKS_WARNING_LOGGED[0] = False
 
 
@@ -1133,8 +1168,10 @@ async def initialize_egress_pool(
         The new ``EgressPool`` instance, or ``None`` for an absent, invalid,
         or disabled setting.
     """
-    public_direct_allowed = initialize_public_egress_policy(settings_service)
     config = load_egress_pool_config(settings_service)
+    public_direct_allowed = initialize_public_egress_policy(
+        settings_service, pool_enabled=config is not None and config.enabled
+    )
     if config is None:
         _POOL_HOLDER[0] = None
         return None
