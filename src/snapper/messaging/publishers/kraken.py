@@ -70,6 +70,8 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ret
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreak
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleItem
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
 from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
 from snapper.infrastructure.symbols.functions import has_kraken_candle_history_identity
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
@@ -1484,7 +1486,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         """
         async with self._restart_lock:
             client = self._exchange_client
-            if client is None:
+            if client is None or not self._can_restart_public_ws():
                 return
             self._suspend_candle_synthesis_across_break()
             self._mark_minute_feed_break()
@@ -1493,9 +1495,15 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             except Exception:
                 logger.exception("kraken publisher: disconnect_websocket failed during restart")
             await asyncio.sleep(_FORCE_WS_RESTART_BACKOFF_S)
-            if not self.running:
+            if not self.running or not self._can_restart_public_ws():
                 return
             await client._ensure_ws_connected()
+
+    def _can_restart_public_ws(self) -> bool:
+        """Leave a waiting SDK client in place during public route exhaustion."""
+        return public_egress_pool(get_egress_pool()).has_available(
+            exchange=self._get_exchange_name(), traffic_class="public", record_wait=True
+        )
 
     async def stop(self) -> None:
         """Cancel an in-flight forced WS restart, then stop normally.

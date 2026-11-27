@@ -87,7 +87,7 @@ class KrakenEquitiesSymbolUpdaterService(SymbolUpdaterService[KrakenEquitiesExch
         Returns:
             KrakenEquitiesExchangeClient configured for REST access.
         """
-        return KrakenEquitiesExchangeClient()
+        return KrakenEquitiesExchangeClient(rest_only=True)
 
     def _get_setting_key(self) -> str:
         """Return the database setting key for last update timestamp.

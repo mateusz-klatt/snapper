@@ -128,6 +128,7 @@ from snapper.infrastructure.exchanges.kraken_rest_egress import futures_sdk_prox
 from snapper.infrastructure.exchanges.kraken_rest_egress import route_kraken_rest_sync_call
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
+from snapper.infrastructure.exchanges.kraken_sdk_patches import start_kraken_ws
 from snapper.infrastructure.exchanges.native_balance_source import NativeBalanceProfileObservation
 from snapper.infrastructure.exchanges.prepared_private_key import PreparedKeyToken
 from snapper.infrastructure.exchanges.private_socket_authentication import PrivateRuntimeSelection
@@ -1020,8 +1021,9 @@ class KrakenFuturesExchangeClient(ExchangeClientBase):
             client = FuturesWSClient(callback=self._on_ws_message, sandbox=self.sandbox)
             self._ws_client = client
             try:
-                async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
-                    await client.start()
+                await start_kraken_ws(
+                    client.start, exchange=self.exchange_name, timeout_s=_WS_CONNECT_TIMEOUT_S
+                )
                 logger.info("Kraken Futures WebSocket connected")
                 if self._subscription_cache:
                     await self._replay_subscriptions()

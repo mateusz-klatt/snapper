@@ -39,6 +39,7 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_MAX_MESSAGE_
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_INTERVAL_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_TIMEOUT_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _wrap_connect_factory
+from snapper.infrastructure.network import egress_pool
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
@@ -5216,3 +5217,5 @@ def _stub_public_vpn_for_mocked_kraken_rest(monkeypatch: pytest.MonkeyPatch) -> 
         return configured if configured is not None else fallback_pool
 
     monkeypatch.setattr(kraken_rest_egress, "public_egress_pool", public_pool)
+    monkeypatch.setattr(egress_pool, "public_egress_pool", public_pool)
+    monkeypatch.setattr(ke, "public_egress_pool", public_pool)

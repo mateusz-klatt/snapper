@@ -7895,16 +7895,18 @@ async def test_walutomat_polls_again_after_waiting_for_public_vpn(
     """Unavailable VPNs defer the next poll without increasing HTTP error counts."""
     client = WalutomatExchangeClient(polling_interval=10.0)
     client._running = True
-    pool = MagicMock(spec=EgressPool) if deadline is not None else None
-    if pool is not None:
-        pool.earliest_release_in_seconds.return_value = deadline
+    pool = MagicMock(spec=EgressPool)
+    pool.earliest_release_in_seconds.return_value = deadline
+    configured = pool if deadline is not None else None
+    resolve_public = MagicMock(return_value=pool)
 
     async def sleep(seconds: float) -> None:
         """End the polling loop after observing the refusal's scheduled delay."""
         assert seconds == expected
         client._running = False
 
-    monkeypatch.setattr(walutomat_mod, "get_egress_pool", lambda: pool)
+    monkeypatch.setattr(walutomat_mod, "get_egress_pool", lambda: configured)
+    monkeypatch.setattr(walutomat_mod, "public_egress_pool", resolve_public)
     monkeypatch.setattr(walutomat_mod.asyncio, "sleep", sleep)
     monkeypatch.setattr(
         client, "_fetch_market_data", AsyncMock(side_effect=AllRoutesQuarantinedError("no VPN"))
@@ -7912,7 +7914,7 @@ async def test_walutomat_polls_again_after_waiting_for_public_vpn(
     await client._polling_loop(["EUR-PLN"])
 
     assert client._consecutive_error_count == 0
-    if pool is not None:
-        pool.earliest_release_in_seconds.assert_called_once_with(
-            exchange="walutomat", traffic_class="public"
-        )
+    resolve_public.assert_called_once_with(configured)
+    pool.earliest_release_in_seconds.assert_called_once_with(
+        exchange="walutomat", traffic_class="public"
+    )

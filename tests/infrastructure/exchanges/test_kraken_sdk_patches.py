@@ -111,6 +111,63 @@ from snapper.infrastructure.network.egress_pool import reset_egress_pool
 from snapper.utils.logging import _FILE_SINK_READY
 
 
+async def test_kraken_start_pauses_connect_timeout_after_route_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A route lost during startup pauses both the dial and recovery timers."""
+    proxy = "socks5h://egress:1081"
+    pool = EgressPool(
+        EgressPoolConfig(
+            routes=[
+                RouteConfig(id="vpn", kind="socks5", proxy_url=proxy),
+            ]
+        )
+    )
+    monkeypatch.setattr(egress_pool, "get_egress_pool", lambda: pool)
+    monkeypatch.setattr(kraken_sdk_patches, "get_egress_pool", lambda: pool)
+    timer = MagicMock(spec=asyncio.Timeout)
+    timer.expired.return_value = False
+    timer.when.side_effect = [asyncio.get_running_loop().time() + 20.0, None]
+    recovery_timer = MagicMock(spec=asyncio.Timeout)
+    recovery_timer.expired.return_value = False
+    recovery_deadline = asyncio.get_running_loop().time() + 180.0
+    recovery_timer.when.side_effect = [recovery_deadline, recovery_deadline, None]
+    timeout = MagicMock(
+        side_effect=[
+            MagicMock(__aenter__=AsyncMock(return_value=recovery_timer)),
+            MagicMock(__aenter__=AsyncMock(return_value=timer)),
+        ]
+    )
+    monkeypatch.setattr(kraken_sdk_patches.asyncio, "timeout", timeout)
+    socket = MagicMock()
+    dial = MagicMock(return_value=socket)
+
+    async def dial_after_refusal() -> None:
+        """Exercise both refusal and recovery from an SDK child task."""
+        deadline = datetime.now(UTC) + timedelta(seconds=30)
+        pool._quarantine_route("vpn", deadline, "ws-connect-error")
+        with pytest.raises(AllRoutesQuarantinedError):
+            kraken_sdk_patches._ConnectShim(dial, "wss://ws.kraken.com")
+        timer.reschedule.assert_called_once_with(None)
+        recovery_timer.reschedule.assert_called_once_with(None)
+        dial.assert_not_called()
+        pool._states["vpn"].quarantine_until = None
+        async with kraken_sdk_patches._ConnectShim(dial, "wss://ws.kraken.com"):
+            dial.assert_called_once()
+            assert dial.call_args.kwargs["proxy"] == proxy
+
+    async def start() -> None:
+        """Model the SDK starting a background connector while waiting for a socket."""
+        await asyncio.create_task(dial_after_refusal())
+
+    async with egress_pool.public_egress_timeout(180.0):
+        await kraken_sdk_patches.start_kraken_ws(start, exchange="kraken", timeout_s=20.0)
+    assert [item.args for item in timeout.call_args_list] == [(180.0,), (20.0,)]
+    assert timer.reschedule.call_count == 2
+    assert recovery_timer.reschedule.call_count == 2
+    assert timer.reschedule.call_args.args[0] > asyncio.get_running_loop().time()
+
+
 def _make_429_response(retry_after: str = "412") -> Response:
     """Build a real ``websockets.http11.Response`` carrying a 429 + Retry-After.
 
@@ -2259,6 +2316,7 @@ class TestPhaseBPrimeGetReconnectWait:
             fake_pool.has_available.assert_called_once_with(
                 exchange="kraken_equities",
                 traffic_class="public",
+                record_wait=True,
             )
         finally:
             _CONNECTOR_PUBLISHERS.pop(connector_id, None)
@@ -2294,6 +2352,7 @@ class TestPhaseBPrimeGetReconnectWait:
         fake_pool.has_available.assert_called_once_with(
             exchange="kraken",
             traffic_class="private",
+            record_wait=False,
         )
         fake_pool.earliest_release_in_seconds.assert_called_once_with(
             exchange="kraken",

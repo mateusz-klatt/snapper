@@ -18,14 +18,20 @@ critical sections are bookkeeping-only (microseconds).
 
 import asyncio
 import contextlib
+import contextvars
 import importlib.util
 import json
 import os
 import socket
 import threading
 from collections import OrderedDict
+from collections.abc import AsyncIterator
+from collections.abc import Callable
 from collections.abc import Collection
+from collections.abc import Iterator
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -61,6 +67,7 @@ _PYTHON_SOCKS_WARNING_LOGGED: list[bool] = [False]
 _MAX_REST_HOSTS_PER_ROUTE = 16
 _HOST_FORBIDDEN_CHARS = frozenset("/\\?#@")
 ConnectionKey = tuple[str, TrafficClass, ConnectionKind, str]
+type _PoolWarning = tuple[str, tuple[str | float, ...]]
 _PreflightDisposition = Literal["keep", "disable", "quarantine"]
 
 _PREFLIGHT_QUARANTINE_S: Final[float] = 30.0
@@ -170,15 +177,22 @@ class EgressPool(EgressPoolBase):
         with self._lock:
             return sum(1 for s in self._states.values() if s.enabled)
 
-    def has_available(self, exchange: str | None = None, traffic_class: str = "public") -> bool:
+    def has_available(
+        self,
+        exchange: str | None = None,
+        traffic_class: str = "public",
+        *,
+        record_wait: bool = False,
+    ) -> bool:
         """Report whether the requested traffic class can reserve a healthy route.
 
         Public traffic can use healthy public VPNs or its explicitly enabled
-        dev fallback. A public exchange name identifies the wait episode.
+        dev fallback. Actual public waiters can opt in to recording wait
+        transitions for the named exchange.
         Private availability follows the direct and private fallback policy.
         """
         now = datetime.now(UTC)
-        with self._lock:
+        with self._locked_with_warnings() as warnings:
             if traffic_class == "private":
                 return self._pick_private_locked(now) is not None
             vpn_available = any(
@@ -186,14 +200,30 @@ class EgressPool(EgressPoolBase):
                 for state in self._states.values()
             )
             available = vpn_available or self._available_public_direct_locked(now) is not None
-            if exchange is not None:
+            if record_wait and exchange is not None:
                 if vpn_available:
                     self._public_direct_episodes.discard(exchange)
                 if available:
-                    self._finish_public_wait_locked(exchange)
+                    self._finish_public_wait_locked(exchange, warnings)
                 else:
-                    self._begin_public_wait_locked(exchange)
+                    self._begin_public_wait_locked(exchange, warnings)
             return available
+
+    def is_waiting_for_public_vpn(self, exchange: str) -> bool:
+        """Report whether the exchange has an outstanding public VPN wait episode."""
+        with self._lock:
+            return exchange in self._public_wait_started
+
+    @contextmanager
+    def _locked_with_warnings(self) -> Iterator[list[_PoolWarning]]:
+        """Collect route warnings under the lock and emit them after releasing it."""
+        warnings: list[_PoolWarning] = []
+        try:
+            with self._lock:
+                yield warnings
+        finally:
+            for message, args in warnings:
+                logger.warning(message, *args)
 
     def earliest_release_in_seconds(
         self, exchange: str | None = None, traffic_class: str = "public"
@@ -299,11 +329,11 @@ class EgressPool(EgressPoolBase):
         )
         effective_connection_kind = connection_kind or _connection_kind_for_purpose(purpose)
         normalized_host = normalize_egress_target_host(target_host)
-        with self._lock:
+        with self._locked_with_warnings() as warnings:
             selection = self._pick_locked(preferred_route, exchange, now, effective_traffic_class)
             if effective_traffic_class == "public":
                 selection = self._complete_public_selection_locked(
-                    selection, exchange, purpose, now
+                    selection, exchange, purpose, now, warnings
                 )
             elif selection is None:
                 selection = self._exhausted_private_selection_locked(exchange, purpose)
@@ -347,11 +377,11 @@ class EgressPool(EgressPoolBase):
             target_host=normalized_host,
         )
 
-    def _begin_public_wait_locked(self, exchange: str) -> None:
+    def _begin_public_wait_locked(self, exchange: str, warnings: list[_PoolWarning]) -> None:
         """Start one wait episode per exchange, including concurrent callers."""
         if exchange not in self._public_wait_started:
             self._public_wait_started[exchange] = monotonic()
-            logger.warning("egress_pool: public VPN wait started exchange={}", exchange)
+            warnings.append(("egress_pool: public VPN wait started exchange={}", (exchange,)))
 
     def _available_public_direct_locked(self, now: datetime) -> RouteState | None:
         """Return the dedicated dev direct route when it can be used."""
@@ -366,30 +396,40 @@ class EgressPool(EgressPoolBase):
         exchange: str,
         purpose: Literal["websocket", "http"],
         now: datetime,
+        warnings: list[_PoolWarning],
     ) -> RouteSelection:
         """Resolve public exhaustion and log the first direct reservation in an episode."""
         if vpn is not None:
             self._public_direct_episodes.discard(exchange)
-            self._finish_public_wait_locked(exchange)
+            self._finish_public_wait_locked(exchange, warnings)
+            if not self._exchange_allows_locked(vpn.state, exchange):
+                warnings.append(
+                    (
+                        "egress_pool: using unpinned public VPN route exchange={} route_id={}",
+                        (exchange, vpn.state.config.id),
+                    )
+                )
             return vpn
         direct = self._available_public_direct_locked(now)
         if direct is None:
-            self._begin_public_wait_locked(exchange)
             raise AllRoutesQuarantinedError(
                 f"no public VPN route available (exchange={exchange}, purpose={purpose})"
             )
-        self._finish_public_wait_locked(exchange)
+        self._finish_public_wait_locked(exchange, warnings)
         if exchange not in self._public_direct_episodes:
             self._public_direct_episodes.add(exchange)
-            logger.warning(
-                "egress_pool: public direct fallback exchange={} route_id={}. "
-                "public market data may leave from the host's own IP",
-                exchange,
-                direct.config.id,
+            warnings.append(
+                (
+                    (
+                        "egress_pool: public direct fallback exchange={} route_id={}. "
+                        "public market data may leave from the host's own IP"
+                    ),
+                    (exchange, direct.config.id),
+                )
             )
         return RouteSelection(state=direct, is_fallback=True)
 
-    def _finish_public_wait_locked(self, exchange: str) -> None:
+    def _finish_public_wait_locked(self, exchange: str, warnings: list[_PoolWarning]) -> None:
         """Record elapsed and cumulative wait seconds when a VPN becomes usable."""
         started = self._public_wait_started.pop(exchange, None)
         if started is None:
@@ -397,12 +437,14 @@ class EgressPool(EgressPoolBase):
         elapsed = monotonic() - started
         total = self._public_wait_seconds.get(exchange, 0.0) + elapsed
         self._public_wait_seconds[exchange] = total
-        logger.warning(
-            "egress_pool: public VPN wait ended exchange={} wait_seconds={} "
-            "public_vpn_wait_seconds_total={}",
-            exchange,
-            elapsed,
-            total,
+        warnings.append(
+            (
+                (
+                    "egress_pool: public VPN wait ended exchange={} wait_seconds={} "
+                    "public_vpn_wait_seconds_total={}"
+                ),
+                (exchange, elapsed, total),
+            )
         )
 
     def _exhausted_private_selection_locked(
@@ -867,12 +909,6 @@ class EgressPool(EgressPoolBase):
                 state.in_use_count,
             ),
         )
-        if not self._exchange_allows_locked(pick, exchange):
-            logger.warning(
-                "egress_pool: using unpinned public VPN route exchange={} route_id={}",
-                exchange,
-                pick.config.id,
-            )
         return RouteSelection(state=pick, is_fallback=False)
 
     def _is_public_vpn(self, state: RouteState) -> bool:
@@ -946,21 +982,14 @@ identity is the source of truth read by ``get_egress_pool``.
 """
 
 
-_EMPTY_PUBLIC_POOL = EgressPool(EgressPoolConfig())
-"""Refuse public reservations and track waiting when no pool is configured."""
-
-_UNPOOLED_PUBLIC_HOLDER: list[EgressPool] = [_EMPTY_PUBLIC_POOL]
+_UNPOOLED_PUBLIC_HOLDER: list[EgressPool] = [EgressPool(EgressPoolConfig())]
 """Process-local public routing when there is no configured VPN pool."""
 
 
 def initialize_public_egress_policy(settings_service: SettingsService) -> bool:
     """Load the dev-only opt-in independently of the configured VPN pool."""
     allowed = settings_service.get_setting("public_direct_allowed") is True
-    _UNPOOLED_PUBLIC_HOLDER[0] = (
-        EgressPool(EgressPoolConfig(), public_direct_allowed=True)
-        if allowed
-        else _EMPTY_PUBLIC_POOL
-    )
+    _UNPOOLED_PUBLIC_HOLDER[0] = EgressPool(EgressPoolConfig(), public_direct_allowed=allowed)
     if allowed:
         logger.warning(
             "egress_pool: dev-only public_direct_allowed=true. "
@@ -972,6 +1001,61 @@ def initialize_public_egress_policy(settings_service: SettingsService) -> bool:
 def public_egress_pool(pool: EgressPool | None) -> EgressPool:
     """Resolve the configured pool or the process's unpooled public policy."""
     return pool if pool is not None else _UNPOOLED_PUBLIC_HOLDER[0]
+
+
+_PUBLIC_EGRESS_TIMEOUT_UPDATE: contextvars.ContextVar[Callable[[bool], None] | None] = (
+    contextvars.ContextVar("_public_egress_timeout_update", default=None)
+)
+
+
+@asynccontextmanager
+async def public_egress_timeout(timeout_s: float) -> AsyncIterator[None]:
+    """Bound network work while leaving public route waits outside its budget."""
+    clock = asyncio.get_running_loop().time
+    remaining = timeout_s
+    parent_update = _PUBLIC_EGRESS_TIMEOUT_UPDATE.get()
+    async with asyncio.timeout(timeout_s) as timeout:
+        timer: asyncio.Timeout | None = timeout
+
+        def update_availability(available: bool) -> None:
+            """Pause or resume this budget and any enclosing recovery budget."""
+            nonlocal remaining
+            if parent_update is not None:
+                parent_update(available)
+            if timer is None or timer.expired():
+                return
+            deadline = timer.when()
+            if not available and deadline is not None:
+                remaining = max(deadline - clock(), 0.0)
+                timer.reschedule(None)
+            elif available and deadline is None:
+                timer.reschedule(clock() + remaining)
+
+        token = _PUBLIC_EGRESS_TIMEOUT_UPDATE.set(update_availability)
+        try:
+            yield
+        finally:
+            timer = None
+            _PUBLIC_EGRESS_TIMEOUT_UPDATE.reset(token)
+
+
+def report_public_route_availability(available: bool) -> None:
+    """Pause or resume timeouts in the task that owns this public operation."""
+    update = _PUBLIC_EGRESS_TIMEOUT_UPDATE.get()
+    if update is not None:
+        update(available)
+
+
+async def wait_for_public_route(exchange: str) -> None:
+    """Wait until public traffic for this exchange can reserve an egress route."""
+    while True:
+        pool = public_egress_pool(get_egress_pool())
+        if pool.has_available(exchange=exchange, traffic_class="public", record_wait=True):
+            report_public_route_availability(True)
+            return
+        report_public_route_availability(False)
+        earliest = pool.earliest_release_in_seconds(exchange=exchange, traffic_class="public")
+        await asyncio.sleep(max(earliest or 0.0, 1.0))
 
 
 def configure_egress_pool(
@@ -1027,7 +1111,7 @@ def get_egress_pool() -> EgressPool | None:
 def reset_egress_pool() -> None:
     """Clear the singleton. Test fixture only."""
     _POOL_HOLDER[0] = None
-    _UNPOOLED_PUBLIC_HOLDER[0] = _EMPTY_PUBLIC_POOL
+    _UNPOOLED_PUBLIC_HOLDER[0] = EgressPool(EgressPoolConfig())
     _PYTHON_SOCKS_WARNING_LOGGED[0] = False
 
 
@@ -1050,6 +1134,20 @@ async def initialize_egress_pool(
         or disabled setting.
     """
     public_direct_allowed = initialize_public_egress_policy(settings_service)
+    config = load_egress_pool_config(settings_service)
+    if config is None:
+        _POOL_HOLDER[0] = None
+        return None
+    effective, quarantine_route_ids = await _preflight_routes(config)
+    return configure_egress_pool(
+        effective,
+        initial_quarantine_route_ids=quarantine_route_ids,
+        public_direct_allowed=public_direct_allowed,
+    )
+
+
+def load_egress_pool_config(settings_service: SettingsService) -> EgressPoolConfig | None:
+    """Read and validate the cached routing settings without installing a pool."""
     raw = settings_service.get_setting("egress_pool")
     if raw is None:
         logger.info("egress_pool: setting not present — disabled")
@@ -1058,19 +1156,13 @@ async def initialize_egress_pool(
     if parsed is None:
         return None
     try:
-        config = EgressPoolConfig.model_validate(parsed)
+        return EgressPoolConfig.model_validate(parsed)
     except (ValueError, TypeError) as exc:
         logger.error(
             "egress_pool: config validation failed — disabling. error={}",
             exc,
         )
         return None
-    effective, quarantine_route_ids = await _preflight_routes(config)
-    return configure_egress_pool(
-        effective,
-        initial_quarantine_route_ids=quarantine_route_ids,
-        public_direct_allowed=public_direct_allowed,
-    )
 
 
 async def safely_initialize_egress_pool(settings_service: SettingsService) -> None:

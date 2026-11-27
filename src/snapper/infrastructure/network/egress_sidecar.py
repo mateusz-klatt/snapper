@@ -44,6 +44,7 @@ from loguru import logger
 
 from snapper.application.services.settings import SettingsService
 from snapper.infrastructure.network import wg_control
+from snapper.infrastructure.network.egress_pool import load_egress_pool_config
 from snapper.infrastructure.network.egress_transfer_observability import EgressTransferPublisher
 from snapper.infrastructure.network.egress_transfer_stats import EgressTransferSampler
 from snapper.infrastructure.network.egress_transfer_stats import EgressTransferTunnel
@@ -115,6 +116,7 @@ class _SidecarState:
 
     running: list[_RunningTunnel] = field(default_factory=list)
     failed: list[_FailedTunnel] = field(default_factory=list)
+    public_route_ids: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -181,7 +183,7 @@ async def run_sidecar(
         ``0`` for a clean shutdown. A non-zero return is reserved
         for future fail-closed configurations.
     """
-    state = _SidecarState()
+    state = _SidecarState(public_route_ids=_public_route_ids(settings_service))
     load_result = await _load_declared_tunnels_after_kernel_probe(settings_service)
     runner: web.AppRunner | None = None
     transfer_resources: _TransferPublisherResources | None = None
@@ -201,6 +203,18 @@ async def run_sidecar(
             await runner.cleanup()
         await _shutdown_tunnels(state)
     return 0
+
+
+def _public_route_ids(settings_service: SettingsService) -> frozenset[str]:
+    """Read enabled public SOCKS route IDs from the same config as publishers."""
+    config = load_egress_pool_config(settings_service)
+    if config is None or not config.enabled:
+        return frozenset()
+    return frozenset(
+        route.id
+        for route in config.routes
+        if route.enabled and route.kind == "socks5" and route.id != config.private_fallback_route_id
+    )
 
 
 def _egress_transfer_interval_seconds(heartbeat_interval_ms: int) -> float:
@@ -446,11 +460,13 @@ async def _handle_ready(request: web.Request) -> web.Response:
 
 
 async def _handle_ready_public(request: web.Request) -> web.Response:
-    """Report whether a running SOCKS5 tunnel has a recent WireGuard handshake."""
+    """Report a public-eligible SOCKS listener with a recent WireGuard handshake."""
     state = request.app[_STATE_KEY]
     cutoff = datetime.now(UTC) - _PUBLIC_HANDSHAKE_MAX_AGE
     for running in state.running:
         descriptor = running.loaded.descriptor
+        if descriptor.id not in state.public_route_ids or not running.server.is_running():
+            continue
         try:
             counters = await asyncio.to_thread(read_wg_transfer_counters, descriptor.interface)
         except OSError:

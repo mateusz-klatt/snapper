@@ -80,6 +80,7 @@ from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPa
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
 from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
 from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
 from snapper.infrastructure.network.pooled_httpx_transport import PooledAsyncTransport
 from snapper.infrastructure.symbols.functions import native_to_walutomat_rest
 from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
@@ -1644,11 +1645,10 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 self._reset_polling_error_state()
                 await self._process_polling_data(data, symbol_map)
             except AllRoutesQuarantinedError:
-                pool = get_egress_pool()
-                earliest = (
-                    pool.earliest_release_in_seconds(exchange="walutomat", traffic_class="public")
-                    if pool is not None
-                    else None
+                pool = public_egress_pool(get_egress_pool())
+                pool.has_available(exchange="walutomat", traffic_class="public", record_wait=True)
+                earliest = pool.earliest_release_in_seconds(
+                    exchange="walutomat", traffic_class="public"
                 )
                 await asyncio.sleep(max(earliest or 0.0, self.polling_interval))
                 continue

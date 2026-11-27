@@ -74,6 +74,8 @@ from snapper.infrastructure.network.egress_observability import EgressSnapshotPu
 from snapper.infrastructure.network.egress_observability import resolve_egress_container_id
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_pool import initialize_public_egress_policy
+from snapper.infrastructure.network.egress_pool import public_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_timeout
 from snapper.infrastructure.network.egress_pool import safely_initialize_egress_pool
 from snapper.infrastructure.symbols.functions import get_market_data_capability_exclusions
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
@@ -820,8 +822,8 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         self._last_data_timestamps: dict[str, float] = {}
         self._last_tick_payload: dict[str, tuple[TickPayloadValue, ...]] = {}
         self._seen_trade_ids: dict[str, collections.OrderedDict[str, _TradeDedupState]] = {}
-        self._last_message_at: float = monotonic()
-        self._last_candle_msg_at: float = monotonic()
+        self._last_message_at = self._last_candle_msg_at = monotonic()
+        self._public_egress_watchdog_since = 0.0
         self._consumes_native_candles: bool = False
         self._recovery_lock: asyncio.Lock = asyncio.Lock()
         self._last_recovery_at: float = 0.0
@@ -1424,7 +1426,7 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             f"{self.settings.zmq_broker_xpub}"
         )
         self._exchange_client = self._create_exchange_client()
-        await connect_publisher_exchange(self._exchange_client)
+        self._public_egress_watchdog_since = await connect_publisher_exchange(self._exchange_client)
         self._exchange_client.start_health_loop()
         logger.info(f"{process_name}: Exchange client connected (anonymous, public data)")
         self.running = True
@@ -2002,11 +2004,11 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             candle_baseline = self._last_candle_msg_at if require_candle_progress else None
             backoff = _RECOVERY_BACKOFF_INITIAL_S
             attempt = 0
-            while self.running:
+            while self.running and not self._public_egress_wait_active():
                 attempt += 1
                 attempt_ok = True
                 try:
-                    async with asyncio.timeout(_RECOVERY_ATTEMPT_TIMEOUT_S):
+                    async with public_egress_timeout(_RECOVERY_ATTEMPT_TIMEOUT_S):
                         await self._attempt_liveness_recovery(reason)
                 except asyncio.CancelledError:
                     raise
@@ -5449,7 +5451,9 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
         When the recovery threshold is enabled and no message has
         arrived for longer than it, spawn a recovery attempt; when the
         feed stays dark past ``_DARK_FEED_EXIT_CEILING_S`` despite
-        recovery, escalate to a process exit.
+        recovery, escalate to a process exit. Public VPN wait episodes
+        suspend both guards and give the recovering feed time to deliver
+        frames after a route returns.
 
         Separately, for venues with a dedicated live candle source
         (``_candle_liveness_threshold_s() > 0``) that are actually consuming
@@ -5474,11 +5478,18 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
             FeedDarkTooLongError: When the feed has been dark beyond the
                 exit ceiling and the launcher must restart the publisher.
         """
+        now = monotonic()
+        if self._public_egress_wait_active():
+            public_egress_pool(get_egress_pool()).has_available(
+                exchange=self._get_exchange_name(), record_wait=True
+            )
+            self._public_egress_watchdog_since = now
+            return
         candle_threshold_s = self._candle_liveness_threshold_s()
         candle_venue = candle_threshold_s > 0 and self._consumes_native_candles
         threshold_s = self._get_liveness_recovery_threshold_s()
         if threshold_s > 0:
-            stale_for = monotonic() - self._last_message_at
+            stale_for = now - max(self._last_message_at, self._public_egress_watchdog_since)
             if stale_for > threshold_s:
                 self._spawn_recovery(
                     reason=f"no_messages_for_{stale_for:.0f}s",
@@ -5492,12 +5503,20 @@ class MarketDataPublisherService[T: ExchangeClientBase](RegisterableProcess, ABC
                 )
                 raise FeedDarkTooLongError(f"{self._get_exchange_name()} dark for {stale_for:.0f}s")
         if candle_venue:
-            candle_stale_for = monotonic() - self._last_candle_msg_at
+            candle_stale_for = now - max(
+                self._last_candle_msg_at, self._public_egress_watchdog_since
+            )
             if candle_stale_for > candle_threshold_s:
                 self._spawn_recovery(
                     reason=f"no_candles_for_{candle_stale_for:.0f}s",
                     require_candle_progress=True,
                 )
+
+    def _public_egress_wait_active(self) -> bool:
+        """Report an outstanding wait before starting recovery or applying liveness limits."""
+        return public_egress_pool(get_egress_pool()).is_waiting_for_public_vpn(
+            self._get_exchange_name()
+        )
 
     async def _publish_heartbeat(self, topic: str, message: HeartbeatData) -> None:
         """Send a complete heartbeat message to ZMQ.

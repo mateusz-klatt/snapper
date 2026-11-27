@@ -45,6 +45,7 @@ import contextvars
 import logging
 import re
 import weakref
+from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Collection
 from collections.abc import Coroutine
@@ -75,6 +76,9 @@ from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantine
 from snapper.infrastructure.network.egress_pool import EgressPool
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_pool import public_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_timeout
+from snapper.infrastructure.network.egress_pool import report_public_route_availability
+from snapper.infrastructure.network.egress_pool import wait_for_public_route
 from snapper.infrastructure.network.egress_reservation import EgressReservation
 from snapper.utils.logging import is_file_sink_ready
 
@@ -285,6 +289,44 @@ _PUBLIC_DIAL_ATTEMPT: contextvars.ContextVar[Callable[[], None] | None] = contex
 )
 """Budget charge scoped to the SDK run child and deferred until it reserves a VPN."""
 
+
+async def start_kraken_ws(
+    start: Callable[[], Awaitable[None]], *, exchange: str, timeout_s: float
+) -> None:
+    """Bound SDK startup without charging time spent waiting for public egress."""
+    exchange, traffic_class = resolve_egress_traffic(exchange)
+    if traffic_class == "private":
+        async with asyncio.timeout(timeout_s):
+            await start()
+        return
+
+    await wait_for_public_route(exchange)
+    async with public_egress_timeout(timeout_s):
+        await start()
+
+
+def _reserve_ws_route(
+    pool: EgressPool, exchange: str, traffic_class: str, target_host: str | None
+) -> EgressReservation:
+    """Record public connect refusals as SDK waits and keep their dial timer paused."""
+    try:
+        reservation = pool.reserve(
+            exchange=exchange,
+            purpose="websocket",
+            traffic_class=traffic_class,
+            target_host=target_host,
+            connection_kind="ws",
+        )
+    except AllRoutesQuarantinedError:
+        if traffic_class != "private":
+            report_public_route_availability(False)
+            pool.has_available(exchange=exchange, traffic_class="public", record_wait=True)
+        raise
+    if traffic_class != "private":
+        report_public_route_availability(True)
+    return reservation
+
+
 _ORIGINAL_GET_RECONNECT_WAIT: Any = getattr(
     ConnectSpotWebsocketBase, "_ConnectSpotWebsocketBase__get_reconnect_wait"
 )
@@ -403,13 +445,7 @@ class _ConnectShim:
         if traffic_class != "private":
             pool = public_egress_pool(pool)
         if pool is not None and (traffic_class != "private" or pool.size() > 0):
-            self._reservation = pool.reserve(
-                exchange=exchange_name,
-                purpose="websocket",
-                traffic_class=traffic_class,
-                target_host=target_host,
-                connection_kind="ws",
-            )
+            self._reservation = _reserve_ws_route(pool, exchange_name, traffic_class, target_host)
             kwargs = {**kwargs, **self._reservation.websocket_kwargs()}
         kwargs = {
             "ping_interval": _WS_PING_INTERVAL_S,
@@ -731,12 +767,17 @@ def _pool_reconnect_wait(pool: EgressPool, connector_id: int) -> float:
         This helper does not raise directly.
     """
     exchange_name, traffic_class = _resolve_pool_reconnect_scope(connector_id)
-    if pool.has_available(exchange=exchange_name, traffic_class=traffic_class):
+    available = pool.has_available(
+        exchange=exchange_name, traffic_class=traffic_class, record_wait=traffic_class == "public"
+    )
+    if available:
         logger.info(
             "kraken WS pool-aware reconnect: healthy route available (connector={})",
             connector_id,
         )
         return _RETRY_AFTER_MIN_SECONDS
+    if traffic_class == "public":
+        report_public_route_availability(False)
     earliest = (
         pool.earliest_release_in_seconds(
             exchange=exchange_name,

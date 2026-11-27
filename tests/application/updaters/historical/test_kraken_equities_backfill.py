@@ -420,11 +420,12 @@ class TestStart:
                 "snapper.application.updaters.historical.kraken_equities_aggregates"
                 ".KrakenEquitiesExchangeClient",
                 return_value=mock_client,
-            ),
+            ) as mock_client_class,
             patch.object(svc, "_process_symbol", new_callable=AsyncMock) as mock_process,
         ):
             mock_repo.return_value = AsyncMock()
             await svc.start()
+        mock_client_class.assert_called_once_with(rest_only=True)
         mock_client.connect.assert_awaited_once()
         mock_client.disconnect.assert_awaited_once()
         mock_process.assert_awaited_once_with(mock_client, "MNQM6-CME")

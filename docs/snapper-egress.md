@@ -269,9 +269,11 @@ docker compose exec snapper-egress \
   python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8081/ready-public', timeout=2).read().decode())"
 ```
 
-Expect HTTP 200 with the ID of a running SOCKS5 tunnel whose WireGuard
-peer handshook within the last 180 seconds. HTTP 503 means no running
-tunnel meets that condition. Compose still uses `/ready` as the
+Expect HTTP 200 with the ID of an enabled public SOCKS5 route from the
+sidecar's startup `egress_pool` configuration. Its listener must be
+running and its WireGuard peer must have handshaken within the last 180
+seconds. The private fallback is excluded. HTTP 503 means no tunnel
+meets those conditions. Compose still uses `/ready` as the
 sidecar's bootstrap check. Waiting for public readiness reduces the feed
 gap. If a feed starts before the listener is ready, its initially
 quarantined routes become eligible for retry without a feed restart.

@@ -139,7 +139,7 @@ class KrakenEquitiesAggregatesBackfillService(RegisterableProcess):
         if not symbols:
             logger.warning("No Kraken Equities symbols configured for backfill")
             return
-        client = KrakenEquitiesExchangeClient()
+        client = KrakenEquitiesExchangeClient(rest_only=True)
         await client.connect()
         try:
             for symbol in symbols:

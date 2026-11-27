@@ -33,6 +33,9 @@ from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBrea
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleItem
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleMark
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_models import EgressPoolConfig
+from snapper.infrastructure.network.egress_models import RouteConfig
+from snapper.infrastructure.network.egress_pool import EgressPool
 from snapper.messaging.publishers import kraken as kraken_module
 from snapper.messaging.publishers.base import CompletionClock
 from snapper.messaging.publishers.base import MarketDataPublisherService
@@ -1068,7 +1071,10 @@ class TestKrakenReconnectWatchdog:
         client._ensure_ws_connected = AsyncMock()
         pub._exchange_client = client
 
-        with patch.object(kraken_module.asyncio, "sleep", new=AsyncMock()) as sleep_mock:
+        with (
+            patch.object(pub, "_can_restart_public_ws", return_value=True),
+            patch.object(kraken_module.asyncio, "sleep", new=AsyncMock()) as sleep_mock,
+        ):
             await pub._force_ws_restart()
         client.disconnect_websocket.assert_called_once()
         sleep_mock.assert_called_once()
@@ -1090,7 +1096,10 @@ class TestKrakenReconnectWatchdog:
         client.disconnect_websocket = AsyncMock()
         client._ensure_ws_connected = AsyncMock()
         pub._exchange_client = client
-        with patch.object(kraken_module.asyncio, "sleep", new=AsyncMock()):
+        with (
+            patch.object(pub, "_can_restart_public_ws", return_value=True),
+            patch.object(kraken_module.asyncio, "sleep", new=AsyncMock()),
+        ):
             await pub._force_ws_restart()
         client.disconnect_websocket.assert_called_once()
         client._ensure_ws_connected.assert_not_called()
@@ -1149,9 +1158,33 @@ class TestKrakenReconnectWatchdog:
         client.disconnect_websocket = AsyncMock(side_effect=RuntimeError("boom"))
         client._ensure_ws_connected = AsyncMock()
         pub._exchange_client = client
-        with patch.object(kraken_module.asyncio, "sleep", new=AsyncMock()):
+        with (
+            patch.object(pub, "_can_restart_public_ws", return_value=True),
+            patch.object(kraken_module.asyncio, "sleep", new=AsyncMock()),
+        ):
             await pub._force_ws_restart()
         client._ensure_ws_connected.assert_called_once()
+
+    async def test_spot_forced_and_liveness_restarts_leave_waiting_ws_intact(self) -> None:
+        """Both restart callers leave the same SDK client in place during a VPN wait."""
+        publisher = KrakenMarketDataPublisher(symbols=["BTC-USD"])
+        publisher.running = True
+        client = MagicMock(disconnect_websocket=AsyncMock(), _ensure_ws_connected=AsyncMock())
+        publisher._exchange_client = client
+        pool = EgressPool(
+            EgressPoolConfig(
+                routes=[
+                    RouteConfig(id="vpn", kind="socks5", proxy_url="socks5h://egress:1081"),
+                ]
+            )
+        )
+        pool._quarantine_route("vpn", datetime.now(UTC) + timedelta(seconds=30), "http-429")
+        assert not pool.has_available(exchange="kraken", record_wait=True)
+        with patch.object(kraken_module, "get_egress_pool", return_value=pool):
+            await publisher._force_ws_restart()
+            await publisher._attempt_liveness_recovery("stale")
+        client.disconnect_websocket.assert_not_awaited()
+        client._ensure_ws_connected.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_attempt_liveness_recovery_calls_force_ws_restart(self) -> None:

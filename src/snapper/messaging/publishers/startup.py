@@ -1,9 +1,9 @@
 """Classify upstream outages at the market-data publisher's connect boundary."""
 
-import asyncio
 import errno
 import socket
 import ssl
+from time import monotonic
 
 import aiohttp
 import ccxt
@@ -14,8 +14,7 @@ from snapper.core.process_exit import UpstreamUnavailableError
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
 from snapper.infrastructure.network.egress_context import resolve_egress_traffic
 from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
-from snapper.infrastructure.network.egress_pool import get_egress_pool
-from snapper.infrastructure.network.egress_pool import public_egress_pool
+from snapper.infrastructure.network.egress_pool import wait_for_public_route
 
 _UPSTREAM_HTTP_STATUSES = frozenset({502, 503, 504})
 _NETWORK_ERRNOS = frozenset(
@@ -129,7 +128,7 @@ def _is_upstream_unavailable(error: BaseException) -> bool:
     return unavailable
 
 
-async def connect_publisher_exchange(client: ExchangeClientBase) -> None:
+async def connect_publisher_exchange(client: ExchangeClientBase) -> float:
     """Connect a market-data publisher, waiting in-process for public VPN egress.
 
     Route exhaustion is retried without leaving this process. Upstream
@@ -138,6 +137,9 @@ async def connect_publisher_exchange(client: ExchangeClientBase) -> None:
     Args:
         client: The publisher's exchange client.
 
+    Returns:
+        Monotonic connection time, used to arm the publisher's watchdog.
+
     Raises:
         UpstreamUnavailableError: The venue or proxy could not be reached.
         Exception: Other startup connection errors propagate unchanged.
@@ -145,15 +147,12 @@ async def connect_publisher_exchange(client: ExchangeClientBase) -> None:
     while True:
         try:
             await client.connect()
-            return
+            return monotonic()
         except AllRoutesQuarantinedError:
-            exchange, traffic_class = resolve_egress_traffic()
+            exchange, traffic_class = resolve_egress_traffic(client.exchange_name)
             if traffic_class == "private":
                 raise
-            earliest = public_egress_pool(get_egress_pool()).earliest_release_in_seconds(
-                exchange=exchange, traffic_class="public"
-            )
-            await asyncio.sleep(max(earliest or 0.0, 1.0))
+            await wait_for_public_route(exchange)
         except Exception as error:
             if _is_upstream_unavailable(error):
                 raise UpstreamUnavailableError(str(error)) from error

@@ -891,7 +891,49 @@ async def test_ready_public_requires_a_recent_handshake_on_a_running_tunnel(
     ]
     with patch.object(egress_sidecar, "read_wg_transfer_counters", side_effect=outcomes) as read:
         response = await egress_sidecar._handle_ready_public(
-            _make_request(_SidecarState(running=running))
+            _make_request(
+                _SidecarState(
+                    running=running,
+                    public_route_ids=frozenset(tunnel.loaded.descriptor.id for tunnel in running),
+                )
+            )
         )
     assert response.status == (200 if handshook else 503)
     assert read.call_count == len(running)
+
+
+@pytest.mark.parametrize(
+    "reason", ["private_fallback", "disabled", "absent", "stopped", "pool_disabled"]
+)
+async def test_ready_public_excludes_ineligible_tunnels(reason: str) -> None:
+    """An ineligible tunnel cannot make the sidecar ready even with a fresh handshake."""
+    tunnel_id = "wg-de-1"
+    service = MagicMock()
+    routes: list[dict[str, object]] = [{"id": "default", "kind": "direct"}]
+    if reason != "absent":
+        routes.append(
+            {
+                "id": tunnel_id,
+                "kind": "socks5",
+                "proxy_url": "socks5h://snapper-egress:1081",
+                "enabled": reason != "disabled",
+            }
+        )
+    service.get_setting.return_value = {
+        "enabled": reason != "pool_disabled",
+        "private_fallback_route_id": tunnel_id if reason == "private_fallback" else None,
+        "routes": routes,
+    }
+    running = _RunningTunnel(
+        loaded=_make_loaded(tunnel_id),
+        server=MagicMock(is_running=MagicMock(return_value=reason != "stopped")),
+        tunnel_index=0,
+    )
+    state = _SidecarState(
+        running=[running], public_route_ids=egress_sidecar._public_route_ids(service)
+    )
+    handshake = WireGuardTransferCounters(tunnel_id, 0, 0, datetime.now(UTC))
+    with patch.object(egress_sidecar, "read_wg_transfer_counters", return_value=handshake) as read:
+        response = await egress_sidecar._handle_ready_public(_make_request(state))
+    assert response.status == 503
+    read.assert_not_called()

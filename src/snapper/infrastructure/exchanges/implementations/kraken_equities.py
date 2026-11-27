@@ -87,8 +87,13 @@ from snapper.infrastructure.exchanges.kraken_rest_egress import route_kraken_res
 from snapper.infrastructure.exchanges.kraken_rest_egress import spot_sdk_proxy_target
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
+from snapper.infrastructure.exchanges.kraken_sdk_patches import start_kraken_ws
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTickerSubscriptionAckSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenTradeSubscriptionAckSchema
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
+from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
+from snapper.infrastructure.network.egress_pool import wait_for_public_route
 from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
 
 apply_kraken_ws_teardown_hardening()
@@ -435,6 +440,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         *,
         realtime_ws_enabled: bool = False,
         realtime_wallet_public_id: str = "",
+        rest_only: bool = False,
     ) -> None:
         """Initialize Kraken Equities exchange client.
 
@@ -447,8 +453,10 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 Accepts a wallet public id verbatim, or
                 ``label:<wallet-label>`` resolved at runtime to the single
                 matching live wallet (fail closed on zero or multiple).
+            rest_only: Skip the WS startup gate for existing REST-only maintenance jobs.
         """
         super().__init__(repository=repository, exchange_name=ExchangeEnum.KRAKEN_EQUITIES)
+        self._rest_only = rest_only
         self._health_tracker: SubscriptionHealthTracker = SubscriptionHealthTracker()
         self._ws_client: SpotWSClient | None = None
         self._ws_connect_lock: asyncio.Lock = asyncio.Lock()
@@ -478,10 +486,16 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         self._stale_trade_last_log_at = float("-inf")
 
     async def connect(self) -> None:
-        """Establish connection (no-op until WS subscription).
+        """Require public egress before starting the lazy WS lifecycle.
 
         The SpotWSClient is created lazily on first subscription.
         """
+        if not self._rest_only and not public_egress_pool(get_egress_pool()).has_available(
+            exchange=self.exchange_name, traffic_class="public"
+        ):
+            raise AllRoutesQuarantinedError(
+                f"no public VPN route available (exchange={self.exchange_name}, purpose=websocket)"
+            )
         self._ws_connection_generation += 1
         self._ws_closing = False
         self._reopen_rest_pool()
@@ -1271,8 +1285,9 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
                 and self._disable_sdk_reconnect_replay_for_auth(client)
             ):
                 raise _RealtimeWsAuthUnavailableError("Kraken SDK auth WS patch unavailable")
-            async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
-                await client.start()
+            await start_kraken_ws(
+                client.start, exchange=self.exchange_name, timeout_s=_WS_CONNECT_TIMEOUT_S
+            )
             logger.info("Kraken Equities WebSocket connected")
             if replay_subscriptions and self._subscription_cache:
                 await self._replay_subscriptions()
@@ -1442,6 +1457,7 @@ class KrakenEquitiesExchangeClient(ExchangeClientBase):
         async with self._ws_connect_lock:
             if self._ws_client is not None:
                 return
+            await wait_for_public_route(self.exchange_name)
             auth_active = await self._prepare_realtime_ws_auth()
             if auth_active:
                 try:

@@ -1059,15 +1059,14 @@ class TestReserveAllQuarantined:
             with patch.object(pool_module, "monotonic", side_effect=[10, 12, 16, 17, 30, 34]):
                 vpn.quarantine_until = unavailable
                 for exchange in ("kraken", "kraken", "walutomat"):
-                    with pytest.raises(AllRoutesQuarantinedError):
-                        pool.reserve(exchange=exchange, purpose="http")
+                    assert not pool.has_available(exchange=exchange, record_wait=True)
                 vpn.quarantine_until = None
-                assert pool.has_available(exchange="walutomat")
+                assert pool.has_available(exchange="walutomat", record_wait=True)
                 pool.reserve(exchange="kraken", purpose="http").release()
                 vpn.quarantine_until = unavailable
-                assert not pool.has_available(exchange="kraken")
+                assert not pool.has_available(exchange="kraken", record_wait=True)
                 vpn.quarantine_until = None
-                assert pool.has_available(exchange="kraken")
+                assert pool.has_available(exchange="kraken", record_wait=True)
         finally:
             logger.remove(sink_id)
         assert pool._public_wait_seconds == {"kraken": 11, "walutomat": 4}
@@ -1079,6 +1078,31 @@ class TestReserveAllQuarantined:
         assert "wait ended exchange=kraken wait_seconds=4 public_vpn_wait_seconds_total=11" in (
             messages[-1]
         )
+
+    def test_public_availability_is_read_only_and_logs_outside_lock(self) -> None:
+        """A one-shot check records nothing and real waiter warnings run unlocked."""
+        pool = EgressPool(_two_route_config())
+        vpn = pool._states["wg-uk-1"]
+        vpn.quarantine_until = datetime.now(UTC) + timedelta(seconds=30)
+
+        def verify_unlocked(_message: str, *_args: str | float) -> None:
+            """Detect a synchronous warning delivered under the pool's RLock."""
+            assert not getattr(pool._lock, "_is_owned")()
+
+        with patch.object(logger, "warning", side_effect=verify_unlocked) as warning:
+            assert not pool.has_available(exchange="kraken")
+            with pytest.raises(AllRoutesQuarantinedError):
+                pool.reserve(exchange="kraken", purpose="http")
+            assert not pool.is_waiting_for_public_vpn("kraken")
+            warning.assert_not_called()
+            assert not pool.has_available(exchange="kraken", record_wait=True)
+            assert pool.is_waiting_for_public_vpn("kraken")
+            vpn.quarantine_until = None
+            assert pool.has_available(exchange="kraken")
+            assert pool.is_waiting_for_public_vpn("kraken")
+            assert pool.has_available(exchange="kraken", record_wait=True)
+            assert not pool.is_waiting_for_public_vpn("kraken")
+        assert warning.call_count == 2
 
     def test_wait_mode_raises_when_no_direct_route(self) -> None:
         """Spec — wait mode without an enabled direct route also raises.
@@ -1102,6 +1126,26 @@ class TestReserveAllQuarantined:
         pool = EgressPool(config)
         with pytest.raises(AllRoutesQuarantinedError, match="no direct fallback available"):
             pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_empty_public_policy_replacement_discards_wait_state(reset: bool) -> None:
+    """Reset and disabled initialization both install an empty pool with fresh state."""
+    reset_egress_pool()
+    old = public_egress_pool(None)
+    assert not old.has_available(exchange="kraken", record_wait=True)
+    try:
+        if reset:
+            reset_egress_pool()
+        else:
+            settings = MagicMock()
+            settings.get_setting.return_value = False
+            assert not pool_module.initialize_public_egress_policy(settings)
+        current = public_egress_pool(None)
+        assert current is not old
+        assert not current.is_waiting_for_public_vpn("kraken")
+    finally:
+        reset_egress_pool()
 
 
 class TestHasAvailable:
@@ -2119,7 +2163,7 @@ class TestInitializeEgressPool:
         messages: list[str] = []
         sink = logger.add(messages.append, level="WARNING", format="{message}")
         try:
-            assert not pool.has_available(exchange="kraken")
+            assert not pool.has_available(exchange="kraken", record_wait=True)
             with pytest.raises(AllRoutesQuarantinedError, match="no public VPN route available"):
                 pool.reserve(exchange="kraken", purpose="websocket")
             clock.now.return_value = vpn.quarantine_until
@@ -2320,6 +2364,19 @@ async def test_maintenance_loads_startup_pool_or_reuses_existing_pool(
         load_service.assert_not_awaited()
     else:
         load_service.assert_awaited_once_with("sqlite://", "tcp://broker:5555")
+
+
+@pytest.mark.parametrize("raw", [None, "{broken", {"enabled": True, "routes": []}])
+async def test_invalid_or_absent_pool_config_clears_installed_pool(raw: object) -> None:
+    """Any early refusal to install a new config clears the old routes."""
+    assert configure_egress_pool(_two_route_config()) is not None
+    settings = MagicMock()
+    settings.get_setting.return_value = raw
+    try:
+        assert await initialize_egress_pool(settings) is None
+        assert get_egress_pool() is None
+    finally:
+        reset_egress_pool()
 
 
 class TestSafelyInitializeEgressPool:

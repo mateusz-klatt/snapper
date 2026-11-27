@@ -49,6 +49,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _enqueue_or_drop_oldest
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _timeframe_to_seconds
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _tracker_feed_key
+from snapper.infrastructure.network import egress_pool
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_pool import EgressPool
@@ -7592,3 +7593,4 @@ def _stub_public_vpn_for_mocked_kraken_rest(monkeypatch: pytest.MonkeyPatch) -> 
         return configured if configured is not None else fallback_pool
 
     monkeypatch.setattr(kraken_rest_egress, "public_egress_pool", public_pool)
+    monkeypatch.setattr(egress_pool, "public_egress_pool", public_pool)
