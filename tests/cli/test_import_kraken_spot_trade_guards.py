@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from typer.testing import CliRunner
@@ -128,6 +129,33 @@ async def test_read_plan_refuses_unsupported_dialect() -> None:
         await importer._read_plan(repository, _EVIDENCE)
 
     session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("database", ["", ":memory:"])
+async def test_read_plan_keeps_non_file_sqlite_reader_url(
+    database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the SQLite reader URL for empty and in-memory database names.
+
+    Given: A SQLite URL with an empty or in-memory database name.
+    When: The importer starts a dry run.
+    Then: Reader construction receives the original read-only URL.
+    """
+    repository, _ = _repository_mock("sqlite")
+    url = make_url(f"sqlite+aiosqlite:///{database}")
+    repository.engine.url = url
+    create_reader = MagicMock(side_effect=RuntimeError("reader construction reached"))
+    monkeypatch.setattr(importer, "create_async_engine", create_reader)
+
+    with pytest.raises(RuntimeError, match="reader construction reached"):
+        await importer._read_plan(repository, _EVIDENCE)
+
+    create_reader.assert_called_once_with(
+        url.set(database=Path(database).absolute().as_uri()).update_query_dict(
+            {"mode": "ro", "uri": "true"}
+        )
+    )
 
 
 @pytest.mark.asyncio

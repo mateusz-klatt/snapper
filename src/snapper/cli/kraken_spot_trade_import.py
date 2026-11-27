@@ -5,22 +5,20 @@ import asyncio
 import hashlib
 import json
 import re
-import sqlite3
 import sys
 from collections.abc import Sequence
 from datetime import UTC
 from datetime import datetime
-from functools import partial
 from itertools import batched
 from pathlib import Path
 from typing import Final
 from typing import TextIO
 from typing import TypedDict
 from typing import cast
+from urllib.request import url2pathname
 from uuid import uuid7
 
 import typer
-from aiosqlite import Connection as SQLiteConnection
 from sqlalchemy import select
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -183,39 +181,13 @@ async def _catalog_checked_plan(
     return await _compare(session, evidence.rows)
 
 
-class _SQLiteReaderConnection(SQLiteConnection):
-    """Track aiosqlite worker shutdown before the connection reaches the pool."""
-
-    _worker_stopped: asyncio.Future[object] | None = None
-
-    def stop(self) -> asyncio.Future[object] | None:
-        """Retain the future that aiosqlite discards when SQLite fails to open.
-
-        Returns:
-            The worker's shutdown future, if an event loop is available.
-        """
-        self._worker_stopped = super().stop()
-        return self._worker_stopped
-
-    async def open(self) -> SQLiteConnection:
-        """Wait for shutdown if opening fails before the pool owns the connection.
-
-        Returns:
-            The open SQLite connection on success.
-        """
-        try:
-            return await self
-        finally:
-            if self._worker_stopped is not None:
-                await self._worker_stopped
-
-
 async def _read_plan(
     repository: SQLAlchemyRepository, evidence: KrakenSpotTradeEvidenceWindow
 ) -> KrakenSpotTradeRecoveryPlan:
     """Read the full live comparison in one read-only snapshot.
 
-    Open SQLite in read-only file mode to bypass the repository's writer pragmas.
+    Check the SQLite file before opening it in read-only mode to bypass the
+    repository's writer pragmas and avoid starting a worker for a missing file.
     """
     if repository.dialect_name == "postgresql":
         async with repository.session() as session:
@@ -228,20 +200,15 @@ async def _read_plan(
 
     url = repository.engine.url
     database = url.database or ""
-    if url.query.get("uri") != "true" or not database.startswith("file:"):
-        database = Path(database).absolute().as_uri()
+    file_uri = url.query.get("uri") == "true" and database.startswith("file:")
+    filename = url2pathname(database, require_scheme=True) if file_uri else database
+    path = Path(filename).absolute()
+    if filename not in ("", ":memory:") and not path.is_file():
+        raise ValueError(f"SQLite database file not found: {path}")
+    if not file_uri:
+        database = path.as_uri()
     reader_url = url.set(database=database).update_query_dict({"mode": "ro", "uri": "true"})
-
-    async def connect_reader() -> SQLiteConnection:
-        """Open the reader with the dialect's URI options and daemon worker."""
-        args, options = reader.dialect.create_connect_args(reader_url)
-        connection = _SQLiteReaderConnection(
-            partial(sqlite3.connect, *args, **options), iter_chunk_size=64
-        )
-        connection._thread.daemon = True
-        return await connection.open()
-
-    reader = create_async_engine(reader_url, async_creator=connect_reader)
+    reader = create_async_engine(reader_url)
     try:
         async with AsyncSession(reader) as session:
             await session.execute(text("BEGIN"))

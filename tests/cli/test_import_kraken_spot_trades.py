@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-from collections.abc import Generator
 from collections.abc import Iterator
 from contextlib import closing
 from datetime import UTC
@@ -17,7 +16,6 @@ from uuid import UUID
 from uuid import uuid7
 
 import pytest
-from aiosqlite import Connection as SQLiteConnection
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typer.testing import CliRunner
@@ -241,51 +239,26 @@ def test_dry_run_preserves_sqlite_journal_mode(
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
 
 
+@pytest.mark.parametrize("uri", [False, True], ids=["path", "uri"])
 def test_dry_run_does_not_create_a_missing_sqlite_database(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], uri: bool
 ) -> None:
     """Refuse a missing SQLite database without creating a file.
 
-    Given: The database URL points to an absent SQLite file.
+    Given: A plain path or file URI pointing to an absent SQLite file.
     When: The operator previews the import.
-    Then: The command waits for the failed reader's worker to stop, reports
-        the connection failure, and leaves the file absent.
+    Then: The command exits with a missing-file refusal and leaves the file absent.
     """
-    awaited_stops: list[asyncio.Future[object]] = []
-    original_stop = SQLiteConnection.stop
+    path = tmp_path / "missing database.db"
+    database = f"{path.as_uri()}?uri=true" if uri else str(path)
+    url = f"sqlite+aiosqlite:///{database}"
+    monkeypatch.setattr(importer, "get_bootstrap_settings", lambda: SimpleNamespace(db_url=url))
 
-    class ObservedStopFuture(asyncio.Future[object]):
-        """Record when the importer awaits the worker's shutdown."""
+    assert importer.main(_args(tmp_path)) == 1
 
-        def __await__(self) -> Generator[object, None, object]:
-            """Record the await and delegate to the actual shutdown future."""
-            awaited_stops.append(self)
-            return super().__await__()
-
-    def observe_stop(connection: SQLiteConnection) -> asyncio.Future[object] | None:
-        """Use an observable future for the driver's actual worker shutdown."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return original_stop(connection)
-        with monkeypatch.context() as patch:
-            patch.setattr(loop, "create_future", ObservedStopFuture)
-            return original_stop(connection)
-
-    path = tmp_path / "missing.db"
-    monkeypatch.setattr(
-        importer,
-        "get_bootstrap_settings",
-        lambda: SimpleNamespace(db_url=f"sqlite+aiosqlite:///{path}"),
+    assert (
+        capsys.readouterr().err == f"Trade import refused: SQLite database file not found: {path}\n"
     )
-
-    with monkeypatch.context() as patch:
-        patch.setattr(SQLiteConnection, "stop", observe_stop)
-        assert importer.main(_args(tmp_path)) == 1
-
-    assert len(awaited_stops) == 1
-    assert awaited_stops[0].done()
-    assert "OperationalError" in capsys.readouterr().err
     assert not path.exists()
 
 
