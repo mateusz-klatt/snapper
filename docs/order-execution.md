@@ -121,20 +121,32 @@ dated contracts. A cached price cannot extend certification or preserve a
 revoked specification. Missing derivative semantics never use spot arithmetic.
 Legacy spot valuation is limited to known spot sources; unknown venues or
 unrecognized quantity and product dimensions are refused.
-The implemented profile requires positive finite prices. Non-USD quote exposure
-is converted using current market-data-enabled, non-paper forex snapshots against
-USD. Direct and inverse rates are normalized before selecting the newest usable
-plane; equally recent conflicting normalized rates refuse admission. USD quotes
-do not perform an FX lookup. Neither P&L candles nor carried FX rates support this
-oracle. General commodity, option, margin and collateral valuation remain outside
-this profile.
+The live candle pipeline is the production price source. For the main
+instrument and each FX plane, the newest active 1m candle supplies the price.
+This includes `calculated`, `native`, `synthesized`, and provisional rows.
+Freshness uses `open_at + 60s`, capped at `now` for the current minute, and
+uses `open_at` for future-opened candles. The oracle requires a positive finite
+price. `market_snapshots` is a deprecated transitional fallback available only
+when the instrument has no active 1m candle. A stale candle blocks its
+instrument's snapshot fallback even when that snapshot is fresh.
+
+Non-USD quote exposure uses current market-data-enabled, non-paper forex
+planes against USD. The oracle normalizes direct and inverse rates and chooses
+the newest usable plane after applying candle priority to each instrument.
+Equally recent planes with conflicting normalized rates refuse admission
+with `fx_plane_conflict`. USD quotes need no FX lookup. The oracle excludes
+historical and carried P&L conversion rates. General commodity, option, margin
+and collateral valuation remain outside this profile.
 
 Both marks must be at most 300 seconds old and at most 5 seconds ahead of the
 final clock, with inclusive boundaries and timezone-aware timestamps. The main
-price has a 60-second cache; its metadata and every FX leg are reread on each
-conversion. Freshness, certification and contract expiry are checked again after
-all awaited reads, including cached and USD-only calls. Missing or unsafe FX
-evidence reports `caps_price_unavailable`, retaining structured FX reason codes.
+price and its evidence timestamp have a 60-second cache. The converter rereads
+metadata and every FX leg on each conversion. Freshness,
+certification and contract expiry are checked again after all awaited reads,
+including cached and USD-only calls. Missing or unsafe evidence reports
+`caps_price_unavailable`, retaining structured reason codes (`snapshot_missing`,
+`price_stale`, `fx_snapshot_missing`, `fx_price_stale`, `fx_plane_conflict`,
+etc.).
 
 Admission stores the converted value in `submitted_notional_usd`, rounded up to
 whole cents by the existing cap enforcer. The rolling 24-hour cap uses that
