@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from itertools import chain
 from itertools import count
+from itertools import repeat
 from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -102,7 +104,7 @@ async def test_dispatch_publishes_and_updates_status() -> None:
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
-    repo.get_undispatched_commands = AsyncMock(side_effect=[[cmd], []])
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
@@ -137,7 +139,7 @@ async def test_dispatch_handles_publish_failure() -> None:
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
-    repo.get_undispatched_commands = AsyncMock(side_effect=[[cmd], []])
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
@@ -407,7 +409,7 @@ async def test_notify_wakes_dispatcher() -> None:
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
-    repo.get_undispatched_commands = AsyncMock(side_effect=[[cmd], []])
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.update_trade_command_status = AsyncMock(return_value=1)
     publish_fn = AsyncMock()
 
@@ -454,7 +456,7 @@ async def test_no_publish_fn_skips_publish() -> None:
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
-    repo.get_undispatched_commands = AsyncMock(side_effect=[[cmd], []])
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
@@ -505,7 +507,7 @@ async def test_dispatch_post_publish_db_failure_no_revert() -> None:
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
-    repo.get_undispatched_commands = AsyncMock(side_effect=[[cmd], []])
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     repo.bulk_dispatch_trade_commands = AsyncMock(side_effect=RuntimeError("DB down"))
@@ -534,7 +536,7 @@ async def test_dispatch_revert_db_failure_logged() -> None:
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
-    repo.get_undispatched_commands = AsyncMock(side_effect=[[cmd], []])
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.cas_trade_command_status = AsyncMock(side_effect=RuntimeError("DB down"))
     publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
 
@@ -575,7 +577,7 @@ class TestDispatchTtl:
     def _repo(self, cmd: TradeCommandRow) -> AsyncMock:
         """Build a repo serving the command once, with healthy defaults."""
         repo = AsyncMock()
-        repo.get_undispatched_commands = AsyncMock(side_effect=[[cmd], []])
+        repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
         repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
         repo.has_order_submit_evidence = AsyncMock(return_value=False)
         repo.cas_trade_command_status = AsyncMock(return_value=True)
