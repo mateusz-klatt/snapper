@@ -748,7 +748,7 @@ def _fsync_directory_tree(target_dir: Path, base_dir: Path) -> None:
         current = current.parent
 
 
-_UNSYNCABLE_DIRECTORY_ERRNOS = frozenset({errno.EROFS, errno.EINVAL, errno.EBADF, errno.EACCES})
+_UNSYNCABLE_DIRECTORY_ERRNOS = frozenset({errno.EROFS, errno.EINVAL})
 
 
 def _fsync_base_ancestors(base_dir: Path) -> None:
@@ -760,9 +760,11 @@ def _fsync_base_ancestors(base_dir: Path) -> None:
     ``base_dir.parent``. Syncing every ancestor of the resolved base, up to the
     filesystem root, closes that gap for first runs and retries alike at a
     cost bounded by the path depth. Ancestors above ``base_dir.parent`` may sit
-    on read-only or special filesystems that refuse a directory fsync; those
-    specific refusals are tolerated there, while any error at ``base_dir`` or
-    ``base_dir.parent`` propagates and blocks the purge. On Windows
+    on read-only or special filesystems that refuse a directory fsync. Only
+    ``EROFS`` and ``EINVAL`` are tolerated there, because a read-only or
+    sync-incapable directory cannot have gained a new entry; any other error,
+    including a permission refusal, and any error at ``base_dir`` or
+    ``base_dir.parent``, propagates and blocks the purge. On Windows
     (``os.name == "nt"``) this is a no-op, like every directory fsync here.
 
     Args:

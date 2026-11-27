@@ -1623,7 +1623,7 @@ def test_fsync_base_ancestors_tolerates_unsyncable_high_ancestors(
     assert attempted == [resolved, *resolved.parents]
 
 
-@pytest.mark.parametrize("failing", ["base", "parent", "unexpected"])
+@pytest.mark.parametrize("failing", ["base", "parent", "unexpected", "permission"])
 def test_fsync_base_ancestors_propagates_strict_or_unexpected_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1632,7 +1632,8 @@ def test_fsync_base_ancestors_propagates_strict_or_unexpected_errors(
     """Errors at the base, its parent, or with an unexpected errno block the purge.
 
     Given: Directory fsync that fails at the base, at its parent with a tolerated
-        errno, or above the parent with an errno outside the tolerated set.
+        errno, or above the parent with an errno outside the tolerated set,
+        including a permission refusal on a directory that may hold a new entry.
     When: ``_fsync_base_ancestors`` runs.
     Then: The ``OSError`` propagates.
     """
@@ -1643,6 +1644,7 @@ def test_fsync_base_ancestors_propagates_strict_or_unexpected_errors(
         "base": (resolved, errno.EROFS),
         "parent": (resolved.parent, errno.EROFS),
         "unexpected": (resolved.parent.parent, errno.EIO),
+        "permission": (resolved.parent.parent, errno.EACCES),
     }
     failing_dir, failing_errno = targets[failing]
 

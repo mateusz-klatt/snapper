@@ -2040,7 +2040,7 @@ snapper archive [OPTIONS]
 | `--dry-run` | FLAG | False | Report counts without writing files |
 | `--purge` | FLAG | False | Delete exported rows from DB after writing (event tables **except `executions`**, plus `candles-audit`/state tables when combined with `--closed-only`). Refused for `executions` — see the execution exception note below. |
 | `--closed-only` | FLAG | False | Only closed SCD2 versions (`candles-audit` and state tables) |
-| `--output-dir` | str | `data` | Base output directory. For a live `candles-audit` `--purge` (not `--dry-run`) it must already exist, or the export refuses to start. Before deleting rows, the export also fsyncs the base and every ancestor directory, so the archive stays reachable after a crash. |
+| `--output-dir` | str | `data` | Base output directory. For a live `candles-audit` `--purge` (not `--dry-run`) it must already exist, or the export refuses to start. Before deleting rows on POSIX hosts, the export also fsyncs the base and every ancestor directory. It skips only ancestors on read-only filesystems that refuse a directory fsync; any other failure blocks the purge. Windows has no directory fsync, so there durability ends at the fsynced CSV file itself. |
 
 **Output structure:**
 
