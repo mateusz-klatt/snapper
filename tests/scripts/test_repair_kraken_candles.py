@@ -355,7 +355,14 @@ async def test_futures_resolves_active_instruments_and_disconnects(
     repo = _repo()
     repo.get_exchange_instruments = AsyncMock(return_value=["BTC-USD-PERP", "MISSING"])
     repo.get_instrument_public_ids_by_symbols = AsyncMock(return_value={"BTC-USD-PERP": "iid"})
-    client = MagicMock(connect=AsyncMock(), disconnect=AsyncMock())
+    initialize = AsyncMock()
+
+    async def connect() -> None:
+        """Require the maintenance pool before the first venue call."""
+        initialize.assert_awaited_once_with(repair.get_settings())
+
+    client = MagicMock(connect=AsyncMock(side_effect=connect), disconnect=AsyncMock())
+    monkeypatch.setattr(repair, "ensure_maintenance_egress_pool", initialize)
     monkeypatch.setattr(repair, "KrakenFuturesExchangeClient", lambda: client)
     process = AsyncMock()
     monkeypatch.setattr(repair, "futures_symbol", process)
@@ -539,6 +546,7 @@ async def test_futures_fetch_failures_continue_but_database_failures_abort(
         return_value={"BAD": "bad", "GOOD": "good"}
     )
     client = MagicMock(connect=AsyncMock(), disconnect=AsyncMock())
+    monkeypatch.setattr(repair, "ensure_maintenance_egress_pool", AsyncMock())
     monkeypatch.setattr(repair, "KrakenFuturesExchangeClient", lambda: client)
     failure = (
         OperationalError("write", None, Exception("locked"))

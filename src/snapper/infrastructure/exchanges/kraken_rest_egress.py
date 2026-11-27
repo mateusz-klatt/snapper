@@ -23,6 +23,7 @@ from snapper.infrastructure.network.egress_context import current_egress_identit
 from snapper.infrastructure.network.egress_context import egress_identity
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_pool import normalize_egress_target_host
+from snapper.infrastructure.network.egress_pool import public_egress_pool
 from snapper.infrastructure.network.egress_reservation import EgressReservation
 
 KrakenRestOperationKind = Literal["public_read", "private_idempotent_read", "private_mutation"]
@@ -361,16 +362,9 @@ def _run_public_read[ResultT](
     proxy_lock: AbstractContextManager[object],
     sync_call: Callable[[], ResultT],
 ) -> ResultT:
-    """Execute a public read through the public egress selector."""
-    pool = get_egress_pool()
+    """Execute a public read, propagating a refusal before dispatch."""
+    pool = public_egress_pool(get_egress_pool())
     target_host = _target_host_from_rest_target(target)
-    if pool is None or pool.size() == 0:
-        return _execute_with_proxy(
-            target=target,
-            proxy_lock=proxy_lock,
-            proxy_url=None,
-            sync_call=sync_call,
-        )
     reservation = pool.reserve(
         exchange=exchange,
         purpose="http",

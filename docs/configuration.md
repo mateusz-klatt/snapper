@@ -511,10 +511,11 @@ through the Settings API/UI:
 | Key | Default | Description |
 | --- | ------- | ----------- |
 | `ai_integration_enabled` | `true` | Feature gate for `/api/mcp`, `/api/ai-delegates/*`, and `/api/ai-researchers`; `false` returns `503 {"error_code":"feature_disabled"}` from `/api/mcp` and hides AI integration in the frontend |
-| `feed_egress_enabled` | `false` | Route feed publishers through their own process-local egress pools at startup |
+| `feed_egress_enabled` | `false` | Load each feed publisher’s process-local VPN routes at startup. Public feeds wait when an eligible route is unavailable. |
+| `public_direct_allowed` | `false` | Dev hosts only. The JSON boolean `true` permits a direct public reservation when no public VPN is usable. Production never sets this. Hosts without an `egress_pool` wait for a VPN route unless the dev opt-in is enabled. |
 | `kraken_equities_realtime_ws_enabled` | `false` | Use Kraken Equities authenticated realtime market-data WS when token mint succeeds; fallback remains the public delayed feed |
 | `kraken_equities_realtime_wallet_public_id` | `""` | Optional wallet pin whose `exchange='kraken'` Spot API key/secret mints Kraken Equities realtime WS tokens: a wallet public id used verbatim, or `label:<wallet-label>` resolved at runtime to the single matching live wallet (fails closed to the delayed feed on zero/multiple matches); empty auto-selects an active Kraken Spot `api_key_secret` wallet |
-| `egress_pool` | unset | JSON tunnel-pool definition, validated as `EgressPoolConfig` at startup. An absent, malformed, or validation-failing value disables egress routing with a log line. See [snapper-egress.md](snapper-egress.md) |
+| `egress_pool` | unset | JSON tunnel-pool definition, validated as `EgressPoolConfig` at startup. The `private_fallback_route_id` is reserved for private traffic. An absent, invalid, or disabled pool supplies no public VPN routes. See [snapper-egress.md](snapper-egress.md) |
 | `paper_instruments` | `{"kraken": ["BTC-USD", "EUR-USD"], "kraken_futures": [], "walutomat": ["EUR-PLN", "USD-PLN"]}` | Source exchanges and symbols replayed by paper feeds |
 | `backfill_days` | `30` | Default historical backfill window |
 | `risk_max_drawdown` | `0.15` | Maximum portfolio drawdown threshold |
@@ -528,6 +529,12 @@ through the Settings API/UI:
 | `rest_circuit_reset_timeout` | `30` | Seconds before the REST circuit attempts reset |
 | `zmq_heartbeat_interval_ms` | `1000` | ZMQ heartbeat interval |
 | `recon_balance_threshold` | `1.0` | Absolute balance mismatch threshold for reconciliation warnings |
+
+The API, feed publishers, and snapshot commands read `public_direct_allowed`
+as a standalone DB setting at startup. Only the JSON boolean `true` enables
+it. The dev fallback can operate with an absent, invalid, disabled, or
+exhausted VPN pool. Every opted-in process logs a startup warning and
+warns when an exchange first reserves direct in each fallback episode.
 
 Kraken Futures startup uses a fixed public `load_markets` discovery policy: at most
 three attempts for completed HTTP `503` GET responses, with asynchronous waits of

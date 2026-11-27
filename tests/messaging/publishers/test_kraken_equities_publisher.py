@@ -3,6 +3,7 @@
 import asyncio
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import PropertyMock
@@ -15,10 +16,26 @@ from snapper.infrastructure.exchanges.implementations import kraken_equities as 
 from snapper.infrastructure.exchanges.implementations.kraken_equities import (
     KrakenEquitiesExchangeClient,
 )
+from snapper.infrastructure.network import egress_pool
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_models import EgressPoolConfig
+from snapper.infrastructure.network.egress_models import RouteConfig
+from snapper.infrastructure.network.egress_pool import EgressPool
 from snapper.messaging.publishers import kraken_equities as equities_module
 from snapper.messaging.publishers.kraken_equities import KrakenEquitiesMarketDataPublisher
 from snapper.messaging.publishers.kraken_equities import _is_cme_closed
+
+
+@pytest.fixture
+def public_pool(monkeypatch: pytest.MonkeyPatch) -> EgressPool:
+    """Install a public route shared by the publisher and its exchange client."""
+    pool = EgressPool(
+        EgressPoolConfig(
+            routes=[RouteConfig(id="vpn", kind="socks5", proxy_url="socks5h://egress:1081")]
+        )
+    )
+    monkeypatch.setattr(egress_pool, "_POOL_HOLDER", [pool])
+    return pool
 
 
 class TestKrakenEquitiesMarketDataPublisher:
@@ -321,6 +338,7 @@ class TestKrakenEquitiesMarketDataPublisher:
         assert _is_cme_closed(now_utc) is expected
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("public_pool")
     async def test_attempt_liveness_recovery_disconnects_and_ensures(self) -> None:
         """Equities liveness recovery rebuilds the websocket client.
 
@@ -340,6 +358,7 @@ class TestKrakenEquitiesMarketDataPublisher:
         client._ensure_ws_connected.assert_awaited_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("public_pool")
     async def test_liveness_recovery_reopens_lifecycle_for_auth_demotion(self) -> None:
         """Realtime liveness rebuild allows later auth rejection demotion."""
         publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
@@ -394,6 +413,91 @@ class TestKrakenEquitiesMarketDataPublisher:
             assert client._ws_auth_active is False
         finally:
             await client.disconnect()
+
+    async def test_equities_recovery_preserves_the_existing_sdk_during_vpn_wait(
+        self, public_pool: EgressPool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The SDK keeps ownership of its reconnect throughout route exhaustion."""
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        client = KrakenEquitiesExchangeClient()
+        sdk = MagicMock(close=AsyncMock())
+        client._ws_client = sdk
+        publisher._exchange_client = client
+        publisher._last_message_at = 0.0
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1_501.0)
+        public_pool._quarantine_route("vpn", datetime.now(UTC) + timedelta(seconds=30), "http-429")
+
+        await publisher._attempt_liveness_recovery("stale")
+        assert public_pool.is_waiting_for_public_vpn("kraken_equities")
+        publisher._check_feed_liveness()
+        sdk.close.assert_not_awaited()
+        assert client._ws_client is sdk
+        assert not client._ws_closing
+
+    @pytest.mark.parametrize("has_socket", [False, True])
+    async def test_equities_recovery_waits_for_vpn_then_reconnects_without_dark_exit(
+        self, has_socket: bool, public_pool: EgressPool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty slot or a route lost during teardown waits for egress and reconnects."""
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        client = KrakenEquitiesExchangeClient()
+        publisher._exchange_client = client
+        publisher._last_message_at = 0.0
+        monkeypatch.setattr("snapper.messaging.publishers.base.monotonic", lambda: 1_501.0)
+        monkeypatch.setattr(publisher, "_get_liveness_recovery_threshold_s", lambda: 120)
+
+        async def lose_route() -> None:
+            """Quarantine the only VPN when the socket closes or before recovery starts."""
+            public_pool._quarantine_route(
+                "vpn", datetime.now(UTC) + timedelta(seconds=30), "http-429"
+            )
+
+        if has_socket:
+            client._ws_client = MagicMock(close=AsyncMock(side_effect=lose_route))
+        else:
+            await lose_route()
+        waiting = asyncio.Event()
+        released = asyncio.Event()
+
+        async def hold_wait(_delay: float) -> None:
+            """Hold the real route waiter until the test releases the VPN."""
+            waiting.set()
+            await released.wait()
+
+        sdk = MagicMock(start=AsyncMock(), close=AsyncMock())
+        monkeypatch.setattr(ke, "SpotWSClient", MagicMock(return_value=sdk))
+        monkeypatch.setattr(egress_pool.asyncio, "sleep", hold_wait)
+        recovery = asyncio.create_task(publisher._attempt_liveness_recovery("stale"))
+        try:
+            await asyncio.wait_for(waiting.wait(), timeout=1.0)
+            assert public_pool.is_waiting_for_public_vpn("kraken_equities")
+            publisher._check_feed_liveness()
+            assert client._ws_client is None
+            assert not client._ws_closing
+            sdk.start.assert_not_awaited()
+            public_pool._states["vpn"].quarantine_until = None
+            released.set()
+            await asyncio.wait_for(recovery, timeout=1.0)
+            sdk.start.assert_awaited_once()
+            assert client._ws_client is sdk
+            assert not client._ws_closing
+            assert not public_pool.is_waiting_for_public_vpn("kraken_equities")
+        finally:
+            recovery.cancel()
+            await asyncio.gather(recovery, return_exceptions=True)
+            await client.disconnect()
+
+    @pytest.mark.usefixtures("public_pool")
+    async def test_equities_recovery_resets_closing_on_cancelled_teardown(self) -> None:
+        """A cancelled recovery releases the client closing flag."""
+        publisher = KrakenEquitiesMarketDataPublisher(symbols=["CLM6-NYMEX"])
+        client = KrakenEquitiesExchangeClient()
+        client._ws_client = MagicMock(close=AsyncMock(side_effect=asyncio.CancelledError))
+        publisher._exchange_client = client
+
+        with pytest.raises(asyncio.CancelledError):
+            await publisher._attempt_liveness_recovery("stale")
+        assert not client._ws_closing
 
     @pytest.mark.asyncio
     async def test_attempt_liveness_recovery_skips_without_client(self) -> None:

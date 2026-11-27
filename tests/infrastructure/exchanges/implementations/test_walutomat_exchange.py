@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 from typing import cast
 from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
 from urllib.parse import parse_qs
 
 import httpx
@@ -54,6 +55,12 @@ from snapper.infrastructure.exchanges.implementations.walutomat import walutomat
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatBestOffer
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
+from snapper.infrastructure.network.egress_models import EgressPoolConfig
+from snapper.infrastructure.network.egress_models import RouteConfig
+from snapper.infrastructure.network.egress_pool import EgressPool
+from snapper.infrastructure.network.egress_pool import configure_egress_pool
+from snapper.infrastructure.network.egress_pool import reset_egress_pool
 
 
 class StubResponse:
@@ -7818,3 +7825,112 @@ def test_transition_logs_are_rate_limited_per_symbol_and_report_suppression(
     assert "suppressed" not in refusals[0].message
     assert "[2 further transition(s) suppressed]" in refusals[1].message
     assert client.mark_refusal_report().counts == {"TRY-PLN": 4}
+
+
+async def test_walutomat_market_and_signed_requests_use_distinct_egress_classes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public quote and authenticated balance requests use their respective routes.
+
+    Given: A pool with direct and VPN routes and a Walutomat client with credentials,
+    When: The client fetches the market quote and then reads signed balances,
+    Then: The market request uses the SOCKS proxy and the balance request goes direct.
+    """
+    reset_egress_pool()
+    configure_egress_pool(
+        EgressPoolConfig(
+            enabled=True,
+            routes=[
+                RouteConfig(id="direct", kind="direct"),
+                RouteConfig(id="vpn", kind="socks5", proxy_url="socks5h://egress:1081"),
+            ],
+        )
+    )
+    proxies: list[str | None] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        """Supply the two vendor payloads without making a socket connection."""
+        if request.url.host == "user.walutomat.pl":
+            return httpx.Response(200, json=[], request=request)
+        return httpx.Response(200, json={"success": True, "result": []}, request=request)
+
+    def factory(*, proxy: str | None) -> httpx.MockTransport:
+        """Record the proxy chosen for each host's HTTP transport."""
+        proxies.append(proxy)
+        return httpx.MockTransport(respond)
+
+    client = WalutomatExchangeClient(api_key="example")
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", factory)
+    monkeypatch.setattr(
+        client, "_get_auth_headers", MagicMock(return_value={"X-API-Key": "example"})
+    )
+    try:
+        await client.connect()
+        assert await client.read_native_balances() == []
+    finally:
+        await client.disconnect()
+        reset_egress_pool()
+    assert proxies == ["socks5h://egress:1081", None]
+
+
+async def test_walutomat_connect_preserves_public_route_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A public VPN refusal closes the HTTP client and retains the typed exception.
+
+    Given: A Walutomat startup market request that raises AllRoutesQuarantinedError,
+    When: The client connects,
+    Then: The typed refusal propagates and the partially initialized HTTP client closes.
+    """
+    client = WalutomatExchangeClient()
+    http_client = MagicMock(aclose=AsyncMock())
+    monkeypatch.setattr(httpx, "AsyncClient", MagicMock(return_value=http_client))
+    monkeypatch.setattr(
+        client,
+        "_fetch_market_data",
+        AsyncMock(side_effect=AllRoutesQuarantinedError("no VPN")),
+    )
+
+    with pytest.raises(AllRoutesQuarantinedError, match="no VPN"):
+        await client.connect()
+
+    http_client.aclose.assert_awaited_once_with()
+    assert client._http_client is None
+
+
+@pytest.mark.parametrize("deadline, expected", [(None, 10.0), (60.0, 60.0)])
+async def test_walutomat_polls_again_after_waiting_for_public_vpn(
+    deadline: float | None, expected: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unavailable VPNs defer the next poll without increasing HTTP error counts.
+
+    Given: A Walutomat poll refused by public egress, with or without a release deadline,
+    When: The polling loop handles the refusal,
+    Then: It sleeps using the public pool's deadline with the polling interval as
+        its floor and leaves the HTTP error count unchanged.
+    """
+    client = WalutomatExchangeClient(polling_interval=10.0)
+    client._running = True
+    pool = MagicMock(spec=EgressPool)
+    pool.earliest_release_in_seconds.return_value = deadline
+    configured = pool if deadline is not None else None
+    resolve_public = MagicMock(return_value=pool)
+
+    async def sleep(seconds: float) -> None:
+        """End the polling loop after observing the refusal's scheduled delay."""
+        assert seconds == expected
+        client._running = False
+
+    monkeypatch.setattr(walutomat_mod, "get_egress_pool", lambda: configured)
+    monkeypatch.setattr(walutomat_mod, "public_egress_pool", resolve_public)
+    monkeypatch.setattr(walutomat_mod.asyncio, "sleep", sleep)
+    monkeypatch.setattr(
+        client, "_fetch_market_data", AsyncMock(side_effect=AllRoutesQuarantinedError("no VPN"))
+    )
+    await client._polling_loop(["EUR-PLN"])
+
+    assert client._consecutive_error_count == 0
+    resolve_public.assert_called_once_with(configured)
+    pool.earliest_release_in_seconds.assert_called_once_with(
+        exchange="walutomat", traffic_class="public"
+    )

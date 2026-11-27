@@ -179,6 +179,7 @@ class TestServiceMethods:
         updater = KrakenEquitiesSymbolUpdaterService(update_threshold_hours=6)
         client = updater._create_exchange_client()
         assert isinstance(client, KrakenEquitiesExchangeClient)
+        assert client._rest_only
 
     def test_get_default_parameters(self) -> None:
         """Verify default parameters.

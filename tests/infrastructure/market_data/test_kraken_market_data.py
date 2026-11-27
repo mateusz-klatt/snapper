@@ -33,50 +33,32 @@ def test_service_initialization() -> None:
 
 
 def test_run_snapshot_update_integration() -> None:
-    """Test run_snapshot_update integration flow.
+    """The command starts its one-shot updater in the public egress wrapper.
 
-    Given: mocked client, repository, settings, and async handler,
-    When: calling run_snapshot_update,
-    Then: _async_update_snapshots is invoked once.
+    Given: The Kraken snapshot command and a mocked public egress wrapper,
+    When: The command runs,
+    Then: It awaits the wrapper with the Kraken venue and its snapshot coroutine.
     """
-    with (
-        patch(
-            "snapper.infrastructure.market_data.kraken.KrakenExchangeClient"
-        ) as mock_client_class,
-        patch("snapper.infrastructure.market_data.kraken.DatabaseRepository") as mock_repo_class,
-        patch("snapper.infrastructure.market_data.kraken.get_settings") as mock_settings,
-        patch("snapper.infrastructure.market_data.kraken._async_update_snapshots") as mock_async,
-    ):
-        mock_settings.return_value = MagicMock()
-        mock_settings.return_value.db_url = TEST_DB_URL
-        mock_client = AsyncMock()
-        mock_client_class.return_value = mock_client
-        mock_repo = MagicMock()
-        mock_repo_class.return_value = mock_repo
-        mock_async.return_value = None
+    with patch("snapper.infrastructure.market_data.kraken.run_public_snapshot_with_egress") as run:
         run_snapshot_update()
-        mock_async.assert_called_once()
+    run.assert_awaited_once_with("kraken", _async_update_snapshots)
 
 
 def test_run_snapshot_update_handles_exceptions() -> None:
-    """Test run_snapshot_update exception propagation.
+    """The command propagates the wrapper's failure to the CLI error boundary.
 
-    Given: _async_update_snapshots raises exception,
-    When: calling run_snapshot_update,
-    Then: exception is propagated and handler was called.
+    Given: A public egress wrapper that raises a WebSocket connection error,
+    When: The Kraken snapshot command runs,
+    Then: The same error propagates out of the command.
     """
     with (
-        patch("snapper.infrastructure.market_data.kraken._async_update_snapshots") as mock_async,
+        patch(
+            "snapper.infrastructure.market_data.kraken.run_public_snapshot_with_egress",
+            side_effect=RuntimeError("WebSocket connection failed"),
+        ),
+        pytest.raises(RuntimeError, match="WebSocket connection failed"),
     ):
-        mock_async.side_effect = Exception("WebSocket connection failed")
-        exception_raised = False
-        try:
-            run_snapshot_update()
-        except Exception as e:
-            exception_raised = True
-            assert "WebSocket connection failed" in str(e)
-        assert exception_raised, "Expected exception was not raised"
-        mock_async.assert_called_once()
+        run_snapshot_update()
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from collections.abc import Generator
 from datetime import UTC
 from datetime import datetime
@@ -42,6 +43,17 @@ from snapper.data.models import SymbolExchangeCapability
 from snapper.data.repository import DatabaseRepository
 from snapper.data.repository import begin_scd2_write_sync
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
+from snapper.infrastructure.network.egress_models import EgressPoolConfig
+from snapper.infrastructure.network.egress_models import RouteConfig
+from snapper.infrastructure.network.egress_pool import EgressPool
+
+
+async def _stub_routed_rest[ResultT](
+    *, sync_call: Callable[[], ResultT], **_route: object
+) -> ResultT:
+    """Execute the test double without sending a REST request."""
+    return sync_call()
 
 
 def _create_mock_settings() -> MagicMock:
@@ -169,10 +181,7 @@ class TestKrakenSymbolUpdater:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        mock_client._dispatch_blocking = mock_dispatch
+        mock_client._dispatch_routed_rest = _stub_routed_rest
 
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
@@ -422,9 +431,11 @@ class DummyKrakenClient(SimpleNamespace):
         """No-op connect for mock client."""
         ...
 
-    async def _dispatch_blocking(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
-        """Call func inline instead of dispatching to a REST pool."""
-        return func(*args, **kwargs)
+    async def _dispatch_routed_rest[ResultT](
+        self, *, sync_call: Callable[[], ResultT], **_route: object
+    ) -> ResultT:
+        """Call the supplied operation inline instead of routing a REST request."""
+        return sync_call()
 
 
 def _market(ccxt_symbol: str, rest_id: str, base: str, quote: str) -> dict[str, Any]:
@@ -451,6 +462,63 @@ async def test_load_kraken_rest_symbols_handles_tokenized(monkeypatch: pytest.Mo
     symbols = await svc.load_kraken_rest_symbols()
     assert "XXBTZUSD" in symbols
     assert "GSUSD" in symbols
+
+
+@pytest.mark.parametrize("scenario", ["healthy", "cached", "exhausted"])
+async def test_catalog_rest_dispatch_uses_vpn_and_never_direct(
+    scenario: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The router supplies the proxy at dispatch and refusal sends no requests.
+
+    Given: A healthy or quarantined VPN, with cached markets in one scenario,
+    When: The Spot updater loads regular and tokenized symbols,
+    Then: Remote calls use the VPN, cached markets skip the regular fetch, and
+        exhaustion leaves both calls undispatched.
+    """
+    proxy = "socks5h://egress:1081"
+    pool = EgressPool(
+        EgressPoolConfig(
+            routes=[
+                RouteConfig(id="direct", kind="direct"),
+                RouteConfig(id="vpn", kind="socks5", proxy_url=proxy),
+            ]
+        )
+    )
+    if scenario == "exhausted":
+        pool._quarantine_route("vpn", datetime.now(UTC) + timedelta(seconds=30), "http-429")
+    monkeypatch.setattr(
+        "snapper.infrastructure.exchanges.kraken_rest_egress.get_egress_pool", lambda: pool
+    )
+    updater = KrakenSymbolUpdaterService()
+    client = updater._create_exchange_client()
+    market = {"BTC/USD": _market("BTC/USD", "XXBTZUSD", "XBT", "ZUSD")}
+    ccxt = MagicMock(markets=market if scenario == "cached" else None, proxies={})
+
+    def load_markets() -> dict[str, dict[str, Any]]:
+        """Assert the proxy is set at the regular catalog request."""
+        assert ccxt.proxies == {"http": proxy, "https": proxy}
+        return market
+
+    def load_tokenized(params: dict[str, str]) -> dict[str, dict[str, str]]:
+        """Assert the tokenized request also uses the VPN."""
+        assert params == {"aclass_base": "tokenized_asset"}
+        assert ccxt.proxies == {"http": proxy, "https": proxy}
+        return {"result": {}}
+
+    ccxt.load_markets.side_effect = load_markets
+    ccxt.publicGetAssetPairs.side_effect = load_tokenized
+    monkeypatch.setattr(client, "_ccxt_client", ccxt)
+    try:
+        if scenario == "exhausted":
+            with pytest.raises(AllRoutesQuarantinedError):
+                await updater.load_kraken_rest_symbols()
+        else:
+            assert "XXBTZUSD" in await updater.load_kraken_rest_symbols()
+    finally:
+        await client.disconnect()
+    assert ccxt.load_markets.call_count == int(scenario == "healthy")
+    assert ccxt.publicGetAssetPairs.call_count == int(scenario != "exhausted")
+    assert ccxt.proxies == {}
 
 
 def test_normalize_currency_mapping_and_fallbacks() -> None:
@@ -981,10 +1049,7 @@ class TestLoadKrakenRestSymbolsFallback:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        mock_client._dispatch_blocking = mock_dispatch
+        mock_client._dispatch_routed_rest = _stub_routed_rest
 
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
@@ -1017,10 +1082,7 @@ class TestLoadKrakenRestSymbolsFallback:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        mock_client._dispatch_blocking = mock_dispatch
+        mock_client._dispatch_routed_rest = _stub_routed_rest
 
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
@@ -1963,10 +2025,7 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        mock_client._dispatch_blocking = mock_dispatch
+        mock_client._dispatch_routed_rest = _stub_routed_rest
 
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
@@ -1995,10 +2054,7 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        mock_client._dispatch_blocking = mock_dispatch
+        mock_client._dispatch_routed_rest = _stub_routed_rest
 
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
@@ -2027,10 +2083,7 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        mock_client._dispatch_blocking = mock_dispatch
+        mock_client._dispatch_routed_rest = _stub_routed_rest
 
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
@@ -2062,10 +2115,7 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        mock_client._dispatch_blocking = mock_dispatch
+        mock_client._dispatch_routed_rest = _stub_routed_rest
 
         with patch.object(updater, "_create_exchange_client", return_value=mock_client):
             result = await updater.load_kraken_rest_symbols()
@@ -2085,10 +2135,7 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        mock_client._dispatch_blocking = mock_dispatch
+        mock_client._dispatch_routed_rest = _stub_routed_rest
 
         with (
             patch.object(updater, "_create_exchange_client", return_value=mock_client),
@@ -2115,10 +2162,7 @@ class TestKrakenLoadRestSymbolsEdgeCases:
         mock_client._ccxt_client = mock_ccxt
         mock_client.get_ccxt_client = MagicMock(return_value=mock_ccxt)
 
-        async def mock_dispatch(func: Any, *args: Any, **kwargs: Any) -> Any:
-            return func(*args, **kwargs)
-
-        mock_client._dispatch_blocking = mock_dispatch
+        mock_client._dispatch_routed_rest = _stub_routed_rest
 
         with (
             patch.object(updater, "_create_exchange_client", return_value=mock_client),

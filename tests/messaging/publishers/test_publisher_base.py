@@ -58,7 +58,9 @@ from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_observability import EGRESS_SNAPSHOT_TOPIC
 from snapper.infrastructure.network.egress_observability import EgressSnapshotPublisher
+from snapper.infrastructure.network.egress_pool import EgressPool
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
@@ -1753,7 +1755,7 @@ async def test_maybe_init_egress_pool_when_enabled(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.asyncio
 async def test_maybe_init_egress_pool_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The default-off gate leaves feeds on their direct connections.
+    """The default-off gate skips VPN pool initialization.
 
     Given: A publisher whose feed_egress_enabled is False,
     When: _maybe_init_egress_pool runs,
@@ -1765,8 +1767,32 @@ async def test_maybe_init_egress_pool_when_disabled(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(
         "snapper.messaging.publishers.base.safely_initialize_egress_pool", init_mock
     )
-    await pub._maybe_init_egress_pool(MagicMock())
+    service = MagicMock()
+    await pub._maybe_init_egress_pool(service)
     init_mock.assert_not_called()
+    service.get_setting.assert_called_once_with("public_direct_allowed")
+
+
+@pytest.mark.asyncio
+async def test_feed_loads_dev_direct_policy_with_vpn_pool_gate_off() -> None:
+    """The standalone opt-in takes effect in a feed without VPN initialization.
+
+    Given: A publisher with VPN initialization disabled and explicit dev direct opt-in,
+    When: The publisher initializes its egress policy,
+    Then: It can reserve the unpooled dev direct route for public traffic.
+    """
+    pub = DummyPublisher(symbols=["BTC-USD"])
+    pub.settings = SimpleNamespace(feed_egress_enabled=False)
+    service = MagicMock()
+    service.get_setting.side_effect = {"public_direct_allowed": True}.get
+    try:
+        await pub._maybe_init_egress_pool(service)
+        reservation = public_egress_pool(None).reserve(exchange="kraken", purpose="http")
+        assert reservation.route_id == "public-dev-direct"
+        assert reservation.proxy_url is None
+        reservation.release()
+    finally:
+        reset_egress_pool()
 
 
 @pytest.mark.asyncio
@@ -1979,6 +2005,49 @@ async def test_dark_feed_exits_when_ceiling_exceeded(
     with pytest.raises(FeedDarkTooLongError):
         await pub._heartbeat_loop()
     pub._spawn_recovery.assert_called_once()
+
+
+@pytest.mark.parametrize("vpn_available", [False, True])
+def test_dark_feed_ceiling_respects_public_egress_wait(
+    vpn_available: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an actual VPN wait suppresses exit and defers recovery on release.
+
+    Given: A publisher silent past the exit ceiling, with an available VPN or
+        a recorded wait for a quarantined VPN,
+    When: The watchdog checks liveness, including after quarantine release,
+    Then: An available VPN without a wait triggers a fatal error, while the wait
+        suppresses recovery and exit without advancing the message watermark.
+    """
+    publisher = DummyPublisher(symbols=["BTC-USD"])
+    exchange = publisher._get_exchange_name()
+    publisher._last_message_at = 0.0
+    publisher._get_liveness_recovery_threshold_s = Mock(return_value=60)
+    publisher._spawn_recovery = Mock()
+    pool = EgressPool(
+        EgressPoolConfig(
+            routes=[
+                RouteConfig(id="vpn", kind="socks5", proxy_url="socks5h://egress:1081"),
+            ]
+        )
+    )
+    monkeypatch.setattr("snapper.messaging.publishers.base.get_egress_pool", lambda: pool)
+    monkeypatch.setattr(
+        "snapper.messaging.publishers.base.monotonic", lambda: _DARK_FEED_EXIT_CEILING_S + 1
+    )
+    if vpn_available:
+        with pytest.raises(FeedDarkTooLongError):
+            publisher._check_feed_liveness()
+        publisher._spawn_recovery.assert_called_once()
+    else:
+        pool._quarantine_route("vpn", datetime.now(UTC) + timedelta(seconds=30), "http-429")
+        assert not pool.has_available(exchange=exchange, record_wait=True)
+        publisher._check_feed_liveness()
+        pool._states["vpn"].quarantine_until = None
+        publisher._check_feed_liveness()
+        assert not pool.is_waiting_for_public_vpn(exchange)
+        publisher._spawn_recovery.assert_not_called()
+        assert publisher._last_message_at == 0.0
 
 
 @pytest.mark.asyncio

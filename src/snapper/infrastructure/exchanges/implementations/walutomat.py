@@ -78,6 +78,9 @@ from snapper.infrastructure.exchanges.errors import AmbiguousOrderSubmitError
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatBestOffer
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketPair
 from snapper.infrastructure.exchanges.schemas.walutomat import WalutomatMarketResponse
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
+from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
 from snapper.infrastructure.network.pooled_httpx_transport import PooledAsyncTransport
 from snapper.infrastructure.symbols.functions import native_to_walutomat_rest
 from snapper.infrastructure.symbols.functions import native_to_walutomat_ws
@@ -1160,6 +1163,11 @@ class WalutomatExchangeClient(ExchangeClientBase):
         logger.info("Connecting to Walutomat API...")
         http_client = httpx.AsyncClient(
             transport=PooledAsyncTransport(),
+            mounts={
+                str(httpx.URL(self.api_base_url).copy_with(path="/")): PooledAsyncTransport(
+                    traffic_class="private"
+                )
+            },
             timeout=httpx.Timeout(self.timeout),
             follow_redirects=True,
         )
@@ -1173,7 +1181,7 @@ class WalutomatExchangeClient(ExchangeClientBase):
             self._http_client = None
             with contextlib.suppress(Exception):
                 await http_client.aclose()
-            if isinstance(e, Exception):
+            if isinstance(e, Exception) and not isinstance(e, AllRoutesQuarantinedError):
                 raise ConnectionError(f"Failed to connect to Walutomat API: {e}") from e
             raise
         self._running = True
@@ -1636,6 +1644,14 @@ class WalutomatExchangeClient(ExchangeClientBase):
                 self._last_data = data
                 self._reset_polling_error_state()
                 await self._process_polling_data(data, symbol_map)
+            except AllRoutesQuarantinedError:
+                pool = public_egress_pool(get_egress_pool())
+                pool.has_available(exchange="walutomat", traffic_class="public", record_wait=True)
+                earliest = pool.earliest_release_in_seconds(
+                    exchange="walutomat", traffic_class="public"
+                )
+                await asyncio.sleep(max(earliest or 0.0, self.polling_interval))
+                continue
             except httpx.HTTPError as e:
                 self._handle_http_error(e)
             except Exception as e:

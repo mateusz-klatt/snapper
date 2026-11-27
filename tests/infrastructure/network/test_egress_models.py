@@ -232,7 +232,7 @@ class TestEgressPoolConfig:
         """
         socks5_route = RouteConfig(id="s", kind="socks5", proxy_url="socks5h://x:1081")
 
-        with pytest.raises(ValidationError, match="direct route"):
+        with pytest.raises(ValidationError, match="enabled direct route for private traffic"):
             EgressPoolConfig(enabled=True, routes=[socks5_route])
 
     def test_enabled_requires_enabled_direct_route(self) -> None:
@@ -244,7 +244,7 @@ class TestEgressPoolConfig:
         """
         disabled_direct_route = RouteConfig(id="d", kind="direct", enabled=False)
 
-        with pytest.raises(ValidationError, match="direct route"):
+        with pytest.raises(ValidationError, match="enabled direct route for private traffic"):
             EgressPoolConfig(enabled=True, routes=[disabled_direct_route])
 
     def test_disabled_pool_allows_no_routes(self) -> None:

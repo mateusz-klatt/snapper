@@ -592,14 +592,11 @@ class AppSettings:
 
     @property
     def feed_egress_enabled(self) -> bool:
-        """Return whether feed publishers route market data through the egress pool.
+        """Return whether feed publishers load their VPN pool at startup.
 
-        Default off: feed publishers connect directly to the exchanges. When
-        enabled, each publisher process initializes the egress pool at startup
-        so the Kraken connect shim and Walutomat's pooled HTTP transport route
-        through the configured WireGuard/SOCKS tunnels (direct stays the
-        fallback). Coerced defensively so a string ``"false"`` setting value
-        does not read as truthy.
+        Defaults to off. Public Kraken and Walutomat traffic requires an
+        eligible route. The standalone dev-only ``public_direct_allowed``
+        setting controls permission to use the host's direct route.
 
         Returns:
             True when the feed should use the egress pool, else False.

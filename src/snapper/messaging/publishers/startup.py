@@ -3,6 +3,7 @@
 import errno
 import socket
 import ssl
+from time import monotonic
 
 import aiohttp
 import ccxt
@@ -11,6 +12,9 @@ import requests
 
 from snapper.core.process_exit import UpstreamUnavailableError
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
+from snapper.infrastructure.network.egress_context import resolve_egress_traffic
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
+from snapper.infrastructure.network.egress_pool import wait_for_public_route
 
 _UPSTREAM_HTTP_STATUSES = frozenset({502, 503, 504})
 _NETWORK_ERRNOS = frozenset(
@@ -124,19 +128,32 @@ def _is_upstream_unavailable(error: BaseException) -> bool:
     return unavailable
 
 
-async def connect_publisher_exchange(client: ExchangeClientBase) -> None:
-    """Connect a market-data publisher to its upstream during startup.
+async def connect_publisher_exchange(client: ExchangeClientBase) -> float:
+    """Connect a market-data publisher, waiting in-process for public VPN egress.
+
+    Route exhaustion is retried without leaving this process. Upstream
+    network failures retain their existing supervisor backoff.
 
     Args:
         client: The publisher's exchange client.
+
+    Returns:
+        Monotonic connection time, used to arm the publisher's watchdog.
 
     Raises:
         UpstreamUnavailableError: The venue or proxy could not be reached.
         Exception: Other startup connection errors propagate unchanged.
     """
-    try:
-        await client.connect()
-    except Exception as error:
-        if _is_upstream_unavailable(error):
-            raise UpstreamUnavailableError(str(error)) from error
-        raise
+    while True:
+        try:
+            await client.connect()
+            return monotonic()
+        except AllRoutesQuarantinedError:
+            exchange, traffic_class = resolve_egress_traffic(client.exchange_name)
+            if traffic_class == "private":
+                raise
+            await wait_for_public_route(exchange)
+        except Exception as error:
+            if _is_upstream_unavailable(error):
+                raise UpstreamUnavailableError(str(error)) from error
+            raise

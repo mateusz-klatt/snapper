@@ -9,11 +9,16 @@ real ip routes.
 
 import asyncio
 import signal
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from aiohttp import web
+from yarl import URL
 
 from snapper.infrastructure.network import egress_sidecar
 from snapper.infrastructure.network.egress_sidecar import _bring_down_safe
@@ -32,6 +37,7 @@ from snapper.infrastructure.network.egress_sidecar import _stop_server_safe
 from snapper.infrastructure.network.egress_sidecar import _stop_transfer_publisher
 from snapper.infrastructure.network.egress_sidecar import install_signal_handlers
 from snapper.infrastructure.network.egress_sidecar import run_sidecar
+from snapper.infrastructure.network.egress_transfer_stats import WireGuardTransferCounters
 from snapper.infrastructure.network.egress_tunnel_models import LoadedTunnel
 from snapper.infrastructure.network.egress_tunnel_models import LoadResult
 from snapper.infrastructure.network.egress_tunnel_models import TunnelDescriptor
@@ -845,3 +851,104 @@ class TestInstallSignalHandlers:
         install_signal_handlers(loop, shutdown_event)
         loop.add_signal_handler.assert_any_call(signal.SIGTERM, shutdown_event.set)
         loop.add_signal_handler.assert_any_call(signal.SIGINT, shutdown_event.set)
+
+
+async def test_ready_public_is_registered_and_503_with_no_running_tunnels() -> None:
+    """The public readiness route is available even when bootstrap has no tunnels.
+
+    Given: A sidecar that started its health app with no running tunnels,
+    When: A GET to /ready-public is routed to its registered handler,
+    Then: The response is HTTP 503 with ready set to false.
+    """
+    state = _SidecarState()
+    site = MagicMock(start=AsyncMock())
+    with patch.object(web, "TCPSite", return_value=site):
+        runner = await egress_sidecar._start_healthcheck_app(state, "127.0.0.1", 0)
+    try:
+        request = _make_request(state)
+        request.method = "GET"
+        request.rel_url = URL("/ready-public")
+        match = await runner.app.router.resolve(request)
+        response = await match.handler(request)
+    finally:
+        await runner.cleanup()
+    assert response.status == 503
+    assert response.text == '{"ready": false}'
+
+
+@pytest.mark.parametrize("handshook", [False, True])
+async def test_ready_public_requires_a_recent_handshake_on_a_running_tunnel(
+    handshook: bool,
+) -> None:
+    """Missing and stale handshake data cannot satisfy readiness.
+
+    Given: Running public tunnels with varying handshake data,
+    When: The readiness handler reads their WireGuard counters,
+    Then: It returns HTTP 200 only if one has a recent handshake, and HTTP 503 otherwise.
+    """
+    running = [
+        _RunningTunnel(loaded=_make_loaded(f"wg-{index}"), server=MagicMock(), tunnel_index=index)
+        for index in range(5)
+    ]
+    cutoff = datetime.now(UTC)
+    recent = cutoff if handshook else None
+    outcomes = [
+        OSError("WireGuard unavailable"),
+        None,
+        WireGuardTransferCounters("wg-2", 0, 0, None),
+        WireGuardTransferCounters("wg-3", 0, 0, cutoff - timedelta(minutes=5)),
+        WireGuardTransferCounters("wg-4", 0, 0, recent),
+    ]
+    with patch.object(egress_sidecar, "read_wg_transfer_counters", side_effect=outcomes) as read:
+        response = await egress_sidecar._handle_ready_public(
+            _make_request(
+                _SidecarState(
+                    running=running,
+                    public_route_ids=frozenset(tunnel.loaded.descriptor.id for tunnel in running),
+                )
+            )
+        )
+    assert response.status == (200 if handshook else 503)
+    assert read.call_count == len(running)
+
+
+@pytest.mark.parametrize(
+    "reason", ["private_fallback", "disabled", "absent", "stopped", "pool_disabled"]
+)
+async def test_ready_public_excludes_ineligible_tunnels(reason: str) -> None:
+    """An ineligible tunnel cannot make the sidecar ready even with a fresh handshake.
+
+    Given: A tunnel with a fresh handshake that fails a public eligibility check,
+    When: The sidecar handles a public readiness request,
+    Then: It returns HTTP 503 without reading the tunnel's handshake counters.
+    """
+    tunnel_id = "wg-de-1"
+    service = MagicMock()
+    routes: list[dict[str, object]] = [{"id": "default", "kind": "direct"}]
+    if reason != "absent":
+        routes.append(
+            {
+                "id": tunnel_id,
+                "kind": "socks5",
+                "proxy_url": "socks5h://snapper-egress:1081",
+                "enabled": reason != "disabled",
+            }
+        )
+    service.get_setting.return_value = {
+        "enabled": reason != "pool_disabled",
+        "private_fallback_route_id": tunnel_id if reason == "private_fallback" else None,
+        "routes": routes,
+    }
+    running = _RunningTunnel(
+        loaded=_make_loaded(tunnel_id),
+        server=MagicMock(is_running=MagicMock(return_value=reason != "stopped")),
+        tunnel_index=0,
+    )
+    state = _SidecarState(
+        running=[running], public_route_ids=egress_sidecar._public_route_ids(service)
+    )
+    handshake = WireGuardTransferCounters(tunnel_id, 0, 0, datetime.now(UTC))
+    with patch.object(egress_sidecar, "read_wg_transfer_counters", return_value=handshake) as read:
+        response = await egress_sidecar._handle_ready_public(_make_request(state))
+    assert response.status == 503
+    read.assert_not_called()

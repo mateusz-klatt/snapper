@@ -2040,12 +2040,6 @@
       "TestPreflightRoutes.test_socks5_route_with_resolvable_host_survives": {
         "C901": 11
       },
-      "TestSocks5GreetingProbe.test_socks5_route_auto_disabled_on_short_greeting_reply": {
-        "C901": 11
-      },
-      "TestSocks5GreetingProbe.test_socks5_route_auto_disabled_on_wrong_greeting_reply": {
-        "C901": 11
-      },
       "TestSocks5GreetingProbe.test_socks5_route_with_reachable_listener_stays_enabled": {
         "C901": 11
       }

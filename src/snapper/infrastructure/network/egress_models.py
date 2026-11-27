@@ -82,14 +82,10 @@ class RouteConfig(BaseModel):
     allowed_exchanges: StringSequence = Field(
         default=(),
         description=(
-            "Exchanges this route may serve. Empty tuple = any exchange "
-            "(back-compatible default). Non-empty restricts the pool to "
-            "this route only when ``reserve(exchange=...)`` is called with "
-            "a matching value. The direct-fallback path in "
-            "``EgressPool._fallback_direct_locked()`` IGNORES this "
-            "constraint by design — direct egress is always the "
-            "last-resort route. Operators who want per-exchange deny on "
-            "direct should set ``enabled=false``, not ``allowed_exchanges``."
+            "Exchanges this VPN route is preferred for. Empty tuple means "
+            "the route is preferred for any exchange. When no preferred VPN "
+            "is available, public traffic may use another public VPN. "
+            "Private routing ignores this field."
         ),
     )
 
@@ -167,21 +163,21 @@ class EgressPoolConfig(BaseModel):
     """Top-level ``egress_pool`` setting payload.
 
     Attributes:
-        enabled: Master toggle. ``False`` (default) skips pool
-            wiring entirely — the connect shim short-circuits to
-            direct-connection behaviour.
-        on_all_quarantined: Policy when every route is quarantined.
-            ``wait`` (default): pool returns the direct route so the
-            patched ``__get_reconnect_wait`` translates the situation
-            into a single long sleep until the earliest release.
-            ``raise``: pool raises ``AllRoutesQuarantinedError`` so
-            the reconnect watchdog handles the storm.
+        enabled: Master toggle. ``False`` (default) skips configured routes.
+            Public egress has no VPN in this case. Private traffic keeps its
+            unpooled direct behavior.
+        on_all_quarantined: Private policy when no healthy private route is
+            available. ``wait`` (default) permits the enabled direct route
+            even while quarantined. ``raise`` refuses the reservation.
+            Public reservations use their own policy, including the
+            separate dev-only ``public_direct_allowed`` setting.
         private_fallback_route_id: Optional route id used when private
-            executor traffic cannot use a healthy direct route. The
-            route must be declared in ``routes`` when set.
+            executor traffic cannot use a healthy direct route. Public
+            traffic never selects this route. The route must be declared
+            in ``routes`` when set.
         routes: List of declared routes. When ``enabled=True``, at
             least one ``direct`` route with ``enabled=True`` MUST be
-            present so the pool always has a fallback.
+            present for private traffic.
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -193,19 +189,14 @@ class EgressPoolConfig(BaseModel):
 
     @model_validator(mode="after")
     def _check_direct_route_when_enabled(self) -> Self:
-        """When enabled, require at least one enabled direct route.
-
-        Pure-SOCKS5 configurations are rejected at the schema layer
-        so the operator cannot ship a pool without a guaranteed
-        fallback. Disabled pools may have any routes (or none).
-        """
+        """Require an enabled direct route for private traffic in enabled pools."""
         if not self.enabled:
             return self
         has_direct = any(r.kind == "direct" and r.enabled for r in self.routes)
         if not has_direct:
             raise ValueError(
                 "egress_pool with enabled=True requires at least one "
-                "enabled direct route as fallback"
+                "enabled direct route for private traffic"
             )
         return self
 
@@ -237,8 +228,7 @@ class EgressPoolConfig(BaseModel):
         Every entry across every route's ``allowed_exchanges`` must
         match an ``ExchangeEnum`` *value* (e.g. ``"walutomat"``, not
         ``"WALUTOMAT"``). Catches operator typos like ``"krakeen"`` at
-        config-load time instead of silently rendering a route
-        unreachable (which would then quietly fall back to direct).
+        config-load time so routing preferences remain explicit.
         """
         known = {member.value for member in ExchangeEnum}
         for route in self.routes:

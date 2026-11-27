@@ -1732,16 +1732,14 @@ Deploy notes (see `docker-compose.yml` `snapper-feed` service):
   direct-first and never traverses the public allow-list. Private idempotent
   REST reads and the next private WebSocket reconnect may use
   `private_fallback_route_id` when direct is unavailable; private REST
-  mutations remain direct-only. Public/market-data traffic instead egresses through
-  the per-venue `snapper-egress` SOCKS5/WireGuard routes, selected from the
-  `EgressPool` by the exchange allow-list (`egress_pool.py`). The API process
-  initializes its own process-local pool from `egress_pool`; API-side Kraken
-  public REST reads may use that pool when configured. Feed-publisher public
-  routing is gated separately: by default feed publishers dial exchanges
-  directly. Set `feed_egress_enabled=true` and restart `snapper-feed` to enable
-  `snapper-egress` routing for feed traffic, then confirm publisher connections
-  use the configured `snapper-egress` SOCKS routes. See
-  `docs/snapper-egress.md` for the sidecar deployment model. Each pool-bearing
+  mutations on Kraken remain direct-only. Kraken and Walutomat public traffic uses
+  `snapper-egress` SOCKS5/WireGuard routes. The pool prefers exchange pins,
+  then considers other healthy VPNs. A public request with no eligible VPN
+  receives a typed refusal, and feed startup and Kraken SDK reconnects wait
+  in-process. The API loads its pool from `egress_pool` and publisher
+  subprocesses load their own pools when `feed_egress_enabled=true`. See
+  the [egress runbook](snapper-egress.md) for public tunnel readiness and
+  deploy order. Each pool-bearing
   process publishes a read-only `system.egress.snapshot` frame on the
   heartbeat cadence; the API process subscribes to those frames and merges the
   latest per-container snapshots into `GET /api/health/egress` for
@@ -2018,10 +2016,9 @@ feed, tokenized assets and Kraken Futures, and the remaining accounting work.
   the first active Kraken Spot `api_key_secret` wallet credential when the
   setting is empty, and connects to `wss://ws-equities-auth.kraken.com/?f`;
   subscribe params receive the token in memory only. Mint, credential, or
-  autolookup failure falls back to the public delayed URL. Under
-  `feed_egress_enabled=true`, the token mint is
-  classified as public `kraken_equities` market-data traffic so it uses the
-  same egress-pool route as the authenticated Equities WebSocket, preserving
+  autolookup failure falls back to the public delayed URL. The token mint
+  uses the public `kraken_equities` route selection shared with the
+  authenticated Equities WebSocket, preserving
   source-IP consistency for tokens that may be IP-bound. The outer envelope's
   `delayed` flag propagates onto every `TickData.is_delayed` value so ZMQ
   subscribers can distinguish delayed and realtime frames.

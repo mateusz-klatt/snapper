@@ -214,13 +214,16 @@ class TestProcessSymbol:
         """
         service._db = AsyncMock()
         client = AsyncMock()
-        with patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
-            return_value="BTC/USD:USD",
-        ), patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates"
-            ".resolve_symbol_public_id",
-            return_value=None,
+        with (
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
+                return_value="BTC/USD:USD",
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates"
+                ".resolve_symbol_public_id",
+                return_value=None,
+            ),
         ):
             await service._process_symbol(client, "BTC-USD-PERP")
         client.get_ohlcv.assert_not_called()
@@ -249,13 +252,16 @@ class TestProcessSymbol:
         service._db = mock_db
         client = AsyncMock()
         client.get_ohlcv = AsyncMock(side_effect=[[candle], []])
-        with patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
-            return_value="BTC/USD:USD",
-        ), patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates"
-            ".resolve_symbol_public_id",
-            return_value="sym-001",
+        with (
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
+                return_value="BTC/USD:USD",
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates"
+                ".resolve_symbol_public_id",
+                return_value="sym-001",
+            ),
         ):
             await service._process_symbol(client, "BTC-USD-PERP")
         mock_db.upsert_candles.assert_called_once()
@@ -278,13 +284,16 @@ class TestProcessSymbol:
         service._db = mock_db
         client = AsyncMock()
         client.get_ohlcv = AsyncMock(return_value=[])
-        with patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
-            return_value="BTC/USD:USD",
-        ), patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates"
-            ".resolve_symbol_public_id",
-            return_value="sym-001",
+        with (
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
+                return_value="BTC/USD:USD",
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates"
+                ".resolve_symbol_public_id",
+                return_value="sym-001",
+            ),
         ):
             await service._process_symbol(client, "BTC-USD-PERP")
         mock_db.upsert_candles.assert_not_called()
@@ -348,12 +357,15 @@ class TestStart:
         svc.settings = MagicMock(spec=AppSettings)
         svc.settings.instruments = {}
         svc.settings.db_url = "sqlite://"
-        with patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates.get_repository",
-        ) as mock_repo, patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates"
-            ".KrakenFuturesExchangeClient",
-        ) as mock_client_cls:
+        with (
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates.get_repository",
+            ) as mock_repo,
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates"
+                ".KrakenFuturesExchangeClient",
+            ) as mock_client_cls,
+        ):
             mock_repo.return_value = AsyncMock()
             await svc.start()
         mock_client_cls.assert_not_called()
@@ -375,15 +387,29 @@ class TestStart:
         svc.settings = MagicMock(spec=AppSettings)
         svc.settings.db_url = "sqlite://"
         mock_client = AsyncMock()
-        with patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates.get_repository",
-        ) as mock_repo, patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates"
-            ".KrakenFuturesExchangeClient",
-            return_value=mock_client,
-        ), patch.object(
-            svc, "_process_symbol", new_callable=AsyncMock
-        ) as mock_process:
+        initialize = AsyncMock()
+
+        async def connect() -> None:
+            """Require startup initialization before connecting to the venue."""
+            initialize.assert_awaited_once_with(svc.settings)
+
+        mock_client.connect.side_effect = connect
+        with (
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates.get_repository",
+            ) as mock_repo,
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates"
+                ".KrakenFuturesExchangeClient",
+                return_value=mock_client,
+            ),
+            patch.object(svc, "_process_symbol", new_callable=AsyncMock) as mock_process,
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates"
+                ".ensure_maintenance_egress_pool",
+                initialize,
+            ),
+        ):
             mock_repo.return_value = AsyncMock()
             await svc.start()
         mock_client.connect.assert_awaited_once()
@@ -437,13 +463,16 @@ class TestResumePath:
         svc._db = mock_db
         client = AsyncMock()
         client.get_ohlcv = AsyncMock(return_value=[])
-        with patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
-            return_value="BTC/USD:USD",
-        ), patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates"
-            ".resolve_symbol_public_id",
-            return_value="sym-001",
+        with (
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
+                return_value="BTC/USD:USD",
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates"
+                ".resolve_symbol_public_id",
+                return_value="sym-001",
+            ),
         ):
             await svc._process_symbol(client, "BTC-USD-PERP")
         call_args = client.get_ohlcv.call_args
@@ -469,13 +498,16 @@ class TestResumePath:
         svc._db = mock_db
         client = AsyncMock()
         client.get_ohlcv = AsyncMock(return_value=[])
-        with patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
-            return_value="BTC/USD:USD",
-        ), patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates"
-            ".resolve_symbol_public_id",
-            return_value="sym-001",
+        with (
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
+                return_value="BTC/USD:USD",
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates"
+                ".resolve_symbol_public_id",
+                return_value="sym-001",
+            ),
         ):
             await svc._process_symbol(client, "BTC-USD-PERP")
         mock_db.get_candles.assert_awaited_once()
@@ -527,17 +559,21 @@ class TestPagination:
         svc._db = mock_db
         client = AsyncMock()
         client.get_ohlcv = AsyncMock(side_effect=[full_page, partial_page])
-        with patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
-            return_value="BTC/USD:USD",
-        ), patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates"
-            ".resolve_symbol_public_id",
-            return_value="sym-001",
-        ), patch(
-            "snapper.application.updaters.historical.kraken_futures_aggregates.asyncio.sleep",
-            new_callable=AsyncMock,
-        ) as mock_sleep:
+        with (
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates.native_to_ccxt",
+                return_value="BTC/USD:USD",
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates"
+                ".resolve_symbol_public_id",
+                return_value="sym-001",
+            ),
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_aggregates.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as mock_sleep,
+        ):
             await svc._process_symbol(client, "BTC-USD-PERP")
         assert client.get_ohlcv.call_count == 2
         mock_sleep.assert_awaited_once()

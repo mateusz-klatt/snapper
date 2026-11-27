@@ -26,6 +26,7 @@ from kraken.exceptions import KrakenDeadlineElapsedError
 from loguru import logger
 from pydantic import ValidationError
 
+from snapper.infrastructure.exchanges import kraken_rest_egress
 from snapper.infrastructure.exchanges._subscription_health import SubscriptionHealthTracker
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
@@ -60,6 +61,10 @@ from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBrea
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreakReason
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleItem
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleMark
+from snapper.infrastructure.network import egress_pool
+from snapper.infrastructure.network.egress_models import EgressPoolConfig
+from snapper.infrastructure.network.egress_models import RouteConfig
+from snapper.infrastructure.network.egress_pool import EgressPool
 
 
 class _DummyWs:
@@ -10798,3 +10803,20 @@ class TestTradeBuiltInBandResets:
             (TradeCandleBreakReason.RESET, 1)
         ]
         assert client._trade_candle_pending_break is None
+
+
+@pytest.fixture(autouse=True)
+def _stub_public_vpn_for_mocked_kraken_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give mocked SDK calls a VPN reservation while preserving explicit pool cases."""
+    fallback_pool = EgressPool(
+        EgressPoolConfig(
+            routes=[RouteConfig(id="test-vpn", kind="socks5", proxy_url="socks5h://egress:1081")]
+        )
+    )
+
+    def public_pool(configured: EgressPool | None) -> EgressPool:
+        """Prefer the real pool when the test installed one."""
+        return configured if configured is not None else fallback_pool
+
+    monkeypatch.setattr(kraken_rest_egress, "public_egress_pool", public_pool)
+    monkeypatch.setattr(egress_pool, "public_egress_pool", public_pool)

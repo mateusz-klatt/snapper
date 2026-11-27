@@ -18,17 +18,21 @@ import asyncio
 import contextlib
 import gc
 import logging
+from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from types import ModuleType
 from types import SimpleNamespace
 from typing import Any
+from typing import Literal
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
 from kraken.exceptions import MaxReconnectError
+from kraken.futures import FuturesWSClient
 from kraken.futures.websocket import ConnectFuturesWebsocket
 from kraken.spot import SpotWSClient
 from kraken.spot.websocket.connectors import ConnectSpotWebsocket
@@ -95,15 +99,78 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
 from snapper.infrastructure.exchanges.kraken_sdk_patches import get_registered_publisher
 from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
+from snapper.infrastructure.network import egress_pool
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.network.egress_context import egress_identity
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
-from snapper.infrastructure.network.egress_pool import _POOL_HOLDER
 from snapper.infrastructure.network.egress_pool import EgressPool
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
 from snapper.utils.logging import _FILE_SINK_READY
+
+
+async def test_kraken_start_pauses_connect_timeout_after_route_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A route lost during startup pauses both the dial and recovery timers.
+
+    Given: A public Kraken client starting within an enclosing recovery timeout,
+    When: The SDK child loses its VPN before dialing and later obtains a route,
+    Then: Both timers pause during refusal and resume when the SDK dials through SOCKS.
+    """
+    proxy = "socks5h://egress:1081"
+    pool = EgressPool(
+        EgressPoolConfig(
+            routes=[
+                RouteConfig(id="vpn", kind="socks5", proxy_url=proxy),
+            ]
+        )
+    )
+    monkeypatch.setattr(egress_pool, "get_egress_pool", lambda: pool)
+    monkeypatch.setattr(kraken_sdk_patches, "get_egress_pool", lambda: pool)
+    timer = MagicMock(spec=asyncio.Timeout)
+    timer.expired.return_value = False
+    timer.when.side_effect = [asyncio.get_running_loop().time() + 20.0, None]
+    recovery_timer = MagicMock(spec=asyncio.Timeout)
+    recovery_timer.expired.return_value = False
+    recovery_deadline = asyncio.get_running_loop().time() + 180.0
+    recovery_timer.when.side_effect = [recovery_deadline, recovery_deadline, None]
+    timeout = MagicMock(
+        side_effect=[
+            MagicMock(__aenter__=AsyncMock(return_value=recovery_timer)),
+            MagicMock(__aenter__=AsyncMock(return_value=timer)),
+        ]
+    )
+    monkeypatch.setattr(kraken_sdk_patches.asyncio, "timeout", timeout)
+    socket = MagicMock()
+    dial = MagicMock(return_value=socket)
+
+    async def dial_after_refusal() -> None:
+        """Exercise both refusal and recovery from an SDK child task."""
+        deadline = datetime.now(UTC) + timedelta(seconds=30)
+        pool._quarantine_route("vpn", deadline, "ws-connect-error")
+        with pytest.raises(AllRoutesQuarantinedError):
+            kraken_sdk_patches._ConnectShim(dial, "wss://ws.kraken.com")
+        timer.reschedule.assert_called_once_with(None)
+        recovery_timer.reschedule.assert_called_once_with(None)
+        dial.assert_not_called()
+        pool._states["vpn"].quarantine_until = None
+        async with kraken_sdk_patches._ConnectShim(dial, "wss://ws.kraken.com"):
+            dial.assert_called_once()
+            assert dial.call_args.kwargs["proxy"] == proxy
+
+    async def start() -> None:
+        """Model the SDK starting a background connector while waiting for a socket."""
+        await asyncio.create_task(dial_after_refusal())
+
+    async with egress_pool.public_egress_timeout(180.0):
+        await kraken_sdk_patches.start_kraken_ws(start, exchange="kraken", timeout_s=20.0)
+    assert [item.args for item in timeout.call_args_list] == [(180.0,), (20.0,)]
+    assert timer.reschedule.call_count == 2
+    assert recovery_timer.reschedule.call_count == 2
+    assert timer.reschedule.call_args.args[0] > asyncio.get_running_loop().time()
 
 
 def _make_429_response(retry_after: str = "412") -> Response:
@@ -116,6 +183,15 @@ def _make_429_response(retry_after: str = "412") -> Response:
     """
     headers = Headers([("Retry-After", retry_after)])
     return Response(status_code=429, reason_phrase="Too Many Requests", headers=headers, body=b"")
+
+
+@pytest.fixture
+def private_ws_egress() -> Iterator[None]:
+    """Exercise legacy unpooled SDK behavior in an explicit executor scope."""
+    with egress_identity(
+        exchange="kraken", traffic_class="private", owner="executor", operation="order_ws"
+    ):
+        yield
 
 
 class TestParseRetryAfter:
@@ -259,6 +335,7 @@ class TestApplyKrakenFuturesPoolRouting:
         assert getattr(_kraken_futures_ws, "connect") is before
 
 
+@pytest.mark.usefixtures("private_ws_egress")
 class TestPatchedGetReconnectWait:
     """The reconnect-wait override consumes the per-connector stash."""
 
@@ -321,6 +398,7 @@ class TestPatchedRunSetsContextVar:
         assert _CURRENT_CONNECTOR_ID.get() is None
 
 
+@pytest.mark.usefixtures("private_ws_egress")
 class TestConnectShim:
     """Connect shim observes ``InvalidStatus`` 429 responses."""
 
@@ -612,6 +690,7 @@ class _CancelTracker:
         return _child
 
 
+@pytest.mark.usefixtures("private_ws_egress")
 class TestPatchedReconnect:
     """Hardened Spot ``__reconnect``: watchdog notify + #143 teardown safety."""
 
@@ -780,6 +859,7 @@ class TestPatchedReconnect:
         assert tracker.cancelled == {"recover": True, "run": True}
 
 
+@pytest.mark.usefixtures("private_ws_egress")
 class TestPatchedFuturesReconnect:
     """Hardened Futures ``__reconnect``: same #143 teardown safety."""
 
@@ -870,6 +950,7 @@ class TestPatchedFuturesReconnect:
         assert tracker.cancelled == {"recover": True, "run": True}
 
 
+@pytest.mark.usefixtures("private_ws_egress")
 class TestCloseCodeBackoff:
     """Kraken WebSocket close codes drive custom reconnect backoff.
 
@@ -1119,30 +1200,15 @@ class TestPhaseBPrimeShim:
         _CONNECTOR_PUBLISHERS.clear()
 
     @staticmethod
-    def _enable_pool(
-        *,
-        on_all_quarantined: str = "wait",
-        with_socks5: bool = False,
-    ) -> Any:
-        """Helper — configure the singleton with one or two routes."""
-        routes = [RouteConfig(id="default", kind="direct", priority=0)]
-        if with_socks5:
-            routes.append(
-                RouteConfig(
-                    id="wg-uk-1",
-                    kind="socks5",
-                    proxy_url="socks5h://snapper-egress:1081",
-                    priority=10,
-                )
-            )
-        config = EgressPoolConfig(
-            enabled=True,
-            on_all_quarantined=on_all_quarantined,
-            routes=routes,
-        )
-        return configure_egress_pool(config)
+    def _enable_pool() -> EgressPool:
+        """Configure the singleton with a direct route and one public VPN."""
+        return _configure_kraken_test_pool()
 
-    def test_shim_no_pool_preserves_phase_a_kwargs(self) -> None:
+    @pytest.mark.usefixtures("private_ws_egress")
+    @pytest.mark.parametrize("installed_empty", [False, True])
+    def test_shim_no_pool_preserves_phase_a_kwargs(
+        self, installed_empty: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Spec — pool disabled passes caller kwargs through, adds keepalive.
 
         Given get_egress_pool() returns None,
@@ -1152,6 +1218,8 @@ class TestPhaseBPrimeShim:
         ``ping_interval`` preserved, and the enforced transport keepalive
         (``ping_timeout``/``close_timeout``) merged in.
         """
+        pool = EgressPool(EgressPoolConfig()) if installed_empty else None
+        monkeypatch.setattr(kraken_sdk_patches, "get_egress_pool", lambda: pool)
         seen_kwargs: dict[str, Any] = {}
 
         def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
@@ -1167,6 +1235,7 @@ class TestPhaseBPrimeShim:
             "max_size": _WS_MAX_MESSAGE_BYTES,
         }
 
+    @pytest.mark.usefixtures("private_ws_egress")
     def test_shim_injects_default_keepalive_when_absent(self) -> None:
         """Spec — keepalive defaults are injected when the caller omits them.
 
@@ -1190,6 +1259,7 @@ class TestPhaseBPrimeShim:
             "max_size": _WS_MAX_MESSAGE_BYTES,
         }
 
+    @pytest.mark.usefixtures("private_ws_egress")
     def test_shim_default_max_size_admits_frames_beyond_the_websockets_default(self) -> None:
         """Spec — the injected inbound cap is larger than the 1 MiB library default.
 
@@ -1211,6 +1281,7 @@ class TestPhaseBPrimeShim:
         assert seen_kwargs["max_size"] > 1_048_702 > 2**20
 
     @pytest.mark.parametrize("caller_max_size", [None, 4 * 1024 * 1024])
+    @pytest.mark.usefixtures("private_ws_egress")
     def test_shim_caller_max_size_wins(self, caller_max_size: int | None) -> None:
         """Spec — an explicit caller ``max_size`` overrides the injected default.
 
@@ -1237,7 +1308,7 @@ class TestPhaseBPrimeShim:
     def test_shim_direct_route_injects_proxy_none(self) -> None:
         """Spec — direct route forces ``proxy=None`` to override env detection.
 
-        Given the pool is enabled with only a direct route,
+        Given the pool is enabled and the connector is private,
         When _ConnectShim is constructed,
         Then original_connect is called with ``proxy=None`` injected.
         The explicit None overrides the websockets-16 default of
@@ -1252,7 +1323,10 @@ class TestPhaseBPrimeShim:
             return MagicMock()
 
         shim_cls = _wrap_connect_factory(fake_connect)
-        shim_cls("wss://kraken")
+        with egress_identity(
+            exchange="kraken", traffic_class="private", owner="executor", operation="order_ws"
+        ):
+            shim_cls("wss://kraken")
         assert seen_kwargs == {
             "proxy": None,
             "ping_interval": _WS_PING_INTERVAL_S,
@@ -1461,7 +1535,7 @@ class TestPhaseBPrimeShim:
         When the shim runs,
         Then original_connect receives ``proxy="socks5h://..."``.
         """
-        pool = self._enable_pool(with_socks5=True)
+        pool = self._enable_pool()
 
         pool._quarantine_route(
             "default",
@@ -1500,14 +1574,14 @@ class TestPhaseBPrimeShim:
         shim_cls = _wrap_connect_factory(fake_connect)
         with pytest.raises(RuntimeError, match="simulated sync raise"):
             shim_cls("wss://kraken")
-        snap = pool.snapshot()[0]
+        snap = pool.snapshot()[1]
         assert snap.in_use_count == 0
 
     @pytest.mark.asyncio
     async def test_shim_429_quarantines_active_route_pool_path(self) -> None:
         """Spec — 429 quarantines the borrowed route, NOT the global stash.
 
-        Given the pool is enabled and one direct route is borrowed,
+        Given the pool is enabled and one VPN route is borrowed,
         When the handshake raises InvalidStatus 429 with Retry-After=600,
         Then the borrowed route is quarantined for 600 s with
         reason="http-429" AND ``_PENDING_RETRY_AFTER_S`` is NOT
@@ -1543,12 +1617,13 @@ class TestPhaseBPrimeShim:
                 await shim.__aenter__()
         finally:
             _CURRENT_CONNECTOR_ID.reset(token)
-        snap = pool.snapshot()[0]
+        snap = pool.snapshot()[1]
         assert snap.quarantine_until is not None
         assert snap.last_handshake_429_at is not None
         assert 424242 not in _PENDING_RETRY_AFTER_S
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("private_ws_egress")
     async def test_shim_429_legacy_stash_path_when_pool_disabled(self) -> None:
         """Spec — pool disabled keeps the global-stash behaviour.
 
@@ -1619,7 +1694,7 @@ class TestPhaseBPrimeShim:
         shim = shim_cls("wss://kraken")
         with pytest.raises(InvalidStatus):
             await shim.__aenter__()
-        assert pool.snapshot()[0].in_use_count == 0
+        assert pool.snapshot()[1].in_use_count == 0
 
     @pytest.mark.asyncio
     async def test_shim_non_429_invalid_status_releases_reservation(self) -> None:
@@ -1655,7 +1730,7 @@ class TestPhaseBPrimeShim:
         shim = shim_cls("wss://kraken")
         with pytest.raises(InvalidStatus):
             await shim.__aenter__()
-        snap = pool.snapshot()[0]
+        snap = pool.snapshot()[1]
         assert snap.in_use_count == 0
         assert snap.quarantine_until is None
 
@@ -1670,7 +1745,7 @@ class TestPhaseBPrimeShim:
             and its in_use_count returns to 0, so the next reconnect fails over
             instead of re-dialing the dead tunnel.
         """
-        pool = self._enable_pool(with_socks5=True)
+        pool = self._enable_pool()
         pool._quarantine_route("default", datetime.now(UTC) + timedelta(seconds=600), "http-429")
 
         async def fake_aenter(_: Any) -> Any:
@@ -1709,7 +1784,7 @@ class TestPhaseBPrimeShim:
         Then the SOCKS route is quarantined — proving the connect-error handler
             catches the real exposed ProxyError, not only OSError/TimeoutError.
         """
-        pool = self._enable_pool(with_socks5=True)
+        pool = self._enable_pool()
         pool._quarantine_route("default", datetime.now(UTC) + timedelta(seconds=600), "http-429")
 
         async def fake_aenter(_: Any) -> Any:
@@ -1744,7 +1819,7 @@ class TestPhaseBPrimeShim:
             connect-error clause and only hits the catch-all release path, so a
             clean shutdown does not penalize an otherwise-healthy route.
         """
-        pool = self._enable_pool(with_socks5=True)
+        pool = self._enable_pool()
         pool._quarantine_route("default", datetime.now(UTC) + timedelta(seconds=600), "http-429")
 
         async def fake_aenter(_: Any) -> Any:
@@ -1766,38 +1841,6 @@ class TestPhaseBPrimeShim:
         socks = next(s for s in pool.snapshot() if s.id == "wg-uk-1")
         assert socks.quarantine_until is None
         assert socks.in_use_count == 0
-
-    @pytest.mark.asyncio
-    async def test_shim_connect_error_on_direct_route_does_not_quarantine(self) -> None:
-        """Spec — a connect error on a DIRECT route does not quarantine it.
-
-        Given the pool has only the direct route reserved,
-        When the handshake raises ConnectionRefusedError,
-        Then the direct route is NOT quarantined (a no-proxy connect error means
-            the exchange or local uplink is down, and the pool's only fallback is
-            that same direct route) but the reservation is still released.
-        """
-        pool = self._enable_pool()
-
-        async def fake_aenter(_: Any) -> Any:
-            raise ConnectionRefusedError("connection refused")
-
-        class FakeCm:
-            __aenter__ = fake_aenter
-
-            async def __aexit__(self, *_: Any) -> None:
-                return None
-
-        def fake_connect(*args: Any, **kwargs: Any) -> FakeCm:
-            return FakeCm()
-
-        shim_cls = _wrap_connect_factory(fake_connect)
-        shim = shim_cls("wss://kraken")
-        with pytest.raises(ConnectionRefusedError):
-            await shim.__aenter__()
-        snap = pool.snapshot()[0]
-        assert snap.quarantine_until is None
-        assert snap.in_use_count == 0
 
     @pytest.mark.asyncio
     async def test_private_direct_connect_error_quarantines_direct_briefly(self) -> None:
@@ -1866,6 +1909,7 @@ class TestPhaseBPrimeShim:
             next_reservation.release()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("private_ws_egress")
     async def test_shim_connect_error_pool_disabled_just_propagates(self) -> None:
         """Spec — a connect error with no pool has nothing to quarantine.
 
@@ -1892,6 +1936,7 @@ class TestPhaseBPrimeShim:
             await shim.__aenter__()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("private_ws_egress")
     async def test_shim_generic_error_pool_disabled_just_propagates(self) -> None:
         """Spec — a generic error with no pool propagates via the catch-all.
 
@@ -1945,7 +1990,7 @@ class TestPhaseBPrimeShim:
         shim = shim_cls("wss://kraken")
         with pytest.raises(RuntimeError):
             await shim.__aenter__()
-        assert pool.snapshot()[0].in_use_count == 0
+        assert pool.snapshot()[1].in_use_count == 0
 
     @pytest.mark.asyncio
     async def test_shim_clean_handshake_releases_on_aexit(self) -> None:
@@ -1976,7 +2021,7 @@ class TestPhaseBPrimeShim:
         ws = await shim.__aenter__()
         assert ws is ws_mock
         await shim.__aexit__(None, None, None)
-        assert pool.snapshot()[0].in_use_count == 0
+        assert pool.snapshot()[1].in_use_count == 0
 
     @pytest.mark.asyncio
     async def test_shim_close_1015_quarantines_route_on_aexit(self) -> None:
@@ -2009,7 +2054,7 @@ class TestPhaseBPrimeShim:
         close = Close(code=1015, reason="rate-limited")
         exc = ConnectionClosedError(rcvd=close, sent=None)
         await shim.__aexit__(type(exc), exc, exc.__traceback__)
-        snap = pool.snapshot()[0]
+        snap = pool.snapshot()[1]
         assert snap.quarantine_until is not None
         assert snap.last_close_1015_at is not None
         assert snap.last_handshake_429_at is None
@@ -2045,7 +2090,7 @@ class TestPhaseBPrimeShim:
         close = Close(code=1012, reason="restart")
         exc = ConnectionClosedError(rcvd=close, sent=None)
         await shim.__aexit__(type(exc), exc, exc.__traceback__)
-        snap = pool.snapshot()[0]
+        snap = pool.snapshot()[1]
         assert snap.quarantine_until is None
         assert snap.last_close_1015_at is None
 
@@ -2076,7 +2121,7 @@ class TestPhaseBPrimeShim:
         shim = shim_cls("wss://kraken")
         await shim.__aenter__()
         await shim.__aexit__(None, None, None)
-        snap = pool.snapshot()[0]
+        snap = pool.snapshot()[1]
         assert snap.quarantine_until is None
 
     def test_shim_uses_publisher_exchange_name_via_context_var(self) -> None:
@@ -2149,7 +2194,7 @@ class TestPhaseBPrimeShim:
         ``_CURRENT_PUBLISHER`` still get pool routing under the
         legacy tag.)
         """
-        self._enable_pool(with_socks5=True)
+        self._enable_pool()
         seen_kwargs: dict[str, Any] = {}
 
         def fake_connect(*args: Any, **kwargs: Any) -> MagicMock:
@@ -2184,21 +2229,11 @@ class TestPhaseBPrimeGetReconnectWait:
         _LAST_CLOSE_CODE.clear()
 
     @staticmethod
-    def _enable_pool(*, with_socks5: bool = False) -> Any:
-        """Helper matching the pool-enabled shim setup."""
-        routes = [RouteConfig(id="default", kind="direct", priority=0)]
-        if with_socks5:
-            routes.append(
-                RouteConfig(
-                    id="wg-uk-1",
-                    kind="socks5",
-                    proxy_url="socks5h://x:1081",
-                    priority=10,
-                )
-            )
-        config = EgressPoolConfig(enabled=True, routes=routes)
-        return configure_egress_pool(config)
+    def _enable_pool() -> EgressPool:
+        """Configure the singleton with a direct route and one public VPN."""
+        return _configure_kraken_test_pool()
 
+    @pytest.mark.usefixtures("private_ws_egress")
     def test_pool_disabled_honors_retry_after_stash(self) -> None:
         """Spec — pool disabled + stash present → return stashed value.
 
@@ -2249,7 +2284,7 @@ class TestPhaseBPrimeGetReconnectWait:
     def test_pool_enabled_any_route_healthy_returns_min(self) -> None:
         """Spec — pool with at least one healthy route returns 1.0.
 
-        Given pool is enabled with a healthy direct route,
+        Given the pool has a healthy VPN route,
         When _patched_get_reconnect_wait runs with no stashes,
         Then it returns ``_RETRY_AFTER_MIN_SECONDS``.
         """
@@ -2286,6 +2321,7 @@ class TestPhaseBPrimeGetReconnectWait:
             fake_pool.has_available.assert_called_once_with(
                 exchange="kraken_equities",
                 traffic_class="public",
+                record_wait=True,
             )
         finally:
             _CONNECTOR_PUBLISHERS.pop(connector_id, None)
@@ -2321,6 +2357,7 @@ class TestPhaseBPrimeGetReconnectWait:
         fake_pool.has_available.assert_called_once_with(
             exchange="kraken",
             traffic_class="private",
+            record_wait=False,
         )
         fake_pool.earliest_release_in_seconds.assert_called_once_with(
             exchange="kraken",
@@ -2330,13 +2367,13 @@ class TestPhaseBPrimeGetReconnectWait:
     def test_pool_enabled_all_quarantined_returns_earliest_release(self) -> None:
         """Spec — all routes quarantined returns earliest release deadline.
 
-        Given pool is enabled and the direct route is quarantined for 600 s,
+        Given pool is enabled and the VPN route is quarantined for 600 s,
         When _patched_get_reconnect_wait runs,
         Then it returns approximately 600 (allow ±5 s for test latency).
         """
         pool = self._enable_pool()
         pool._quarantine_route(
-            "default",
+            "wg-uk-1",
             datetime.now(UTC) + timedelta(seconds=600),
             "http-429",
         )
@@ -2344,24 +2381,23 @@ class TestPhaseBPrimeGetReconnectWait:
         wait = _patched_get_reconnect_wait(connector, 1)
         assert 595.0 <= wait <= 600.5
 
-    def test_pool_enabled_all_quarantined_clamps_to_min(self) -> None:
-        """Spec — earliest release < 1.0 is clamped to ``_RETRY_AFTER_MIN_SECONDS``.
-
-        Given pool with a quarantine deadline already passed,
-        When _patched_get_reconnect_wait runs,
-        Then the return value is at least ``_RETRY_AFTER_MIN_SECONDS``
-        so the SDK does not no-op-sleep.
-        """
+    def test_pool_enabled_all_quarantined_clamps_to_min(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Quarantined public VPNs with a short deadline use the one-second floor."""
         pool = self._enable_pool()
         pool._quarantine_route(
-            "default",
-            datetime.now(UTC) - timedelta(seconds=10),
+            "wg-uk-1",
+            datetime.now(UTC) + timedelta(minutes=2),
             "http-429",
         )
+        release = MagicMock(return_value=0.25)
+        monkeypatch.setattr(pool, "earliest_release_in_seconds", release)
         connector = MagicMock(spec=ConnectSpotWebsocketBase)
-        wait = _patched_get_reconnect_wait(connector, 1)
-        assert wait == _RETRY_AFTER_MIN_SECONDS
+        assert _patched_get_reconnect_wait(connector, 1) == _RETRY_AFTER_MIN_SECONDS
+        release.assert_called_once_with(exchange="kraken", traffic_class="public")
 
+    @pytest.mark.usefixtures("private_ws_egress")
     def test_pool_empty_falls_through_to_sdk_exponential(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2383,18 +2419,18 @@ class TestPhaseBPrimeGetReconnectWait:
     def test_429_failover_in_one_second_when_healthy_route_available(self) -> None:
         """Spec — egress-pool fast-failover acceptance test.
 
-        Given pool enabled with direct (priority=0) + socks5 (priority=10),
-        When the shim drives a 429 with Retry-After=600 on direct,
+        Given the pool has two healthy VPN routes,
+        When the shim drives a 429 with Retry-After=600 on the preferred VPN,
         Then:
-          (a) direct.quarantine_until is set ~now+600s,
+          (a) the preferred VPN quarantine deadline is set ~now+600s,
           (b) ``_PENDING_RETRY_AFTER_S`` is NOT populated,
           (c) ``_patched_get_reconnect_wait`` returns ~1.0 (not 600),
-          (d) the next reservation picks the socks5 route.
+          (d) the next reservation picks the other VPN.
 
         This is the central egress-pool guarantee: a route-scoped 429
         produces fast failover, not the legacy full-Retry-After wait.
         """
-        pool = self._enable_pool(with_socks5=True)
+        pool = _configure_kraken_test_pool(alternate=True)
         response = Response(
             status_code=429,
             reason_phrase="Too Many Requests",
@@ -2422,15 +2458,15 @@ class TestPhaseBPrimeGetReconnectWait:
             asyncio.run(_raise_through_aenter(shim))
         finally:
             _CURRENT_CONNECTOR_ID.reset(token)
-        direct_snap = next(s for s in pool.snapshot() if s.id == "default")
-        assert direct_snap.quarantine_until is not None
-        assert direct_snap.quarantine_until > datetime.now(UTC) + timedelta(seconds=590)
+        vpn_snap = next(s for s in pool.snapshot() if s.id == "wg-uk-1")
+        assert vpn_snap.quarantine_until is not None
+        assert vpn_snap.quarantine_until > datetime.now(UTC) + timedelta(seconds=590)
         assert 999999 not in _PENDING_RETRY_AFTER_S
         connector = MagicMock(spec=ConnectSpotWebsocketBase)
         wait = _patched_get_reconnect_wait(connector, 1)
         assert wait == _RETRY_AFTER_MIN_SECONDS
         next_reservation = pool.reserve(exchange="kraken", purpose="websocket")
-        assert next_reservation.route_id == "wg-uk-1"
+        assert next_reservation.route_id == "wg-ie-1"
         next_reservation.release()
 
 
@@ -2461,6 +2497,7 @@ class TestPhaseBPrimeBranchCoverage:
         _PENDING_RETRY_AFTER_S.clear()
         _LAST_CLOSE_CODE.clear()
 
+    @pytest.mark.usefixtures("private_ws_egress")
     def test_shim_sync_construct_failure_with_no_pool(self) -> None:
         """Spec — pool disabled + sync raise propagates without reservation work.
 
@@ -2480,6 +2517,7 @@ class TestPhaseBPrimeBranchCoverage:
             shim_cls("wss://kraken")
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("private_ws_egress")
     async def test_shim_aenter_exception_with_no_pool(self) -> None:
         """Spec — pool disabled + arbitrary exception in __aenter__ propagates.
 
@@ -2508,6 +2546,7 @@ class TestPhaseBPrimeBranchCoverage:
             await shim.__aenter__()
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("private_ws_egress")
     async def test_shim_429_legacy_stash_with_no_connector_var(self) -> None:
         """Spec — pool disabled + 429 + missing connector id is a no-op.
 
@@ -2545,31 +2584,24 @@ class TestPhaseBPrimeBranchCoverage:
             await shim.__aenter__()
         assert _PENDING_RETRY_AFTER_S == {}
 
-    def test_get_reconnect_wait_pool_enabled_but_no_routes(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("traffic_class, expected", [("public", 1.0), ("private", 17.5)])
+    def test_empty_pool_uses_public_wait_or_private_sdk_backoff(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        traffic_class: Literal["public", "private"],
+        expected: float,
     ) -> None:
-        """Spec — pool enabled with size==0 falls through to SDK exponential.
-
-        Given a pool object whose ``size()`` returns 0 (defensive —
-        the Pydantic validator prevents this for enabled=True configs,
-        but the branch must still be safe),
-        When _patched_get_reconnect_wait runs,
-        Then ``has_available()`` returns False AND
-        ``earliest_release_in_seconds()`` returns None, so the
-        function falls through to SDK exponential.
-        """
-        empty_pool = EgressPool(EgressPoolConfig(enabled=False, routes=[]))
-        _POOL_HOLDER[0] = empty_pool
-        try:
-            captured = MagicMock(return_value=17.5)
-            monkeypatch.setattr(kraken_sdk_patches, "_ORIGINAL_GET_RECONNECT_WAIT", captured)
-            connector = MagicMock(spec=ConnectSpotWebsocketBase)
-            wait = _patched_get_reconnect_wait(connector, 2)
-        finally:
-            from snapper.infrastructure.network.egress_pool import reset_egress_pool
-
-            reset_egress_pool()
-        assert wait == 17.5
+        """An empty installed pool uses the public floor; private uses its SDK backoff."""
+        empty_pool = EgressPool(EgressPoolConfig())
+        monkeypatch.setattr(kraken_sdk_patches, "get_egress_pool", lambda: empty_pool)
+        monkeypatch.setattr(
+            kraken_sdk_patches, "_ORIGINAL_GET_RECONNECT_WAIT", MagicMock(return_value=17.5)
+        )
+        connector = MagicMock(spec=ConnectSpotWebsocketBase)
+        with egress_identity(
+            exchange="kraken", traffic_class=traffic_class, owner="test", operation="reconnect"
+        ):
+            assert _patched_get_reconnect_wait(connector, 2) == expected
 
 
 class TestApplyKrakenAlreadySubscribedFilter:
@@ -4117,3 +4149,251 @@ class TestApplyKrakenWsTeardownHardening:
         apply_kraken_ws_teardown_hardening()
         assert _TEARDOWN_PATCH_APPLIED[0] is True
         assert before is True
+
+
+def _configure_kraken_test_pool(*, alternate: bool = False) -> EgressPool:
+    """Provide a public VPN and retain a direct route for private SDK tests."""
+    routes = [
+        RouteConfig(id="default", kind="direct"),
+        RouteConfig(id="wg-uk-1", kind="socks5", proxy_url="socks5h://snapper-egress:1081"),
+    ]
+    if alternate:
+        routes.append(
+            RouteConfig(
+                id="wg-ie-1", kind="socks5", proxy_url="socks5h://snapper-egress:1082", priority=1
+            )
+        )
+    pool = configure_egress_pool(EgressPoolConfig(enabled=True, routes=routes))
+    assert pool is not None
+    return pool
+
+
+def _make_public_sdk_connector(
+    exchange: str, callback: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> tuple[ConnectSpotWebsocket | ConnectFuturesWebsocket, ModuleType, str]:
+    """Build a real SDK connector and identify its dial module and attempt counter."""
+    if exchange == "kraken_futures":
+        return (
+            ConnectFuturesWebsocket(MagicMock(spec=FuturesWSClient), "example.com", callback),
+            _kraken_futures_ws,
+            "_ConnectFuturesWebsocket__reconnect_num",
+        )
+    connector = ConnectSpotWebsocket(MagicMock(spec=SpotWSClient), "wss://example.com", callback)
+    monkeypatch.setattr(connector, "send_ping", AsyncMock())
+    return (
+        connector,
+        kraken_sdk_patches._kraken_connectors,
+        "_ConnectSpotWebsocketBase__reconnect_num",
+    )
+
+
+@pytest.mark.parametrize("exchange", ["kraken", "kraken_equities", "kraken_futures"])
+async def test_sdk_public_vpn_refusals_reconnect_without_charging_restart_budgets(
+    exchange: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Drive the actual SDK start, child refusal, retry and recovered SOCKS connection.
+
+    Given: A Kraken public SDK connector with every eligible VPN quarantined,
+    When: The SDK retries past its normal limit and a VPN becomes available,
+    Then: Refusals consume neither SDK reconnect budget nor publisher attempts,
+        and the first dial uses the recovered SOCKS route.
+    """
+    apply_kraken_retry_after_honoring()
+    apply_kraken_futures_pool_routing()
+    pool = _configure_kraken_test_pool()
+    callback = AsyncMock()
+    connector, sdk_module, counter = _make_public_sdk_connector(exchange, callback, monkeypatch)
+    publisher = MagicMock()
+    publisher._get_exchange_name.return_value = exchange
+    monkeypatch.setitem(_CONNECTOR_PUBLISHERS, id(connector), publisher)
+    wait_count = connector.MAX_RECONNECT_NUM + 1
+    delay = MagicMock(return_value=20.0)
+    monkeypatch.setattr(pool, "earliest_release_in_seconds", delay)
+    vpn = pool._states["wg-uk-1"]
+    vpn.quarantine_until = datetime.now(UTC) + timedelta(seconds=20)
+
+    async def backoff(_connector: object, wait_s: float) -> None:
+        """Keep the tunnel unavailable beyond the SDK's ordinary retry budget."""
+        assert getattr(connector, counter) == 0
+        publisher._on_sdk_reconnect_attempt.assert_not_called()
+        assert wait_s == 20.0
+        if delay.call_count == wait_count:
+            vpn.quarantine_until = None
+
+    def dial(_uri: str, **kwargs: object) -> AsyncMock:
+        """Accept a SOCKS connection and stop the SDK after the recovered dial."""
+        assert kwargs["proxy"] == "socks5h://snapper-egress:1081"
+        assert getattr(connector, counter) == 1
+        connector.keep_alive = False
+        return AsyncMock()
+
+    factory = MagicMock(side_effect=dial)
+    monkeypatch.setattr(kraken_sdk_patches, "_interruptible_backoff", backoff)
+    monkeypatch.setattr(sdk_module, "connect", _wrap_connect_factory(factory))
+    try:
+        with egress_identity(
+            exchange=exchange, traffic_class="public", owner="publisher", operation="market_ws"
+        ):
+            await connector.start()
+            await asyncio.wait_for(connector.task, timeout=2)
+    finally:
+        reset_egress_pool()
+
+    assert delay.call_count == wait_count
+    delay.assert_called_with(exchange=exchange, traffic_class="public")
+    factory.assert_called_once()
+    callback.assert_not_awaited()
+    assert not connector.exception_occur
+    assert getattr(connector, counter) == 0
+    if exchange == "kraken_futures":
+        publisher._on_sdk_reconnect_attempt.assert_not_called()
+        publisher._on_sdk_reconnect_wait.assert_not_called()
+    else:
+        publisher._on_sdk_reconnect_attempt.assert_called_once_with()
+        assert publisher._on_sdk_reconnect_wait.call_count == wait_count
+
+
+async def test_public_sdk_budget_exhaustion_after_a_vpn_is_reserved_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A healthy VPN admission still reaches the SDK's reconnect ceiling.
+
+    Given: A Spot connector one attempt below its reconnect ceiling and a healthy VPN,
+    When: Recovery reserves the VPN,
+    Then: MaxReconnectError propagates before dialing and the reservation is released.
+    """
+    apply_kraken_retry_after_honoring()
+    pool = _configure_kraken_test_pool()
+    connector = ConnectSpotWebsocket(MagicMock(spec=SpotWSClient), "wss://example.com", AsyncMock())
+    counter = "_ConnectSpotWebsocketBase__reconnect_num"
+    monkeypatch.setattr(connector, counter, connector.MAX_RECONNECT_NUM - 1)
+    monkeypatch.setattr(kraken_sdk_patches, "_interruptible_backoff", AsyncMock())
+    factory = MagicMock()
+    monkeypatch.setattr(
+        kraken_sdk_patches._kraken_connectors, "connect", _wrap_connect_factory(factory)
+    )
+    try:
+        with pytest.raises(MaxReconnectError):
+            await _patched_reconnect(connector)
+    finally:
+        reset_egress_pool()
+    factory.assert_not_called()
+    assert pool.snapshot()[1].in_use_count == 0
+
+
+@pytest.mark.parametrize("exchange", ["kraken", "kraken_futures"])
+async def test_sdk_public_reconnect_recovers_after_startup_preflight_quarantine(
+    exchange: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real SDK loop waits for a startup deadline and dials the recovered VPN.
+
+    Given: A SOCKS listener that refuses preflight and is quarantined for 30 seconds,
+    When: A Kraken public connector starts and the quarantine expires,
+    Then: The same pool supplies the first SOCKS dial after the 30-second wait
+        and the connector finishes without a terminal error.
+    """
+    apply_kraken_retry_after_honoring()
+    apply_kraken_futures_pool_routing()
+    start = datetime(2026, 11, 27, tzinfo=UTC)
+    clock = MagicMock(wraps=datetime)
+    clock.now.return_value = start
+    monkeypatch.setattr(egress_pool, "datetime", clock)
+    monkeypatch.setattr(egress_pool.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", AsyncMock(return_value=[]))
+    proxy_probe = AsyncMock(side_effect=ConnectionRefusedError("listener still starting"))
+    monkeypatch.setattr(egress_pool.asyncio, "open_connection", proxy_probe)
+    settings = MagicMock()
+    settings.get_setting.return_value = {
+        "enabled": True,
+        "routes": [
+            {"id": "direct", "kind": "direct"},
+            {"id": "vpn", "kind": "socks5", "proxy_url": "socks5h://snapper-egress:1081"},
+        ],
+    }
+    callback = AsyncMock()
+    connector, sdk_module, counter = _make_public_sdk_connector(exchange, callback, monkeypatch)
+    socket_context = AsyncMock()
+
+    async def advance_clock(_connector: object, wait_s: float) -> None:
+        """Release the VPN after the SDK waits exactly as long as the seeded deadline."""
+        assert getattr(connector, counter) == 0
+        assert wait_s == 30.0
+        clock.now.return_value = start + timedelta(seconds=wait_s)
+
+    def dial(_uri: str, **kwargs: object) -> AsyncMock:
+        """The first SDK dial reaches the recovered proxy and ends the loop."""
+        assert kwargs["proxy"] == "socks5h://snapper-egress:1081"
+        assert clock.now.return_value == start + timedelta(seconds=30)
+        connector.keep_alive = False
+        return socket_context
+
+    backoff = AsyncMock(side_effect=advance_clock)
+    factory = MagicMock(side_effect=dial)
+    monkeypatch.setattr(kraken_sdk_patches, "_interruptible_backoff", backoff)
+    monkeypatch.setattr(sdk_module, "connect", _wrap_connect_factory(factory))
+    try:
+        pool = await egress_pool.initialize_egress_pool(settings)
+        assert pool is not None
+        assert not pool.has_available()
+        with egress_identity(
+            exchange=exchange, traffic_class="public", owner="publisher", operation="market_ws"
+        ):
+            await connector.start()
+            await asyncio.wait_for(connector.task, timeout=2)
+        assert egress_pool.get_egress_pool() is pool
+    finally:
+        reset_egress_pool()
+
+    proxy_probe.assert_awaited_once_with("snapper-egress", 1081)
+    backoff.assert_awaited_once_with(connector, 30.0)
+    factory.assert_called_once()
+    socket_context.__aenter__.assert_awaited_once_with()
+    callback.assert_not_awaited()
+    assert not connector.exception_occur
+    assert getattr(connector, counter) == 0
+
+
+def test_public_ws_without_a_configured_pool_refuses_before_dial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disabled or missing public pool cannot fall through to the SDK dial.
+
+    Given: No configured pool and the default public policy,
+    When: The wrapped SDK attempts a public WebSocket connection,
+    Then: AllRoutesQuarantinedError propagates before the dial factory is called.
+    """
+    monkeypatch.setattr(kraken_sdk_patches, "get_egress_pool", lambda: None)
+    dial = MagicMock()
+    shim = _wrap_connect_factory(dial)
+    with pytest.raises(AllRoutesQuarantinedError, match="no public VPN route available"):
+        shim("wss://example.com")
+    dial.assert_not_called()
+
+
+async def test_public_dev_ws_dials_direct_and_quarantines_only_the_dev_route() -> None:
+    """An opted-in public direct connect failure leaves executor routes usable.
+
+    Given: Explicit dev opt-in and a separate direct route for private traffic,
+    When: The public WebSocket dials direct and the socket refuses the connection,
+    Then: Only the dev public route is quarantined and its reservation is released.
+    """
+    config = EgressPoolConfig(enabled=True, routes=[RouteConfig(id="default", kind="direct")])
+    pool = configure_egress_pool(config, public_direct_allowed=True)
+    assert pool is not None
+    socket_context = AsyncMock()
+    socket_context.__aenter__.side_effect = ConnectionRefusedError("direct host offline")
+    dial = MagicMock(return_value=socket_context)
+    try:
+        with egress_identity(
+            exchange="kraken", traffic_class="public", owner="publisher", operation="market_ws"
+        ):
+            shim = _wrap_connect_factory(dial)("wss://example.com")
+            assert dial.call_args.kwargs["proxy"] is None
+            with pytest.raises(ConnectionRefusedError, match="direct host offline"):
+                await shim.__aenter__()
+        configured, dev = pool.snapshot()
+        assert configured.quarantine_until is None
+        assert dev.quarantine_until is not None
+        assert dev.in_use_count == 0
+    finally:
+        reset_egress_pool()

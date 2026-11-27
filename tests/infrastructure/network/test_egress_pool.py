@@ -6,6 +6,7 @@ from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
+from typing import Literal
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -24,9 +25,11 @@ from snapper.infrastructure.network.egress_pool import _parse_egress_pool_settin
 from snapper.infrastructure.network.egress_pool import _preflight_one_route
 from snapper.infrastructure.network.egress_pool import _preflight_routes
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
+from snapper.infrastructure.network.egress_pool import ensure_maintenance_egress_pool
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_pool import initialize_egress_pool
 from snapper.infrastructure.network.egress_pool import normalize_egress_target_host
+from snapper.infrastructure.network.egress_pool import public_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
 from snapper.infrastructure.network.egress_pool import safely_initialize_egress_pool
 
@@ -44,7 +47,7 @@ def _two_route_config(
     direct_priority: int = 0,
     socks_priority: int = 10,
     enabled: bool = True,
-    on_all_quarantined: str = "wait",
+    on_all_quarantined: Literal["wait", "raise"] = "wait",
 ) -> EgressPoolConfig:
     """Helper — build a config with one direct + one socks5 route."""
     return EgressPoolConfig(
@@ -101,95 +104,55 @@ class TestSize:
 class TestReserveSelection:
     """Tests for ``EgressPool.reserve`` selection policy."""
 
-    def test_reserve_picks_lowest_priority(self) -> None:
-        """Spec — lowest priority wins when all healthy.
-
-        Given direct(priority=0) + socks5(priority=10), both healthy,
-        When reserve is called with no preference,
-        Then the direct route (priority=0) is picked.
-        """
+    def test_public_never_picks_healthy_direct_even_at_lower_priority(self) -> None:
+        """Public traffic picks the VPN over a higher-ranked direct route."""
         pool = EgressPool(_two_route_config())
         reservation = pool.reserve(exchange="kraken", purpose="websocket")
-        assert reservation.route_id == "default"
+        assert reservation.route_id == "wg-uk-1"
+        assert reservation.proxy_url == "socks5h://snapper-egress:1081"
 
     def test_reserve_skips_quarantined_route(self) -> None:
-        """Spec — quarantined routes are skipped.
-
-        Given direct(priority=0) quarantined + socks5(priority=10) healthy,
-        When reserve is called,
-        Then the socks5 route is picked.
-        """
-        pool = EgressPool(_two_route_config())
+        """A quarantined public route yields to another healthy VPN."""
+        pool = EgressPool(TestReserveExchangeFilter._pl_pinned_config())
+        pool._quarantine_route("ie", datetime.now(UTC) + timedelta(seconds=120), "http-429")
         reservation = pool.reserve(exchange="kraken", purpose="websocket")
-        reservation.quarantine(120.0, reason="http-429")
-        reservation.release()
-        next_reservation = pool.reserve(exchange="kraken", purpose="websocket")
-        assert next_reservation.route_id == "wg-uk-1"
+        assert reservation.route_id == "uk"
 
     def test_reserve_respects_preferred_route(self) -> None:
-        """Spec — preferred_route overrides priority order.
-
-        Given two healthy routes and preferred_route="wg-uk-1",
-        When reserve is called,
-        Then wg-uk-1 is picked even though direct has lower priority.
-        """
-        pool = EgressPool(_two_route_config())
-        reservation = pool.reserve(
-            exchange="kraken",
-            purpose="websocket",
-            preferred_route="wg-uk-1",
-        )
-        assert reservation.route_id == "wg-uk-1"
+        """A healthy allowed preferred VPN overrides priority."""
+        pool = EgressPool(TestReserveExchangeFilter._pl_pinned_config())
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", preferred_route="uk")
+        assert reservation.route_id == "uk"
 
     def test_reserve_falls_back_when_preferred_quarantined(self) -> None:
-        """Spec — quarantined preferred route falls through to priority.
+        """A quarantined preferred VPN yields to a healthy allowed VPN."""
+        pool = EgressPool(TestReserveExchangeFilter._pl_pinned_config())
+        pool._quarantine_route("uk", datetime.now(UTC) + timedelta(seconds=60), "http-429")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", preferred_route="uk")
+        assert reservation.route_id == "ie"
 
-        Given a preferred socks5 route that is quarantined,
-        When reserve is called,
-        Then the direct route is picked.
-        """
-        pool = EgressPool(_two_route_config())
-        first = pool.reserve(
-            exchange="kraken",
-            purpose="websocket",
-            preferred_route="wg-uk-1",
-        )
-        first.quarantine(60.0, reason="http-429")
-        first.release()
-        second = pool.reserve(
-            exchange="kraken",
-            purpose="websocket",
-            preferred_route="wg-uk-1",
-        )
-        assert second.route_id == "default"
-
-    def test_reserve_ignores_unknown_preferred_route(self) -> None:
-        """Spec — unknown preferred_route is ignored.
-
-        Given preferred_route="nonexistent" and a healthy direct route,
-        When reserve is called,
-        Then the direct route is picked.
-        """
+    @pytest.mark.parametrize("preferred", ["nonexistent", "default"])
+    def test_public_ignores_unknown_or_direct_preferred_route(self, preferred: str) -> None:
+        """A nonexistent or direct preferred route leaves the public VPN selected."""
         pool = EgressPool(_two_route_config())
         reservation = pool.reserve(
-            exchange="kraken",
-            purpose="websocket",
-            preferred_route="nonexistent",
+            exchange="kraken", purpose="websocket", preferred_route=preferred
         )
-        assert reservation.route_id == "default"
+        assert reservation.route_id == "wg-uk-1"
 
     def test_reserve_balances_in_use_count_within_priority(self) -> None:
         """Spec — equal-priority routes are balanced by in_use_count.
 
-        Given two direct routes with priority=0,
+        Given two VPN routes with equal priority,
         When reserved three times in succession,
         Then the picks alternate so neither route holds more than half.
         """
         config = EgressPoolConfig(
             enabled=True,
             routes=[
-                RouteConfig(id="d1", kind="direct", priority=0),
-                RouteConfig(id="d2", kind="direct", priority=0),
+                RouteConfig(id="default", kind="direct"),
+                RouteConfig(id="s1", kind="socks5", proxy_url="socks5h://x:1081"),
+                RouteConfig(id="s2", kind="socks5", proxy_url="socks5h://x:1082"),
             ],
         )
         pool = EgressPool(config)
@@ -197,24 +160,24 @@ class TestReserveSelection:
         second = pool.reserve(exchange="kraken", purpose="websocket")
         third = pool.reserve(exchange="kraken", purpose="websocket")
         ids = {first.route_id, second.route_id, third.route_id}
-        assert ids == {"d1", "d2"}
+        assert ids == {"s1", "s2"}
 
     def test_reserve_records_last_pick_at(self) -> None:
         """Spec — pick updates RouteState.last_pick_at and increments in_use_count.
 
         Given a fresh pool,
         When reserve is called and the reservation is held,
-        Then snapshot()[0].in_use_count is 1 (proves the increment ran).
+        Then the VPN in_use_count is 1 (proves the increment ran).
 
         The reservation MUST be bound to a local — dropping it would
         let the weakref finalizer fire and decrement back to 0.
         """
         pool = EgressPool(_two_route_config())
         before = pool.snapshot()
-        assert before[0].in_use_count == 0
+        assert before[1].in_use_count == 0
         held = pool.reserve(exchange="kraken", purpose="websocket")
         after = pool.snapshot()
-        assert after[0].in_use_count == 1
+        assert after[1].in_use_count == 1
         held.release()
 
 
@@ -295,32 +258,23 @@ class TestReserveExchangeFilter:
         assert "pl" not in picks
         assert picks.issubset({"ie", "uk"})
 
-    def test_pool_falls_back_to_direct_when_only_pinned_route_disallows(self) -> None:
-        """Spec — direct fallback ignores ``allowed_exchanges`` constraint.
+    def test_public_uses_other_exchanges_vpn_when_allowed_routes_are_quarantined(self) -> None:
+        """Public failover uses the other VPN and logs which exchange overrode its pins."""
+        pool = EgressPool(self._pl_pinned_config())
+        deadline = datetime.now(UTC) + timedelta(seconds=120)
+        pool._quarantine_route("ie", deadline, "http-429")
+        pool._quarantine_route("uk", deadline, "http-429")
 
-        Given a pool whose only socks5 route pins itself to
-        ``["walutomat"]`` and is then quarantined, reserving for
-        ``"kraken"`` falls back to the direct route even though the
-        direct route's ``allowed_exchanges`` is empty (any-exchange)
-        — direct is always the last-resort path per the documented
-        invariant.
-        """
-        config = EgressPoolConfig(
-            enabled=True,
-            routes=[
-                RouteConfig(id="default", kind="direct", priority=100),
-                RouteConfig(
-                    id="pl",
-                    kind="socks5",
-                    proxy_url="socks5h://x:1084",
-                    priority=10,
-                    allowed_exchanges=("walutomat",),
-                ),
-            ],
-        )
-        pool = EgressPool(config)
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
-        assert reservation.route_id == "default"
+        messages: list[str] = []
+        sink_id = logger.add(messages.append, level="WARNING", format="{level} {message}")
+        try:
+            reservation = pool.reserve(exchange="kraken", purpose="websocket")
+            assert reservation.route_id == "pl"
+        finally:
+            logger.remove(sink_id)
+        assert messages == [
+            "WARNING egress_pool: using unpinned public VPN route exchange=kraken route_id=pl\n"
+        ]
 
     def test_preferred_route_respects_allowed_exchanges(self) -> None:
         """Spec — preferred_route pointing at a disallowing route is skipped.
@@ -337,7 +291,7 @@ class TestReserveExchangeFilter:
             preferred_route="pl",
         )
         assert reservation.route_id != "pl"
-        assert reservation.route_id in {"default", "ie", "uk"}
+        assert reservation.route_id in {"ie", "uk"}
 
     def test_open_route_serves_any_exchange(self) -> None:
         """Spec — default empty ``allowed_exchanges`` means any exchange.
@@ -358,7 +312,7 @@ class TestPrivateTrafficSelection:
     """Tests for private direct-first routing and fallback semantics."""
 
     @staticmethod
-    def _private_config(on_all_quarantined: str = "wait") -> EgressPoolConfig:
+    def _private_config(on_all_quarantined: Literal["wait", "raise"] = "wait") -> EgressPoolConfig:
         """Build direct + public VPN + PL private fallback config.
 
         Args:
@@ -401,6 +355,26 @@ class TestPrivateTrafficSelection:
         reservation = pool.reserve(exchange="kraken", purpose="websocket")
         assert reservation.route_id == "ie"
         reservation.release()
+
+    @pytest.mark.parametrize("exchange", ["walutomat", "kraken"])
+    def test_public_refuses_only_healthy_private_fallback(self, exchange: str) -> None:
+        """The fallback is private even for a public exchange named in its pin."""
+        pool = EgressPool(self._private_config())
+        now = datetime.now(UTC)
+        pool._quarantine_route("default", now + timedelta(seconds=10), "ws-connect-error")
+        pool._quarantine_route("ie", now + timedelta(seconds=90), "ws-connect-error")
+
+        assert not pool.has_available(exchange=exchange)
+        with pytest.raises(AllRoutesQuarantinedError, match="no public VPN route available"):
+            pool.reserve(exchange=exchange, purpose="websocket", preferred_route="pl")
+        private = pool.reserve(exchange=exchange, purpose="websocket", traffic_class="private")
+        assert private.route_id == "pl"
+        private.release()
+
+        pool._quarantine_route("pl", now + timedelta(seconds=20), "ws-connect-error")
+        delay = pool.earliest_release_in_seconds(exchange=exchange)
+        assert delay is not None
+        assert 85.0 <= delay <= 90.0
 
     def test_unknown_traffic_class_defaults_to_public(self) -> None:
         """Spec — unknown traffic classes are treated as public.
@@ -767,13 +741,12 @@ class TestStatusSnapshot:
             purpose="websocket",
             traffic_class="private",
         )
+        ie_public = pool.reserve(exchange="kraken", purpose="websocket")
         pool._quarantine_route(
             "ie",
             datetime.now(UTC) + timedelta(seconds=60),
             "http-429",
         )
-        pl_public = pool.reserve(exchange="walutomat", purpose="websocket")
-
         snapshot = pool.status_snapshot()
 
         assert snapshot.enabled is True
@@ -808,11 +781,12 @@ class TestStatusSnapshot:
         assert pl.exit_ip is None
         assert pl.provider is None
         assert pl.allowed_exchanges == ["walutomat"]
-        assert [(r.exchange, r.traffic_class) for r in pl.active_reservations] == [
-            ("walutomat", "public")
+        assert pl.active_reservations == []
+        assert [(r.exchange, r.traffic_class) for r in ie.active_reservations] == [
+            ("kraken", "public")
         ]
         direct_private.release()
-        pl_public.release()
+        ie_public.release()
 
     def test_active_reservation_map_counts_duplicate_tuples(self) -> None:
         """Spec — duplicate active tuples remain visible until all holds release.
@@ -826,21 +800,21 @@ class TestStatusSnapshot:
         first = pool.reserve(exchange="kraken", purpose="websocket")
         second = pool.reserve(exchange="kraken", purpose="websocket")
 
-        held = pool.status_snapshot().routes[0]
+        held = pool.status_snapshot().routes[1]
         assert held.in_use_count == 2
         assert [(r.exchange, r.traffic_class) for r in held.active_reservations] == [
             ("kraken", "public")
         ]
 
         first.release()
-        one_left = pool.status_snapshot().routes[0]
+        one_left = pool.status_snapshot().routes[1]
         assert one_left.in_use_count == 1
         assert [(r.exchange, r.traffic_class) for r in one_left.active_reservations] == [
             ("kraken", "public")
         ]
 
         second.release()
-        empty = pool.status_snapshot().routes[0]
+        empty = pool.status_snapshot().routes[1]
         assert empty.in_use_count == 0
         assert empty.active_reservations == []
 
@@ -887,14 +861,14 @@ class TestStatusSnapshot:
         pool = EgressPool(_two_route_config())
         reservation = pool.reserve(exchange="kraken", purpose="http")
 
-        held = pool.status_snapshot().routes[0]
+        held = pool.status_snapshot().routes[1]
         assert held.in_use_count == 1
         assert [(r.exchange, r.traffic_class) for r in held.active_reservations] == [
             ("kraken", "public")
         ]
 
         reservation.release()
-        assert pool.status_snapshot().routes[0].active_reservations == []
+        assert pool.status_snapshot().routes[1].active_reservations == []
 
     def test_websocket_connection_counts_group_by_target_host(self) -> None:
         """Spec — WebSocket reservations count live holds per target host.
@@ -917,18 +891,18 @@ class TestStatusSnapshot:
             connection_kind="ws",
         )
 
-        held = pool.status_snapshot().routes[0].connections
+        held = pool.status_snapshot().routes[1].connections
         assert [
             (item.host, item.kind, item.exchange, item.traffic_class, item.count) for item in held
         ] == [("ws.kraken.com", "ws", "kraken", "public", 2)]
         assert held[0].last_seen_at is None
 
         first.release()
-        one_left = pool.status_snapshot().routes[0].connections
+        one_left = pool.status_snapshot().routes[1].connections
         assert one_left[0].count == 1
 
         second.release()
-        assert pool.status_snapshot().routes[0].connections == []
+        assert pool.status_snapshot().routes[1].connections == []
 
     def test_rest_connection_records_last_seen_after_release(self) -> None:
         """Spec — REST reservations leave a last-seen host row after release.
@@ -945,7 +919,7 @@ class TestStatusSnapshot:
             connection_kind="rest",
         )
 
-        active = pool.status_snapshot().routes[0].connections
+        active = pool.status_snapshot().routes[1].connections
         assert len(active) == 1
         assert active[0].host == "api.kraken.com"
         assert active[0].kind == "rest"
@@ -954,7 +928,7 @@ class TestStatusSnapshot:
         last_seen_at = active[0].last_seen_at
 
         reservation.release()
-        released = pool.status_snapshot().routes[0].connections
+        released = pool.status_snapshot().routes[1].connections
         assert len(released) == 1
         assert released[0].count == 0
         assert released[0].last_seen_at == last_seen_at
@@ -980,7 +954,7 @@ class TestStatusSnapshot:
             connection_kind="rest",
         )
 
-        assert pool.status_snapshot().routes[0].connections == []
+        assert pool.status_snapshot().routes[1].connections == []
         reservation.release()
 
     def test_rest_last_seen_hosts_are_capped_per_route(self) -> None:
@@ -1000,7 +974,7 @@ class TestStatusSnapshot:
             )
             reservation.release()
 
-        hosts = [item.host for item in pool.status_snapshot().routes[0].connections]
+        hosts = [item.host for item in pool.status_snapshot().routes[1].connections]
         assert len(hosts) == 16
         assert "api-0.kraken.com" not in hosts
         assert "api-16.kraken.com" in hosts
@@ -1063,36 +1037,72 @@ class TestStatusSnapshot:
 class TestReserveAllQuarantined:
     """Tests for ``EgressPool.reserve`` when no route is available."""
 
-    def test_wait_mode_falls_back_to_direct_route(self) -> None:
-        """Spec — on_all_quarantined="wait" falls back to direct even when quarantined.
+    @pytest.mark.parametrize("policy", ["wait", "raise"])
+    def test_public_refuses_when_every_vpn_is_quarantined(
+        self, policy: Literal["wait", "raise"]
+    ) -> None:
+        """An enabled direct route cannot satisfy public traffic under either policy."""
+        pool = EgressPool(_two_route_config(on_all_quarantined=policy))
+        pool._quarantine_route("wg-uk-1", datetime.now(UTC) + timedelta(seconds=120), "http-429")
+        with pytest.raises(AllRoutesQuarantinedError, match="no public VPN route available"):
+            pool.reserve(exchange="kraken", purpose="websocket", preferred_route="default")
+        assert pool.snapshot()[0].last_pick_at is None
 
-        Given all routes quarantined,
-        When reserve is called with on_all_quarantined="wait",
-        Then the direct route is returned (the SDK will sleep via
-        earliest_release_in_seconds rather than retry immediately).
-        """
-        pool = EgressPool(_two_route_config(on_all_quarantined="wait"))
-        for _ in range(2):
-            reservation = pool.reserve(exchange="kraken", purpose="websocket")
-            reservation.quarantine(120.0, reason="http-429")
-            reservation.release()
-        fallback = pool.reserve(exchange="kraken", purpose="websocket")
-        assert fallback.route_id == "default"
+    def test_public_wait_logs_and_accumulates_one_episode_per_exchange(self) -> None:
+        """Repeated callers share a timer and completed waits accumulate per exchange."""
+        pool = EgressPool(_two_route_config())
+        vpn = pool._states["wg-uk-1"]
+        unavailable = datetime.now(UTC) + timedelta(seconds=120)
+        messages: list[str] = []
+        sink_id = logger.add(messages.append, level="WARNING", format="{message}")
+        try:
+            with patch.object(pool_module, "monotonic", side_effect=[10, 12, 16, 17, 30, 34]):
+                vpn.quarantine_until = unavailable
+                for exchange in ("kraken", "kraken", "walutomat"):
+                    assert not pool.has_available(exchange=exchange, record_wait=True)
+                vpn.quarantine_until = None
+                assert pool.has_available(exchange="walutomat", record_wait=True)
+                pool.reserve(exchange="kraken", purpose="http").release()
+                vpn.quarantine_until = unavailable
+                assert not pool.has_available(exchange="kraken", record_wait=True)
+                vpn.quarantine_until = None
+                assert pool.has_available(exchange="kraken", record_wait=True)
+        finally:
+            logger.remove(sink_id)
+        assert pool._public_wait_seconds == {"kraken": 11, "walutomat": 4}
+        assert [msg for msg in messages if "wait started" in msg] == [
+            "egress_pool: public VPN wait started exchange=kraken\n",
+            "egress_pool: public VPN wait started exchange=walutomat\n",
+            "egress_pool: public VPN wait started exchange=kraken\n",
+        ]
+        assert "wait ended exchange=kraken wait_seconds=4 public_vpn_wait_seconds_total=11" in (
+            messages[-1]
+        )
 
-    def test_raise_mode_raises_on_all_quarantined(self) -> None:
-        """Spec — on_all_quarantined="raise" raises AllRoutesQuarantinedError.
+    def test_public_availability_is_read_only_and_logs_outside_lock(self) -> None:
+        """A one-shot check records nothing and real waiter warnings run unlocked."""
+        pool = EgressPool(_two_route_config())
+        vpn = pool._states["wg-uk-1"]
+        vpn.quarantine_until = datetime.now(UTC) + timedelta(seconds=30)
 
-        Given all routes quarantined and on_all_quarantined="raise",
-        When reserve is called,
-        Then AllRoutesQuarantinedError fires.
-        """
-        pool = EgressPool(_two_route_config(on_all_quarantined="raise"))
-        for _ in range(2):
-            reservation = pool.reserve(exchange="kraken", purpose="websocket")
-            reservation.quarantine(120.0, reason="http-429")
-            reservation.release()
-        with pytest.raises(AllRoutesQuarantinedError):
-            pool.reserve(exchange="kraken", purpose="websocket")
+        def verify_unlocked(_message: str, *_args: str | float) -> None:
+            """Detect a synchronous warning delivered under the pool's RLock."""
+            assert not getattr(pool._lock, "_is_owned")()
+
+        with patch.object(logger, "warning", side_effect=verify_unlocked) as warning:
+            assert not pool.has_available(exchange="kraken")
+            with pytest.raises(AllRoutesQuarantinedError):
+                pool.reserve(exchange="kraken", purpose="http")
+            assert not pool.is_waiting_for_public_vpn("kraken")
+            warning.assert_not_called()
+            assert not pool.has_available(exchange="kraken", record_wait=True)
+            assert pool.is_waiting_for_public_vpn("kraken")
+            vpn.quarantine_until = None
+            assert pool.has_available(exchange="kraken")
+            assert pool.is_waiting_for_public_vpn("kraken")
+            assert pool.has_available(exchange="kraken", record_wait=True)
+            assert not pool.is_waiting_for_public_vpn("kraken")
+        assert warning.call_count == 2
 
     def test_wait_mode_raises_when_no_direct_route(self) -> None:
         """Spec — wait mode without an enabled direct route also raises.
@@ -1114,11 +1124,33 @@ class TestReserveAllQuarantined:
             ],
         )
         pool = EgressPool(config)
-        only = pool.reserve(exchange="kraken", purpose="websocket")
-        only.quarantine(120.0, reason="http-429")
-        only.release()
-        with pytest.raises(AllRoutesQuarantinedError):
-            pool.reserve(exchange="kraken", purpose="websocket")
+        with pytest.raises(AllRoutesQuarantinedError, match="no direct fallback available"):
+            pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_empty_public_policy_replacement_discards_wait_state(reset: bool) -> None:
+    """Reset and disabled initialization both install an empty pool with fresh state.
+
+    Given: An unpooled public policy with an active Kraken wait episode,
+    When: The pool is reset or initialized with the dev opt-in disabled,
+    Then: The replacement policy is a fresh pool with no recorded wait episode.
+    """
+    reset_egress_pool()
+    old = public_egress_pool(None)
+    assert not old.has_available(exchange="kraken", record_wait=True)
+    try:
+        if reset:
+            reset_egress_pool()
+        else:
+            settings = MagicMock()
+            settings.get_setting.return_value = False
+            assert not pool_module.initialize_public_egress_policy(settings)
+        current = public_egress_pool(None)
+        assert current is not old
+        assert not current.is_waiting_for_public_vpn("kraken")
+    finally:
+        reset_egress_pool()
 
 
 class TestHasAvailable:
@@ -1142,10 +1174,7 @@ class TestHasAvailable:
         Then False is returned.
         """
         pool = EgressPool(_two_route_config())
-        for _ in range(2):
-            reservation = pool.reserve(exchange="kraken", purpose="websocket")
-            reservation.quarantine(120.0, reason="http-429")
-            reservation.release()
+        pool._quarantine_route("wg-uk-1", datetime.now(UTC) + timedelta(seconds=120), "http-429")
         assert pool.has_available() is False
 
     def test_returns_false_for_disabled_only(self) -> None:
@@ -1165,15 +1194,7 @@ class TestHasAvailable:
         assert pool.has_available() is False
 
     def test_filters_by_exchange_for_pinned_routes(self) -> None:
-        """Spec — has_available(exchange='kraken') ignores Walutomat-pinned routes.
-
-        Pool has direct(disabled) + pl(socks5, healthy, allowed=['walutomat']).
-        Without an exchange filter, has_available() reports True
-        because pl is healthy. With exchange='kraken', the filter
-        excludes pl → False, which is the correct signal to the
-        Kraken reconnect path that there is NO healthy Kraken-eligible
-        route and it should sleep until release, not retry in 1s.
-        """
+        """Any healthy VPN is eligible regardless of its exchange pin."""
         config = EgressPoolConfig(
             enabled=False,
             routes=[
@@ -1189,7 +1210,7 @@ class TestHasAvailable:
         )
         pool = EgressPool(config)
         assert pool.has_available() is True
-        assert pool.has_available(exchange="kraken") is False
+        assert pool.has_available(exchange="kraken") is True
         assert pool.has_available(exchange="walutomat") is True
 
 
@@ -1311,21 +1332,11 @@ class TestEarliestReleaseInSeconds:
         When earliest_release_in_seconds() is called,
         Then the result is approximately 30 (allow ±2 s for test latency).
         """
-        pool = EgressPool(_two_route_config())
-        first = pool.reserve(
-            exchange="kraken",
-            purpose="websocket",
-            preferred_route="default",
-        )
-        first.quarantine(30.0, reason="http-429")
-        first.release()
-        second = pool.reserve(
-            exchange="kraken",
-            purpose="websocket",
-            preferred_route="wg-uk-1",
-        )
-        second.quarantine(90.0, reason="http-429")
-        second.release()
+        pool = EgressPool(TestReserveExchangeFilter._pl_pinned_config())
+        now = datetime.now(UTC)
+        pool._quarantine_route("ie", now + timedelta(seconds=30), "http-429")
+        pool._quarantine_route("uk", now + timedelta(seconds=90), "http-429")
+        pool._quarantine_route("default", now + timedelta(seconds=5), "http-429")
         earliest = pool.earliest_release_in_seconds()
         assert earliest is not None
         assert 27.0 <= earliest <= 32.0
@@ -1339,7 +1350,7 @@ class TestEarliestReleaseInSeconds:
         """
         pool = EgressPool(_two_route_config())
         pool._quarantine_route(
-            "default",
+            "wg-uk-1",
             datetime.now(UTC) - timedelta(seconds=10),
             "http-429",
         )
@@ -1347,16 +1358,7 @@ class TestEarliestReleaseInSeconds:
         assert result == 0.0
 
     def test_filters_by_exchange_for_pinned_routes(self) -> None:
-        """Spec — earliest_release_in_seconds(exchange) ignores other-exchange pins.
-
-        When a Walutomat-pinned route is quarantined and the only
-        Kraken-eligible direct fallback has no deadline, asking for
-        the Kraken-eligible release time must return ``None`` (no
-        Kraken-eligible route in quarantine), NOT the pl deadline.
-        The Kraken reconnect path needs this so it doesn't sleep
-        until a Walutomat route releases when that release has no
-        bearing on Kraken availability.
-        """
+        """Another exchange's VPN can become the first available public route."""
         config = EgressPoolConfig(
             enabled=True,
             routes=[
@@ -1378,7 +1380,7 @@ class TestEarliestReleaseInSeconds:
         )
         assert pool.earliest_release_in_seconds() is not None
         assert pool.earliest_release_in_seconds(exchange="walutomat") is not None
-        assert pool.earliest_release_in_seconds(exchange="kraken") is None
+        assert pool.earliest_release_in_seconds(exchange="kraken") is not None
 
 
 class TestModuleSingletonState:
@@ -1566,9 +1568,10 @@ class TestPreflightRoutes:
         monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
         monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
         config = _two_route_config()
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         direct_route = next(r for r in effective.routes if r.kind == "direct")
         assert direct_route.enabled is True
+        assert quarantined == []
 
     async def test_socks5_route_auto_disabled_when_python_socks_missing(
         self,
@@ -1588,25 +1591,28 @@ class TestPreflightRoutes:
 
         monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
         config = _two_route_config()
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
         assert socks_route.enabled is False
+        assert quarantined == []
 
-    async def test_socks5_route_auto_disabled_on_dns_failure(
+    @pytest.mark.parametrize("error_type", [OSError, TimeoutError])
+    async def test_socks5_route_quarantined_on_dns_failure(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        error_type: type[OSError],
     ) -> None:
-        """Spec — DNS resolution failure disables the SOCKS5 route.
+        """Spec — DNS resolution failure quarantines the SOCKS5 route.
 
         Given asyncio.getaddrinfo raises OSError for the socks5 host
             AND python_socks is importable (otherwise the route would
             be auto-disabled BEFORE the DNS check runs),
         When _preflight_routes runs,
-        Then the socks5 route's effective enabled flag is False.
+        Then the SOCKS5 route stays enabled and is scheduled for retry.
         """
 
         async def fake_getaddrinfo(*args: object, **kwargs: object) -> list[object]:
-            raise OSError("simulated DNS failure")
+            raise error_type("simulated DNS failure")
 
         loop = MagicMock()
         loop.getaddrinfo = fake_getaddrinfo
@@ -1622,9 +1628,10 @@ class TestPreflightRoutes:
         monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
         monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
         config = _two_route_config()
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
-        assert socks_route.enabled is False
+        assert socks_route.enabled is True
+        assert quarantined == ["wg-uk-1"]
 
     async def test_socks5_route_with_resolvable_host_survives(
         self,
@@ -1669,9 +1676,10 @@ class TestPreflightRoutes:
         monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
         monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
         config = _two_route_config()
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
         assert socks_route.enabled is True
+        assert quarantined == []
 
     async def test_no_warning_when_socks5_missing_and_no_socks_routes(
         self,
@@ -1697,8 +1705,9 @@ class TestPreflightRoutes:
             enabled=True,
             routes=[RouteConfig(id="d", kind="direct")],
         )
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         assert all(r.enabled for r in effective.routes)
+        assert quarantined == []
 
     async def test_already_disabled_route_passes_through(self) -> None:
         """Spec — preflight does not re-enable explicitly disabled routes.
@@ -1718,11 +1727,69 @@ class TestPreflightRoutes:
                 )
             ],
         )
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         assert effective.routes[0].enabled is False
+        assert quarantined == []
 
 
 @pytest.mark.asyncio
+class _GreetingWriter:
+    """Writer stub for the SOCKS5 greeting probe that discards every call."""
+
+    def write(self, _data: bytes) -> None:
+        """Accept the greeting bytes."""
+
+    async def drain(self) -> None:
+        """Pretend the greeting was flushed."""
+
+    def close(self) -> None:
+        """Pretend the socket closed."""
+
+    async def wait_closed(self) -> None:
+        """Pretend the close completed."""
+
+
+class _GreetingReader:
+    """Reader stub that returns a fixed greeting reply or ends the stream early."""
+
+    def __init__(self, reply: bytes | None) -> None:
+        """Store the reply, where ``None`` means the listener closes mid-reply."""
+        self._reply = reply
+
+    async def readexactly(self, n: int) -> bytes:
+        """Return the stored reply, or raise ``IncompleteReadError`` when it is ``None``."""
+        if self._reply is None:
+            raise asyncio.IncompleteReadError(partial=b"\x05", expected=n)
+        return self._reply
+
+
+def _install_greeting_probe(monkeypatch: pytest.MonkeyPatch, reply: bytes | None) -> None:
+    """Patch DNS, the TCP dial and python-socks discovery for one greeting reply.
+
+    Args:
+        monkeypatch: Pytest fixture used to install the fakes.
+        reply: Bytes the listener answers with, or ``None`` to close mid-reply.
+    """
+
+    async def fake_open_connection(
+        host: object, port: object
+    ) -> tuple[_GreetingReader, _GreetingWriter]:
+        return _GreetingReader(reply), _GreetingWriter()
+
+    async def fake_getaddrinfo(*_a: object, **_kw: object) -> list[object]:
+        return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
+
+    loop = MagicMock()
+    loop.getaddrinfo = fake_getaddrinfo
+    monkeypatch.setattr(pool_module.asyncio, "get_running_loop", lambda: loop)
+    monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
+    monkeypatch.setattr(
+        pool_module.importlib.util,
+        "find_spec",
+        lambda name: MagicMock() if name == "python_socks" else None,
+    )
+
+
 class TestSocks5GreetingProbe:
     """Tests for the SOCKS5 listener reachability probe.
 
@@ -1774,21 +1841,21 @@ class TestSocks5GreetingProbe:
         monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
         monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
         config = _two_route_config()
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
         assert socks_route.enabled is True
+        assert quarantined == []
 
-    async def test_socks5_route_auto_disabled_when_listener_refused(
+    async def test_socks5_route_quarantined_when_listener_refused(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Spec — TCP connection refused → route auto-disabled.
+        """Spec — TCP connection refused → route quarantined.
 
         Given asyncio.open_connection raises ConnectionRefusedError on
             the SOCKS5 probe AND DNS resolves AND python_socks installed,
         When _preflight_one_route runs,
-        Then the route's enabled flag is False (closes the
-            degraded-ready gap).
+        Then the SOCKS5 route stays enabled and is scheduled for retry.
         """
 
         async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
@@ -1812,20 +1879,21 @@ class TestSocks5GreetingProbe:
         monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
         monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
         config = _two_route_config()
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
-        assert socks_route.enabled is False
+        assert socks_route.enabled is True
+        assert quarantined == ["wg-uk-1"]
 
-    async def test_socks5_route_auto_disabled_on_probe_timeout(
+    async def test_socks5_route_quarantined_on_probe_timeout(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Spec — open_connection timeout → route auto-disabled.
+        """Spec — open_connection timeout → route quarantined.
 
         Given asyncio.open_connection never returns (hangs past
             _SOCKS5_PROBE_TIMEOUT_S),
         When _preflight_one_route runs,
-        Then the route is auto-disabled.
+        Then the route is quarantined.
         """
 
         async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
@@ -1851,104 +1919,47 @@ class TestSocks5GreetingProbe:
         monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
         monkeypatch.setattr(pool_module, "_SOCKS5_PROBE_TIMEOUT_S", 0.01)
         config = _two_route_config()
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
-        assert socks_route.enabled is False
+        assert socks_route.enabled is True
+        assert quarantined == ["wg-uk-1"]
 
-    async def test_socks5_route_auto_disabled_on_wrong_greeting_reply(
+    async def test_socks5_route_quarantined_on_wrong_greeting_reply(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        r"""Spec — non-SOCKS5 reply → route auto-disabled.
+        r"""Spec — non-SOCKS5 reply → route quarantined.
 
         Given the listener accepts the TCP connection but replies with
             something other than ``\x05\x00`` (e.g. an HTTP server
             mistakenly listening on the SOCKS5 port),
         When _preflight_one_route runs,
-        Then the route is auto-disabled.
+        Then the route is quarantined.
         """
-
-        async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
-            class _R:
-                async def readexactly(self, n: int) -> bytes:
-                    return b"HT"
-
-            class _W:
-                def write(self, _data: bytes) -> None: ...
-                async def drain(self) -> None: ...
-                def close(self) -> None: ...
-                async def wait_closed(self) -> None: ...
-
-            return _R(), _W()
-
-        async def fake_getaddrinfo(*_a: object, **_kw: object) -> list[object]:
-            return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
-
-        loop = MagicMock()
-        loop.getaddrinfo = fake_getaddrinfo
-
-        def fake_get_running_loop() -> MagicMock:
-            return loop
-
-        def fake_find_spec(name: str) -> object | None:
-            if name == "python_socks":
-                return MagicMock()
-            return None
-
-        monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
-        monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
-        monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        _install_greeting_probe(monkeypatch, b"HT")
         config = _two_route_config()
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
-        assert socks_route.enabled is False
+        assert socks_route.enabled is True
+        assert quarantined == ["wg-uk-1"]
 
-    async def test_socks5_route_auto_disabled_on_short_greeting_reply(
+    async def test_socks5_route_quarantined_on_short_greeting_reply(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Spec — listener closes mid-greeting → route auto-disabled.
+        """Spec — listener closes mid-greeting → route quarantined.
 
         Given the listener accepts the TCP connection but closes before
             sending the full 2-byte greeting reply,
         When _preflight_one_route runs,
-        Then the route is auto-disabled (IncompleteReadError path).
+        Then the route is quarantined (IncompleteReadError path).
         """
-
-        async def fake_open_connection(host: object, port: object) -> tuple[Any, Any]:
-            class _R:
-                async def readexactly(self, n: int) -> bytes:
-                    raise asyncio.IncompleteReadError(partial=b"\x05", expected=n)
-
-            class _W:
-                def write(self, _data: bytes) -> None: ...
-                async def drain(self) -> None: ...
-                def close(self) -> None: ...
-                async def wait_closed(self) -> None: ...
-
-            return _R(), _W()
-
-        async def fake_getaddrinfo(*_a: object, **_kw: object) -> list[object]:
-            return [("af_inet", "sock_stream", 0, "", ("127.0.0.1", 1081))]
-
-        loop = MagicMock()
-        loop.getaddrinfo = fake_getaddrinfo
-
-        def fake_get_running_loop() -> MagicMock:
-            return loop
-
-        def fake_find_spec(name: str) -> object | None:
-            if name == "python_socks":
-                return MagicMock()
-            return None
-
-        monkeypatch.setattr(pool_module.asyncio, "get_running_loop", fake_get_running_loop)
-        monkeypatch.setattr(pool_module.asyncio, "open_connection", fake_open_connection)
-        monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
+        _install_greeting_probe(monkeypatch, None)
         config = _two_route_config()
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
-        assert socks_route.enabled is False
+        assert socks_route.enabled is True
+        assert quarantined == ["wg-uk-1"]
 
     async def test_socks5_route_auto_disabled_when_proxy_url_has_no_port(
         self,
@@ -1974,9 +1985,10 @@ class TestSocks5GreetingProbe:
         monkeypatch.setattr(pool_module.importlib.util, "find_spec", fake_find_spec)
         monkeypatch.setattr(pool_module, "_extract_proxy_port", lambda _url: None)
         config = _two_route_config()
-        effective = await _preflight_routes(config)
+        effective, quarantined = await _preflight_routes(config)
         socks_route = next(r for r in effective.routes if r.kind == "socks5")
         assert socks_route.enabled is False
+        assert quarantined == []
 
 
 class TestExtractProxyPort:
@@ -2024,10 +2036,10 @@ class TestPreflightOneRoute:
     """Branch-coverage tests for ``_preflight_one_route`` edge cases."""
 
     async def test_direct_route_skips_dns(self) -> None:
-        """Spec — direct route returns identity, no DNS lookup."""
+        """Direct routes stay unchanged and skip DNS."""
         route = RouteConfig(id="d", kind="direct")
         result = await _preflight_one_route(MagicMock(), route, True)
-        assert result is route
+        assert result == "keep"
 
     async def test_socks5_with_no_proxy_url_when_python_socks_ok(
         self,
@@ -2047,7 +2059,7 @@ class TestPreflightOneRoute:
         broken = route.model_copy(update={"proxy_url": None})
         loop = MagicMock()
         result = await _preflight_one_route(loop, broken, True)
-        assert result.enabled is False
+        assert result == "disable"
 
     async def test_socks5_with_unparseable_proxy_url(
         self,
@@ -2066,12 +2078,160 @@ class TestPreflightOneRoute:
         broken = route.model_copy(update={"proxy_url": "socks5h:///"})
         loop = MagicMock()
         result = await _preflight_one_route(loop, broken, True)
-        assert result.enabled is False
+        assert result == "disable"
 
 
 @pytest.mark.asyncio
 class TestInitializeEgressPool:
     """End-to-end tests for ``initialize_egress_pool``."""
+
+    @pytest.mark.parametrize(
+        ("raw_pool", "opt_in", "expected_warnings"),
+        [
+            (None, False, 1),
+            ("{invalid JSON", False, 1),
+            ({"enabled": True, "routes": []}, False, 1),
+            ({"enabled": False}, False, 1),
+            (_two_route_config().model_dump(mode="json"), False, 0),
+            (None, True, 0),
+        ],
+        ids=["absent", "invalid-json", "invalid-schema", "disabled", "enabled", "dev-opt-in"],
+    )
+    async def test_startup_warns_once_when_public_egress_has_no_pool_or_opt_in(
+        self,
+        raw_pool: object,
+        opt_in: bool,
+        expected_warnings: int,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Warn once for an unpooled process that must wait, including across reinitialization."""
+        service = MagicMock()
+        service.get_setting.side_effect = {
+            "egress_pool": raw_pool,
+            "public_direct_allowed": opt_in,
+        }.get
+
+        async def keep_config(config: EgressPoolConfig) -> tuple[EgressPoolConfig, list[str]]:
+            """Keep valid routes for this policy test without making network requests."""
+            return config, []
+
+        monkeypatch.setattr(pool_module, "_preflight_routes", keep_config)
+        messages: list[str] = []
+        sink = logger.add(messages.append, level="WARNING", format="{level} {message}")
+        try:
+            for _ in range(2):
+                await initialize_egress_pool(service)
+        finally:
+            logger.remove(sink)
+        warning = (
+            "WARNING no egress_pool configured: public market data will wait for a VPN route; "
+            "set public_direct_allowed=true on dev hosts only\n"
+        )
+        assert messages.count(warning) == expected_warnings
+
+    @pytest.mark.parametrize(
+        "raw_pool",
+        [
+            None,
+            "{invalid JSON",
+            {"enabled": True, "routes": []},
+            {"enabled": False},
+            {"enabled": True, "routes": [{"id": "default", "kind": "direct"}]},
+        ],
+        ids=["absent", "invalid-json", "invalid-schema", "disabled", "exhausted"],
+    )
+    @pytest.mark.parametrize("opt_in", [None, False, "true", 1, True])
+    async def test_missing_public_vpn_requires_an_explicit_boolean_to_go_direct(
+        self, raw_pool: object, opt_in: object
+    ) -> None:
+        """Only the standalone JSON boolean permits direct public reservations."""
+        service = MagicMock()
+        service.get_setting.side_effect = {
+            "egress_pool": raw_pool,
+            "public_direct_allowed": opt_in,
+        }.get
+        messages: list[str] = []
+        sink = logger.add(messages.append, level="WARNING", format="{level} {message}")
+        try:
+            public = public_egress_pool(await initialize_egress_pool(service))
+            if opt_in is True:
+                assert public.has_available(exchange="kraken")
+                for _ in range(2):
+                    reservation = public.reserve(exchange="kraken", purpose="http")
+                    assert reservation.route_id == "public-dev-direct"
+                    assert reservation.proxy_url is None
+                    reservation.release()
+            else:
+                assert not public.has_available(exchange="kraken")
+                with pytest.raises(
+                    AllRoutesQuarantinedError, match="no public VPN route available"
+                ):
+                    public.reserve(exchange="kraken", purpose="http")
+        finally:
+            logger.remove(sink)
+        ip_warnings = [line for line in messages if "host's own IP" in line]
+        if opt_in is True:
+            assert len(ip_warnings) == 2
+            assert ip_warnings[0].startswith(
+                "WARNING egress_pool: dev-only public_direct_allowed=true"
+            )
+            assert ip_warnings[1].startswith(
+                "WARNING egress_pool: public direct fallback exchange=kraken"
+            )
+        else:
+            assert ip_warnings == []
+
+    async def test_transient_preflight_quarantine_releases_and_ends_public_wait(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An enabled VPN recovers in the same pool after its startup deadline."""
+        start = datetime(2026, 11, 27, tzinfo=UTC)
+        clock = MagicMock(wraps=datetime)
+        clock.now.return_value = start
+        monotonic_clock = MagicMock(return_value=10.0)
+        monkeypatch.setattr(pool_module, "datetime", clock)
+        monkeypatch.setattr(pool_module, "monotonic", monotonic_clock)
+        monkeypatch.setattr(pool_module.importlib.util, "find_spec", lambda _name: object())
+        monkeypatch.setattr(
+            asyncio.get_running_loop(), "getaddrinfo", AsyncMock(side_effect=OSError("DNS down"))
+        )
+        service = MagicMock()
+        service.get_setting.return_value = _two_route_config().model_dump(mode="json")
+        pool = await initialize_egress_pool(service)
+
+        assert pool is not None
+        assert get_egress_pool() is pool
+        vpn = pool.snapshot()[1]
+        assert vpn.enabled
+        assert vpn.quarantine_until == start + timedelta(seconds=30)
+        assert vpn.last_handshake_429_at is None
+        assert vpn.last_close_1015_at is None
+        assert pool.earliest_release_in_seconds(exchange="kraken") == 30.0
+        assert pool.has_available(exchange="kraken", traffic_class="private")
+
+        messages: list[str] = []
+        sink = logger.add(messages.append, level="WARNING", format="{message}")
+        try:
+            assert not pool.has_available(exchange="kraken", record_wait=True)
+            with pytest.raises(AllRoutesQuarantinedError, match="no public VPN route available"):
+                pool.reserve(exchange="kraken", purpose="websocket")
+            clock.now.return_value = vpn.quarantine_until
+            monotonic_clock.return_value = 40.0
+            assert pool.earliest_release_in_seconds(exchange="kraken") == 0.0
+            assert pool.has_available(exchange="kraken")
+            reservation = pool.reserve(exchange="kraken", purpose="websocket")
+            assert reservation.route_id == vpn.id
+            reservation.release()
+        finally:
+            logger.remove(sink)
+
+        assert messages == [
+            "egress_pool: public VPN wait started exchange=kraken\n",
+            (
+                "egress_pool: public VPN wait ended exchange=kraken wait_seconds=30.0 "
+                "public_vpn_wait_seconds_total=30.0\n"
+            ),
+        ]
 
     async def test_returns_none_when_setting_missing(self) -> None:
         """Spec — missing setting key disables the pool.
@@ -2174,6 +2334,153 @@ class TestInitializeEgressPool:
         assert result.size() == 1
 
 
+@pytest.mark.parametrize("check_availability", [False, True])
+def test_dev_direct_warns_again_after_a_public_vpn_recovers(check_availability: bool) -> None:
+    """Prefer the usable public VPN and warn at each new per-exchange fallback.
+
+    Given: A pool with dev direct enabled and an initially usable public VPN,
+    When: Kraken and Walutomat fall back during quarantine, the VPN briefly
+        recovers, and Kraken falls back again,
+    Then: Each exchange warns once per fallback episode, and Kraken warns again
+        after the VPN recovery.
+    """
+    pool = EgressPool(TestPrivateTrafficSelection._private_config(), public_direct_allowed=True)
+    deadline = datetime.now(UTC) + timedelta(seconds=90)
+    messages: list[str] = []
+    sink = logger.add(messages.append, level="WARNING", format="{message}")
+    try:
+        pool.reserve(exchange="kraken", purpose="http").release()
+        pool._quarantine_route("ie", deadline, "http-connect-error")
+        pool.reserve(exchange="kraken", purpose="http").release()
+        pool.reserve(exchange="kraken", purpose="http").release()
+        pool.reserve(exchange="walutomat", purpose="http").release()
+        pool._states["ie"].quarantine_until = None
+        if check_availability:
+            assert pool.has_available(exchange="kraken")
+        else:
+            vpn = pool.reserve(exchange="kraken", purpose="http")
+            assert vpn.route_id == "ie"
+            vpn.release()
+        pool._quarantine_route("ie", deadline, "http-connect-error")
+        pool.reserve(exchange="kraken", purpose="http").release()
+    finally:
+        logger.remove(sink)
+
+    assert [line.split("exchange=")[1].split()[0] for line in messages] == [
+        "kraken",
+        "walutomat",
+        "kraken",
+    ]
+
+
+def test_dev_direct_has_separate_state_from_configured_private_routes() -> None:
+    """A dev direct failure cannot quarantine a configured direct route.
+
+    Given: Dev direct is enabled and a configured private route uses the preferred
+        ID of the dev public route,
+    When: A public reservation is quarantined,
+    Then: The separately named public route is unavailable and the configured
+        private direct route remains usable without a release deadline.
+    """
+    config = EgressPoolConfig(
+        enabled=True,
+        private_fallback_route_id="public-dev-direct",
+        routes=[RouteConfig(id="public-dev-direct", kind="direct")],
+    )
+    pool = EgressPool(config, public_direct_allowed=True)
+    public = pool.reserve(exchange="kraken", purpose="http")
+    assert public.route_id == "public-dev-direct-1"
+    public.quarantine(30.0, reason="http-connect-error")
+    public.release()
+
+    assert not pool.has_available(exchange="kraken")
+    assert pool.earliest_release_in_seconds(exchange="kraken") is not None
+    assert pool.has_available(exchange="kraken", traffic_class="private")
+    assert pool.earliest_release_in_seconds(exchange="kraken", traffic_class="private") is None
+    private = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
+    assert private.route_id == "public-dev-direct"
+    private.release()
+
+
+def test_configuring_then_clearing_pool_preserves_dev_direct_opt_in() -> None:
+    """Pool reconfiguration retains the explicit process policy until it is overridden.
+
+    Given: A configured pool with the dev direct opt-in enabled,
+    When: The pool is reconfigured and then cleared without a policy override,
+    Then: Public requests can still reserve the unpooled dev route until an
+        explicit override disables it.
+    """
+    config = _two_route_config()
+    assert configure_egress_pool(config, public_direct_allowed=True) is not None
+    unpooled = public_egress_pool(None)
+    reconfigured = configure_egress_pool(config)
+    assert reconfigured is not None
+    assert reconfigured.size() == len(config.routes) + 1
+
+    disabled = config.model_copy(update={"enabled": False})
+    assert configure_egress_pool(disabled) is None
+    assert get_egress_pool() is None
+    assert public_egress_pool(None) is unpooled
+    reservation = public_egress_pool(get_egress_pool()).reserve(exchange="kraken", purpose="http")
+    assert reservation.route_id == "public-dev-direct"
+    assert reservation.proxy_url is None
+    reservation.release()
+
+    assert configure_egress_pool(disabled, public_direct_allowed=False) is None
+    assert not public_egress_pool(None).has_available(exchange="kraken")
+
+
+@pytest.mark.parametrize("already_configured", [False, True])
+@pytest.mark.parametrize("supplied_service", [False, True])
+async def test_maintenance_loads_startup_pool_or_reuses_existing_pool(
+    already_configured: bool, supplied_service: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone job loads settings and an API job preserves its pool identity.
+
+    Given: A maintenance job with or without an installed pool and supplied settings,
+    When: The job asks for a pool,
+    Then: It reuses the existing pool or initializes one with the supplied or
+        newly loaded settings service.
+    """
+    existing = configure_egress_pool(_two_route_config()) if already_configured else None
+    settings = MagicMock(db_url="sqlite://", zmq_broker_xsub="tcp://broker:5555")
+    service = MagicMock()
+    load_service = AsyncMock(return_value=service)
+    initialize = AsyncMock()
+    monkeypatch.setattr(pool_module, "get_settings_service", load_service)
+    monkeypatch.setattr(pool_module, "initialize_egress_pool", initialize)
+
+    await ensure_maintenance_egress_pool(settings, service if supplied_service else None)
+
+    if already_configured:
+        assert get_egress_pool() is existing
+        initialize.assert_not_awaited()
+    else:
+        initialize.assert_awaited_once_with(service)
+    if already_configured or supplied_service:
+        load_service.assert_not_awaited()
+    else:
+        load_service.assert_awaited_once_with("sqlite://", "tcp://broker:5555")
+
+
+@pytest.mark.parametrize("raw", [None, "{broken", {"enabled": True, "routes": []}])
+async def test_invalid_or_absent_pool_config_clears_installed_pool(raw: object) -> None:
+    """Any early refusal to install a new config clears the old routes.
+
+    Given: An installed pool and a missing or invalid replacement setting,
+    When: Pool initialization reads the replacement,
+    Then: It returns None and clears the previously installed pool.
+    """
+    assert configure_egress_pool(_two_route_config()) is not None
+    settings = MagicMock()
+    settings.get_setting.return_value = raw
+    try:
+        assert await initialize_egress_pool(settings) is None
+        assert get_egress_pool() is None
+    finally:
+        reset_egress_pool()
+
+
 class TestSafelyInitializeEgressPool:
     """Best-effort wrapper shared by the API lifespan and feed publishers."""
 
@@ -2198,7 +2505,7 @@ class TestSafelyInitializeEgressPool:
 
         Given: initialize_egress_pool raises,
         When: safely_initialize_egress_pool is awaited,
-        Then: No exception escapes (callers fall back to direct egress).
+        Then: No exception escapes and no pool is installed.
         """
         with patch.object(
             pool_module,

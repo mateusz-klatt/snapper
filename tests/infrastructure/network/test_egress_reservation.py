@@ -35,7 +35,7 @@ class TestRelease:
         Then the snapshot's in_use_count is 0.
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         snapshot_before = pool.snapshot()[0]
         assert snapshot_before.in_use_count == 1
         reservation.release()
@@ -50,7 +50,7 @@ class TestRelease:
         Then in_use_count stays at 0 (clamped).
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         reservation.release()
         reservation.release()
         reservation.release()
@@ -71,7 +71,7 @@ class TestRelease:
         finalize callback.
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         finalizer = reservation._finalizer
         assert finalizer.alive is True
         reservation.release()
@@ -98,7 +98,7 @@ class TestFinalizer:
         capacity.
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         assert pool.snapshot()[0].in_use_count == 1
         ref = weakref.ref(reservation)
         del reservation
@@ -117,7 +117,7 @@ class TestFinalizer:
             (clamped via explicit release with detached finalizer).
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         _finalize_release(
             pool,
             reservation.route_id,
@@ -143,7 +143,7 @@ class TestQuarantine:
         Then the route's quarantine_until shifts to roughly now + 120 s.
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         reservation.quarantine(60.0, reason="http-429")
         first_deadline = pool.snapshot()[0].quarantine_until
         assert first_deadline is not None
@@ -160,7 +160,7 @@ class TestQuarantine:
         Then quarantine_until remains the original (longer) deadline.
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         reservation.quarantine(120.0, reason="http-429")
         long_deadline = pool.snapshot()[0].quarantine_until
         assert long_deadline is not None
@@ -176,7 +176,7 @@ class TestQuarantine:
         Then the route is quarantined for at least 1 s (deadline > now).
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         before = datetime.now(UTC)
         reservation.quarantine(0.0, reason="http-429")
         snapshot = pool.snapshot()[0]
@@ -192,7 +192,7 @@ class TestQuarantine:
             last_close_1015_at is still None.
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         reservation.quarantine(60.0, reason="http-429")
         snapshot = pool.snapshot()[0]
         assert snapshot.last_handshake_429_at is not None
@@ -207,7 +207,7 @@ class TestQuarantine:
             last_handshake_429_at is still None.
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         reservation.quarantine(60.0, reason="close-1015")
         snapshot = pool.snapshot()[0]
         assert snapshot.last_close_1015_at is not None
@@ -223,7 +223,7 @@ class TestQuarantine:
             be mis-reported to operators as a Cloudflare 1015 close or a 429.
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         reservation.quarantine(30.0, reason="ws-connect-error")
         snapshot = pool.snapshot()[0]
         assert snapshot.quarantine_until is not None
@@ -240,7 +240,7 @@ class TestQuarantine:
             mis-reported to operators as a Cloudflare 1015 close or a 429.
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="walutomat", purpose="http")
+        reservation = pool.reserve(exchange="walutomat", purpose="http", traffic_class="private")
         reservation.quarantine(60.0, reason="http-proxy-error")
         snapshot = pool.snapshot()[0]
         assert snapshot.quarantine_until is not None
@@ -261,7 +261,7 @@ class TestWebsocketKwargs:
         cannot silently activate.
         """
         pool = _build_pool()
-        reservation = pool.reserve(exchange="kraken", purpose="websocket")
+        reservation = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
         assert reservation.websocket_kwargs() == {"proxy": None}
 
     def test_socks5_route_returns_proxy_url(self) -> None:

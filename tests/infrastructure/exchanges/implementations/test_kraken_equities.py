@@ -20,6 +20,7 @@ from snapper.config.credentials import CredentialNotFoundError
 from snapper.core.json_types import JsonValue
 from snapper.data.repository_types import WalletCredentialRow
 from snapper.data.repository_types import WalletRow
+from snapper.infrastructure.exchanges import kraken_rest_egress
 from snapper.infrastructure.exchanges._subscription_request import SubscriptionRequest
 from snapper.infrastructure.exchanges._trade_candle_builder import TradeCandleBuilder
 from snapper.infrastructure.exchanges.contracts import CandleUpdate
@@ -38,9 +39,11 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_MAX_MESSAGE_
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_INTERVAL_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _WS_PING_TIMEOUT_S
 from snapper.infrastructure.exchanges.kraken_sdk_patches import _wrap_connect_factory
+from snapper.infrastructure.network import egress_pool
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
+from snapper.infrastructure.network.egress_pool import EgressPool
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
 from snapper.infrastructure.network.egress_pool import reset_egress_pool
 
@@ -268,8 +271,7 @@ class TestRealtimeAuthWebSocket:
                     return_value={"token": "token-1", "expires": 900},
                 ) as dispatch,
                 patch(
-                    "snapper.infrastructure.exchanges.implementations.kraken_equities."
-                    "SpotWSClient"
+                    "snapper.infrastructure.exchanges.implementations.kraken_equities.SpotWSClient"
                 ) as ws_cls,
             ):
                 ws_cls.return_value.start = AsyncMock()
@@ -5199,3 +5201,21 @@ class TestConnectRaceHardening:
             ws_cls.return_value.close = AsyncMock(side_effect=RuntimeError("close fail"))
             with pytest.raises(RuntimeError, match="replaced during connect"):
                 await client._ensure_ws_connected()
+
+
+@pytest.fixture(autouse=True)
+def _stub_public_vpn_for_mocked_kraken_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give mocked SDK calls a VPN reservation while preserving explicit pool cases."""
+    fallback_pool = EgressPool(
+        EgressPoolConfig(
+            routes=[RouteConfig(id="test-vpn", kind="socks5", proxy_url="socks5h://egress:1081")]
+        )
+    )
+
+    def public_pool(configured: EgressPool | None) -> EgressPool:
+        """Prefer the real pool when the test installed one."""
+        return configured if configured is not None else fallback_pool
+
+    monkeypatch.setattr(kraken_rest_egress, "public_egress_pool", public_pool)
+    monkeypatch.setattr(egress_pool, "public_egress_pool", public_pool)
+    monkeypatch.setattr(ke, "public_egress_pool", public_pool)

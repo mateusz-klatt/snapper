@@ -19,9 +19,8 @@ cascade until ``MaxReconnectError``. The patches in this module:
    with its owning publisher (carried through ``_CURRENT_PUBLISHER``) and
    arrange a ``weakref.finalize`` for automatic unregistration when the
    SDK garbage-collects the connector instance.
-5. Patch ``ConnectSpotWebsocketBase.__reconnect`` so each reconnect attempt
-   notifies the owning publisher's reconnect-storm watchdog before
-   delegating to the SDK's original reconnect logic.
+5. Patch the SDK reconnect loops to use cancellation-safe children and
+   charge public reconnect budgets only when a VPN route is reserved.
 
 Public API:
 
@@ -46,8 +45,10 @@ import contextvars
 import logging
 import re
 import weakref
+from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Collection
+from collections.abc import Coroutine
 from collections.abc import Mapping
 from typing import Any
 from typing import Final
@@ -71,8 +72,13 @@ from snapper.core.json_types import JsonObject
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
 from snapper.infrastructure.network.egress_context import current_egress_identity
 from snapper.infrastructure.network.egress_context import resolve_egress_traffic
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
 from snapper.infrastructure.network.egress_pool import EgressPool
 from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_timeout
+from snapper.infrastructure.network.egress_pool import report_public_route_availability
+from snapper.infrastructure.network.egress_pool import wait_for_public_route
 from snapper.infrastructure.network.egress_reservation import EgressReservation
 from snapper.utils.logging import is_file_sink_ready
 
@@ -278,6 +284,58 @@ _CURRENT_CONNECTOR_ID: contextvars.ContextVar[int | None] = contextvars.ContextV
 )
 """ContextVar carrying ``id(self)`` from patched ``__run`` into the connect shim."""
 
+_PUBLIC_DIAL_ATTEMPT: contextvars.ContextVar[Callable[[], None] | None] = contextvars.ContextVar(
+    "_kraken_public_dial_attempt", default=None
+)
+"""Budget charge scoped to the SDK run child and deferred until it reserves a VPN."""
+
+
+async def start_kraken_ws(
+    start: Callable[[], Awaitable[None]], *, exchange: str, timeout_s: float
+) -> None:
+    """Bound SDK startup without charging time spent waiting for public egress.
+
+    Args:
+        start: Callable that starts the SDK WebSocket client when awaited.
+        exchange: Default exchange tag when no egress identity overrides it.
+        timeout_s: Startup time budget in seconds, excluding public route waits.
+
+    Raises:
+        TimeoutError: The SDK startup exceeds the active time budget.
+    """
+    exchange, traffic_class = resolve_egress_traffic(exchange)
+    if traffic_class == "private":
+        async with asyncio.timeout(timeout_s):
+            await start()
+        return
+
+    await wait_for_public_route(exchange)
+    async with public_egress_timeout(timeout_s):
+        await start()
+
+
+def _reserve_ws_route(
+    pool: EgressPool, exchange: str, traffic_class: str, target_host: str | None
+) -> EgressReservation:
+    """Record public connect refusals as SDK waits and keep their dial timer paused."""
+    try:
+        reservation = pool.reserve(
+            exchange=exchange,
+            purpose="websocket",
+            traffic_class=traffic_class,
+            target_host=target_host,
+            connection_kind="ws",
+        )
+    except AllRoutesQuarantinedError:
+        if traffic_class != "private":
+            report_public_route_availability(False)
+            pool.has_available(exchange=exchange, traffic_class="public", record_wait=True)
+        raise
+    if traffic_class != "private":
+        report_public_route_availability(True)
+    return reservation
+
+
 _ORIGINAL_GET_RECONNECT_WAIT: Any = getattr(
     ConnectSpotWebsocketBase, "_ConnectSpotWebsocketBase__get_reconnect_wait"
 )
@@ -350,27 +408,13 @@ deadline is recorded on ``RouteState.last_close_1015_at``.
 _WS_CONNECT_ERROR_QUARANTINE_S: Final[float] = 30.0
 """Quarantine duration (seconds) for a WS connect-level failure on a proxy route.
 
-Applied when opening the handshake through a SOCKS route raises a TCP/SOCKS
-connect error — timeout, connection refused, or a silent blackhole (the egress
-tunnel went dark mid-flight). Without quarantining, the SDK's reconnect loop
-re-reserves and re-dials the same dead route every attempt and never fails over
-to another tunnel or to the direct fallback. Thirty seconds is shorter than the
-1015 quarantine because a connect timeout is often a transient tunnel hiccup
-worth retrying sooner, while still long enough to let the pool route around a
-genuinely down tunnel across several reconnect attempts. Direct routes are never
-quarantined here — a connect error with no proxy means the exchange or the local
-uplink is down, not the route, and the pool would only fall back to that same
-direct route anyway."""
+Applied when opening the handshake through a SOCKS route fails or times
+out. The quarantine gives other VPN routes a chance and allows the failed
+route to be retried after a transient outage.
+"""
 
 _PRIVATE_DIRECT_CONNECT_ERROR_QUARANTINE_S: Final[float] = 15.0
-"""Short quarantine for private direct WS connect errors.
-
-Executor-owned private traffic normally reserves direct egress first. If the
-direct handshake itself fails, briefly quarantining direct lets the next
-reconnect attempt reserve the configured private fallback route. Public direct
-traffic keeps the previous behaviour and is never quarantined for connect
-errors.
-"""
+"""Briefly quarantine private direct WS failures to allow the configured fallback."""
 
 
 class _ConnectShim:
@@ -404,19 +448,13 @@ class _ConnectShim:
 
     def __init__(self, original_connect: Any, *args: Any, **kwargs: Any) -> None:
         self._reservation: EgressReservation | None = None
-        self._traffic_class = "public"
         target_host = _target_host_from_connect_args(args, kwargs)
         pool = get_egress_pool()
-        if pool is not None and pool.size() > 0:
-            exchange_name, traffic_class = resolve_egress_traffic()
-            self._traffic_class = traffic_class
-            self._reservation = pool.reserve(
-                exchange=exchange_name,
-                purpose="websocket",
-                traffic_class=traffic_class,
-                target_host=target_host,
-                connection_kind="ws",
-            )
+        exchange_name, traffic_class = resolve_egress_traffic()
+        if traffic_class != "private":
+            pool = public_egress_pool(pool)
+        if pool is not None and (traffic_class != "private" or pool.size() > 0):
+            self._reservation = _reserve_ws_route(pool, exchange_name, traffic_class, target_host)
             kwargs = {**kwargs, **self._reservation.websocket_kwargs()}
         kwargs = {
             "ping_interval": _WS_PING_INTERVAL_S,
@@ -426,6 +464,10 @@ class _ConnectShim:
             "close_timeout": _WS_CLOSE_TIMEOUT_S,
         }
         try:
+            charge = _PUBLIC_DIAL_ATTEMPT.get()
+            if charge is not None:
+                _PUBLIC_DIAL_ATTEMPT.set(None)
+                charge()
             self._cm = original_connect(*args, **kwargs)
         except BaseException:
             if self._reservation is not None:
@@ -490,17 +532,14 @@ class _ConnectShim:
         _PENDING_RETRY_AFTER_S[connector_id] = retry_after
 
     def _maybe_quarantine_on_connect_error(self, exc: BaseException) -> None:
-        """Quarantine the active proxy route on a WS connect-level failure.
+        """Quarantine the active route on a WS connect-level failure.
 
         Fires from ``__aenter__`` when opening the handshake raises a
         TCP/SOCKS connect error (timeout, refused, or blackhole). Quarantining
         the route makes the SDK's next reconnect re-reserve a different route
-        (or the direct fallback) instead of re-dialing the same dead tunnel.
-        Public direct routes (``proxy_url is None``) are left untouched — a
-        connect error with no proxy points at the exchange or the local uplink,
-        and the public pool's only fallback would be that same direct route.
-        Private direct routes quarantine briefly so the next reconnect can use
-        the configured private fallback route.
+        instead of re-dialing the same dead tunnel. The dev public direct
+        route uses the public connect delay. Private direct uses a shorter
+        delay so the next reconnect can use the configured private fallback.
 
         Args:
             exc: The connect-level exception raised by ``__aenter__``.
@@ -508,18 +547,22 @@ class _ConnectShim:
         if self._reservation is None:
             return
         if self._reservation.proxy_url is None:
-            if self._traffic_class != "private":
-                return
+            traffic_class = self._reservation.traffic_class
+            quarantine_s = (
+                _PRIVATE_DIRECT_CONNECT_ERROR_QUARANTINE_S
+                if traffic_class == "private"
+                else _WS_CONNECT_ERROR_QUARANTINE_S
+            )
             logger.warning(
-                "kraken WS private direct connect error on route '{}' ({}: {}); "
-                "quarantining for {}s",
+                "kraken WS {} direct connect error on route '{}' ({}: {}); quarantining for {}s",
+                traffic_class,
                 self._reservation.route_id,
                 type(exc).__name__,
                 exc,
-                _PRIVATE_DIRECT_CONNECT_ERROR_QUARANTINE_S,
+                quarantine_s,
             )
             self._reservation.quarantine(
-                _PRIVATE_DIRECT_CONNECT_ERROR_QUARANTINE_S,
+                quarantine_s,
                 reason="ws-connect-error",
             )
             return
@@ -648,16 +691,16 @@ def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -
        * If all routes are quarantined → return
          ``pool.earliest_release_in_seconds()`` so the SDK sleeps
          exactly until the first route releases instead of churning.
-       * If somehow neither (empty pool) → fall through to SDK
-         exponential.
+       * If no public VPN has a release deadline, poll at the floor.
+         Private traffic without a configured pool uses SDK backoff.
     3. **SDK exponential** — same last-resort.
 
     When pool is enabled, the legacy ``_PENDING_RETRY_AFTER_S`` stash
     is intentionally NOT consulted — the shim's ``_handle_handshake_429``
     routes 429 captures to ``reservation.quarantine`` instead, so the
     pool's quarantine state is authoritative. This is the core
-    pool-routing guarantee: a 429 on direct with a healthy
-    SOCKS5 alternate must recover in ~1 s, not the full Retry-After.
+    pool-routing guarantee: a 429 on a public VPN with a healthy alternate
+    can retry in about one second.
 
     Both stashes are popped on consumption so the next reconnect
     makes a fresh decision.
@@ -689,6 +732,8 @@ def _patched_get_reconnect_wait(self: ConnectSpotWebsocketBase, attempts: int) -
             connector_id,
         )
         return wait
+    if _resolve_pool_reconnect_scope(connector_id)[1] != "private":
+        return _pool_reconnect_wait(public_egress_pool(pool), connector_id)
     if pool is not None and pool.size() > 0:
         return _pool_reconnect_wait(pool, connector_id)
     fallback: float = _ORIGINAL_GET_RECONNECT_WAIT(self, attempts)
@@ -717,10 +762,10 @@ def _resolve_pool_reconnect_scope(connector_id: int) -> tuple[str, str]:
 
 
 def _pool_reconnect_wait(pool: EgressPool, connector_id: int) -> float:
-    """Given a non-empty egress pool, when reconnecting, then choose the pool wait.
+    """Choose the pool-aware reconnect delay for the current traffic scope.
 
     Args:
-        pool: Configured egress pool with at least one enabled route.
+        pool: Egress pool for the current traffic scope.
         connector_id: Identity of the SDK connector being reconnected.
 
     Returns:
@@ -731,12 +776,17 @@ def _pool_reconnect_wait(pool: EgressPool, connector_id: int) -> float:
         This helper does not raise directly.
     """
     exchange_name, traffic_class = _resolve_pool_reconnect_scope(connector_id)
-    if pool.has_available(exchange=exchange_name, traffic_class=traffic_class):
+    available = pool.has_available(
+        exchange=exchange_name, traffic_class=traffic_class, record_wait=traffic_class == "public"
+    )
+    if available:
         logger.info(
             "kraken WS pool-aware reconnect: healthy route available (connector={})",
             connector_id,
         )
         return _RETRY_AFTER_MIN_SECONDS
+    if traffic_class == "public":
+        report_public_route_availability(False)
     earliest = (
         pool.earliest_release_in_seconds(
             exchange=exchange_name,
@@ -744,13 +794,14 @@ def _pool_reconnect_wait(pool: EgressPool, connector_id: int) -> float:
         )
         or 0.0
     )
-    logger.warning(
-        "kraken WS pool-aware reconnect: all routes quarantined; "
-        "sleeping {}s until earliest release (connector={})",
-        earliest,
+    wait = max(earliest, _RETRY_AFTER_MIN_SECONDS)
+    log = logger.warning if traffic_class == "private" else logger.debug
+    log(
+        "kraken WS pool-aware reconnect: no eligible route; sleeping {}s (connector={})",
+        wait,
         connector_id,
     )
-    return max(earliest, _RETRY_AFTER_MIN_SECONDS)
+    return wait
 
 
 def _patched_init(self: ConnectSpotWebsocketBase, *args: Any, **kwargs: Any) -> None:
@@ -828,6 +879,8 @@ async def _drive_reconnect_children(
     connector: Any,
     tasks: list[asyncio.Task[None]],
     on_child_exception: Callable[[asyncio.Task[None]], None],
+    *,
+    public_egress: bool = False,
 ) -> None:
     """Run the SDK reconnect wait semantics with guaranteed child reaping.
 
@@ -847,8 +900,9 @@ async def _drive_reconnect_children(
     Args:
         connector: The SDK connector exposing the ``keep_alive`` bool.
         tasks: The child tasks spawned for this reconnect attempt.
-        on_child_exception: Venue-specific handler invoked once per finished
-            child that holds an exception (state transition + SDK-parity log).
+        on_child_exception: Venue-specific handler for a finished child with an exception.
+        public_egress: Skip route refusals and surface a public dial's deferred
+            SDK budget exhaustion to the SDK run-forever loop.
     """
     try:
         if not connector.keep_alive:
@@ -857,16 +911,76 @@ async def _drive_reconnect_children(
         for task in finished:
             if task.cancelled():
                 continue
-            if task.exception() is not None:
+            error = task.exception()
+            if public_egress:
+                if isinstance(error, AllRoutesQuarantinedError):
+                    continue
+                if isinstance(error, MaxReconnectError):
+                    raise error
+            if error is not None:
                 on_child_exception(task)
     finally:
         await _reap_reconnect_children(tasks)
 
 
+def _public_reconnect_pool(connector_id: int) -> EgressPool | None:
+    """Resolve the public reconnect pool, including when it has no VPNs."""
+    if _resolve_pool_reconnect_scope(connector_id)[1] == "private":
+        return None
+    return public_egress_pool(get_egress_pool())
+
+
+def _notify_spot_feed_break(connector_id: int) -> None:
+    """Open the publisher's candle feed break while the reconnect waits."""
+    publisher = _CONNECTOR_PUBLISHERS.get(connector_id)
+    hook = getattr(publisher, "_on_sdk_reconnect_wait", None)
+    if hook is not None:
+        hook()
+
+
+def _charge_spot_reconnect(connector: ConnectSpotWebsocketBase) -> None:
+    """Notify the Spot watchdog and charge one SDK reconnect attempt."""
+    publisher = _CONNECTOR_PUBLISHERS.get(id(connector))
+    if publisher is not None:
+        hook = getattr(publisher, "_on_sdk_reconnect_attempt", None)
+        if hook is not None:
+            hook()
+    counter = "_ConnectSpotWebsocketBase__reconnect_num"
+    reconnect_num: int = getattr(connector, counter) + 1
+    setattr(connector, counter, reconnect_num)
+    if reconnect_num >= connector.MAX_RECONNECT_NUM:
+        raise MaxReconnectError(
+            "The Kraken Spot websocket client encountered to many reconnects!",
+        )
+
+
+def _charge_futures_reconnect(connector: ConnectFuturesWebsocket) -> None:
+    """Charge one Futures SDK reconnect attempt."""
+    counter = "_ConnectFuturesWebsocket__reconnect_num"
+    reconnect_num: int = getattr(connector, counter) + 1
+    setattr(connector, counter, reconnect_num)
+    if reconnect_num >= connector.MAX_RECONNECT_NUM:
+        raise MaxReconnectError
+
+
+async def _run_with_deferred_reconnect_charge(
+    run: Callable[[asyncio.Event], Coroutine[object, object, None]],
+    event: asyncio.Event,
+    charge: Callable[[], None],
+) -> None:
+    """Run the SDK child, charging only once its connect shim can dial."""
+    token = _PUBLIC_DIAL_ATTEMPT.set(charge)
+    try:
+        await run(event)
+    finally:
+        _PUBLIC_DIAL_ATTEMPT.reset(token)
+
+
 async def _patched_reconnect(self: ConnectSpotWebsocketBase) -> None:
     """Hardened replacement for the Spot connector's ``__reconnect``.
 
-    Notifies the registered publisher's reconnect-storm watchdog first. The
+    Public pool reconnects charge the SDK and publisher watchdog when the
+    connect shim reserves a VPN. Other reconnects notify the watchdog first. The
     hook ``_on_sdk_reconnect_attempt`` is optional — only
     ``KrakenMarketDataPublisher`` (Spot) implements it; other Kraken
     publishers register via ``_CURRENT_PUBLISHER`` for egress-pool exchange
@@ -898,29 +1012,32 @@ async def _patched_reconnect(self: ConnectSpotWebsocketBase) -> None:
         MaxReconnectError: When the reconnect budget is exhausted, matching
             stock behaviour (message included).
     """
-    publisher = _CONNECTOR_PUBLISHERS.get(id(self))
-    if publisher is not None:
-        hook = getattr(publisher, "_on_sdk_reconnect_attempt", None)
-        if hook is not None:
-            hook()
+    public_pool = _public_reconnect_pool(id(self))
+    if public_pool is None:
+        _charge_spot_reconnect(self)
+    else:
+        _notify_spot_feed_break(id(self))
     self.state = WSState.RECONNECTING
     _kraken_connectors.LOG.info("Websocket start connect/reconnect")
-    reconnect_num = getattr(self, "_ConnectSpotWebsocketBase__reconnect_num") + 1
-    setattr(self, "_ConnectSpotWebsocketBase__reconnect_num", reconnect_num)
-    if reconnect_num >= self.MAX_RECONNECT_NUM:
-        raise MaxReconnectError(
-            "The Kraken Spot websocket client encountered to many reconnects!",
-        )
+    reconnect_num = getattr(self, "_ConnectSpotWebsocketBase__reconnect_num")
     wait_s = getattr(self, "_ConnectSpotWebsocketBase__get_reconnect_wait")(reconnect_num)
     await _interruptible_backoff(self, wait_s)
     if not self.keep_alive:
         self.state = WSState.CLOSED
         return
     event: asyncio.Event = asyncio.Event()
-    run = getattr(self, "_ConnectSpotWebsocketBase__run")
-    tasks: list[asyncio.Task[None]] = [
+    run: Callable[[asyncio.Event], Coroutine[object, object, None]] = getattr(
+        self, "_ConnectSpotWebsocketBase__run"
+    )
+    if public_pool is None:
+        connect = run(event)
+    else:
+        connect = _run_with_deferred_reconnect_charge(
+            run, event, lambda: _charge_spot_reconnect(self)
+        )
+    tasks = [
         asyncio.create_task(self._recover_subscriptions(event)),
-        asyncio.create_task(run(event)),
+        asyncio.create_task(connect),
     ]
 
     def _on_child_exception(task: asyncio.Task[None]) -> None:
@@ -931,7 +1048,9 @@ async def _patched_reconnect(self: ConnectSpotWebsocketBase) -> None:
             task.exception(),
         )
 
-    await _drive_reconnect_children(self, tasks, _on_child_exception)
+    await _drive_reconnect_children(
+        self, tasks, _on_child_exception, public_egress=public_pool is not None
+    )
     self.state = WSState.CLOSED
     _kraken_connectors.LOG.info("Connection closed!")
 
@@ -955,23 +1074,33 @@ async def _patched_futures_reconnect(self: ConnectFuturesWebsocket) -> None:
         MaxReconnectError: When the reconnect budget is exhausted, matching
             stock behaviour (bare raise).
     """
+    public_pool = _public_reconnect_pool(id(self))
     self.state = WSState.RECONNECTING
     _kraken_futures_ws.LOG.info("Websocket start connect/reconnect")
-    reconnect_num = getattr(self, "_ConnectFuturesWebsocket__reconnect_num") + 1
-    setattr(self, "_ConnectFuturesWebsocket__reconnect_num", reconnect_num)
-    if reconnect_num >= self.MAX_RECONNECT_NUM:
-        raise MaxReconnectError
-    wait_s = getattr(self, "_ConnectFuturesWebsocket__get_reconnect_wait")(reconnect_num)
+    if public_pool is None:
+        _charge_futures_reconnect(self)
+        reconnect_num = getattr(self, "_ConnectFuturesWebsocket__reconnect_num")
+        wait_s = getattr(self, "_ConnectFuturesWebsocket__get_reconnect_wait")(reconnect_num)
+    else:
+        wait_s = _pool_reconnect_wait(public_pool, id(self))
     await _interruptible_backoff(self, wait_s)
     if not self.keep_alive:
         self.state = WSState.CLOSED
         return
     event: asyncio.Event = asyncio.Event()
     recover = getattr(self, "_ConnectFuturesWebsocket__recover_subscription_req_msg")
-    run = getattr(self, "_ConnectFuturesWebsocket__run")
-    tasks: list[asyncio.Task[None]] = [
+    run: Callable[[asyncio.Event], Coroutine[object, object, None]] = getattr(
+        self, "_ConnectFuturesWebsocket__run"
+    )
+    if public_pool is None:
+        connect = run(event)
+    else:
+        connect = _run_with_deferred_reconnect_charge(
+            run, event, lambda: _charge_futures_reconnect(self)
+        )
+    tasks = [
         asyncio.create_task(recover(event)),
-        asyncio.create_task(run(event)),
+        asyncio.create_task(connect),
     ]
 
     def _on_child_exception(task: asyncio.Task[None]) -> None:
@@ -983,7 +1112,9 @@ async def _patched_futures_reconnect(self: ConnectFuturesWebsocket) -> None:
             task.exception(),
         )
 
-    await _drive_reconnect_children(self, tasks, _on_child_exception)
+    await _drive_reconnect_children(
+        self, tasks, _on_child_exception, public_egress=public_pool is not None
+    )
     self.state = WSState.CLOSED
     _kraken_futures_ws.LOG.info("Connection closed!")
 
@@ -1146,32 +1277,17 @@ async def _close_leaked_sessions(client: Any) -> None:
 
 
 def apply_kraken_ws_teardown_hardening() -> None:
-    """Install the hardened reconnect loops on both connector classes (idempotent).
+    """Install both route-aware, cancellation-safe SDK reconnect loops.
 
-    Rebinds Spot's ``__reconnect`` to :func:`_patched_reconnect` (the same
-    object :func:`apply_kraken_retry_after_honoring` installs — publisher
-    processes apply both, executor processes reach this one through the
-    Kraken venue implementation modules, which call it at import time) and
-    Futures' ``__reconnect`` to :func:`_patched_futures_reconnect`. Every
-    process that can tear down a kraken-sdk WS client therefore gets
-    interruptible backoffs and reconnect-child reaping, which is the
-    precondition that makes :func:`force_close_ws_client` safe to cancel run
-    tasks (#143 — the first fix attempt was reverted exactly because parent
-    cancellation orphaned the reconnect children).
+    Venue clients call this even outside the feed publisher processes.
+    Installing the dial shim and the reconnect patch together ensures every
+    deferred public budget charge runs behind a successful VPN reservation.
     """
     _apply_kraken_sdk_log_redaction_filter()
     if _TEARDOWN_PATCH_APPLIED[0]:
         return
-    setattr(
-        ConnectSpotWebsocketBase,
-        "_ConnectSpotWebsocketBase__reconnect",
-        _patched_reconnect,
-    )
-    setattr(
-        ConnectFuturesWebsocket,
-        "_ConnectFuturesWebsocket__reconnect",
-        _patched_futures_reconnect,
-    )
+    apply_kraken_retry_after_honoring()
+    apply_kraken_futures_pool_routing()
     _TEARDOWN_PATCH_APPLIED[0] = True
     log_kraken_sdk_patches_status()
 
@@ -1217,44 +1333,20 @@ def apply_kraken_retry_after_honoring() -> None:
 
 
 def apply_kraken_futures_pool_routing() -> None:
-    """Rebind ``kraken.futures.websocket.connect`` so Futures WS opts into the egress pool.
+    """Install the Futures route-aware dial shim and hardened reconnect loop.
 
-    Idempotent — safe to call multiple times.
-
-    Unlike the Spot patch this is a narrower rebind: only the
-    ``connect`` reference inside ``kraken.futures.websocket`` (which
-    ``ConnectFuturesWebsocket.__run`` uses as ``async with
-    connect(...)``) is wrapped in the ``_ConnectShim`` factory. The
-    Retry-After / close-code / reconnect-storm machinery from the
-    Spot patch is NOT mirrored here:
-
-    * The Futures SDK has its own ``ConnectFuturesWebsocket`` class
-      with a separate ``__get_reconnect_wait`` and reconnect loop
-      that is not subject to the same Cloudflare 429 cascade pattern
-      observed on the Spot path.
-    * The Futures publisher does not implement the
-      ``_on_sdk_reconnect_attempt`` watchdog hook, so registering
-      Futures connectors via ``_patched_init`` would add no benefit.
-
-    What this rebind DOES give the Futures path:
-
-    * The connect shim consults ``get_egress_pool()`` and reserves a
-      route when the pool is enabled, then merges ``{"proxy": None}``
-      (direct) or ``{"proxy": "socks5h://..."}`` (SOCKS5) into the
-      kwargs passed to ``websockets.connect``.
-    * The reservation tag is read from the ``_CURRENT_PUBLISHER``
-      ContextVar (set by ``KrakenFuturesMarketDataPublisher.start``),
-      so per-exchange ``allowed_exchanges`` pins on egress_pool
-      routes apply to Futures the same way they apply to Spot and
-      Equities.
-    * The 429-on-handshake quarantine path through
-      ``__aenter__`` ➜ ``_handle_handshake_429`` is shared. A
-      Cloudflare 429 on the Futures handshake will quarantine the
-      borrowed route, NOT poison a global retry-after stash.
+    The Futures SDK keeps its own retry budget and private backoff. Public
+    reconnects use the pool's VPN release delay and charge the SDK only
+    after the shim reserves a route.
     """
     if _FUTURES_PATCH_APPLIED[0]:
         return
     setattr(_kraken_futures_ws, "connect", _wrap_connect_factory(_ws_client.connect))
+    setattr(
+        ConnectFuturesWebsocket,
+        "_ConnectFuturesWebsocket__reconnect",
+        _patched_futures_reconnect,
+    )
     _FUTURES_PATCH_APPLIED[0] = True
     log_kraken_sdk_patches_status()
 

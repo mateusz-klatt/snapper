@@ -5,6 +5,7 @@ from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -15,8 +16,14 @@ from snapper.data.models import MarketSnapshot
 from snapper.data.models import Symbol
 from snapper.data.repository import DatabaseRepository
 from snapper.infrastructure.exchanges.contracts import TickerUpdate
+from snapper.infrastructure.market_data import base as market_data_base
 from snapper.infrastructure.market_data.base import MarketSnapshotUpdaterService
 from snapper.infrastructure.market_data.kraken import KrakenSnapshotUpdaterService
+from snapper.infrastructure.network.egress_context import resolve_egress_traffic
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
+from snapper.infrastructure.network.egress_pool import EgressPool
+from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
 
 
 def _make_instrument_map(symbols: list[str]) -> dict[str, str]:
@@ -872,3 +879,71 @@ def test_persist_snapshots_scd2_sorts_locks_by_instrument_and_timestamp() -> Non
         ("inst-a", t_late),
         ("inst-b", t_early),
     ]
+
+
+@pytest.mark.parametrize("vpn_available", [None, False, True])
+async def test_one_shot_snapshot_initializes_public_pool_and_refuses_without_vpn(
+    vpn_available: bool | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new run container loads the pool before any public snapshot work.
+
+    Given: A fresh snapshot run with an absent, unavailable, or healthy public pool,
+    When: The Equities snapshot wrapper initializes egress,
+    Then: Collection runs only with an available route under the public venue
+        identity, and every run resets the pool and shuts down settings.
+    """
+    service = MagicMock(shutdown=AsyncMock())
+    monkeypatch.setattr(market_data_base, "get_settings_service", AsyncMock(return_value=service))
+    pool = MagicMock(spec=EgressPool) if vpn_available is not None else None
+    if pool is not None:
+        pool.has_available.return_value = vpn_available
+    initialize = AsyncMock(return_value=pool)
+    monkeypatch.setattr(market_data_base, "initialize_egress_pool", initialize)
+    reset = MagicMock()
+    monkeypatch.setattr(market_data_base, "reset_egress_pool", reset)
+
+    async def assert_scope() -> None:
+        """Observe the venue-specific public identity in the actual collection scope."""
+        assert resolve_egress_traffic() == ("kraken_equities", "public")
+
+    update = AsyncMock(side_effect=assert_scope)
+    if vpn_available:
+        await market_data_base.run_public_snapshot_with_egress("kraken_equities", update)
+        update.assert_awaited_once_with()
+    else:
+        with pytest.raises(AllRoutesQuarantinedError, match="no public VPN route available"):
+            await market_data_base.run_public_snapshot_with_egress("kraken_equities", update)
+        update.assert_not_awaited()
+    initialize.assert_awaited_once_with(service)
+    reset.assert_called_once_with()
+    service.shutdown.assert_awaited_once_with()
+
+
+async def test_one_shot_snapshot_honors_explicit_dev_direct_without_vpn_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One-shot collection can reserve direct with the standalone opt-in.
+
+    Given: A fresh Kraken snapshot run without a configured pool and with dev opt-in,
+    When: The wrapper runs the collection coroutine,
+    Then: The coroutine reserves the public dev direct route, and cleanup removes it.
+    """
+    service = MagicMock(shutdown=AsyncMock())
+    service.get_setting.side_effect = {"public_direct_allowed": True}.get
+    monkeypatch.setattr(market_data_base, "get_settings_service", AsyncMock(return_value=service))
+
+    async def collect() -> None:
+        """Reserve under the identity installed by the real snapshot wrapper."""
+        exchange, traffic_class = resolve_egress_traffic()
+        reservation = public_egress_pool(get_egress_pool()).reserve(
+            exchange=exchange, purpose="http", traffic_class=traffic_class
+        )
+        assert reservation.proxy_url is None
+        assert reservation.route_id == "public-dev-direct"
+        reservation.release()
+
+    update = AsyncMock(side_effect=collect)
+    await market_data_base.run_public_snapshot_with_egress("kraken", update)
+    update.assert_awaited_once_with()
+    service.shutdown.assert_awaited_once_with()
+    assert not public_egress_pool(get_egress_pool()).has_available()

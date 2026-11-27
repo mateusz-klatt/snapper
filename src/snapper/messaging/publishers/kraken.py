@@ -70,6 +70,8 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ret
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleBreak
 from snapper.infrastructure.exchanges.trade_candle_stream import TradeCandleItem
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
 from snapper.infrastructure.symbols.functions import get_available_kraken_symbols
 from snapper.infrastructure.symbols.functions import has_kraken_candle_history_identity
 from snapper.infrastructure.symbols.functions import kraken_websocket_to_native
@@ -540,8 +542,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
             return
         self._producer_stall_warned_at = now
         logger.warning(
-            "kraken publisher: trade-built candle producer is alive but its last tick "
-            "is {}s old",
+            "kraken publisher: trade-built candle producer is alive but its last tick is {}s old",
             age,
         )
 
@@ -1418,6 +1419,11 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         finally:
             _CURRENT_PUBLISHER.reset(token)
 
+    def _on_sdk_reconnect_wait(self) -> None:
+        """Fence candle completion as soon as the SDK starts waiting to reconnect."""
+        self._suspend_candle_synthesis_across_break()
+        self._mark_minute_feed_break()
+
     def _on_sdk_reconnect_attempt(self) -> None:
         """Hook called by the patched SDK reconnect path on every attempt.
 
@@ -1446,8 +1452,7 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         the socket returns: the resulting hole in the 1m plane is the correct
         record that we were not listening.
         """
-        self._suspend_candle_synthesis_across_break()
-        self._mark_minute_feed_break()
+        self._on_sdk_reconnect_wait()
         now = time.monotonic()
         self._reconnect_timestamps.append(now)
         cutoff = now - _RECONNECT_WINDOW_S
@@ -1476,23 +1481,32 @@ class KrakenMarketDataPublisher(MarketDataPublisherService[KrakenExchangeClient]
         no longer running so a storm restart that overlaps :meth:`stop`
         cannot re-establish a WebSocket after shutdown has begun.
 
-        Opens a minute-completion feed break before the teardown so no minute
-        spanning the restart is asserted as observed.
+        Preserve an existing SDK socket during VPN exhaustion. Once the
+        slot is empty, let the normal connect path wait in process for a
+        public route. Open a minute-completion feed break before teardown.
         """
         async with self._restart_lock:
             client = self._exchange_client
             if client is None:
                 return
-            self._suspend_candle_synthesis_across_break()
-            self._mark_minute_feed_break()
-            try:
-                await client.disconnect_websocket()
-            except Exception:
-                logger.exception("kraken publisher: disconnect_websocket failed during restart")
-            await asyncio.sleep(_FORCE_WS_RESTART_BACKOFF_S)
-            if not self.running:
-                return
-            await client._ensure_ws_connected()
+            if client._ws_client is not None:
+                if not self._can_restart_public_ws():
+                    return
+                self._suspend_candle_synthesis_across_break()
+                self._mark_minute_feed_break()
+                try:
+                    await client.disconnect_websocket()
+                except Exception:
+                    logger.exception("kraken publisher: disconnect_websocket failed during restart")
+                await asyncio.sleep(_FORCE_WS_RESTART_BACKOFF_S)
+            if self.running:
+                await client._ensure_ws_connected()
+
+    def _can_restart_public_ws(self) -> bool:
+        """Leave a waiting SDK client in place during public route exhaustion."""
+        return public_egress_pool(get_egress_pool()).has_available(
+            exchange=self._get_exchange_name(), traffic_class="public", record_wait=True
+        )
 
     async def stop(self) -> None:
         """Cancel an in-flight forced WS restart, then stop normally.

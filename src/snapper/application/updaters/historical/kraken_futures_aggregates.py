@@ -31,6 +31,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.infrastructure.exchanges.implementations.kraken_futures import _timeframe_to_seconds
+from snapper.infrastructure.network.egress_pool import ensure_maintenance_egress_pool
 from snapper.infrastructure.symbols.functions import get_available_kraken_futures_symbols
 from snapper.infrastructure.symbols.functions import native_to_ccxt
 from snapper.infrastructure.symbols.functions import resolve_symbol_public_id
@@ -124,6 +125,7 @@ class KrakenFuturesAggregatesBackfillService(RegisterableProcess):
         if not symbols:
             logger.warning("No Kraken Futures symbols configured for backfill")
             return
+        await ensure_maintenance_egress_pool(self.settings)
         client = KrakenFuturesExchangeClient()
         await client.connect()
         try:

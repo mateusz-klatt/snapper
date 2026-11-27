@@ -43,6 +43,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_equities import (
 from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
+from snapper.infrastructure.network.egress_pool import ensure_maintenance_egress_pool
 from snapper.infrastructure.symbols.functions import native_to_ccxt
 from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
 
@@ -396,6 +397,7 @@ async def load_futures(args: argparse.Namespace, writer: Writer, window: Window)
     mapping = await writer.repository.get_instrument_public_ids_by_symbols(
         set(symbols), "kraken_futures", now
     )
+    await ensure_maintenance_egress_pool(get_settings())
     client = KrakenFuturesExchangeClient()
     try:
         await client.connect()

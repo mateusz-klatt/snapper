@@ -40,9 +40,13 @@ from snapper.infrastructure.exchanges.kraken_sdk_patches import (
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_resubscribe_pacing
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_retry_after_honoring
 from snapper.infrastructure.network.egress_context import _CURRENT_PUBLISHER
+from snapper.infrastructure.network.egress_pool import get_egress_pool
+from snapper.infrastructure.network.egress_pool import public_egress_pool
+from snapper.infrastructure.network.egress_pool import wait_for_public_route
 from snapper.infrastructure.symbols.functions import get_available_kraken_equities_symbols
 from snapper.infrastructure.symbols.functions import native_to_kraken_equities_ws
 from snapper.messaging.publishers.base import MarketDataPublisherService
+from snapper.messaging.publishers.startup import connect_publisher_exchange
 
 apply_kraken_already_subscribed_filter()
 """Install the kraken-sdk Already-subscribed filter at module import.
@@ -328,10 +332,21 @@ class KrakenEquitiesMarketDataPublisher(
         return (False, None)
 
     async def _attempt_liveness_recovery(self, reason: str) -> None:
-        """Recover stale market data by rebuilding the public WS client."""
+        """Rebuild a stale socket when egress is usable, preserving SDK reconnects."""
         logger.error("kraken_equities publisher: liveness recovery triggered ({})", reason)
         client = self._exchange_client
-        if client is not None:
-            await client.disconnect()
-            await client.connect()
-            await client._ensure_ws_connected()
+        if client is None:
+            return
+        exchange = self._get_exchange_name()
+        has_socket = client._ws_client is not None
+        pool = public_egress_pool(get_egress_pool())
+        if has_socket and not pool.has_available(exchange=exchange, record_wait=True):
+            return
+        try:
+            if has_socket:
+                await client.disconnect()
+        finally:
+            client._ws_closing = False
+        await wait_for_public_route(exchange)
+        await connect_publisher_exchange(client)
+        await client._ensure_ws_connected()

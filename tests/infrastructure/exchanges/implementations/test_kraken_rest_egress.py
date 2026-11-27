@@ -3,6 +3,9 @@
 import errno
 import threading
 from collections.abc import Callable
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
 from typing import Literal
 from unittest.mock import MagicMock
 
@@ -34,6 +37,7 @@ from snapper.infrastructure.exchanges.kraken_rest_egress import route_kraken_res
 from snapper.infrastructure.exchanges.kraken_rest_egress import spot_sdk_proxy_target
 from snapper.infrastructure.network.egress_context import current_egress_identity
 from snapper.infrastructure.network.egress_context import egress_identity
+from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
 from snapper.infrastructure.network.egress_models import EgressPoolConfig
 from snapper.infrastructure.network.egress_models import RouteConfig
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
@@ -289,6 +293,37 @@ def test_public_rest_routes_through_pool_vpn_and_restores_proxy_state() -> None:
     assert client.session.trust_env is True
 
 
+def test_public_rest_refusal_never_dispatches_a_direct_request() -> None:
+    """A public REST read refuses before touching the request or proxy state.
+
+    Given: A configured direct route and quarantined VPN routes,
+    When: A public Kraken ticker request tries to reserve a route,
+    Then: The request raises before dispatch, the proxy state stays empty,
+        and the direct route stays unselected.
+    """
+    pool = configure_egress_pool(_private_fallback_config())
+    assert pool is not None
+    deadline = datetime.now(UTC) + timedelta(minutes=2)
+    pool._quarantine_route("ie", deadline, "http-429")
+    pool._quarantine_route("pl", deadline, "http-429")
+    client = _FakeCcxtClient()
+    sync_call = MagicMock()
+
+    with pytest.raises(AllRoutesQuarantinedError, match="no public VPN route available"):
+        route_kraken_rest_sync_call(
+            exchange="kraken",
+            operation="fetch_ticker",
+            kind="public_read",
+            target=ccxt_proxy_target(client),
+            proxy_lock=threading.RLock(),
+            sync_call=sync_call,
+        )
+
+    sync_call.assert_not_called()
+    assert client.session.proxies == {}
+    assert pool.snapshot()[0].last_pick_at is None
+
+
 def test_public_rest_records_ccxt_base_url_host_in_snapshot() -> None:
     """Spec — CCXT REST base URL host is recorded without path or query.
 
@@ -421,36 +456,27 @@ def test_private_identity_public_rest_read_runs_direct_without_pool_reservation(
     ]
 
 
-def test_public_rest_without_pool_runs_direct_with_public_identity() -> None:
-    """Spec — public reads stay public and direct when the pool is disabled.
+def test_public_rest_without_pool_refuses_before_dispatch() -> None:
+    """Unconfigured public REST stays closed and leaves the existing proxy state alone.
 
-    Given: no egress pool singleton is configured,
-    When: a public REST read is routed,
-    Then: the call runs without a proxy but still carries public identity.
+    Given: No installed pool and a client with existing session proxies,
+    When: A public Kraken ticker request tries to reserve a route,
+    Then: The request raises before dispatch and preserves the session proxies.
     """
     client = _FakeCcxtClient()
-    seen_proxies: list[dict[str, str]] = []
-    seen_identity: list[tuple[str, str]] = []
-
-    def sync_call() -> str:
-        identity = current_egress_identity()
-        assert identity is not None
-        seen_identity.append((identity.exchange, identity.traffic_class))
-        seen_proxies.append(_proxy_snapshot(client.session))
-        return "ok"
-
-    result = route_kraken_rest_sync_call(
-        exchange="kraken",
-        operation="fetch_ticker",
-        kind="public_read",
-        target=ccxt_proxy_target(client),
-        proxy_lock=threading.RLock(),
-        sync_call=sync_call,
-    )
-
-    assert result == "ok"
-    assert seen_identity == [("kraken", "public")]
-    assert seen_proxies == [{}]
+    sync_call = MagicMock()
+    client.session.proxies.update({"http": "http://before", "https": "http://before"})
+    with pytest.raises(AllRoutesQuarantinedError, match="no public VPN route available"):
+        route_kraken_rest_sync_call(
+            exchange="kraken",
+            operation="fetch_ticker",
+            kind="public_read",
+            target=ccxt_proxy_target(client),
+            proxy_lock=threading.RLock(),
+            sync_call=sync_call,
+        )
+    sync_call.assert_not_called()
+    assert client.session.proxies == {"http": "http://before", "https": "http://before"}
 
 
 @pytest.mark.asyncio

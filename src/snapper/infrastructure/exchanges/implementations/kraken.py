@@ -117,6 +117,7 @@ from snapper.infrastructure.exchanges.kraken_rest_egress import route_kraken_res
 from snapper.infrastructure.exchanges.kraken_rest_egress import spot_sdk_proxy_target
 from snapper.infrastructure.exchanges.kraken_sdk_patches import apply_kraken_ws_teardown_hardening
 from snapper.infrastructure.exchanges.kraken_sdk_patches import force_close_ws_client
+from snapper.infrastructure.exchanges.kraken_sdk_patches import start_kraken_ws
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenExecutionSubscribeParamsSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenExecutionSubscriptionAckSchema
 from snapper.infrastructure.exchanges.schemas.kraken import KrakenInstrumentPairSchema
@@ -3982,8 +3983,9 @@ class KrakenExchangeClient(ExchangeClientBase):
         self._ws_client = client
         logger.info("Kraken WebSocket client initialized")
         try:
-            async with asyncio.timeout(_WS_CONNECT_TIMEOUT_S):
-                await client.start()
+            await start_kraken_ws(
+                client.start, exchange=self.exchange_name, timeout_s=_WS_CONNECT_TIMEOUT_S
+            )
             logger.info("Kraken WebSocket client started")
             if self._subscription_cache:
                 await self._replay_subscriptions()

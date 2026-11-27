@@ -34,6 +34,7 @@ QuarantineReason = Literal[
     "http-connect-error",
     "http-proxy-error",
     "ws-connect-error",
+    "preflight-connect-error",
 ]
 TrafficClass = Literal["public", "private"]
 ConnectionKind = Literal["ws", "rest"]

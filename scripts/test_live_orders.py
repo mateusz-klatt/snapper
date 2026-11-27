@@ -67,6 +67,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
+from snapper.infrastructure.network.egress_context import egress_identity
 from snapper.infrastructure.security.encryption import get_encryption_service
 from snapper.infrastructure.symbols.functions import native_to_ccxt
 
@@ -627,7 +628,13 @@ async def _run() -> int:
     for name, runner in runners.items():
         logger.info(f"=== {name.upper()} ===")
         try:
-            await runner(settings, scenario_filter)
+            with egress_identity(
+                exchange=name,
+                traffic_class="private",
+                owner="executor",
+                operation="live_order_probe",
+            ):
+                await runner(settings, scenario_filter)
         except Exception as exc:
             logger.error(f"{name}: {exc}")
             emit(name, "ERROR", "exception", str(exc))

@@ -55,6 +55,7 @@ from snapper.data.models import SymbolAlias
 from snapper.data.repository import Scd2UpsertSpec
 from snapper.data.repository import upsert_scd2_sync
 from snapper.infrastructure.exchanges.implementations.kraken import KrakenExchangeClient
+from snapper.infrastructure.exchanges.kraken_rest_egress import ccxt_proxy_target
 from snapper.infrastructure.exchanges.tokenized_spec_provenance import TOKENIZED_MAX_DECIMALS
 from snapper.infrastructure.exchanges.tokenized_spec_provenance import TOKENIZED_SPEC_ETL_VERSION
 from snapper.infrastructure.exchanges.tokenized_spec_provenance import TOKENIZED_SPEC_SOURCE
@@ -535,30 +536,28 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
         return pairs
 
     async def _fetch_ccxt_markets(self) -> tuple[Any, dict[str, Any]]:
-        """Connect to Kraken and fetch CCXT markets data.
-
-        The blocking CCXT call rides the client-owned bounded REST pool
-        (audit P1-5) — never the loop's shared default executor — so a
-        stalled Kraken REST round-trip cannot starve unrelated
-        ``to_thread`` users process-wide. The client is the updater's
-        cached singleton; its lifecycle (connect at run start,
-        disconnect in the run ``finally``) is owned by
-        ``SymbolUpdaterService.run``.
+        """Read the markets loaded by connect or fetch them through public egress.
 
         Returns:
             Tuple of (ccxt_client, markets dict).
         """
         client = self._create_exchange_client()
-        await client.connect()
         ccxt_client = client.get_ccxt_client()
-        markets = await client._dispatch_blocking(ccxt_client.load_markets)
-        return ccxt_client, markets
+        markets = getattr(ccxt_client, "markets", None)
+        if isinstance(markets, dict) and markets:
+            return ccxt_client, markets
+        loaded: dict[str, Any] = await client._dispatch_routed_rest(
+            operation="load_markets",
+            kind="public_read",
+            target=ccxt_proxy_target(ccxt_client),
+            sync_call=ccxt_client.load_markets,
+        )
+        return ccxt_client, loaded
 
     async def _fetch_tokenized_result(self, ccxt_client: Any) -> dict[str, Any]:
         """Fetch tokenized asset pairs from Kraken REST API.
 
-        Dispatches through the cached client's bounded REST pool — see
-        ``_fetch_ccxt_markets`` for the rationale.
+        Dispatches through public egress in the cached client's bounded REST pool.
 
         Args:
             ccxt_client: CCXT Kraken client instance.
@@ -570,9 +569,11 @@ class KrakenSymbolUpdaterService(SymbolUpdaterService[KrakenExchangeClient]):
             RuntimeError: If response result is not a dict.
         """
         client = self._create_exchange_client()
-        tokenized_response: dict[str, Any] = await client._dispatch_blocking(
-            ccxt_client.publicGetAssetPairs,
-            {"aclass_base": "tokenized_asset"},
+        tokenized_response: dict[str, Any] = await client._dispatch_routed_rest(
+            operation="load_tokenized_asset_pairs",
+            kind="public_read",
+            target=ccxt_proxy_target(ccxt_client),
+            sync_call=lambda: ccxt_client.publicGetAssetPairs({"aclass_base": "tokenized_asset"}),
         )
         tokenized_result: dict[str, Any] = tokenized_response.get("result", {})
         if not isinstance(tokenized_result, dict):
