@@ -10,8 +10,12 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Context
 from decimal import Decimal
+from decimal import localcontext
+from math import isfinite
 from typing import TypedDict
+from typing import Unpack
 from uuid import uuid7
 
 import zmq
@@ -29,6 +33,7 @@ from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.outbox import OutboxDispatcher
 from snapper.application.trade.submission import TradeCommandSubmission
 from snapper.core.partitioning import ShardOwnership
+from snapper.core.strategy_order_cap import LiveStrategyOrderPolicy
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import ExecutionModeEnum
 from snapper.core.types import FillStatusEnum
@@ -83,6 +88,86 @@ class _StrategyOrderProvenance:
     replay_window_end: dt.datetime | None = None
 
 
+@dataclass(frozen=True)
+class _LiveQuantity:
+    """One snapped live size and its lossless Float-column representation."""
+
+    exact: Decimal
+    serialized: float
+
+
+@dataclass(frozen=True)
+class PreparedStrategyOrder:
+    """Sized order with the engine state against which it was prepared."""
+
+    side: TradeSide
+    quantity: float | _LiveQuantity
+    reduce_only: bool
+    position_qty: float
+    pending_client_order_id: str | None
+    peak_equity: float
+
+
+class _OrderOptions(TypedDict, total=False):
+    """Modifiers, attribution and policy for one strategy submit."""
+
+    leverage: int | None
+    reduce_only: bool
+    ai_review_public_id: str | None
+    ai_review_dispatch_version: int | None
+    grouped_correlation_id: str | None
+    provenance: _StrategyOrderProvenance | None
+    policy: LiveStrategyOrderPolicy | None
+
+
+class StrategySignalOrderOptions(TypedDict, total=False):
+    """Signal provenance and optional pre-admitted order for execution."""
+
+    ai_review_public_id: str | None
+    ai_review_dispatch_version: int | None
+    grouped_correlation_id: str | None
+    signal_public_id: str | None
+    origin: FrameOrigin
+    replay_window_start: dt.datetime | None
+    replay_window_end: dt.datetime | None
+    policy: LiveStrategyOrderPolicy | None
+    prepared: PreparedStrategyOrder | None
+
+
+@dataclass(frozen=True)
+class _OrderIntent:
+    """Validated order operands and provenance shared by dispatch surfaces."""
+
+    side: TradeSide
+    quantity: float
+    reason: str
+    reference_price: float | None
+    signaled_at: dt.datetime | None
+    operator_public_id: str | None
+    options: _OrderOptions
+    provenance: _StrategyOrderProvenance
+
+
+@dataclass(frozen=True)
+class _OrderIdentity:
+    """Allocated order identity and sequence for an admitted submission."""
+
+    client_order_id: str
+    timestamp: dt.datetime
+    session_id: str
+    sequence_id: int
+
+
+_LIVE_DECIMAL_CONTEXT = Context(prec=650)
+"""Enough precision to add and subtract any two finite Float operands exactly."""
+
+
+def _snap_live_quantity(quantity: Decimal, lot: Decimal) -> Decimal:
+    """Floor a base-asset quantity to whole lots with exact decimal arithmetic."""
+    with localcontext(_LIVE_DECIMAL_CONTEXT):
+        return (quantity // lot) * lot
+
+
 class InstrumentSpec(TypedDict, total=False):
     """Per-instrument lookup row carrying lot/tick sizing plus identity.
 
@@ -99,6 +184,8 @@ class InstrumentSpec(TypedDict, total=False):
     public_id: str
     tick_size: float
     lot_size: float
+    quantity_unit: str | None
+    native_order_quantity_unit: str | None
 
 
 class InstrumentSpecMissingError(RuntimeError):
@@ -328,76 +415,38 @@ class TradingEngineService:
             listener(previous, value)
 
     def _build_strategy_insert_row(
-        self,
-        *,
-        order_public_id: str,
-        reason: str,
-        side: str,
-        size: float,
-        leverage: int | None,
-        reduce_only: bool,
-        now: dt.datetime,
-        session_id: str,
-        sequence_id: int,
-        grouped_correlation_id: str | None = None,
-        reference_price: float | None = None,
-        ai_review_public_id: str | None = None,
-        provenance: _StrategyOrderProvenance,
+        self, intent: _OrderIntent, identity: _OrderIdentity
     ) -> TradeCommandInsertRow:
-        """Return the TradeCommand insert row for a strategy submit.
-
-        Factored out of ``_send_order`` so the same row is used whether
-        the insert is wrapped by
-        :meth:`TradingCapsEnforcer.guard_service_principal` (production)
-        or issued directly (test fixtures without a caps enforcer).
-
-        When ``grouped_correlation_id`` is set (a paired-execution leg), it
-        becomes the command's ``correlation_id`` so the command joins its
-        paired-execution group and is held by the outbox arming gate until
-        the group arms; otherwise ``correlation_id`` defaults to the order's
-        own public id (the existing per-order behaviour).
-
-        ``reference_price`` is the paper-venue fill reference: the paper
-        simulator fills a market order at ``order.price``, so paper
-        engines pass the validated signal price here and it rides the
-        existing ``price`` column onto the dispatch payload. Live-venue
-        market commands MUST keep it ``None`` — a real exchange must
-        never receive a market order carrying a price.
-
-        ``signal_public_id`` and ``ai_review_public_id`` are the
-        decision-lineage stamps (PnL Phase 1): the durable command row
-        records which signal fired it and which AI review approved it.
-        Both are nullable — non-AI strategy emits carry only the
-        signal, and test fixtures may carry neither.
-        """
+        """Build the durable submit from the admitted quantity and lineage."""
+        options = intent.options
+        provenance = intent.provenance
+        group_id = options.get("grouped_correlation_id")
         return {
             "command_type": OrderCommandEnum.SUBMIT,
             "shard_key": self._shard_key,
             "exchange": self.exchange,
             "instrument": self.instrument,
             "mode": self.mode,
-            "strategy_id": reason,
-            "client_order_id": order_public_id,
-            "venue_client_id": order_public_id,
-            "side": side,
+            "strategy_id": intent.reason,
+            "client_order_id": identity.client_order_id,
+            "venue_client_id": identity.client_order_id,
+            "side": intent.side,
             "order_type": "market",
-            "quantity": size,
-            "price": reference_price,
-            "leverage": leverage,
-            "reduce_only": reduce_only,
+            "quantity": intent.quantity,
+            "price": intent.reference_price,
+            "leverage": options.get("leverage"),
+            "reduce_only": options.get("reduce_only", False),
             "status": TradeCommandStatusEnum.CREATED,
-            "created_at": now,
-            "correlation_id": (
-                grouped_correlation_id if grouped_correlation_id is not None else order_public_id
-            ),
-            "session_id": session_id,
-            "sequence_id": sequence_id,
-            "timestamp": now,
+            "created_at": identity.timestamp,
+            "correlation_id": group_id if group_id is not None else identity.client_order_id,
+            "session_id": identity.session_id,
+            "sequence_id": identity.sequence_id,
+            "timestamp": identity.timestamp,
             "wallet_public_id": self.wallet_public_id or "",
-            "operator_public_id": self.operator_public_id or None,
+            "operator_public_id": intent.operator_public_id,
             "source_surface": "strategy",
             "signal_public_id": provenance.signal_public_id,
-            "ai_review_public_id": ai_review_public_id,
+            "ai_review_public_id": options.get("ai_review_public_id"),
             "origin": provenance.origin,
             "replay_window_start": provenance.replay_window_start,
             "replay_window_end": provenance.replay_window_end,
@@ -678,9 +727,9 @@ class TradingEngineService:
                 price=last_close,
                 reason="engine-stop",
             )
-            self.order_in_flight = True
-            self.pending_client_order_id = dispatch.client_order_id
-            self._in_flight_since = time.monotonic()
+            if dispatch is None:
+                return False
+            self._record_order_dispatch(dispatch)
             return True
         return False
 
@@ -751,169 +800,213 @@ class TradingEngineService:
         )
         return command_public_id
 
+    def _live_lot(self) -> Decimal | None:
+        """Return a real positive lot for a base-asset venue operand."""
+        spec = self.instrument_specs.get(self.instrument, InstrumentSpec())
+        lot = spec.get("lot_size")
+        if (
+            not spec.get("public_id")
+            or spec.get("quantity_unit") != "base_asset"
+            or spec.get("native_order_quantity_unit") != "base_asset"
+            or not isinstance(lot, (int, float))
+            or isinstance(lot, bool)
+            or not isfinite(lot)
+            or lot <= 0
+        ):
+            return None
+        return Decimal(str(lot))
+
+    def _log_live_refusal(
+        self, policy: LiveStrategyOrderPolicy | None, qty: Decimal, reason: str
+    ) -> None:
+        """Record the sizing decision and full strategy wallet context."""
+        logger.error(
+            "Live strategy order refused: strategy={} instrument={} qty={} cap={} wallet={} reason={}",
+            policy.strategy_name if policy else self._strategy_tag or "engine-stop",
+            self.instrument,
+            qty,
+            policy.max_order_base_qty if policy else None,
+            self.wallet_public_id,
+            reason,
+        )
+
+    def _live_refusal_reason(
+        self, qty: Decimal, policy: LiveStrategyOrderPolicy | None
+    ) -> str | None:
+        """Check the same live admission conditions before assembly and submit."""
+        if policy is None or policy.wallet_public_id != self.wallet_public_id:
+            return "missing or mismatched live strategy policy"
+        cap = policy.max_order_base_qty
+        if not cap.is_finite() or cap <= 0:
+            return "invalid live strategy cap"
+        if self._repository is None or self._outbox is None:
+            return "live strategy orders require a repository and outbox"
+        if qty > cap:
+            return "quantity exceeds live strategy cap"
+        return None
+
+    def _prepare_live_quantity(
+        self, quantity: Decimal, policy: LiveStrategyOrderPolicy | None
+    ) -> _LiveQuantity | None:
+        """Snap once and admit the exact quantity that will be serialized."""
+        lot = self._live_lot()
+        if lot is None:
+            self._log_live_refusal(policy, quantity, "missing or unsupported live instrument specs")
+            return None
+        snapped = _snap_live_quantity(quantity, lot)
+        if snapped <= 0:
+            return None
+        reason = self._live_refusal_reason(snapped, policy)
+        if reason is not None:
+            self._log_live_refusal(policy, snapped, reason)
+            return None
+        serialized = float(snapped)
+        if Decimal(str(serialized)) != snapped:
+            self._log_live_refusal(policy, snapped, "quantity cannot round-trip through Float")
+            return None
+        return _LiveQuantity(snapped, serialized)
+
+    def _send_quantity(
+        self, size: float | _LiveQuantity, policy: LiveStrategyOrderPolicy | None
+    ) -> float | None:
+        """Recheck live admission before allocating any order identity."""
+        if self.exchange == ExchangeEnum.PAPER:
+            assert not isinstance(size, _LiveQuantity)
+            return size
+        if not isinstance(size, _LiveQuantity):
+            quantity = Decimal(str(size))
+            if not quantity.is_finite() or quantity <= 0:
+                self._log_live_refusal(policy, quantity, "invalid live order quantity")
+                return None
+            prepared = self._prepare_live_quantity(quantity, policy)
+            return prepared.serialized if prepared is not None else None
+        reason = self._live_refusal_reason(size.exact, policy)
+        if reason is not None:
+            self._log_live_refusal(policy, size.exact, reason)
+            return None
+        return size.serialized
+
     async def _send_order(
         self,
         side: TradeSide,
-        size: float,
+        size: float | _LiveQuantity,
         price: float,
         reason: str,
         signaled_at: float | None = None,
-        leverage: int | None = None,
-        reduce_only: bool = False,
-        *,
-        ai_review_public_id: str | None = None,
-        ai_review_dispatch_version: int | None = None,
-        grouped_correlation_id: str | None = None,
-        provenance: _StrategyOrderProvenance | None = None,
-    ) -> _OrderDispatch:
-        """Publish order request via the durable-outbox path.
-
-        Writes a durable ``TradeCommand`` row to DB and notifies the
-        ``OutboxDispatcher`` — the dispatcher owns the ZMQ publish.
-        The dual-write in-process fallback remains for unit tests that
-        construct the engine without an outbox (MagicMock repos, no
-        SQL backing); production always wires the outbox via
-        ``TraderCoordinator._setup_trade_services``.
-
-        Args:
-            side: Order side ("buy" or "sell").
-            size: Order quantity.
-            price: Reference price. On paper-venue engines it is
-                forwarded as the market order's fill reference (the
-                paper simulator fills at ``order.price``; previously it
-                was discarded and paper fills booked at 0.0). Live-venue
-                market commands never carry it.
-            reason: Order reason tag (e.g., "engine-buy", "engine-stop").
-            signaled_at: Unix timestamp when signal was generated.
-            leverage: Margin leverage (None for spot).
-            reduce_only: True when closing a position.
-            ai_review_public_id: Optional citation forwarded from
-                :class:`SignalData` so the strategy hot-path can route
-                through the attribution-aware caps gate. ``None`` keeps
-                the existing service-principal bypass.
-            ai_review_dispatch_version: Companion to
-                ``ai_review_public_id`` — transport-only;
-                the strategy citation validator does not compare it.
-            grouped_correlation_id: When set (a paired-execution leg),
-                stamped as the command's correlation_id so it joins its
-                group and is held by the outbox arming gate until armed.
-            provenance: Signal lineage and triggering-frame provenance.
-                ``None`` represents a signal-less live order.
-
-        Returns:
-            An :class:`_OrderDispatch` carrying the venue ``client_order_id``
-            and the durable ``command_public_id`` (for binding a
-            paired-execution leg).
-
-        Raises:
-            InstrumentSpecMissingError: When ``ai_review_public_id`` is
-                set but ``instrument_specs[self.instrument]`` lacks the
-                ``public_id`` key. AI-attributed emits require a
-                resolved ``instrument_public_id`` so the caps evaluator
-                can run quantity / notional checks; failing closed
-                makes the spec-loader gap loud and operator-actionable.
-        """
-        order_provenance = provenance or _StrategyOrderProvenance()
-        signaled_at_dt = None
-        if signaled_at is not None:
-            signaled_at_dt = dt.datetime.fromtimestamp(signaled_at, tz=dt.UTC)
-        reference_price = price if self.exchange == ExchangeEnum.PAPER else None
-        topic = order_command_topic(self.exchange, self.instrument, OrderCommandEnum.SUBMIT)
-        order_public_id = str(uuid7())
-        now = dt.datetime.now(dt.UTC)
-        session_id = self.execution_socket.tracker.session_id
-        sequence_id = self.execution_socket.tracker.next_sequence(topic)
-
-        spec = self.instrument_specs.get(self.instrument, InstrumentSpec())
-        instrument_public_id = spec.get("public_id")
-        if ai_review_public_id is not None and instrument_public_id is None:
+        **options: Unpack[_OrderOptions],
+    ) -> _OrderDispatch | None:
+        """Admit and dispatch a market order, returning no ids on refusal."""
+        policy = options.get("policy")
+        quantity = self._send_quantity(size, policy)
+        if quantity is None:
+            return None
+        instrument_public_id = self.instrument_specs.get(self.instrument, {}).get("public_id")
+        if options.get("ai_review_public_id") is not None and instrument_public_id is None:
             raise InstrumentSpecMissingError(
-                f"AI-attributed strategy emit for {self.instrument!r} "
-                "requires instrument_specs[...]['public_id'] to be "
-                "populated by the spec loader; aborting before caps "
-                "guard so the failure is loud + operator-actionable."
+                f"AI-attributed strategy emit for {self.instrument!r} requires a resolved spec id"
             )
-
-        command_public_id = order_public_id
+        intent = _OrderIntent(
+            side=side,
+            quantity=quantity,
+            reason=reason,
+            reference_price=price if self.exchange == ExchangeEnum.PAPER else None,
+            signaled_at=(
+                dt.datetime.fromtimestamp(signaled_at, tz=dt.UTC)
+                if signaled_at is not None
+                else None
+            ),
+            operator_public_id=(
+                policy.operator_public_id if policy else self.operator_public_id or None
+            ),
+            options=options,
+            provenance=options.get("provenance") or _StrategyOrderProvenance(),
+        )
+        topic = order_command_topic(self.exchange, self.instrument, OrderCommandEnum.SUBMIT)
+        tracker = self.execution_socket.tracker
+        identity = _OrderIdentity(
+            str(uuid7()), dt.datetime.now(dt.UTC), tracker.session_id, tracker.next_sequence(topic)
+        )
+        command_public_id = identity.client_order_id
         if self._repository is not None:
-            strategy_submission = TradeCommandSubmission(
-                user_public_id=None,
-                operator_public_id=self.operator_public_id or None,
-                wallet_public_id=self.wallet_public_id or None,
-                instrument_public_id=instrument_public_id,
-                command_type=OrderCommandEnum.SUBMIT,
-                side=side,
-                order_type="market",
-                quantity=Decimal(str(size)),
-                price=None,
-                source_surface="strategy",
-                idempotency_key=None,
-                ai_review_public_id=ai_review_public_id,
-                ai_review_dispatch_version=ai_review_dispatch_version,
+            command_public_id = await self._persist_strategy_order(
+                intent, identity, instrument_public_id
             )
-            insert_row = self._build_strategy_insert_row(
-                order_public_id=order_public_id,
-                reason=reason,
-                side=side,
-                size=size,
-                leverage=leverage,
-                reduce_only=reduce_only,
-                now=now,
-                session_id=session_id,
-                sequence_id=sequence_id,
-                grouped_correlation_id=grouped_correlation_id,
-                reference_price=reference_price,
-                ai_review_public_id=ai_review_public_id,
-                provenance=order_provenance,
-            )
-            command_public_id = await self._insert_strategy_trade_command(
-                strategy_submission,
-                insert_row,
-                ai_review_public_id=ai_review_public_id,
-                ai_review_dispatch_version=ai_review_dispatch_version,
-            )
-
         if self._outbox is not None:
             self._outbox.notify()
-            logger.debug(f"Durable command written, outbox notified: {order_public_id}")
+            logger.debug(f"Durable command written, outbox notified: {identity.client_order_id}")
         else:
-            order = OrderRequestData(
-                public_id=order_public_id,
-                timestamp=now,
-                session_id=session_id,
-                sequence_id=sequence_id,
-                strategy_id=reason,
-                instrument=self.instrument,
-                mode=self.mode,
-                side=side,
-                order_type=OrderTypeEnum.MARKET,
-                quantity=size,
-                price=reference_price,
-                client_order_id=order_public_id,
-                exchange=self.exchange,
-                strategy_tag=self._strategy_tag,
-                signaled_at=signaled_at_dt,
-                leverage=leverage,
-                reduce_only=reduce_only,
-                wallet_public_id=self.wallet_public_id,
-                operator_public_id=self.operator_public_id or None,
-                origin=order_provenance.origin,
-                replay_window_start=order_provenance.replay_window_start,
-                replay_window_end=order_provenance.replay_window_end,
+            await self._publish_paper_order(intent, identity, topic)
+        return _OrderDispatch(identity.client_order_id, command_public_id)
+
+    async def _persist_strategy_order(
+        self, intent: _OrderIntent, identity: _OrderIdentity, instrument_public_id: str | None
+    ) -> str:
+        """Insert one admitted order through its existing attribution guard."""
+        ai_review_public_id = intent.options.get("ai_review_public_id")
+        ai_review_dispatch_version = intent.options.get("ai_review_dispatch_version")
+        submission = TradeCommandSubmission(
+            user_public_id=None,
+            operator_public_id=intent.operator_public_id,
+            wallet_public_id=self.wallet_public_id or None,
+            instrument_public_id=instrument_public_id,
+            command_type=OrderCommandEnum.SUBMIT,
+            side=intent.side,
+            order_type="market",
+            quantity=Decimal(str(intent.quantity)),
+            price=None,
+            source_surface="strategy",
+            idempotency_key=None,
+            ai_review_public_id=ai_review_public_id,
+            ai_review_dispatch_version=ai_review_dispatch_version,
+        )
+        return await self._insert_strategy_trade_command(
+            submission,
+            self._build_strategy_insert_row(intent, identity),
+            ai_review_public_id=ai_review_public_id,
+            ai_review_dispatch_version=ai_review_dispatch_version,
+        )
+
+    async def _publish_paper_order(
+        self, intent: _OrderIntent, identity: _OrderIdentity, topic: str
+    ) -> None:
+        """Preserve the paper direct-publish path when no outbox is configured."""
+        provenance = intent.provenance
+        order = OrderRequestData(
+            public_id=identity.client_order_id,
+            timestamp=identity.timestamp,
+            session_id=identity.session_id,
+            sequence_id=identity.sequence_id,
+            strategy_id=intent.reason,
+            instrument=self.instrument,
+            mode=self.mode,
+            side=intent.side,
+            order_type=OrderTypeEnum.MARKET,
+            quantity=intent.quantity,
+            price=intent.reference_price,
+            client_order_id=identity.client_order_id,
+            exchange=self.exchange,
+            strategy_tag=self._strategy_tag,
+            signaled_at=intent.signaled_at,
+            leverage=intent.options.get("leverage"),
+            reduce_only=intent.options.get("reduce_only", False),
+            wallet_public_id=self.wallet_public_id,
+            operator_public_id=intent.operator_public_id,
+            origin=provenance.origin,
+            replay_window_start=provenance.replay_window_start,
+            replay_window_end=provenance.replay_window_end,
+        )
+        await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)
+        if self._repository is not None:
+            await self._repository.update_trade_command_status(
+                public_id=identity.client_order_id,
+                new_status=TradeCommandStatusEnum.DIRECT_DISPATCHED,
+                bus_time=identity.timestamp,
+                session_id=identity.session_id,
+                sequence_id=identity.sequence_id,
+                dispatched_at=identity.timestamp,
+                attempt_count=1,
             )
-            await self.execution_socket.send(topic, order, flags=zmq.NOBLOCK)
-            if self._repository is not None:
-                await self._repository.update_trade_command_status(
-                    public_id=order_public_id,
-                    new_status=TradeCommandStatusEnum.DIRECT_DISPATCHED,
-                    bus_time=now,
-                    session_id=session_id,
-                    sequence_id=sequence_id,
-                    dispatched_at=now,
-                    attempt_count=1,
-                )
-            logger.debug(f"Published order command (direct): {order_public_id}")
-        return _OrderDispatch(client_order_id=order_public_id, command_public_id=command_public_id)
+        logger.debug(f"Published order command (direct): {identity.client_order_id}")
 
     def _cap_opening_size(
         self, opening_qty: float, current_price: float, closing_proceeds: float = 0.0
@@ -942,7 +1035,9 @@ class TradingEngineService:
         )
         max_size_by_cash = effective_cash / current_price if current_price > 0 else 0.0
         opening_qty = max(min(opening_qty, max_size_by_cash), 0.0)
-        specs = self.instrument_specs.get(self.instrument, {})
+        if self.exchange != ExchangeEnum.PAPER:
+            return opening_qty
+        specs = self.instrument_specs.get(self.instrument, InstrumentSpec())
         lot = float(specs.get("lot_size", 0.0))
         tick = float(specs.get("tick_size", 0.0))
         return self.risk.round_size(opening_qty, lot, current_price, tick)
@@ -976,109 +1071,170 @@ class TradingEngineService:
             return abs_delta, 0.0
         return 0.0, abs_delta
 
-    async def execute_desired_units(
+    def prepare_desired_units(
         self,
         desired_units: float,
         current_price: float,
-        signaled_at: float | None = None,
-        *,
-        ai_review_public_id: str | None = None,
-        ai_review_dispatch_version: int | None = None,
-        grouped_correlation_id: str | None = None,
-        signal_public_id: str | None = None,
-        origin: FrameOrigin = "live",
-        replay_window_start: dt.datetime | None = None,
-        replay_window_end: dt.datetime | None = None,
-    ) -> str | None:
-        """Execute position change based on desired position size.
-
-        Main entry point for strategy signal execution. Compares desired position
-        with current position and sends appropriate buy/sell orders. Supports
-        long, short, and flip transitions.
-
-        For flips (long→short or short→long), the delta is split into a closing
-        portion (uncapped) and an opening portion (subject to cash/leverage caps).
-
-        Portfolio and position state are NOT updated here; they change only
-        when confirmed fills arrive via apply_fill().
+        policy: LiveStrategyOrderPolicy | None = None,
+    ) -> PreparedStrategyOrder | None:
+        """Size a strategy order and check live admission before group creation.
 
         Args:
-            desired_units: Target position size (positive=long, negative=short, 0=flat).
-            current_price: Current market price for sizing calculations.
-            signaled_at: Unix timestamp when signal was generated.
-            ai_review_public_id: Optional citation forwarded from
-                :class:`SignalData` so the strategy hot-path can route through
-                :meth:`TradingCapsEnforcer.guard_with_ai_review_attribution`.
-                ``None`` preserves the existing
-                ``guard_service_principal()`` audit-bypass behavior.
-            ai_review_dispatch_version: Companion to
-                ``ai_review_public_id``; transport-only — the
-                strategy citation validator does not compare it.
-            grouped_correlation_id: When set (a paired-execution leg),
-                stamped as the command's correlation_id so the command
-                joins its paired-execution group and is held by the outbox
-                arming gate until the group arms.
-            signal_public_id: The firing signal's durable
-                ``signals.public_id``, forwarded from the coordinator's
-                ``_on_signal`` and persisted onto the command row as
-                decision lineage (PnL Phase 1).
-            origin: The triggering frame's provenance carried on the
-                signal — ``"replay"`` commands are rejected pre-venue
-                by every executor (incident 2026-07-10 #3).
-            replay_window_start: Replay window start, when replaying.
-            replay_window_end: Replay window end, when replaying.
+            desired_units: Signed target position.
+            current_price: Reference price for risk sizing.
+            policy: Persisted live strategy cap and identity, when applicable.
 
         Returns:
-            The durable command ``public_id`` when an order was dispatched
-            (for the coordinator to bind a paired-execution leg), else
-            ``None`` (an order already in flight, or no order needed).
+            A prepared order if the target warrants an eligible submission.
         """
-        self._check_in_flight_timeout()
         if self.order_in_flight:
             logger.warning(
                 f"Order {self.pending_client_order_id} still in flight for "
                 f"{self.instrument}, dropping signal"
             )
             return None
+        if self.exchange == ExchangeEnum.PAPER:
+            return self._prepare_paper_order(desired_units, current_price)
+        return self._prepare_live_order(desired_units, current_price, policy)
+
+    def _prepare_paper_order(
+        self, desired_units: float, current_price: float
+    ) -> PreparedStrategyOrder | None:
+        """Keep paper sizing and peak-equity updates on their existing path."""
         delta = desired_units - self.position_qty
         if abs(delta) < 1e-12:
             return None
         equity = self._mark_to_market(current_price)
         side = TradeSideEnum.BUY if delta > 0 else TradeSideEnum.SELL
-        closing_qty, opening_qty = self._classify_delta(desired_units, abs(delta))
-        if opening_qty > 0:
-            if not self.risk.can_open_new_trade(equity, self.peak_equity):
-                opening_qty = 0.0
+        closing, opening = self._classify_delta(desired_units, abs(delta))
+        if opening > 0:
+            if self.risk.can_open_new_trade(equity, self.peak_equity):
+                proceeds = closing * current_price if closing > 0 else 0.0
+                opening = self._cap_opening_size(opening, current_price, proceeds)
             else:
-                proceeds = closing_qty * current_price if closing_qty > 0 else 0.0
-                opening_qty = self._cap_opening_size(opening_qty, current_price, proceeds)
-        total_order = closing_qty + opening_qty
-        specs = self.instrument_specs.get(self.instrument, {})
-        lot = float(specs.get("lot_size", 0.0))
-        total_order = self.risk.round_down_to_step(total_order, lot)
-        if total_order <= 0:
+                opening = 0.0
+        specs = self.instrument_specs.get(self.instrument, InstrumentSpec())
+        size = self.risk.round_down_to_step(closing + opening, float(specs.get("lot_size", 0.0)))
+        if size <= 0:
             return None
-        reason = "engine-buy" if side == TradeSideEnum.BUY else "engine-sell"
-        is_pure_close = closing_qty > 0 and opening_qty <= 0
+        return PreparedStrategyOrder(
+            side,
+            size,
+            closing > 0 and opening <= 0,
+            self.position_qty,
+            self.pending_client_order_id,
+            self.peak_equity,
+        )
+
+    def _prepare_live_order(
+        self, desired_units: float, current_price: float, policy: LiveStrategyOrderPolicy | None
+    ) -> PreparedStrategyOrder | None:
+        """Combine the closing and cash-limited opening quantities before lot snapping."""
+        position = self.position_qty
+        if not all(isfinite(value) for value in (position, desired_units, current_price)):
+            self._log_live_refusal(policy, Decimal("NaN"), "invalid live sizing inputs")
+            return None
+        equity = self.portfolio.cash + position * current_price
+        peak = max(self.peak_equity, equity)
+        with localcontext(_LIVE_DECIMAL_CONTEXT):
+            exact_position = Decimal(str(position))
+            delta = Decimal(str(desired_units)) - exact_position
+            if abs(delta) < Decimal("1e-12"):
+                return None
+            closing = (
+                min(abs(exact_position), abs(delta)) if exact_position * delta < 0 else Decimal(0)
+            )
+            opening = abs(delta) - closing
+            if opening > 0:
+                if self.risk.can_open_new_trade(equity, peak):
+                    allowed = self._cap_opening_size(
+                        float(opening), current_price, float(closing) * current_price
+                    )
+                    opening = min(opening, Decimal(str(allowed)))
+                else:
+                    opening = Decimal(0)
+            size = self._prepare_live_quantity(closing + opening, policy)
+        if size is None:
+            return None
+        side = TradeSideEnum.BUY if delta > 0 else TradeSideEnum.SELL
+        return PreparedStrategyOrder(
+            side,
+            size,
+            closing > 0 and opening <= 0,
+            position,
+            self.pending_client_order_id,
+            peak,
+        )
+
+    async def execute_desired_units(
+        self,
+        desired_units: float,
+        current_price: float,
+        signaled_at: float | None = None,
+        **options: Unpack[StrategySignalOrderOptions],
+    ) -> str | None:
+        """Execute a desired position change using the admitted quantity.
+
+        Args:
+            desired_units: Signed target position.
+            current_price: Reference price for sizing and paper fills.
+            signaled_at: Unix time when the strategy emitted the signal.
+            **options: Signal lineage, persisted policy and any prepared order.
+
+        Returns:
+            The durable command ID when the order is accepted, or None.
+        """
+        prepared = options.get("prepared")
+        policy = options.get("policy")
+        if prepared is None:
+            self._check_in_flight_timeout()
+            prepared = self.prepare_desired_units(desired_units, current_price, policy)
+        if prepared is None or not self._prepared_order_is_current(prepared, policy):
+            return None
+        reason = "engine-buy" if prepared.side == TradeSideEnum.BUY else "engine-sell"
         dispatch = await self._send_order(
-            side=side,
-            size=total_order,
+            side=prepared.side,
+            size=prepared.quantity,
             price=current_price,
             reason=reason,
             signaled_at=signaled_at,
             leverage=self.cfg.leverage,
-            reduce_only=is_pure_close,
-            ai_review_public_id=ai_review_public_id,
-            ai_review_dispatch_version=ai_review_dispatch_version,
-            grouped_correlation_id=grouped_correlation_id,
+            reduce_only=prepared.reduce_only,
+            ai_review_public_id=options.get("ai_review_public_id"),
+            ai_review_dispatch_version=options.get("ai_review_dispatch_version"),
+            grouped_correlation_id=options.get("grouped_correlation_id"),
             provenance=_StrategyOrderProvenance(
-                signal_public_id=signal_public_id,
-                origin=origin,
-                replay_window_start=replay_window_start,
-                replay_window_end=replay_window_end,
+                signal_public_id=options.get("signal_public_id"),
+                origin=options.get("origin", "live"),
+                replay_window_start=options.get("replay_window_start"),
+                replay_window_end=options.get("replay_window_end"),
             ),
+            policy=policy,
         )
+        if dispatch is None:
+            return None
+        self.peak_equity = max(self.peak_equity, prepared.peak_equity)
+        self._record_order_dispatch(dispatch)
+        return dispatch.command_public_id
+
+    def _prepared_order_is_current(
+        self, prepared: PreparedStrategyOrder, policy: LiveStrategyOrderPolicy | None
+    ) -> bool:
+        """Refuse to send a stale size after awaiting paired-group creation."""
+        if (
+            not self.order_in_flight
+            and self.position_qty == prepared.position_qty
+            and self.pending_client_order_id == prepared.pending_client_order_id
+        ):
+            return True
+        if isinstance(prepared.quantity, _LiveQuantity):
+            self._log_live_refusal(
+                policy, prepared.quantity.exact, "position or pending intent changed"
+            )
+        return False
+
+    def _record_order_dispatch(self, dispatch: _OrderDispatch) -> None:
+        """Track accepted intent only after the send succeeds."""
         self.order_in_flight = True
         self.pending_client_order_id = dispatch.client_order_id
         self._in_flight_since = time.monotonic()
-        return dispatch.command_public_id

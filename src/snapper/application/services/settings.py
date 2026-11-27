@@ -27,6 +27,7 @@ from snapper.core.financial_account_owner import FinancialAccountOwnerUnavailabl
 from snapper.core.financial_account_owner import canonical_financial_account_owner_policy
 from snapper.core.financial_account_owner import parse_financial_account_owner_policy
 from snapper.core.json_types import JsonValue
+from snapper.core.process_config import PROCESS_CONFIG_PREFIX
 from snapper.data.financial_account_owner_policy_writer import FinancialOwnerPolicyChange
 from snapper.data.financial_account_owner_policy_writer import write_financial_owner_policy
 from snapper.data.models import Setting
@@ -382,6 +383,8 @@ class SettingsService:
             updated_by: Optional user identifier.
             force_encrypt_cleartext: Whether to encrypt sensitive values.
         """
+        if key.startswith(PROCESS_CONFIG_PREFIX):
+            raise ValueError("Process settings must be updated through process configuration")
         str_value = self._serialize_value(value)
         if key == FINANCIAL_OWNER_SETTING_KEY:
             await self._update_financial_owner_policy(str_value, updated_by)

@@ -23,6 +23,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import SignalData
+from tests.application.engine.live_strategy_fixtures import stub_live_signal_policy
 
 
 def _make_coord(monkeypatch: pytest.MonkeyPatch) -> TraderCoordinator:
@@ -178,6 +179,7 @@ class TestCoordinatorSharding:
         When: _on_signal processes it,
         Then: engine has strategy_tag=None and wallet-scoped shard_key.
         """
+        stub_live_signal_policy(monkeypatch)
         coord = _make_coord(monkeypatch)
         coord._current_topic = "signals.kraken.BTC-USD.live"
         await coord._on_signal(_make_signal(exchange="kraken"))

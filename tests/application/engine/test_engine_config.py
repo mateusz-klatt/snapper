@@ -44,6 +44,10 @@ from snapper.messaging.schemas.data import OrderCancelData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderRequestData
 from snapper.messaging.schemas.data import SignalData
+from tests.application.engine.live_strategy_fixtures import WALLET
+from tests.application.engine.live_strategy_fixtures import live_order_policy
+from tests.application.engine.live_strategy_fixtures import stub_live_signal_policy
+from tests.application.engine.live_strategy_fixtures import wire_live_order_backend
 
 
 def _constructed_coordinator() -> TraderCoordinator:
@@ -126,7 +130,7 @@ async def test_engine_execute_desired_units_buy_flow() -> None:
         cast(Any, socket),
         risk=risk,
         cfg=cfg,
-        exchange="kraken",
+        exchange="paper",
         instrument_specs={"BTC-USD": {"lot_size": 0.1, "tick_size": 0.01}},
     )
     engine.portfolio.cash = 1_000.0
@@ -189,7 +193,7 @@ async def test_engine_execute_desired_units_sell_flow() -> None:
         cast(Any, socket),
         risk=risk,
         cfg=EngineConfigModel(initial_cash=5_000.0),
-        exchange="kraken",
+        exchange="paper",
         instrument_specs={"BTC-USD": {"lot_size": 0.1, "tick_size": 0.01}},
     )
     engine.position_qty = 0.3
@@ -400,7 +404,7 @@ class TestEngineExecuteDesiredUnits:
             risk=RiskEvaluator(RiskConfigModel(r_per_trade=0.02, max_leverage=1.0)),
             cfg=EngineConfigModel(initial_cash=10000.0, fee_bps=2.0),
             instrument_specs={"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}},
-            exchange="kraken",
+            exchange="paper",
         )
         desired_units = 0.1
         current_price = 50000.0
@@ -409,7 +413,7 @@ class TestEngineExecuteDesiredUnits:
         order = mock_socket.send.call_args[0][1]
         assert order.instrument == "BTC-USD"
         assert order.side == "buy"
-        assert order.mode == "live"
+        assert order.mode == "paper"
         assert order.quantity > 0
         assert order.quantity <= desired_units
         assert engine.order_in_flight is True
@@ -436,7 +440,7 @@ class TestEngineExecuteDesiredUnits:
             risk=RiskEvaluator(RiskConfigModel()),
             cfg=EngineConfigModel(initial_cash=10000.0, fee_bps=2.0),
             instrument_specs={"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}},
-            exchange="kraken",
+            exchange="paper",
         )
         engine.position_qty = 0.1
         engine.entry_price = 48000.0
@@ -581,7 +585,7 @@ class TestExecuteDesiredUnitsShortSelling:
             risk=RiskEvaluator(RiskConfigModel(r_per_trade=0.02, max_leverage=1.0)),
             cfg=EngineConfigModel(initial_cash=10_000.0, fee_bps=2.0),
             instrument_specs={"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}},
-            exchange="kraken",
+            exchange="paper",
         )
         return engine, mock_socket
 
@@ -773,7 +777,7 @@ class TestTraderSignalHandling:
             price=50000.0,
             reason="Test buy signal",
             strategy_name="test_strategy",
-            exchange="kraken",
+            exchange="paper",
         )
         trader._current_topic = "signals.paper.BTC-USD.test_strategy"
         await trader._on_signal(signal)
@@ -841,7 +845,7 @@ class TestTraderSignalHandling:
             price=52000.0,
             reason="Test sell signal",
             strategy_name="test_strategy",
-            exchange="kraken",
+            exchange="paper",
         )
         trader._current_topic = "signals.paper.BTC-USD.test_strategy"
         await trader._on_signal(signal)
@@ -910,7 +914,11 @@ class TestTraderSignalHandling:
     @patch("snapper.application.engine.trader.get_settings")
     @patch("snapper.application.engine.trader.zmq.Context")
     async def test_on_signal_routes_wallet_tagged_signal_to_wallet_engine(
-        self, mock_zmq_context: MagicMock, mock_get_settings: MagicMock, mock_get_repo: MagicMock
+        self,
+        mock_zmq_context: MagicMock,
+        mock_get_settings: MagicMock,
+        mock_get_repo: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A signal with a populated wallet routes to its own engine.
 
@@ -924,6 +932,7 @@ class TestTraderSignalHandling:
             fail-closed guard is gone — wallet identity is now
             first-class through the engine key.
         """
+        stub_live_signal_policy(monkeypatch)
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
@@ -949,6 +958,7 @@ class TestTraderSignalHandling:
         wallet_engine = MagicMock()
         wallet_engine.execute_desired_units = AsyncMock()
         wallet_engine.pending_client_order_id = None
+        wallet_engine.wallet_public_id = WALLET
         wallet_engine._shard_key = "kraken.BTC-USD.live.waaaaaaaaaaaa"
         trader.engines["BTC-USD@kraken-live-waaaaaaaaaaaa"] = wallet_engine
         wallet_signal = SignalData(
@@ -1033,7 +1043,8 @@ class TestTraderSignalHandling:
             strength=0.5,
             price=3000.0,
             reason="Test ETH signal",
-            exchange="kraken",
+            strategy_name="test_strategy",
+            exchange="paper",
         )
         trader._current_topic = "signals.paper.ETH-USD.test_strategy"
         await trader._on_signal(signal)
@@ -1398,6 +1409,7 @@ async def test_send_order_writes_trade_command_to_db() -> None:
         outbox=outbox_mock,
     )
     dispatch = await engine._send_order(side="buy", size=1.0, price=10.0, reason="unit-test")
+    assert dispatch is not None
     assert len(dispatch.client_order_id) == 36
     assert dispatch.command_public_id == "cmd-pub-1"
     repo_mock.insert_trade_command.assert_called_once()
@@ -1436,6 +1448,7 @@ async def test_send_order_grouped_stamps_group_correlation_id() -> None:
     dispatch = await engine._send_order(
         side="buy", size=1.0, price=10.0, reason="unit-test", grouped_correlation_id="grp-9"
     )
+    assert dispatch is not None
     call_row = repo_mock.insert_trade_command.call_args.args[0]
     assert call_row["correlation_id"] == "grp-9"
     assert dispatch.command_public_id == "cmd-pub-g"
@@ -1764,30 +1777,27 @@ async def test_send_order_paper_direct_publishes_reference_price() -> None:
 
 @pytest.mark.asyncio
 async def test_send_order_live_strips_reference_price() -> None:
-    """A live-venue market command never carries a price on either path.
+    """A live market command never carries the signal's reference price.
 
-    Given: a live TradingEngine (exchange='kraken') with a repository and
-        no outbox, so the durable insert and the direct publish both run,
-    When: ``_send_order`` runs,
-    Then: the durable TradeCommand row and the published
-        ``OrderRequestData`` both carry ``price=None`` — a real exchange
-        must never receive a market order carrying a price.
+    Given: a live trading engine with venue sizing evidence and a durable backend,
+    When: an admitted market order is sent,
+    Then: the command row has no price and the engine wakes the outbox.
     """
     socket = _SocketStub()
-    repo_mock = AsyncMock()
-    repo_mock.insert_trade_command = AsyncMock(return_value=(1, "cmd-live"))
     engine = TradingEngineService(
         instrument="BTC-USD",
-        execution_socket=cast(Any, socket),
-        cfg=EngineConfigModel(initial_cash=1_000.0, fee_bps=10.0),
+        execution_socket=socket,
         exchange="kraken",
-        repository=repo_mock,
+        wallet_public_id=WALLET,
     )
-    await engine._send_order(side="buy", size=1.0, price=55.0, reason="test")
-    insert_row = repo_mock.insert_trade_command.call_args.args[0]
-    assert insert_row["price"] is None
-    assert socket.sent
-    assert socket.sent[0].price is None
+    repo = wire_live_order_backend(engine)
+    await engine._send_order(
+        side="buy", size=1.0, price=55.0, reason="test", policy=live_order_policy()
+    )
+    assert repo.insert_trade_command.call_args.args[0]["price"] is None
+    assert engine._outbox is not None
+    engine._outbox.notify.assert_called_once()
+    assert not socket.sent
 
 
 @pytest.mark.asyncio

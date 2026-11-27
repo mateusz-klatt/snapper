@@ -10,6 +10,7 @@ from datetime import datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
+from typing import Unpack
 from typing import cast
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -24,6 +25,8 @@ from sqlalchemy.exc import IntegrityError as SAIntegrityError
 import snapper.application.engine.trader as trader_module
 from snapper.application.engine.config import EngineConfigModel
 from snapper.application.engine.service import InstrumentSpec
+from snapper.application.engine.service import PreparedStrategyOrder
+from snapper.application.engine.service import StrategySignalOrderOptions
 from snapper.application.engine.service import TradingEngineService
 from snapper.application.engine.trader import TraderCoordinator
 from snapper.application.engine.trader import _compute_pending_boundaries
@@ -37,6 +40,7 @@ from snapper.application.trade.caps_enforcer import CapsViolationError
 from snapper.application.trade.caps_enforcer import TradingCapsEnforcer
 from snapper.application.trade.trade_service import PositionProjection
 from snapper.config.app import AppSettings
+from snapper.core.strategy_order_cap import LiveStrategyOrderPolicy
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import FundingRateRow
 from snapper.data.repository_types import InstrumentSpecRow
@@ -48,6 +52,10 @@ from snapper.messaging.schemas.data import HeartbeatData
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import SignalData
+from tests.application.engine.live_strategy_fixtures import WALLET
+from tests.application.engine.live_strategy_fixtures import live_order_policy
+from tests.application.engine.live_strategy_fixtures import stub_live_signal_policy
+from tests.application.engine.live_strategy_fixtures import wire_live_order_backend
 
 TEST_DB_URL = "sqlite:///:memory:"
 
@@ -277,7 +285,10 @@ class TestTraderCoverage:
     @patch("snapper.application.engine.trader.get_repository")
     @patch("snapper.application.engine.trader.get_settings")
     async def test_on_signal_processes_buy_signal(
-        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+        self,
+        mock_get_settings: MagicMock,
+        mock_get_repository: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Verify buy signal is processed and timestamp is updated.
 
@@ -285,6 +296,7 @@ class TestTraderCoverage:
         When: Buy signal is received,
         Then: Engine execute_desired_units is called and timestamp is recorded.
         """
+        stub_live_signal_policy(monkeypatch)
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
@@ -299,6 +311,7 @@ class TestTraderCoverage:
         trader.execution_publisher = MagicMock()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
+        mock_engine.wallet_public_id = WALLET
         trader.engines["BTC-USD@kraken-live-waaaaaaaaaaaa"] = mock_engine
         signal_msg = SignalData(
             wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
@@ -332,7 +345,10 @@ class TestTraderCoverage:
     @patch("snapper.application.engine.trader.get_repository")
     @patch("snapper.application.engine.trader.get_settings")
     async def test_on_signal_processes_sell_signal(
-        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+        self,
+        mock_get_settings: MagicMock,
+        mock_get_repository: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Verify sell signal triggers execution with negative desired_units.
 
@@ -348,6 +364,7 @@ class TestTraderCoverage:
             ``Engine.execute_desired_units`` is called with
             ``-1.0`` — the opposite sign of BUY at the same strength.
         """
+        stub_live_signal_policy(monkeypatch)
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
@@ -362,6 +379,7 @@ class TestTraderCoverage:
         trader.execution_publisher = MagicMock()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
+        mock_engine.wallet_public_id = WALLET
         trader.engines["BTC-USD@kraken-live-waaaaaaaaaaaa"] = mock_engine
         signal_msg = SignalData(
             wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
@@ -472,7 +490,10 @@ class TestTraderCoverage:
     @patch("snapper.application.engine.trader.get_repository")
     @patch("snapper.application.engine.trader.get_settings")
     async def test_signal_tracking_updates_timestamps(
-        self, mock_get_settings: MagicMock, mock_get_repository: MagicMock
+        self,
+        mock_get_settings: MagicMock,
+        mock_get_repository: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Verify signal processing updates last_signal_time tracking.
 
@@ -480,6 +501,7 @@ class TestTraderCoverage:
         When: Valid signal is processed,
         Then: last_signal_time is updated with current timestamp.
         """
+        stub_live_signal_policy(monkeypatch)
         mock_settings = MagicMock()
         mock_settings.instruments = {
             "kraken": ["BTC-USD"],
@@ -494,6 +516,7 @@ class TestTraderCoverage:
         trader.execution_publisher = MagicMock()
         mock_engine = MagicMock()
         mock_engine.execute_desired_units = AsyncMock()
+        mock_engine.wallet_public_id = WALLET
         trader.engines["BTC-USD@kraken-live-waaaaaaaaaaaa"] = mock_engine
         trader.last_signal_time["BTC-USD@kraken-live-waaaaaaaaaaaa"] = 0.0
         signal_msg = SignalData(
@@ -792,29 +815,30 @@ class _EngineStub:
         self._shard_key = f"{exchange}.{instrument}.live"
         self.execute_calls: list[dict[str, Any]] = []
 
+    def _check_in_flight_timeout(self) -> None:
+        """Allow the routing test to reach the order boundary."""
+
+    def prepare_desired_units(
+        self, desired_units: float, price: float, policy: LiveStrategyOrderPolicy
+    ) -> PreparedStrategyOrder:
+        """Provide a prepared intent for the forwarding assertions."""
+        return PreparedStrategyOrder("buy", abs(desired_units), False, 0.0, None, 0.0)
+
     async def execute_desired_units(
         self,
         desired_units: float,
         price: float,
         *,
-        signaled_at: Any,
-        ai_review_public_id: str | None = None,
-        ai_review_dispatch_version: int | None = None,
-        grouped_correlation_id: str | None = None,
-        signal_public_id: str | None = None,
-        origin: str = "live",
-        replay_window_start: Any = None,
-        replay_window_end: Any = None,
+        signaled_at: float,
+        **options: Unpack[StrategySignalOrderOptions],
     ) -> None:
-        del grouped_correlation_id, origin, replay_window_start, replay_window_end
+        """Record the order operands and lineage forwarded by the coordinator."""
         self.execute_calls.append(
             {
                 "desired_units": desired_units,
                 "price": price,
                 "signaled_at": signaled_at,
-                "ai_review_public_id": ai_review_public_id,
-                "ai_review_dispatch_version": ai_review_dispatch_version,
-                "signal_public_id": signal_public_id,
+                **options,
             }
         )
 
@@ -1437,6 +1461,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     Then only valid signals create engines and execute trades.
     """
     _configure_settings(monkeypatch)
+    stub_live_signal_policy(monkeypatch)
     monkeypatch.setattr(
         trader_module,
         "_bootstrap_settings",
@@ -1517,7 +1542,7 @@ async def test_on_signal_validates_topic_and_payload(monkeypatch: pytest.MonkeyP
     engine_key = "BTC-USD@kraken-live-waaaaaaaaaaaa"
     assert engine_key in coord.engines
     engine = cast(_EngineStub, coord.engines[engine_key])
-    assert repository.calls[0]["symbol_public_id"] == "stub-spid"
+    assert not repository.calls
     assert engine.execute_calls[0]["desired_units"] == pytest.approx(0.5)
     signal_sell = SignalData(
         wallet_public_id="01975a8b-3c7d-7000-8000-aaaaaaaaaaaa",
@@ -1556,6 +1581,7 @@ async def test_on_signal_threads_ai_review_attribution_to_engine(
     ``None`` for both kwargs so non-AI emits stay byte-identical.
     """
     _configure_settings(monkeypatch)
+    stub_live_signal_policy(monkeypatch)
     monkeypatch.setattr(
         trader_module,
         "_bootstrap_settings",
@@ -2838,7 +2864,7 @@ async def test_on_signal_converts_iso_timestamp(monkeypatch: pytest.MonkeyPatch)
         price=10_000.0,
         strategy_name="demo",
         fired_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
-        exchange="kraken",
+        exchange="paper",
         reason="test",
     )
     await coordinator._on_signal(signal)
@@ -3437,7 +3463,7 @@ class TestInFlightTimeout:
             "BTC-USD",
             cast(Any, socket),
             cfg=EngineConfigModel(initial_cash=10000.0),
-            exchange="kraken",
+            exchange="paper",
         )
         engine.order_in_flight = True
         engine.pending_client_order_id = "old-order"
@@ -5512,16 +5538,21 @@ class TestResolveInstrumentSpecs:
     """Tests for TraderCoordinator._resolve_instrument_specs."""
 
     @pytest.mark.asyncio
-    async def test_returns_fallback_when_instrument_not_found(
+    async def test_no_live_spec_when_instrument_not_found(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Verify fallback returned when instrument_public_id is None."""
+        """No live spec when instrument not found.
+
+        Given: A missing live instrument.
+        When: Specs are loaded.
+        Then: No size is available.
+        """
         _configure_settings(monkeypatch)
         coord = TraderCoordinator()
         coord.repository = AsyncMock()
         coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
         result = await cast(Any, coord)._resolve_instrument_specs("UNKNOWN", "kraken")
-        assert result == {"UNKNOWN": {"tick_size": 0.01, "lot_size": 0.0001}}
+        assert result == {}
 
     @pytest.mark.asyncio
     async def test_missing_spec_row_keeps_resolved_public_id(
@@ -5566,6 +5597,26 @@ class TestResolveInstrumentSpecs:
         assert result["BTC-USD"]["lot_size"] == 1.0
         assert result["BTC-USD"]["public_id"] == "inst-1"
 
+    async def test_paper_observed_spec_with_null_precision_keeps_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Paper observed spec with null precision keeps defaults.
+
+        Given: A paper spec with null precision.
+        When: Loaded.
+        Then: Retain simulation defaults.
+        """
+        _configure_settings(monkeypatch)
+        coordinator = TraderCoordinator()
+        coordinator.repository = MagicMock(spec=SQLAlchemyRepository)
+        coordinator.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value="paper")
+        coordinator.repository.get_instrument_spec = AsyncMock(
+            return_value={"tick_size": None, "lot_size": None, "quantity_unit": "base_asset"}
+        )
+        assert await coordinator._resolve_instrument_specs("BTC-USD", "paper") == {
+            "BTC-USD": {"public_id": "paper", "tick_size": 0.01, "lot_size": 0.0001}
+        }
+
     @pytest.mark.asyncio
     async def test_fallback_omits_public_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fallback path omits ``public_id`` deliberately.
@@ -5583,12 +5634,17 @@ class TestResolveInstrumentSpecs:
         coord = TraderCoordinator()
         coord.repository = AsyncMock()
         coord.repository.get_instrument_public_id_by_symbol = AsyncMock(return_value=None)
-        result = await cast(Any, coord)._resolve_instrument_specs("UNKNOWN", "kraken")
+        result = await cast(Any, coord)._resolve_instrument_specs("UNKNOWN", "paper")
         assert "public_id" not in result["UNKNOWN"]
 
     @pytest.mark.asyncio
-    async def test_returns_fallback_on_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Verify fallback returned when repository raises."""
+    async def test_no_live_spec_on_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """No live spec on exception.
+
+        Given: A DB lookup error.
+        When: Specs are loaded.
+        Then: Live sizing is unavailable.
+        """
         _configure_settings(monkeypatch)
         coord = TraderCoordinator()
         coord.repository = AsyncMock()
@@ -5596,7 +5652,7 @@ class TestResolveInstrumentSpecs:
             side_effect=RuntimeError("DB down")
         )
         result = await cast(Any, coord)._resolve_instrument_specs("BTC-USD", "kraken")
-        assert result == {"BTC-USD": {"tick_size": 0.01, "lot_size": 0.0001}}
+        assert result == {}
 
 
 class TestUnknownSubmitGuard:
@@ -6101,7 +6157,9 @@ class TestAdoptedRearmDoubleExposure:
             cast(Any, socket),
             cfg=EngineConfigModel(initial_cash=10000.0),
             exchange="kraken",
+            wallet_public_id=WALLET,
         )
+        wire_live_order_backend(engine)
         engine.order_in_flight = True
         engine.pending_client_order_id = "adopted-1"
         engine._in_flight_since = time.monotonic()
@@ -6119,7 +6177,7 @@ class TestAdoptedRearmDoubleExposure:
         """
         engine, socket = self._make_real_released_engine()
         assert engine.rearm_pending_intent("adopted-1") is True
-        await engine.execute_desired_units(1.0, current_price=100.0)
+        await engine.execute_desired_units(1.0, current_price=100.0, policy=live_order_policy())
         socket.send.assert_not_awaited()
         assert engine.pending_client_order_id == "adopted-1"
 
@@ -6132,8 +6190,10 @@ class TestAdoptedRearmDoubleExposure:
             the re-arm closes.
         """
         engine, socket = self._make_real_released_engine()
-        await engine.execute_desired_units(1.0, current_price=100.0)
-        socket.send.assert_awaited_once()
+        await engine.execute_desired_units(1.0, current_price=100.0, policy=live_order_policy())
+        assert engine._repository is not None
+        engine._repository.insert_trade_command.assert_awaited_once()
+        socket.send.assert_not_awaited()
 
     async def test_rearmed_guard_still_honors_timeout_valve(self) -> None:
         """The accepted residual: a re-armed guard self-clears after 60s.
@@ -6146,8 +6206,10 @@ class TestAdoptedRearmDoubleExposure:
         engine, socket = self._make_real_released_engine()
         assert engine.rearm_pending_intent("adopted-1") is True
         engine._in_flight_since = time.monotonic() - 120.0
-        await engine.execute_desired_units(1.0, current_price=100.0)
-        socket.send.assert_awaited_once()
+        await engine.execute_desired_units(1.0, current_price=100.0, policy=live_order_policy())
+        assert engine._repository is not None
+        engine._repository.insert_trade_command.assert_awaited_once()
+        socket.send.assert_not_awaited()
         assert engine.pending_client_order_id != "adopted-1"
 
     async def test_full_fill_clears_rearmed_guard(self) -> None:
@@ -6168,6 +6230,7 @@ class TestAdoptedRearmDoubleExposure:
             exchange_order_id="ex-1",
             instrument="BTC-USD",
             exchange="kraken",
+            wallet_public_id=WALLET,
             side="buy",
             size=1.0,
             last_size=0.4,

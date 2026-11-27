@@ -35,6 +35,7 @@ from snapper.data.repository import SQLAlchemyRepository
 from snapper.messaging.schemas.data import OrderData
 from snapper.messaging.schemas.data import OrderEventData
 from snapper.messaging.schemas.data import SignalData
+from tests.application.engine.live_strategy_fixtures import stub_live_signal_policy
 
 
 def _build_injected_settings(instance_id: int = 0, instance_count: int = 1) -> SimpleNamespace:
@@ -210,6 +211,7 @@ class TestOnSignalOwnershipFilter:
     @pytest.mark.asyncio
     async def test_owned_shard_creates_engine(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """At N=1 every shard is owned → engine created as before."""
+        stub_live_signal_policy(monkeypatch)
         coord = _make_coordinator_with_ownership(monkeypatch, instance_id=0, instance_count=1)
         coord._current_topic = "signals.kraken.BTC-USD.live"
         await coord._on_signal(self._signal())
@@ -238,6 +240,7 @@ class TestOnSignalOwnershipFilter:
         shard_key = "kraken.BTC-USD.live.waaaaaaaaaaaa"
         hash_val = ShardOwnership._hash(shard_key)
         owner_id = hash_val % 2
+        stub_live_signal_policy(monkeypatch)
         coord = _make_coordinator_with_ownership(
             monkeypatch, instance_id=owner_id, instance_count=2
         )
@@ -293,6 +296,7 @@ class TestOnSignalOwnershipFilter:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """At N=1 ALL signals are owned → never-drop invariant."""
+        stub_live_signal_policy(monkeypatch)
         coord = _make_coordinator_with_ownership(monkeypatch, instance_id=0, instance_count=1)
         for suffix in ("A", "B", "C", "D", "E"):
             coord._current_topic = f"signals.kraken.BTC-USD-{suffix}.live"

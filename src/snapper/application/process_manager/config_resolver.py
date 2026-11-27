@@ -12,23 +12,80 @@ from typing import Any
 from typing import cast
 
 from loguru import logger
+from sqlalchemy import func
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.process_manager.models import ProcessConfigModel
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.registry import get_registered_processes
 from snapper.config.settings import AppSettings
+from snapper.core.json_types import JsonObject
+from snapper.core.process_config import PROCESS_CONFIG_PREFIX
 from snapper.core.types import ProcessLifecycleEnum
 from snapper.core.types import ProcessMode
 from snapper.core.types import ProcessModeEnum
 from snapper.core.types import ProcessRestartPolicyEnum
 from snapper.core.types import ProcessRoleEnum
 from snapper.data.models import Setting
+from snapper.data.repository import Repository
 from snapper.data.repository import get_repository
+from snapper.data.repository import list_current_process_settings
 from snapper.data.repository import where_active_now
 
 VALID_PROCESS_MODES: frozenset[str] = frozenset(m.value for m in ProcessModeEnum)
 """Valid process mode values matching the ProcessMode Literal."""
+
+
+def parse_process_config(setting: Setting) -> JsonObject:
+    """Decode a persisted config and reject malformed routing fields.
+
+    Args:
+        setting: Process setting holding the stored JSON value.
+
+    Returns:
+        The decoded process configuration.
+    """
+    config: object = json.loads(setting.value)
+    if not isinstance(config, dict):
+        raise ValueError(f"Invalid process config {setting.key}: expected a JSON object")
+    if not isinstance(config["class"], str) or not config["class"]:
+        raise ValueError(f"Invalid process class for {setting.key}")
+    if type(config.get("enabled", False)) is not bool:
+        raise ValueError(f"Invalid enabled flag for {setting.key}")
+    if not isinstance(config.get("parameters", {}), dict):
+        raise ValueError(f"Invalid process parameters for {setting.key}")
+    if not isinstance(config.get("template"), (str, type(None))):
+        raise ValueError(f"Invalid process template for {setting.key}")
+    return cast(JsonObject, config)
+
+
+async def load_current_process_configs(session: AsyncSession) -> dict[str, JsonObject]:
+    """Read current process rows, preserving literal prefixes and parse errors.
+
+    Args:
+        session: Database session to read from, including any held write fence.
+
+    Returns:
+        Current process configurations keyed by process name.
+    """
+    result = await list_current_process_settings(session)
+    return {
+        row.key.removeprefix(PROCESS_CONFIG_PREFIX): parse_process_config(row) for row in result
+    }
+
+
+async def read_current_process_configs(repository: Repository) -> dict[str, JsonObject]:
+    """Read the strict current catalogue in a dedicated read session.
+
+    Args:
+        repository: Repository holding the persisted process configurations.
+
+    Returns:
+        Current process configurations keyed by process name.
+    """
+    async with repository.session() as session:
+        return await load_current_process_configs(session)
 
 
 def resolve_lifecycle(
@@ -283,14 +340,17 @@ async def get_process_configs(settings: AppSettings) -> list[ProcessConfigModel]
     registry = get_registered_processes()
     async with repository.session() as session:
         result = await session.execute(
-            select(Setting).where(Setting.key.like("process_%"), *where_active_now(Setting))
+            select(Setting).where(
+                func.substr(Setting.key, 1, len(PROCESS_CONFIG_PREFIX)) == PROCESS_CONFIG_PREFIX,
+                *where_active_now(Setting),
+            )
         )
         settings_rows = result.scalars().all()
         configs: list[ProcessConfigModel] = []
         for setting in settings_rows:
             try:
                 config_dict = json.loads(setting.value)
-                process_name = setting.key.replace("process_", "")
+                process_name = setting.key.removeprefix(PROCESS_CONFIG_PREFIX)
                 entry = registry.get(process_name)
                 config = build_process_config_from_dict(process_name, config_dict, entry)
                 configs.append(config)

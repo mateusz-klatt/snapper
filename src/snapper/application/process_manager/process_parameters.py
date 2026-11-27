@@ -14,12 +14,15 @@ parameters externally, then instantiates via keyword unpacking.
 
 from datetime import date
 from datetime import datetime
+from typing import Self
 
 from pydantic import Field
 from pydantic import model_validator
 
 from snapper.api.schemas.base import StrictBody
 from snapper.core.json_types import JsonObject
+from snapper.core.strategy_order_cap import OrderBaseQuantityCap
+from snapper.core.strategy_order_cap import validate_strategy_order_cap
 from snapper.core.types import ExchangeEnum
 from snapper.core.types import OrderExchange
 
@@ -351,6 +354,7 @@ class StrategyProcessParameters(StrictBody):
             runtime-created strategy configs should pass a real wallet id.
         operator_public_id: Trading-identity operator that owns this
             strategy instance. Empty default.
+        max_order_base_qty: Maximum base-asset quantity per live order.
     """
 
     name: str
@@ -360,3 +364,10 @@ class StrategyProcessParameters(StrictBody):
     params: JsonObject | None = None
     wallet_public_id: str = ""
     operator_public_id: str = ""
+    max_order_base_qty: OrderBaseQuantityCap | None = None
+
+    @model_validator(mode="after")
+    def _require_live_order_cap(self) -> Self:
+        """Require the cap before a live strategy can be configured or launched."""
+        validate_strategy_order_cap(self.exchange, self.max_order_base_qty)
+        return self

@@ -212,6 +212,21 @@ def reference_identity_params_for_registry_name(registry_name: str | None) -> Ma
     return dict(entry.reference_identity_params) if entry is not None else {}
 
 
+def strategy_registry_name(name: str, template: object) -> str:
+    """Choose the same registry key as managed class import.
+
+    Args:
+        name: Persisted process name.
+        template: Optional raw source template name.
+
+    Returns:
+        The registry key used to resolve strategy metadata.
+    """
+    if name not in get_registered_processes() and isinstance(template, str) and template:
+        return template
+    return name
+
+
 def _copy_string_keyed_parameters(raw_parameters: object) -> dict[str, object] | None:
     """Return a string-keyed parameter copy when ``raw_parameters`` is a dict."""
     if not isinstance(raw_parameters, dict):
@@ -258,8 +273,9 @@ def classify_strategy_process(
     raw_role_present = raw_role is not None and raw_role != ""
     if raw_role_present and row_role is None and has_strategy_parameter_shape(raw_parameters):
         raise StrategyScopeError("invalid persisted process role for strategy launch")
-    registry_role: ProcessRoleEnum | None = None
-    if isinstance(class_path, str) and class_path:
+    entry = get_registered_processes().get(registry_name) if registry_name else None
+    registry_role = entry.role if entry is not None else None
+    if registry_role is None and isinstance(class_path, str) and class_path:
         registry_role = resolve_role_for_class_path(class_path)
     treat_as_strategy = (
         row_role is ProcessRoleEnum.STRATEGY or registry_role is ProcessRoleEnum.STRATEGY

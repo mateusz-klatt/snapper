@@ -158,7 +158,9 @@ def _mock_update_repository(
         return repository
 
     monkeypatch.setattr(registry_syncer_module, "get_repository", _get_repository)
-    monkeypatch.setattr(registry_syncer_module, "begin_scd2_write", _fake_begin_scd2_write)
+    monkeypatch.setattr(
+        registry_syncer_module, "begin_process_config_write", _fake_begin_scd2_write
+    )
     monkeypatch.setattr(registry_syncer_module, "upsert_scd2", _fake_upsert_scd2)
     return syncer, recorded_write
 

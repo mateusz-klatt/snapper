@@ -616,6 +616,17 @@ class TestSettingsService:
         assert all("plain-secret" not in msg for msg in sensitive_updates)
         assert any("gAAAA" in msg for msg in sensitive_updates)
 
+    async def test_update_setting_rejects_process_namespace(self) -> None:
+        """Update setting rejects process namespace.
+
+        Given: A process key.
+        When: Written through settings.
+        Then: It is rejected.
+        """
+        service = SettingsService("sqlite+aiosqlite:///:memory:", "inproc://settings")
+        with pytest.raises(ValueError, match="process configuration"):
+            await service.update_setting("process_strategy", {})
+
     @pytest.mark.asyncio
     async def test_update_setting_integration(self, init_db: None) -> None:
         """Verify update_setting persists and retrieves correctly.

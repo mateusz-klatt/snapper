@@ -49,6 +49,28 @@ continues to authorize only non-strategy process targets. Scope configuration
 and launch also validate operator membership, wallet grants, and live-output
 coverage.
 
+## Live order quantity cap
+
+Set `parameters.max_order_base_qty` to a positive finite JSON number in base-asset
+units. Each enabled live strategy must own its wallet, exchange and output
+instrument combination exclusively. Paper strategies may omit the cap.
+
+The trading engine reads the persisted cap for each live signal. It floors the
+combined order quantity to the venue lot and refuses quantities above the cap.
+A quantity equal to the cap is allowed. The same rule applies to openings,
+flips and ordinary closes. Repeated orders can accumulate wallet exposure
+beyond this per-order limit.
+
+If a full close would exceed the cap, the strategy can submit individual
+under-cap reductions. An operator can close the position manually, or an
+independently authorized protective exit can close it under its existing rules.
+
+Before rollout, inventory and pause existing live strategy configs. Backfill
+each cap through the strategy scope editor and reconcile outstanding orders
+and commands submitted before the cap was deployed. Enable each live strategy
+after its cap and wallet scope are valid. A live configuration without a valid
+cap cannot be enabled or started.
+
 ## Creating Strategies
 
 ### Basic Structure

@@ -6,6 +6,7 @@ ones with current metadata.
 """
 
 import json
+from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
@@ -18,6 +19,7 @@ from uuid import uuid7
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from snapper.application.process_manager.delegate_config_guard import (
     validate_delegate_config_references,
@@ -25,6 +27,7 @@ from snapper.application.process_manager.delegate_config_guard import (
 from snapper.application.process_manager.models import ProcessRegistryEntry
 from snapper.application.process_manager.models import RegisterableProcess
 from snapper.application.process_manager.registry import get_registered_processes
+from snapper.application.process_manager.strategy_admission import validate_process_config_write
 from snapper.config.settings import AppSettings
 from snapper.core.json_types import JsonObject
 from snapper.core.types import ProcessLifecycleEnum
@@ -34,7 +37,7 @@ from snapper.data.models import Setting
 from snapper.data.models import is_open_ended_version
 from snapper.data.repository import Repository
 from snapper.data.repository import Scd2UpsertSpec
-from snapper.data.repository import begin_scd2_write
+from snapper.data.repository import begin_process_config_write
 from snapper.data.repository import get_repository
 from snapper.data.repository import upsert_scd2
 from snapper.data.repository import where_active_now
@@ -42,6 +45,25 @@ from snapper.messaging.infrastructure.publisher import SequenceTracker
 
 _SETTINGS_TOPIC = "settings"
 _MAX_CONFIG_UPDATE_ATTEMPTS = 3
+
+
+def _validate_write(
+    repository: Repository,
+    session: AsyncSession,
+    name: str,
+    decide: Callable[[Setting | None], Mapping[str, object] | None],
+) -> Callable[[Setting | None], Awaitable[Mapping[str, object] | None]]:
+    """Check the exact candidate version before SCD2 flushes it."""
+
+    async def validate(existing: Setting | None) -> Mapping[str, object] | None:
+        """Apply process-cap and ownership validation after the row lock."""
+        candidate = decide(existing)
+        if candidate is not None:
+            config = cast(JsonObject, json.loads(cast(str, candidate["value"])))
+            await validate_process_config_write(repository, session, name, config)
+        return candidate
+
+    return validate
 
 
 def _seeded_identity_params_for_registry_name(registry_name: str) -> tuple[str, ...]:
@@ -181,7 +203,7 @@ class ProcessRegistrySyncer:
             }
 
         async with repository.session() as session:
-            await begin_scd2_write(session)
+            await begin_process_config_write(session)
             result = await upsert_scd2(
                 session,
                 Scd2UpsertSpec(
@@ -189,6 +211,7 @@ class ProcessRegistrySyncer:
                     match_filters=[Setting.key == f"process_{name}"],
                     bus_time=now,
                     decide=_decide_create,
+                    decide_async=_validate_write(repository, session, name, _decide_create),
                 ),
             )
             if result.outcome != "unchanged":
@@ -321,11 +344,12 @@ class ProcessRegistrySyncer:
 
     @staticmethod
     async def _upsert_existing_setting_with_lock_wake(
-        session: Any,
+        session: AsyncSession,
         config_key: str,
         decide: Callable[[Setting | None], Mapping[str, object] | None],
         *,
         return_if_deleted: bool,
+        decide_async: Callable[[Setting | None], Awaitable[Mapping[str, object] | None]] | None,
     ) -> str | None:
         """Run active-only ``upsert_scd2`` with bounded lock-wake recovery on ``KeyError``."""
         bus_time = datetime.now(UTC)
@@ -340,6 +364,7 @@ class ProcessRegistrySyncer:
                         bus_time=bus_time,
                         decide=decide,
                         active_only=True,
+                        decide_async=decide_async,
                     ),
                 )
                 return result.outcome
@@ -398,12 +423,13 @@ class ProcessRegistrySyncer:
             }
 
         async with repository.session() as update_session:
-            await begin_scd2_write(update_session)
+            await begin_process_config_write(update_session)
             outcome = await self._upsert_existing_setting_with_lock_wake(
                 update_session,
                 config_key,
                 _decide_sync,
                 return_if_deleted=True,
+                decide_async=_validate_write(repository, update_session, name, _decide_sync),
             )
             if outcome is not None and outcome != "unchanged":
                 await update_session.commit()
@@ -518,7 +544,7 @@ class ProcessRegistrySyncer:
             }
 
         async with repository.session() as session:
-            await begin_scd2_write(session)
+            await begin_process_config_write(session)
             await upsert_scd2(
                 session,
                 Scd2UpsertSpec(
@@ -526,6 +552,7 @@ class ProcessRegistrySyncer:
                     match_filters=[Setting.key == config_key],
                     bus_time=now,
                     decide=_decide_create,
+                    decide_async=_validate_write(repository, session, name, _decide_create),
                 ),
             )
             await session.commit()
@@ -536,6 +563,7 @@ class ProcessRegistrySyncer:
         name: str,
         updated_by: str,
         mutate: Callable[[dict[str, Any]], None],
+        validate: bool = True,
     ) -> dict[str, Any]:
         """Apply an in-place JSON mutation to an existing process config with lock-wake recovery.
 
@@ -570,12 +598,15 @@ class ProcessRegistrySyncer:
             }
 
         async with repository.session() as session:
-            await begin_scd2_write(session)
+            await begin_process_config_write(session)
             await self._upsert_existing_setting_with_lock_wake(
                 session,
                 config_key,
                 _decide_mutate,
                 return_if_deleted=False,
+                decide_async=(
+                    _validate_write(repository, session, name, _decide_mutate) if validate else None
+                ),
             )
             await session.commit()
             return persisted_config
@@ -627,6 +658,7 @@ class ProcessRegistrySyncer:
             name=name,
             updated_by=updated_by,
             mutate=_apply_desired_state,
+            validate=enabled is not False or restart_nonce is not None,
         )
 
     async def update_process_config_parameters(
