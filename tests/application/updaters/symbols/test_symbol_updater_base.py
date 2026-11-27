@@ -566,7 +566,13 @@ async def test_catalog_pool_initialization_matches_venue_transport(
     updater_factory: Callable[[int, bool], DummySymbolUpdater],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Initialize before pool-aware catalog calls and leave other sessions alone."""
+    """Initialize before pool-aware catalog calls and leave other sessions alone.
+
+    Given: An updater for a venue with pooled or non-pooled catalog transport,
+    When: The symbol update starts,
+    Then: Only pooled venues initialize egress before the client connects, and
+        each client is disconnected after the update.
+    """
     updater = updater_factory(1, True)
     client = DummyExchangeClient([])
     client.exchange_name = exchange

@@ -114,7 +114,12 @@ from snapper.utils.logging import _FILE_SINK_READY
 async def test_kraken_start_pauses_connect_timeout_after_route_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A route lost during startup pauses both the dial and recovery timers."""
+    """A route lost during startup pauses both the dial and recovery timers.
+
+    Given: A public Kraken client starting within an enclosing recovery timeout,
+    When: The SDK child loses its VPN before dialing and later obtains a route,
+    Then: Both timers pause during refusal and resume when the SDK dials through SOCKS.
+    """
     proxy = "socks5h://egress:1081"
     pool = EgressPool(
         EgressPoolConfig(
@@ -4186,7 +4191,13 @@ def _make_public_sdk_connector(
 async def test_sdk_public_vpn_refusals_reconnect_without_charging_restart_budgets(
     exchange: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Drive the actual SDK start, child refusal, retry and recovered SOCKS connection."""
+    """Drive the actual SDK start, child refusal, retry and recovered SOCKS connection.
+
+    Given: A Kraken public SDK connector with every eligible VPN quarantined,
+    When: The SDK retries past its normal limit and a VPN becomes available,
+    Then: Refusals consume neither SDK reconnect budget nor publisher attempts,
+        and the first dial uses the recovered SOCKS route.
+    """
     apply_kraken_retry_after_honoring()
     apply_kraken_futures_pool_routing()
     pool = _configure_kraken_test_pool()
@@ -4245,7 +4256,12 @@ async def test_sdk_public_vpn_refusals_reconnect_without_charging_restart_budget
 async def test_public_sdk_budget_exhaustion_after_a_vpn_is_reserved_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A healthy VPN admission still reaches the SDK's reconnect ceiling."""
+    """A healthy VPN admission still reaches the SDK's reconnect ceiling.
+
+    Given: A Spot connector one attempt below its reconnect ceiling and a healthy VPN,
+    When: Recovery reserves the VPN,
+    Then: MaxReconnectError propagates before dialing and the reservation is released.
+    """
     apply_kraken_retry_after_honoring()
     pool = _configure_kraken_test_pool()
     connector = ConnectSpotWebsocket(MagicMock(spec=SpotWSClient), "wss://example.com", AsyncMock())
@@ -4269,7 +4285,13 @@ async def test_public_sdk_budget_exhaustion_after_a_vpn_is_reserved_propagates(
 async def test_sdk_public_reconnect_recovers_after_startup_preflight_quarantine(
     exchange: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The real SDK loop waits for a startup deadline and dials the recovered VPN."""
+    """The real SDK loop waits for a startup deadline and dials the recovered VPN.
+
+    Given: A SOCKS listener that refuses preflight and is quarantined for 30 seconds,
+    When: A Kraken public connector starts and the quarantine expires,
+    Then: The same pool supplies the first SOCKS dial after the 30-second wait
+        and the connector finishes without a terminal error.
+    """
     apply_kraken_retry_after_honoring()
     apply_kraken_futures_pool_routing()
     start = datetime(2026, 11, 27, tzinfo=UTC)
@@ -4334,7 +4356,12 @@ async def test_sdk_public_reconnect_recovers_after_startup_preflight_quarantine(
 def test_public_ws_without_a_configured_pool_refuses_before_dial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A disabled or missing public pool cannot fall through to the SDK dial."""
+    """A disabled or missing public pool cannot fall through to the SDK dial.
+
+    Given: No configured pool and the default public policy,
+    When: The wrapped SDK attempts a public WebSocket connection,
+    Then: AllRoutesQuarantinedError propagates before the dial factory is called.
+    """
     monkeypatch.setattr(kraken_sdk_patches, "get_egress_pool", lambda: None)
     dial = MagicMock()
     shim = _wrap_connect_factory(dial)
@@ -4344,7 +4371,12 @@ def test_public_ws_without_a_configured_pool_refuses_before_dial(
 
 
 async def test_public_dev_ws_dials_direct_and_quarantines_only_the_dev_route() -> None:
-    """An opted-in public direct connect failure leaves executor routes usable."""
+    """An opted-in public direct connect failure leaves executor routes usable.
+
+    Given: Explicit dev opt-in and a separate direct route for private traffic,
+    When: The public WebSocket dials direct and the socket refuses the connection,
+    Then: Only the dev public route is quarantined and its reservation is released.
+    """
     config = EgressPoolConfig(enabled=True, routes=[RouteConfig(id="default", kind="direct")])
     pool = configure_egress_pool(config, public_direct_allowed=True)
     assert pool is not None

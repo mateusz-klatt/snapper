@@ -293,7 +293,16 @@ _PUBLIC_DIAL_ATTEMPT: contextvars.ContextVar[Callable[[], None] | None] = contex
 async def start_kraken_ws(
     start: Callable[[], Awaitable[None]], *, exchange: str, timeout_s: float
 ) -> None:
-    """Bound SDK startup without charging time spent waiting for public egress."""
+    """Bound SDK startup without charging time spent waiting for public egress.
+
+    Args:
+        start: Callable that starts the SDK WebSocket client when awaited.
+        exchange: Default exchange tag when no egress identity overrides it.
+        timeout_s: Startup time budget in seconds, excluding public route waits.
+
+    Raises:
+        TimeoutError: The SDK startup exceeds the active time budget.
+    """
     exchange, traffic_class = resolve_egress_traffic(exchange)
     if traffic_class == "private":
         async with asyncio.timeout(timeout_s):

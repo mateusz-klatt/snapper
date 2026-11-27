@@ -632,7 +632,12 @@ class TestWalutomatPublisherPattern:
 async def test_public_httpx_refusal_never_builds_a_direct_transport(
     state: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The transport factory is never invoked when public VPN egress is absent."""
+    """The transport factory is never invoked when public VPN egress is absent.
+
+    Given: An absent, empty, or direct-only egress pool,
+    When: The pooled HTTP transport receives a public ticker request,
+    Then: It raises AllRoutesQuarantinedError before the transport factory is called.
+    """
     pool: EgressPool | None = None
     if state == "empty":
         pool = EgressPool(EgressPoolConfig())

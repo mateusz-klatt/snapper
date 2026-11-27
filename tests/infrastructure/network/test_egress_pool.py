@@ -1130,7 +1130,12 @@ class TestReserveAllQuarantined:
 
 @pytest.mark.parametrize("reset", [False, True])
 def test_empty_public_policy_replacement_discards_wait_state(reset: bool) -> None:
-    """Reset and disabled initialization both install an empty pool with fresh state."""
+    """Reset and disabled initialization both install an empty pool with fresh state.
+
+    Given: An unpooled public policy with an active Kraken wait episode,
+    When: The pool is reset or initialized with the dev opt-in disabled,
+    Then: The replacement policy is a fresh pool with no recorded wait episode.
+    """
     reset_egress_pool()
     old = public_egress_pool(None)
     assert not old.has_available(exchange="kraken", record_wait=True)
@@ -2331,7 +2336,14 @@ class TestInitializeEgressPool:
 
 @pytest.mark.parametrize("check_availability", [False, True])
 def test_dev_direct_warns_again_after_a_public_vpn_recovers(check_availability: bool) -> None:
-    """Prefer the usable public VPN and warn at each new per-exchange fallback."""
+    """Prefer the usable public VPN and warn at each new per-exchange fallback.
+
+    Given: A pool with dev direct enabled and an initially usable public VPN,
+    When: Kraken and Walutomat fall back during quarantine, the VPN briefly
+        recovers, and Kraken falls back again,
+    Then: Each exchange warns once per fallback episode, and Kraken warns again
+        after the VPN recovery.
+    """
     pool = EgressPool(TestPrivateTrafficSelection._private_config(), public_direct_allowed=True)
     deadline = datetime.now(UTC) + timedelta(seconds=90)
     messages: list[str] = []
@@ -2362,7 +2374,14 @@ def test_dev_direct_warns_again_after_a_public_vpn_recovers(check_availability: 
 
 
 def test_dev_direct_has_separate_state_from_configured_private_routes() -> None:
-    """A dev direct failure cannot quarantine a configured direct route."""
+    """A dev direct failure cannot quarantine a configured direct route.
+
+    Given: Dev direct is enabled and a configured private route uses the preferred
+        ID of the dev public route,
+    When: A public reservation is quarantined,
+    Then: The separately named public route is unavailable and the configured
+        private direct route remains usable without a release deadline.
+    """
     config = EgressPoolConfig(
         enabled=True,
         private_fallback_route_id="public-dev-direct",
@@ -2384,7 +2403,13 @@ def test_dev_direct_has_separate_state_from_configured_private_routes() -> None:
 
 
 def test_configuring_then_clearing_pool_preserves_dev_direct_opt_in() -> None:
-    """Pool reconfiguration retains the explicit process policy until it is overridden."""
+    """Pool reconfiguration retains the explicit process policy until it is overridden.
+
+    Given: A configured pool with the dev direct opt-in enabled,
+    When: The pool is reconfigured and then cleared without a policy override,
+    Then: Public requests can still reserve the unpooled dev route until an
+        explicit override disables it.
+    """
     config = _two_route_config()
     assert configure_egress_pool(config, public_direct_allowed=True) is not None
     unpooled = public_egress_pool(None)
@@ -2410,7 +2435,13 @@ def test_configuring_then_clearing_pool_preserves_dev_direct_opt_in() -> None:
 async def test_maintenance_loads_startup_pool_or_reuses_existing_pool(
     already_configured: bool, supplied_service: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A standalone job loads settings and an API job preserves its pool identity."""
+    """A standalone job loads settings and an API job preserves its pool identity.
+
+    Given: A maintenance job with or without an installed pool and supplied settings,
+    When: The job asks for a pool,
+    Then: It reuses the existing pool or initializes one with the supplied or
+        newly loaded settings service.
+    """
     existing = configure_egress_pool(_two_route_config()) if already_configured else None
     settings = MagicMock(db_url="sqlite://", zmq_broker_xsub="tcp://broker:5555")
     service = MagicMock()
@@ -2434,7 +2465,12 @@ async def test_maintenance_loads_startup_pool_or_reuses_existing_pool(
 
 @pytest.mark.parametrize("raw", [None, "{broken", {"enabled": True, "routes": []}])
 async def test_invalid_or_absent_pool_config_clears_installed_pool(raw: object) -> None:
-    """Any early refusal to install a new config clears the old routes."""
+    """Any early refusal to install a new config clears the old routes.
+
+    Given: An installed pool and a missing or invalid replacement setting,
+    When: Pool initialization reads the replacement,
+    Then: It returns None and clears the previously installed pool.
+    """
     assert configure_egress_pool(_two_route_config()) is not None
     settings = MagicMock()
     settings.get_setting.return_value = raw

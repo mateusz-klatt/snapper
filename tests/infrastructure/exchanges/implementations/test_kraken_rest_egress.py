@@ -294,7 +294,13 @@ def test_public_rest_routes_through_pool_vpn_and_restores_proxy_state() -> None:
 
 
 def test_public_rest_refusal_never_dispatches_a_direct_request() -> None:
-    """A public REST read refuses before touching the request or proxy state."""
+    """A public REST read refuses before touching the request or proxy state.
+
+    Given: A configured direct route and quarantined VPN routes,
+    When: A public Kraken ticker request tries to reserve a route,
+    Then: The request raises before dispatch, the proxy state stays empty,
+        and the direct route stays unselected.
+    """
     pool = configure_egress_pool(_private_fallback_config())
     assert pool is not None
     deadline = datetime.now(UTC) + timedelta(minutes=2)
@@ -451,7 +457,12 @@ def test_private_identity_public_rest_read_runs_direct_without_pool_reservation(
 
 
 def test_public_rest_without_pool_refuses_before_dispatch() -> None:
-    """Unconfigured public REST stays closed and leaves the existing proxy state alone."""
+    """Unconfigured public REST stays closed and leaves the existing proxy state alone.
+
+    Given: No installed pool and a client with existing session proxies,
+    When: A public Kraken ticker request tries to reserve a route,
+    Then: The request raises before dispatch and preserves the session proxies.
+    """
     client = _FakeCcxtClient()
     sync_call = MagicMock()
     client.session.proxies.update({"http": "http://before", "https": "http://before"})

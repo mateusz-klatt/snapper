@@ -7830,7 +7830,12 @@ def test_transition_logs_are_rate_limited_per_symbol_and_report_suppression(
 async def test_walutomat_market_and_signed_requests_use_distinct_egress_classes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The public quote and authenticated balance requests use their respective routes."""
+    """The public quote and authenticated balance requests use their respective routes.
+
+    Given: A pool with direct and VPN routes and a Walutomat client with credentials,
+    When: The client fetches the market quote and then reads signed balances,
+    Then: The market request uses the SOCKS proxy and the balance request goes direct.
+    """
     reset_egress_pool()
     configure_egress_pool(
         EgressPoolConfig(
@@ -7871,7 +7876,12 @@ async def test_walutomat_market_and_signed_requests_use_distinct_egress_classes(
 async def test_walutomat_connect_preserves_public_route_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A public VPN refusal closes the HTTP client and retains the typed exception."""
+    """A public VPN refusal closes the HTTP client and retains the typed exception.
+
+    Given: A Walutomat startup market request that raises AllRoutesQuarantinedError,
+    When: The client connects,
+    Then: The typed refusal propagates and the partially initialized HTTP client closes.
+    """
     client = WalutomatExchangeClient()
     http_client = MagicMock(aclose=AsyncMock())
     monkeypatch.setattr(httpx, "AsyncClient", MagicMock(return_value=http_client))
@@ -7892,7 +7902,13 @@ async def test_walutomat_connect_preserves_public_route_refusal(
 async def test_walutomat_polls_again_after_waiting_for_public_vpn(
     deadline: float | None, expected: float, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Unavailable VPNs defer the next poll without increasing HTTP error counts."""
+    """Unavailable VPNs defer the next poll without increasing HTTP error counts.
+
+    Given: A Walutomat poll refused by public egress, with or without a release deadline,
+    When: The polling loop handles the refusal,
+    Then: It sleeps using the public pool's deadline with the polling interval as
+        its floor and leaves the HTTP error count unchanged.
+    """
     client = WalutomatExchangeClient(polling_interval=10.0)
     client._running = True
     pool = MagicMock(spec=EgressPool)

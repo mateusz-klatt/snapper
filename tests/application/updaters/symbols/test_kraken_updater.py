@@ -468,7 +468,13 @@ async def test_load_kraken_rest_symbols_handles_tokenized(monkeypatch: pytest.Mo
 async def test_catalog_rest_dispatch_uses_vpn_and_never_direct(
     scenario: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The router supplies the proxy at dispatch and refusal sends no requests."""
+    """The router supplies the proxy at dispatch and refusal sends no requests.
+
+    Given: A healthy or quarantined VPN, with cached markets in one scenario,
+    When: The Spot updater loads regular and tokenized symbols,
+    Then: Remote calls use the VPN, cached markets skip the regular fetch, and
+        exhaustion leaves both calls undispatched.
+    """
     proxy = "socks5h://egress:1081"
     pool = EgressPool(
         EgressPoolConfig(

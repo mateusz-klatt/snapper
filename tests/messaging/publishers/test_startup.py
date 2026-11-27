@@ -23,7 +23,13 @@ from snapper.messaging.publishers import startup
 async def test_publisher_startup_retries_public_refusal_in_process(
     deadline: float | None, expected: float, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A typed refusal waits and retries the same client without a process exit."""
+    """A typed refusal waits and retries the same client without a process exit.
+
+    Given: A publisher's first public connect attempt raises AllRoutesQuarantinedError,
+    When: The startup helper handles the refusal,
+    Then: It waits for the public release deadline with a one-second floor and
+        retries the same client in process.
+    """
     client = MagicMock(spec=ExchangeClientBase)
     client.exchange_name = "kraken_futures"
     client.connect.side_effect = [AllRoutesQuarantinedError("no VPN"), None]
@@ -47,7 +53,12 @@ async def test_publisher_startup_retries_public_refusal_in_process(
 
 
 async def test_publisher_startup_keeps_private_refusal_outside_public_wait() -> None:
-    """A private policy refusal retains its existing propagation behavior."""
+    """A private policy refusal retains its existing propagation behavior.
+
+    Given: A connection attempt scoped to private traffic that raises a route refusal,
+    When: The startup helper handles the refusal,
+    Then: The original exception propagates without a public egress retry.
+    """
     client = MagicMock(spec=ExchangeClientBase)
     client.exchange_name = "kraken"
     client.connect.side_effect = AllRoutesQuarantinedError("no VPN")
@@ -63,7 +74,12 @@ async def test_publisher_startup_keeps_private_refusal_outside_public_wait() -> 
 async def test_equities_feed_waits_through_preflight_quarantine_and_starts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same client waits thirty seconds and opens one WS with no teardown."""
+    """The same client waits thirty seconds and opens one WS with no teardown.
+
+    Given: An Equities client starting with its only public VPN in preflight quarantine,
+    When: Connection startup waits for the 30-second quarantine to expire,
+    Then: The SDK is created and started once after release, without a teardown.
+    """
     initial = datetime(2026, 11, 27, tzinfo=UTC)
     clock = MagicMock(wraps=datetime)
     clock.now.return_value = initial

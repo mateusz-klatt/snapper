@@ -240,7 +240,15 @@ class MarketSnapshotUpdaterService(ABC):
 async def run_public_snapshot_with_egress(
     exchange: str, update: Callable[[], Awaitable[None]]
 ) -> None:
-    """Run a one-shot snapshot with the process-local public egress policy."""
+    """Run a one-shot snapshot with the process-local public egress policy.
+
+    Args:
+        exchange: Venue tag for the public route check and snapshot egress identity.
+        update: Callable that collects and persists the snapshot when awaited.
+
+    Raises:
+        AllRoutesQuarantinedError: No public route is available for the snapshot.
+    """
     settings = get_settings()
     service = await get_settings_service(settings.db_url, settings.zmq_broker_xsub)
     try:

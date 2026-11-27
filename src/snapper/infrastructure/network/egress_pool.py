@@ -190,6 +190,16 @@ class EgressPool(EgressPoolBase):
         dev fallback. Actual public waiters can opt in to recording wait
         transitions for the named exchange.
         Private availability follows the direct and private fallback policy.
+
+        Args:
+            exchange: Exchange whose wait state can be updated, or None to
+                leave all wait episodes untouched.
+            traffic_class: Use the private policy for ``"private"`` and the
+                public policy for any other value.
+            record_wait: Record transitions for the named public exchange.
+
+        Returns:
+            Whether a route is currently available under the requested policy.
         """
         now = datetime.now(UTC)
         with self._locked_with_warnings() as warnings:
@@ -210,7 +220,14 @@ class EgressPool(EgressPoolBase):
             return available
 
     def is_waiting_for_public_vpn(self, exchange: str) -> bool:
-        """Report whether the exchange has an outstanding public VPN wait episode."""
+        """Report whether the exchange has an outstanding public VPN wait episode.
+
+        Args:
+            exchange: Exchange whose recorded wait state to check.
+
+        Returns:
+            Whether a wait has been recorded and has yet to be marked complete.
+        """
         with self._lock:
             return exchange in self._public_wait_started
 
@@ -1024,7 +1041,14 @@ def initialize_public_egress_policy(
 
 
 def public_egress_pool(pool: EgressPool | None) -> EgressPool:
-    """Resolve the configured pool or the process's unpooled public policy."""
+    """Resolve the configured pool or the process's unpooled public policy.
+
+    Args:
+        pool: Configured process pool, or None if no pool is installed.
+
+    Returns:
+        The supplied pool or the process's unpooled public policy.
+    """
     return pool if pool is not None else _UNPOOLED_PUBLIC_HOLDER[0]
 
 
@@ -1035,7 +1059,17 @@ _PUBLIC_EGRESS_TIMEOUT_UPDATE: contextvars.ContextVar[Callable[[bool], None] | N
 
 @asynccontextmanager
 async def public_egress_timeout(timeout_s: float) -> AsyncIterator[None]:
-    """Bound network work while leaving public route waits outside its budget."""
+    """Bound network work while leaving public route waits outside its budget.
+
+    Args:
+        timeout_s: Time budget in seconds, paused during reported public route waits.
+
+    Yields:
+        None while the timeout and its route-availability callback are installed.
+
+    Raises:
+        TimeoutError: The active time budget expires before the operation completes.
+    """
     clock = asyncio.get_running_loop().time
     remaining = timeout_s
     parent_update = _PUBLIC_EGRESS_TIMEOUT_UPDATE.get()
@@ -1065,14 +1099,25 @@ async def public_egress_timeout(timeout_s: float) -> AsyncIterator[None]:
 
 
 def report_public_route_availability(available: bool) -> None:
-    """Pause or resume timeouts in the task that owns this public operation."""
+    """Pause or resume timeouts in the task that owns this public operation.
+
+    Args:
+        available: True to resume the time budget, or False to pause it.
+    """
     update = _PUBLIC_EGRESS_TIMEOUT_UPDATE.get()
     if update is not None:
         update(available)
 
 
 async def wait_for_public_route(exchange: str) -> None:
-    """Wait until public traffic for this exchange can reserve an egress route."""
+    """Wait until public traffic for this exchange can reserve an egress route.
+
+    Args:
+        exchange: Exchange used to scope wait tracking and quarantine release checks.
+
+    Raises:
+        asyncio.CancelledError: The caller cancels the wait.
+    """
     while True:
         pool = public_egress_pool(get_egress_pool())
         if pool.has_available(exchange=exchange, traffic_class="public", record_wait=True):
@@ -1184,7 +1229,15 @@ async def initialize_egress_pool(
 
 
 def load_egress_pool_config(settings_service: SettingsService) -> EgressPoolConfig | None:
-    """Read and validate the cached routing settings without installing a pool."""
+    """Read and validate the cached routing settings without installing a pool.
+
+    Args:
+        settings_service: Service holding the cached ``egress_pool`` setting.
+
+    Returns:
+        The validated configuration, including a valid disabled configuration,
+        or None if the setting is absent or invalid.
+    """
     raw = settings_service.get_setting("egress_pool")
     if raw is None:
         logger.info("egress_pool: setting not present — disabled")
@@ -1231,6 +1284,11 @@ async def ensure_maintenance_egress_pool(
     API-managed jobs reuse the process pool so its reservation and quarantine
     state carries across maintenance calls. A standalone job loads the same
     database settings and preflight as the snapshot CLIs.
+
+    Args:
+        settings: Application settings supplying the database URL and broker
+            endpoint if a settings service must be loaded.
+        settings_service: Optional initialized settings service to use directly.
     """
     if get_egress_pool() is not None:
         return

@@ -1775,7 +1775,12 @@ async def test_maybe_init_egress_pool_when_disabled(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.asyncio
 async def test_feed_loads_dev_direct_policy_with_vpn_pool_gate_off() -> None:
-    """The standalone opt-in takes effect in a feed without VPN initialization."""
+    """The standalone opt-in takes effect in a feed without VPN initialization.
+
+    Given: A publisher with VPN initialization disabled and explicit dev direct opt-in,
+    When: The publisher initializes its egress policy,
+    Then: It can reserve the unpooled dev direct route for public traffic.
+    """
     pub = DummyPublisher(symbols=["BTC-USD"])
     pub.settings = SimpleNamespace(feed_egress_enabled=False)
     service = MagicMock()
@@ -2006,7 +2011,14 @@ async def test_dark_feed_exits_when_ceiling_exceeded(
 def test_dark_feed_ceiling_respects_public_egress_wait(
     vpn_available: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only an actual VPN wait suppresses exit and defers recovery on release."""
+    """Only an actual VPN wait suppresses exit and defers recovery on release.
+
+    Given: A publisher silent past the exit ceiling, with an available VPN or
+        a recorded wait for a quarantined VPN,
+    When: The watchdog checks liveness, including after quarantine release,
+    Then: An available VPN without a wait triggers a fatal error, while the wait
+        suppresses recovery and exit without advancing the message watermark.
+    """
     publisher = DummyPublisher(symbols=["BTC-USD"])
     exchange = publisher._get_exchange_name()
     publisher._last_message_at = 0.0

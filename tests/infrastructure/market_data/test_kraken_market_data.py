@@ -33,14 +33,24 @@ def test_service_initialization() -> None:
 
 
 def test_run_snapshot_update_integration() -> None:
-    """The command starts its one-shot updater in the public egress wrapper."""
+    """The command starts its one-shot updater in the public egress wrapper.
+
+    Given: The Kraken snapshot command and a mocked public egress wrapper,
+    When: The command runs,
+    Then: It awaits the wrapper with the Kraken venue and its snapshot coroutine.
+    """
     with patch("snapper.infrastructure.market_data.kraken.run_public_snapshot_with_egress") as run:
         run_snapshot_update()
     run.assert_awaited_once_with("kraken", _async_update_snapshots)
 
 
 def test_run_snapshot_update_handles_exceptions() -> None:
-    """The command propagates the wrapper's failure to the CLI error boundary."""
+    """The command propagates the wrapper's failure to the CLI error boundary.
+
+    Given: A public egress wrapper that raises a WebSocket connection error,
+    When: The Kraken snapshot command runs,
+    Then: The same error propagates out of the command.
+    """
     with (
         patch(
             "snapper.infrastructure.market_data.kraken.run_public_snapshot_with_egress",

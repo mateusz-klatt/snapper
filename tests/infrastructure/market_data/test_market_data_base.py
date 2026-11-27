@@ -885,7 +885,13 @@ def test_persist_snapshots_scd2_sorts_locks_by_instrument_and_timestamp() -> Non
 async def test_one_shot_snapshot_initializes_public_pool_and_refuses_without_vpn(
     vpn_available: bool | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A new run container loads the pool before any public snapshot work."""
+    """A new run container loads the pool before any public snapshot work.
+
+    Given: A fresh snapshot run with an absent, unavailable, or healthy public pool,
+    When: The Equities snapshot wrapper initializes egress,
+    Then: Collection runs only with an available route under the public venue
+        identity, and every run resets the pool and shuts down settings.
+    """
     service = MagicMock(shutdown=AsyncMock())
     monkeypatch.setattr(market_data_base, "get_settings_service", AsyncMock(return_value=service))
     pool = MagicMock(spec=EgressPool) if vpn_available is not None else None
@@ -916,7 +922,12 @@ async def test_one_shot_snapshot_initializes_public_pool_and_refuses_without_vpn
 async def test_one_shot_snapshot_honors_explicit_dev_direct_without_vpn_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One-shot collection can reserve direct with the standalone opt-in."""
+    """One-shot collection can reserve direct with the standalone opt-in.
+
+    Given: A fresh Kraken snapshot run without a configured pool and with dev opt-in,
+    When: The wrapper runs the collection coroutine,
+    Then: The coroutine reserves the public dev direct route, and cleanup removes it.
+    """
     service = MagicMock(shutdown=AsyncMock())
     service.get_setting.side_effect = {"public_direct_allowed": True}.get
     monkeypatch.setattr(market_data_base, "get_settings_service", AsyncMock(return_value=service))

@@ -854,7 +854,12 @@ class TestInstallSignalHandlers:
 
 
 async def test_ready_public_is_registered_and_503_with_no_running_tunnels() -> None:
-    """The public readiness route is available even when bootstrap has no tunnels."""
+    """The public readiness route is available even when bootstrap has no tunnels.
+
+    Given: A sidecar that started its health app with no running tunnels,
+    When: A GET to /ready-public is routed to its registered handler,
+    Then: The response is HTTP 503 with ready set to false.
+    """
     state = _SidecarState()
     site = MagicMock(start=AsyncMock())
     with patch.object(web, "TCPSite", return_value=site):
@@ -875,7 +880,12 @@ async def test_ready_public_is_registered_and_503_with_no_running_tunnels() -> N
 async def test_ready_public_requires_a_recent_handshake_on_a_running_tunnel(
     handshook: bool,
 ) -> None:
-    """Missing and stale handshake data cannot satisfy readiness."""
+    """Missing and stale handshake data cannot satisfy readiness.
+
+    Given: Running public tunnels with varying handshake data,
+    When: The readiness handler reads their WireGuard counters,
+    Then: It returns HTTP 200 only if one has a recent handshake, and HTTP 503 otherwise.
+    """
     running = [
         _RunningTunnel(loaded=_make_loaded(f"wg-{index}"), server=MagicMock(), tunnel_index=index)
         for index in range(5)
@@ -906,7 +916,12 @@ async def test_ready_public_requires_a_recent_handshake_on_a_running_tunnel(
     "reason", ["private_fallback", "disabled", "absent", "stopped", "pool_disabled"]
 )
 async def test_ready_public_excludes_ineligible_tunnels(reason: str) -> None:
-    """An ineligible tunnel cannot make the sidecar ready even with a fresh handshake."""
+    """An ineligible tunnel cannot make the sidecar ready even with a fresh handshake.
+
+    Given: A tunnel with a fresh handshake that fails a public eligibility check,
+    When: The sidecar handles a public readiness request,
+    Then: It returns HTTP 503 without reading the tunnel's handshake counters.
+    """
     tunnel_id = "wg-de-1"
     service = MagicMock()
     routes: list[dict[str, object]] = [{"id": "default", "kind": "direct"}]
