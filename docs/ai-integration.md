@@ -1122,12 +1122,37 @@ the connection flow is the same:
 
 Assistant-specific notes:
 
-- **Claude.ai** — Add a custom connector pointing at
-    `https://<your-snapper-host>/api/mcp` using OAuth and its dedicated
-    provisioned client. Once active, live calls to read-only tools such as
-    `get_ohlcv`, `list_positions`, `list_orders`, `list_recent_signals`,
-    and `list_instruments` return data from your accessible wallets and
-    markets.
+- **Claude.ai** — Connector settings live under the sidebar's
+    **Plugins** page (`/settings/connectors` redirects there), and
+    active connectors are listed under **Your plugins**. UI labels,
+    navigation paths, and dialog steps may change across plans and
+    releases; production UAT observed the following flow:
+
+    - **Opening the dialog:** **Add** opens a menu, and **Add custom
+        connector** opens a dialog titled "Add custom connector, Step 1
+        of 2".
+    - **Step 1 of 2:** Has exactly two required fields — **Name**
+        ("Shown in the connectors list") and **MCP server URL** ("The
+        HTTPS address where the server accepts MCP requests", set to
+        `https://<your-snapper-host>/api/mcp`) — then **Continue**. Step
+        1 has no authentication choice.
+    - **Step 2 of 2 (not verified):** Step 2 was not observed during
+        UAT. OAuth client fields (client ID and client secret) are
+        expected there, but that step and its labels are **not
+        verified**.
+    - **One connector per URL per organization:** If the URL is already
+        used by another connector in the same Claude.ai organization,
+        Step 1 shows "A connector with this URL already exists in your
+        organization. Use the existing connector instead of adding it
+        again." and **Continue** stays disabled. Reuse or edit the
+        existing connector, or use a different Claude.ai organization
+        for a second, separately provisioned client.
+    - **Active connector and live calls:** An existing connector shows
+        in the list as `<Name> / Custom connector / <host>`. Live
+        read-only tool calls through it worked in UAT (`get_ohlcv`,
+        `list_positions`), returning data from your accessible markets
+        and wallets.
+
 - **ChatGPT** — Enable developer mode if required, add a custom app or
     connector at `https://<your-snapper-host>/api/mcp` with OAuth
     authentication and its dedicated provisioned client, then complete the
@@ -1220,6 +1245,14 @@ token or bridge entry directly.)
     delegate first). `409` means an active grant exists for the same
     `(owner, operator, client_id)` with a different resource or scope
     set; confirm replacement or revoke the prior delegate first.
+- **Claude.ai duplicate URL ("A connector with this URL already exists
+    in your organization. Use the existing connector instead of adding
+    it again.")** — In Claude.ai, Step 1 disables **Continue** when
+    another connector in the same organization already uses
+    `https://<your-snapper-host>/api/mcp` (an organization can have only
+    one connector per MCP URL). Reuse or edit the existing connector, or
+    use a different Claude.ai organization for a second, separately
+    provisioned client.
 
 ### Security notes
 
