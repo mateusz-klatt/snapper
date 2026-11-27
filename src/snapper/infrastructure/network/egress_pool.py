@@ -37,6 +37,8 @@ from urllib.parse import urlsplit
 from loguru import logger
 
 from snapper.application.services.settings import SettingsService
+from snapper.application.services.settings import get_settings_service
+from snapper.config.app import AppSettings
 from snapper.infrastructure.network.egress_exceptions import AllRoutesQuarantinedError
 from snapper.infrastructure.network.egress_models import EgressActiveReservationSnapshot
 from snapper.infrastructure.network.egress_models import EgressConnectionSnapshot
@@ -1090,6 +1092,23 @@ async def safely_initialize_egress_pool(settings_service: SettingsService) -> No
         await initialize_egress_pool(settings_service)
     except Exception:
         logger.exception("egress_pool: preflight failed; no VPN routes installed")
+
+
+async def ensure_maintenance_egress_pool(
+    settings: AppSettings, settings_service: SettingsService | None = None
+) -> None:
+    """Load a public maintenance job's pool in a fresh CLI or subprocess.
+
+    API-managed jobs reuse the process pool so its reservation and quarantine
+    state carries across maintenance calls. A standalone job loads the same
+    database settings and preflight as the snapshot CLIs.
+    """
+    if get_egress_pool() is not None:
+        return
+    service = settings_service
+    if service is None:
+        service = await get_settings_service(settings.db_url, settings.zmq_broker_xsub)
+    await initialize_egress_pool(service)
 
 
 def _parse_egress_pool_setting(

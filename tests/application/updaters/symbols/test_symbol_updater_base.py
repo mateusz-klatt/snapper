@@ -24,6 +24,7 @@ from snapper.application.updaters.symbols.kraken_equities import KrakenEquitiesS
 from snapper.application.updaters.symbols.kraken_futures import KrakenFuturesSymbolUpdaterService
 from snapper.application.updaters.symbols.polygon import PolygonSymbolUpdaterService
 from snapper.application.updaters.symbols.walutomat import WalutomatSymbolUpdaterService
+from snapper.core.types import ExchangeEnum
 from snapper.data.models import KNOWN_TO_MAX
 from snapper.data.models import Instrument
 from snapper.data.models import InstrumentSpec
@@ -60,6 +61,8 @@ class DummySettings:
 
 class DummyExchangeClient:
     """Mock exchange client for symbol subscription."""
+
+    exchange_name = ExchangeEnum.PAPER
 
     def __init__(self, symbols: list[dict[str, Any]]):
         """Initialize the instance."""
@@ -546,6 +549,53 @@ async def test_start_skips_update_when_not_needed(
     await updater.set_last_update_timestamp_public(datetime.now(UTC))
     await updater.start()
     assert len(updater.updated_payloads) == 0
+
+
+@pytest.mark.parametrize(
+    "exchange",
+    [
+        ExchangeEnum.KRAKEN,
+        ExchangeEnum.KRAKEN_FUTURES,
+        ExchangeEnum.WALUTOMAT,
+        ExchangeEnum.KRAKEN_EQUITIES,
+        ExchangeEnum.POLYGON,
+    ],
+)
+async def test_catalog_pool_initialization_matches_venue_transport(
+    exchange: ExchangeEnum,
+    updater_factory: Callable[[int, bool], DummySymbolUpdater],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Initialize before pool-aware catalog calls and leave other sessions alone."""
+    updater = updater_factory(1, True)
+    client = DummyExchangeClient([])
+    client.exchange_name = exchange
+    service = MagicMock()
+    ensure = AsyncMock()
+    routed = exchange in {ExchangeEnum.KRAKEN, ExchangeEnum.KRAKEN_FUTURES, ExchangeEnum.WALUTOMAT}
+
+    async def connect() -> None:
+        """Assert initialization order at the first client connection."""
+        assert ensure.await_count == int(routed)
+
+    base_path = "snapper.application.updaters.symbols.base"
+    monkeypatch.setattr(f"{base_path}.get_settings_service", AsyncMock(return_value=service))
+    monkeypatch.setattr(f"{base_path}.get_settings_with_service", lambda _: updater.settings)
+    monkeypatch.setattr(f"{base_path}.DatabaseRepository", MagicMock())
+    monkeypatch.setattr(f"{base_path}.ensure_maintenance_egress_pool", ensure)
+    monkeypatch.setattr(client, "connect", connect)
+    monkeypatch.setattr(updater, "_create_exchange_client", lambda: client)
+    monkeypatch.setattr(updater, "_setup_zmq", MagicMock())
+    monkeypatch.setattr(updater, "broadcast_cache_invalidation", AsyncMock())
+    monkeypatch.setattr(updater, "_set_last_update_timestamp", AsyncMock())
+
+    await updater.start()
+
+    if routed:
+        ensure.assert_awaited_once_with(updater.settings, service)
+    else:
+        ensure.assert_not_awaited()
+    assert client.disconnected
 
 
 @pytest.mark.asyncio

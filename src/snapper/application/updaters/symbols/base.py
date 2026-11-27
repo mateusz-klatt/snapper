@@ -33,6 +33,7 @@ from snapper.config.settings import get_settings
 from snapper.config.settings import get_settings_with_service
 from snapper.core.types import AliasChannelEnum
 from snapper.core.types import AssetTypeEnum
+from snapper.core.types import ExchangeEnum
 from snapper.core.types import UpsertResult
 from snapper.data.instrument_spec_observation_spans import (
     latest_instrument_spec_observation_at_sync,
@@ -53,6 +54,7 @@ from snapper.data.repository import get_repository
 from snapper.data.repository import upsert_scd2_sync
 from snapper.data.repository import where_active_now
 from snapper.infrastructure.exchanges.base import ExchangeClientBase
+from snapper.infrastructure.network.egress_pool import ensure_maintenance_egress_pool
 from snapper.messaging.infrastructure.publisher import MessagePublisher
 from snapper.messaging.infrastructure.publisher import SequenceTracker
 from snapper.messaging.infrastructure.validated_socket import HWM_MARKET_DATA
@@ -78,6 +80,10 @@ class _Preserve:
 
 
 PRESERVE_EXISTING = _Preserve()
+
+_POOLED_SYMBOL_EXCHANGES = frozenset(
+    {ExchangeEnum.KRAKEN, ExchangeEnum.KRAKEN_FUTURES, ExchangeEnum.WALUTOMAT}
+)
 
 
 class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
@@ -1132,6 +1138,8 @@ class SymbolUpdaterService[T: ExchangeClientBase](RegisterableProcess, ABC):
                 return
             self._setup_zmq()
             client = self._create_exchange_client()
+            if client.exchange_name in _POOLED_SYMBOL_EXCHANGES:
+                await ensure_maintenance_egress_pool(self.settings, settings_service)
             await client.connect()
             logger.info(f"Exchange client connected: {type(client).__name__}")
             try:

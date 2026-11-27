@@ -13,7 +13,9 @@ from scripts.check_balances import build_exchange_factories
 from scripts.check_balances import check_single_exchange
 from scripts.check_balances import format_balances
 from scripts.check_balances import main
+from snapper.core.types import ExchangeEnum
 from snapper.infrastructure.exchanges.contracts import AccountBalance
+from snapper.infrastructure.network.egress_context import current_egress_identity
 
 
 def _make_credentials(
@@ -105,14 +107,23 @@ async def test_check_single_exchange_success() -> None:
     When: check_single_exchange is called,
     Then: Only BTC (non-zero) returned.
     """
-    mock_client = AsyncMock()
+    mock_client = AsyncMock(exchange_name=ExchangeEnum.KRAKEN)
+
+    async def connect() -> AsyncMock:
+        """Check account traffic is private even during market bootstrap."""
+        identity = current_egress_identity()
+        assert identity is not None
+        assert identity.traffic_class == "private"
+        assert identity.exchange == ExchangeEnum.KRAKEN
+        return mock_client
+
     mock_client.get_balance = AsyncMock(
         return_value={
             "BTC": AccountBalance(currency="BTC", free=0.1, used=0.0, total=0.1),
             "USD": AccountBalance(currency="USD", free=0.0, used=0.0, total=0.0),
         }
     )
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aenter__ = AsyncMock(side_effect=connect)
     mock_client.__aexit__ = AsyncMock(return_value=None)
     result = await check_single_exchange("Test", lambda: mock_client)
     assert "BTC" in result

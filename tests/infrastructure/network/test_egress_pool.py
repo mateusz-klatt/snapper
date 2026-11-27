@@ -25,6 +25,7 @@ from snapper.infrastructure.network.egress_pool import _parse_egress_pool_settin
 from snapper.infrastructure.network.egress_pool import _preflight_one_route
 from snapper.infrastructure.network.egress_pool import _preflight_routes
 from snapper.infrastructure.network.egress_pool import configure_egress_pool
+from snapper.infrastructure.network.egress_pool import ensure_maintenance_egress_pool
 from snapper.infrastructure.network.egress_pool import get_egress_pool
 from snapper.infrastructure.network.egress_pool import initialize_egress_pool
 from snapper.infrastructure.network.egress_pool import normalize_egress_target_host
@@ -2292,6 +2293,33 @@ def test_dev_direct_has_separate_state_from_configured_private_routes() -> None:
     private = pool.reserve(exchange="kraken", purpose="websocket", traffic_class="private")
     assert private.route_id == "public-dev-direct"
     private.release()
+
+
+@pytest.mark.parametrize("already_configured", [False, True])
+@pytest.mark.parametrize("supplied_service", [False, True])
+async def test_maintenance_loads_startup_pool_or_reuses_existing_pool(
+    already_configured: bool, supplied_service: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone job loads settings and an API job preserves its pool identity."""
+    existing = configure_egress_pool(_two_route_config()) if already_configured else None
+    settings = MagicMock(db_url="sqlite://", zmq_broker_xsub="tcp://broker:5555")
+    service = MagicMock()
+    load_service = AsyncMock(return_value=service)
+    initialize = AsyncMock()
+    monkeypatch.setattr(pool_module, "get_settings_service", load_service)
+    monkeypatch.setattr(pool_module, "initialize_egress_pool", initialize)
+
+    await ensure_maintenance_egress_pool(settings, service if supplied_service else None)
+
+    if already_configured:
+        assert get_egress_pool() is existing
+        initialize.assert_not_awaited()
+    else:
+        initialize.assert_awaited_once_with(service)
+    if already_configured or supplied_service:
+        load_service.assert_not_awaited()
+    else:
+        load_service.assert_awaited_once_with("sqlite://", "tcp://broker:5555")
 
 
 class TestSafelyInitializeEgressPool:

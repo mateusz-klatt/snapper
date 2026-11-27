@@ -29,6 +29,7 @@ from snapper.infrastructure.exchanges.contracts import ExchangeOrderStatusEnum
 from snapper.infrastructure.exchanges.contracts import ExchangeOrderTypeEnum
 from snapper.infrastructure.exchanges.contracts import OrderSideEnum
 from snapper.infrastructure.exchanges.contracts import TickerSnapshot
+from snapper.infrastructure.network.egress_context import resolve_egress_traffic
 
 LiveRunner = Callable[[SimpleNamespace, list[str] | None], Awaitable[None]]
 
@@ -1276,6 +1277,7 @@ def test_main_emits_runner_exceptions(capsys: pytest.CaptureFixture[str]) -> Non
         """Raise an exception after verifying forwarded arguments."""
         assert settings.kraken_api_key == "key"
         assert scenarios == ["passive_buy"]
+        assert resolve_egress_traffic() == ("kraken", "private")
         raise RuntimeError("boom")
 
     mock_settings = _make_settings(kraken_api_key="key")

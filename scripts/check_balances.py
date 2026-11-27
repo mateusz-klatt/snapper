@@ -28,6 +28,7 @@ from snapper.infrastructure.exchanges.implementations.kraken_futures import (
     KrakenFuturesExchangeClient,
 )
 from snapper.infrastructure.exchanges.implementations.walutomat import WalutomatExchangeClient
+from snapper.infrastructure.network.egress_context import egress_identity
 from snapper.infrastructure.security.encryption import get_encryption_service
 
 logger.remove()
@@ -104,9 +105,15 @@ async def check_single_exchange(name: str, factory: ExchangeFactory) -> dict[str
     """
     try:
         client = factory()
-        async with client:
-            result = await client.get_balance()
-            return {k: v for k, v in result.items() if v.total > 0}
+        with egress_identity(
+            exchange=client.exchange_name,
+            traffic_class="private",
+            owner="executor",
+            operation="balance_probe",
+        ):
+            async with client:
+                result = await client.get_balance()
+                return {k: v for k, v in result.items() if v.total > 0}
     except Exception as e:
         print(f"  {name}: SKIP ({e})")
         return {}

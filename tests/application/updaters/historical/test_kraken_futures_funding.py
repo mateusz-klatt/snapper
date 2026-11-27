@@ -16,6 +16,9 @@ from snapper.application.updaters.historical.kraken_futures_funding import (
 from snapper.cli.app import app
 from snapper.config.settings import AppSettings
 from snapper.infrastructure.exchanges.contracts import FundingRateSnapshot
+from snapper.infrastructure.exchanges.implementations.kraken_futures import (
+    KrakenFuturesExchangeClient,
+)
 
 
 @pytest.fixture
@@ -389,9 +392,22 @@ class TestStart:
         """
         svc = KrakenFuturesFundingBackfillService(symbols=["BTC-USD-PERP", "ETH-USD-PERP"])
         svc._db = AsyncMock()
+        initialize = AsyncMock()
+
+        async def fetch(_client: KrakenFuturesExchangeClient, _symbol: str) -> None:
+            """Require initialization before the first funding read."""
+            initialize.assert_awaited_once_with(svc.settings)
+
         with (
             patch.object(svc, "_resolve_symbols", return_value=["BTC-USD-PERP", "ETH-USD-PERP"]),
-            patch.object(svc, "_process_symbol", new_callable=AsyncMock) as mock_process,
+            patch.object(
+                svc, "_process_symbol", new_callable=AsyncMock, side_effect=fetch
+            ) as mock_process,
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_funding"
+                ".ensure_maintenance_egress_pool",
+                initialize,
+            ),
             patch(
                 "snapper.application.updaters.historical.kraken_futures_funding.get_repository",
                 return_value=AsyncMock(),
@@ -416,6 +432,11 @@ class TestStart:
         svc._db = AsyncMock()
         mock_client = MagicMock(disconnect=AsyncMock())
         with (
+            patch(
+                "snapper.application.updaters.historical.kraken_futures_funding"
+                ".ensure_maintenance_egress_pool",
+                new_callable=AsyncMock,
+            ),
             patch.object(svc, "_resolve_symbols", return_value=["BTC-USD-PERP"]),
             patch.object(
                 svc,
