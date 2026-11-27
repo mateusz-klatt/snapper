@@ -693,12 +693,25 @@ def _merge_and_dedup_events(
 
 
 def _directory_fsync_supported() -> bool:
-    """Report whether this platform can open a directory and fsync its descriptor."""
+    """Report whether this platform can open a directory and fsync its descriptor.
+
+    POSIX opens a directory read-only and syncs it so newly created directory
+    entries and atomic replacements are durable. Windows exposes no
+    directory-fsync primitive and refuses ``os.open`` on directories with
+    ``PermissionError``, so on ``os.name == "nt"`` crash durability stops at
+    the flushed and fsynced staged CSV file.
+    """
     return os.name != "nt"
 
 
 def _fsync_directory(path: Path) -> None:
-    """Make a staged archive file replacement durable in its containing directory."""
+    """Make directory entry updates durable when the platform supports dir fsync.
+
+    On POSIX, opens ``path`` read-only and calls ``os.fsync``. On Windows
+    (``os.name == "nt"``), returns without touching the directory because
+    directory descriptors cannot be opened; durability there ends at the synced
+    file itself.
+    """
     if not _directory_fsync_supported():
         return
     descriptor = os.open(path, os.O_RDONLY)
@@ -706,6 +719,28 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _fsync_directory_tree(target_dir: Path, base_dir: Path) -> None:
+    """Fsync ``target_dir`` and each ancestor up to and including ``base_dir``.
+
+    When the first export creates nested subdirectories via
+    ``mkdir(parents=True, exist_ok=True)``, each ancestor directory entry up
+    to ``base_dir`` must be synced after file replacement so a power failure
+    after database purge commits cannot lose newly created directories and leave
+    the CSV unreachable. On Windows (``os.name == "nt"``), directory fsync is
+    a no-op via :func:`_fsync_directory`, so crash durability is bounded by
+    the flushed and fsynced staged CSV file.
+
+    Args:
+        target_dir: Immediate parent directory of the published CSV file.
+        base_dir: Root archive directory the export is rooted at.
+    """
+    steps = len(target_dir.relative_to(base_dir).parts) + 1
+    current = target_dir
+    for _ in range(steps):
+        _fsync_directory(current)
+        current = current.parent
 
 
 def _write_event_csv(
@@ -737,8 +772,15 @@ def _write_event_csv(
             os.fsync(handle.fileno())
 
 
-def _publish_candle_audit_csv(path: Path, rows: list[tuple[str, ...]]) -> None:
-    """Stage, flush/fsync, and atomically replace one candle audit CSV file."""
+def _publish_candle_audit_csv(path: Path, rows: list[tuple[str, ...]], base_dir: Path) -> None:
+    """Stage, flush/fsync, atomically replace, and sync directories for one CSV.
+
+    After replacement on POSIX, syncs ``path.parent`` and every ancestor
+    directory up to and including ``base_dir`` so newly created directories are
+    durable before any database purge commits. On Windows (``os.name == "nt"``),
+    the staged file is flushed and fsynced before replacement, while directory
+    fsync is a documented no-op.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=path.parent, prefix=".ca-") as staging_dir:
         staged_csv = Path(staging_dir) / "archive.tmp"
@@ -746,7 +788,7 @@ def _publish_candle_audit_csv(path: Path, rows: list[tuple[str, ...]]) -> None:
         if path.is_file():
             copymode(path, staged_csv)
         staged_csv.replace(path)
-    _fsync_directory(path.parent)
+    _fsync_directory_tree(path.parent, base_dir)
 
 
 def _resolve_event_path(
@@ -1178,8 +1220,12 @@ class CandleAuditArchiver:
     ) -> tuple[int, int, list[int]]:
         """Export candle audit rows for one instrument.
 
-        Publish each full merged CSV by replacement after its write completes.
-        A partial write must leave previously archived, purged versions intact.
+        Publish each full merged CSV by replacement after its write completes,
+        flushing and syncing the staged CSV before replacement and syncing
+        the parent and ancestor directories up to ``_base_dir`` afterward on
+        platforms that support directory fsync (POSIX; skipped on Windows). A
+        partial write or failed fsync must propagate before any DB purge and
+        leave previously archived, purged versions intact.
 
         Args:
             instrument_public_id: Instrument to export.
@@ -1226,7 +1272,7 @@ class CandleAuditArchiver:
             )
             existing = _read_existing_csv(path)
             merged = _merge_and_dedup_events(existing, by_day[day])
-            _publish_candle_audit_csv(path, merged)
+            _publish_candle_audit_csv(path, merged, self._base_dir)
             files_written += 1
 
         return files_written, len(row_ids), row_ids

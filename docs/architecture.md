@@ -1636,9 +1636,10 @@ before the response returns, the delivery stays `queued` and a subsequent retry
 can duplicate the push (collapsed per `thread_key` via `apns-collapse-id` when
 present). Each queued APNs delivery reads current device registration, that
 device's routing preferences, and user alert defaults in a single repository
-session before admission, and re-verifies the same single-read admission check
-immediately before `ApnsClientPool.send` (after attempt allocation and
-scope/deadline re-checks). A drain or retry batch prefetches events and
+session before admission, and after attempt allocation re-verifies that
+single-read admission check followed by fresh scope revalidation and deadline
+checks immediately before `ApnsClientPool.send`. A drain or retry batch
+prefetches events and
 recipient languages for queued APNs rows only (skipping `provider='fcm'`
 rows). Outage window tracking is scoped per APNs environment (`sandbox` vs
 `prod`). Recovery

@@ -974,17 +974,90 @@ def test_candle_audit_multi_file_later_replace_failure_skips_all_purges(
         repo.dispose()
 
 
+def _candle_dir_sentinels(csv_dir: Path, base_dir: Path) -> dict[Path, int]:
+    """Map ``csv_dir`` and each ancestor up to ``base_dir`` to fake file descriptors."""
+    chain = [
+        csv_dir,
+        base_dir / "archive" / "candles" / "polygon" / "BTC-USD",
+        base_dir / "archive" / "candles" / "polygon",
+        base_dir / "archive" / "candles",
+        base_dir / "archive",
+        base_dir,
+    ]
+    return {directory: 987654321 + index for index, directory in enumerate(chain)}
+
+
+def _install_dir_fsync_spy(
+    monkeypatch: pytest.MonkeyPatch,
+    dir_sentinels: dict[Path, int],
+    *,
+    fail_on_dir: Path | None = None,
+) -> tuple[list[Path], list[Path], list[Path], list[tuple[str, Path | None]]]:
+    """Install ``os.open``/``os.fsync``/``os.close``/``Path.replace`` spies for dir fsyncs."""
+    sentinel_to_dir = {sentinel: directory for directory, sentinel in dir_sentinels.items()}
+    real_open = os.open
+    real_fsync = os.fsync
+    real_close = os.close
+    real_replace = Path.replace
+    opened_dirs: list[Path] = []
+    synced_dirs: list[Path] = []
+    closed_dirs: list[Path] = []
+    events: list[tuple[str, Path | None]] = []
+
+    def _fake_open(
+        target: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        """Record tracked directory opens and pass ``dir_fd`` through for rmtree cleanup."""
+        if dir_fd is None:
+            sentinel = dir_sentinels.get(Path(target))
+            if sentinel is not None:
+                opened_dirs.append(Path(target))
+                events.append(("open_dir", Path(target)))
+                return sentinel
+        return real_open(target, flags, mode, dir_fd=dir_fd)
+
+    def _fake_fsync(descriptor: int) -> None:
+        directory = sentinel_to_dir.get(descriptor)
+        if directory is not None:
+            if directory == fail_on_dir:
+                raise OSError("injected directory fsync failure")
+            synced_dirs.append(directory)
+            events.append(("fsync_dir", directory))
+            return
+        events.append(("fsync_file", None))
+        real_fsync(descriptor)
+
+    def _fake_close(descriptor: int) -> None:
+        directory = sentinel_to_dir.get(descriptor)
+        if directory is not None:
+            closed_dirs.append(directory)
+            events.append(("close_dir", directory))
+            return
+        real_close(descriptor)
+
+    def _track_replace(self_path: Path, target: Path | str) -> Path:
+        events.append(("replace", None))
+        return real_replace(self_path, target)
+
+    monkeypatch.setattr(os, "open", _fake_open)
+    monkeypatch.setattr(os, "fsync", _fake_fsync)
+    monkeypatch.setattr(os, "close", _fake_close)
+    monkeypatch.setattr(Path, "replace", _track_replace)
+    return opened_dirs, synced_dirs, closed_dirs, events
+
+
 def test_candle_audit_export_fsyncs_staged_file_and_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Candle audit CSV publication flushes and fsyncs the staged file and parent directory.
+    """Candle audit CSV publication flushes and fsyncs staged CSV and every ancestor directory.
 
     Given: A SQLite DB with a closed candle version and both supported and unsupported
         directory-fsync capabilities.
-    When: ``CandleAuditArchiver.export`` writes the CSV file.
-    Then: ``os.fsync`` is called for the staged file before ``Path.replace``, and for the
-        parent directory after ``Path.replace`` only when directory fsync is supported.
+    When: ``CandleAuditArchiver.export`` writes the CSV file into a new archive subtree.
+    Then: ``os.fsync`` is called for the staged file before ``Path.replace``, and after
+        ``Path.replace`` for the CSV parent directory and every ancestor directory up to
+        and including ``base_dir`` only when directory fsync is supported.
     """
     assert _directory_fsync_supported() == (os.name != "nt")
     _fsync_directory(tmp_path)
@@ -992,57 +1065,134 @@ def test_candle_audit_export_fsyncs_staged_file_and_directory(
     repo, _ = _make_db_with_candle_versions(tmp_path)
     day = date(2024, 1, 1)
     csv_dir = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
-    dir_sentinel = 987654321
-    real_open = os.open
-    real_fsync = os.fsync
-    real_close = os.close
-    real_replace = Path.replace
-    events: list[str] = []
-
-    def _fake_open(
-        target: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
-    ) -> int:
-        """Record the archive directory open and delegate every other open, including rmtree's."""
-        if dir_fd is None and Path(target) == csv_dir:
-            events.append("open_dir")
-            return dir_sentinel
-        return real_open(target, flags, mode, dir_fd=dir_fd)
-
-    def _fake_fsync(descriptor: int) -> None:
-        if descriptor == dir_sentinel:
-            events.append("fsync_dir")
-            return
-        events.append("fsync_file")
-        real_fsync(descriptor)
-
-    def _fake_close(descriptor: int) -> None:
-        if descriptor == dir_sentinel:
-            events.append("close_dir")
-            return
-        real_close(descriptor)
-
-    def _track_replace(self_path: Path, target: Path | str) -> Path:
-        events.append("replace")
-        return real_replace(self_path, target)
-
+    dir_sentinels = _candle_dir_sentinels(csv_dir, tmp_path)
+    expected_dirs = list(dir_sentinels.keys())
     try:
-        monkeypatch.setattr(os, "open", _fake_open)
-        monkeypatch.setattr(os, "fsync", _fake_fsync)
-        monkeypatch.setattr(os, "close", _fake_close)
-        monkeypatch.setattr(Path, "replace", _track_replace)
-
+        opened_dirs, synced_dirs, closed_dirs, events = _install_dir_fsync_spy(
+            monkeypatch, dir_sentinels
+        )
         monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
         CandleAuditArchiver(repo, tmp_path).export(
             timeframe="1m", day_start=day, day_end=day, closed_only=True
         )
-        assert events == ["fsync_file", "replace", "open_dir", "fsync_dir", "close_dir"]
+        assert opened_dirs == expected_dirs
+        assert synced_dirs == expected_dirs
+        assert closed_dirs == expected_dirs
+        expected_dir_events = [
+            (tag, directory)
+            for directory in expected_dirs
+            for tag in ("open_dir", "fsync_dir", "close_dir")
+        ]
+        assert events == [("fsync_file", None), ("replace", None), *expected_dir_events]
 
+        opened_dirs.clear()
+        synced_dirs.clear()
+        closed_dirs.clear()
         events.clear()
         monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: False)
         CandleAuditArchiver(repo, tmp_path).export(
             timeframe="1m", day_start=day, day_end=day, closed_only=True
         )
-        assert events == ["fsync_file", "replace"]
+        assert opened_dirs == []
+        assert synced_dirs == []
+        assert closed_dirs == []
+        assert events == [("fsync_file", None), ("replace", None)]
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_file_fsync_failure_propagates_and_skips_purge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure during staged file ``os.fsync`` propagates, cleans staging, and skips DB purge.
+
+    Given: An archived 1m CSV file on disk and a closed 5m candle pending purge in SQLite.
+    When: ``os.fsync`` raises ``OSError`` on the staged CSV descriptor during the 5m export
+        with ``purge=True``.
+    Then: The ``OSError`` propagates, existing CSV bytes and permissions remain untouched,
+        no ``.ca-*`` directory survives, and the pending 5m DB row remains unpurged.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_path = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024" / "2024-01-01.csv"
+    archiver = CandleAuditArchiver(repo, tmp_path)
+
+    def _fail_file_fsync(descriptor: int) -> None:
+        _ = descriptor
+        raise OSError("injected file fsync failure")
+
+    try:
+        first = archiver.export(
+            timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+        )
+        assert first == ExportResult(files_written=1, rows_exported=1, rows_purged=1)
+        csv_path.chmod(0o600)
+        original_mode = csv_path.stat().st_mode
+        original_bytes = csv_path.read_bytes()
+        _insert_closed_five_minute_candle(repo, instrument_id)
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "5m", day, day, closed_only=True
+        )
+        assert len(pending) == 1
+
+        monkeypatch.setattr(os, "fsync", _fail_file_fsync)
+        with pytest.raises(OSError, match="injected file fsync failure"):
+            archiver.export(
+                timeframe="5m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert csv_path.read_bytes() == original_bytes
+        assert csv_path.stat().st_mode == original_mode
+        assert list(csv_path.parent.iterdir()) == [csv_path]
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "5m", day, day, closed_only=True)
+            == pending
+        )
+    finally:
+        repo.dispose()
+
+
+def test_candle_audit_directory_fsync_failure_propagates_and_skips_purge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failure during ancestor directory ``os.fsync`` propagates and skips DB purge.
+
+    Given: A SQLite DB with a closed 1m candle version and directory fsync enabled.
+    When: ``os.fsync`` raises ``OSError`` on an ancestor directory during ``export(purge=True)``.
+    Then: The ``OSError`` propagates, opened directory descriptors are closed, and the closed
+        1m DB row remains unpurged.
+    """
+    repo, instrument_id = _make_db_with_candle_versions(tmp_path)
+    day = date(2024, 1, 1)
+    csv_dir = tmp_path / "archive" / "candles" / "polygon" / "BTC-USD" / "2024"
+    failing_ancestor = tmp_path / "archive"
+    dir_sentinels = _candle_dir_sentinels(csv_dir, tmp_path)
+    try:
+        pending = repo.get_candle_versions_for_archive(
+            instrument_id, "1m", day, day, closed_only=True
+        )
+        assert len(pending) == 1
+        opened_dirs, synced_dirs, closed_dirs, _ = _install_dir_fsync_spy(
+            monkeypatch, dir_sentinels, fail_on_dir=failing_ancestor
+        )
+        monkeypatch.setattr("snapper.data.archiver._directory_fsync_supported", lambda: True)
+
+        with pytest.raises(OSError, match="injected directory fsync failure"):
+            CandleAuditArchiver(repo, tmp_path).export(
+                timeframe="1m", day_start=day, day_end=day, closed_only=True, purge=True
+            )
+
+        assert closed_dirs == opened_dirs
+        assert failing_ancestor in opened_dirs
+        assert failing_ancestor not in synced_dirs
+        assert tmp_path not in opened_dirs
+        assert list(csv_dir.iterdir()) == [csv_dir / "2024-01-01.csv"]
+        assert (
+            repo.get_candle_versions_for_archive(instrument_id, "1m", day, day, closed_only=True)
+            == pending
+        )
     finally:
         repo.dispose()
 

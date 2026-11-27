@@ -57,6 +57,7 @@ from snapper.data.repository_types import AlertDeliveryInsertRow
 from snapper.data.repository_types import AlertDeliveryRow
 from snapper.data.repository_types import AlertEventInsertRow
 from snapper.data.repository_types import AlertEventRow
+from snapper.data.repository_types import ApnsAdmissionContext
 from snapper.data.repository_types import DeviceAlertPrefUpsertRow
 from snapper.data.repository_types import NotificationDeviceUpsertRow
 from snapper.data.repository_types import UserAlertDefaultUpsertRow
@@ -4369,3 +4370,207 @@ class TestQueuedAdmissionRecheckAndPrefetch:
         await sidecar._prefetch_caches_for_rows([fcm_row, apns_row])
         events_spy.assert_awaited_once_with(["evt-apns"])
         langs_spy.assert_awaited_once_with(["user-apns"])
+
+    @pytest.mark.asyncio
+    async def test_pre_send_deadline_crossing_during_admission_read_expires_without_send(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deadline passing during pre-send admission recheck expires instead of sending.
+
+        Given: A queued APNs delivery whose ``expires_at`` is ``_ts(5)`` and a clock
+            initially at ``_ts(4)``.
+        When: The injected clock advances to ``_ts(6)`` inside the pre-send admission
+            recheck read after ``begin_delivery_attempt``.
+        Then: ``apns.send`` is not called and the delivery fails as expired with
+            ``attempt_count == 1``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await repo.insert_alert_delivery(
+            AlertDeliveryInsertRow(
+                session_id="t",
+                sequence_id=2,
+                timestamp=_ts(0),
+                alert_event_public_id=event["public_id"],
+                device_public_id=device_pid,
+                user_public_id=user,
+                status="queued",
+                expires_at=_ts(5),
+                created_at=_ts(0),
+            )
+        )
+        current_now = _ts(4)
+        sidecar, apns = _make_sidecar(repo, clock=lambda: current_now)
+        original_get_context = repo.get_apns_admission_context
+        admission_calls = 0
+
+        async def _advance_clock_on_recheck(
+            user_public_id: str, device_public_id: str
+        ) -> ApnsAdmissionContext:
+            nonlocal admission_calls, current_now
+            admission_calls += 1
+            if admission_calls == 2:
+                current_now = _ts(6)
+            return await original_get_context(user_public_id, device_public_id)
+
+        monkeypatch.setattr(repo, "get_apns_admission_context", _advance_clock_on_recheck)
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+
+        await sidecar._attempt_on_queued_row(row, _ts(4))
+
+        assert admission_calls == 2
+        apns.send.assert_not_awaited()
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "failed"
+        assert final_row["error_reason"] == "expired during outage"
+        assert final_row["attempt_count"] == 1
+        assert final_row["timestamp"] == _ts(6)
+
+    @pytest.mark.asyncio
+    async def test_pre_send_scope_revocation_during_admission_read_cancels_without_send(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Scope revocation happening during pre-send admission recheck cancels without sending.
+
+        Given: A queued APNs delivery whose scope is valid at pre-routing and attempt bump.
+        When: The scope is revoked while the post-bump admission recheck read executes.
+        Then: The subsequent ``should_skip_send`` check cancels the delivery as
+            ``cancelled_scope`` with ``scope_revoked`` and never invokes ``apns.send``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user)
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
+        revoked = False
+        scope_calls = 0
+        admission_calls = 0
+
+        async def _should_skip_send(
+            _event: AlertEventRow, _repo: Repository, _now: datetime
+        ) -> bool:
+            nonlocal scope_calls
+            scope_calls += 1
+            return revoked
+
+        sidecar._scope_revalidator = MagicMock()
+        sidecar._scope_revalidator.should_skip_send = AsyncMock(side_effect=_should_skip_send)
+        original_get_context = repo.get_apns_admission_context
+
+        async def _revoke_scope_on_recheck(
+            user_public_id: str, device_public_id: str
+        ) -> ApnsAdmissionContext:
+            nonlocal admission_calls, revoked
+            admission_calls += 1
+            if admission_calls == 2:
+                revoked = True
+            return await original_get_context(user_public_id, device_public_id)
+
+        monkeypatch.setattr(repo, "get_apns_admission_context", _revoke_scope_on_recheck)
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+
+        await sidecar._attempt_on_queued_row(row, _ts(1))
+
+        assert admission_calls == 2
+        assert scope_calls == 2
+        apns.send.assert_not_awaited()
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "cancelled_scope"
+        assert final_row["error_reason"] == "scope_revoked"
+        assert final_row["attempt_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_pre_send_recheck_uses_refreshed_device_token_and_env(
+        self, repo: SQLAlchemyRepository, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Device token/env refreshed before pre-send recheck is used on the APNs send.
+
+        Given: A queued APNs delivery targeting an active sandbox device with token ``a*64``.
+        When: The device's active SCD2 row is refreshed with token ``b*64`` and env ``prod``
+            between pre-allocation admission and the pre-send admission recheck.
+        Then: ``apns.send`` is awaited once with ``device_token='b'*64`` and ``env='prod'``
+            and the delivery transitions to ``sent``.
+        """
+        user = "019dbb34-f439-77bd-afa8-ee5321d60307"
+        await _seed_user(repo, user)
+        device_pid = await _seed_device(repo, user, device_token="a" * 64, env="sandbox")
+        event = await _seed_alert_event(repo, user)
+        delivery_pid = await _seed_queued_delivery(
+            repo,
+            event_public_id=event["public_id"],
+            device_public_id=device_pid,
+            user_public_id=user,
+        )
+        sidecar, apns = _make_sidecar(repo, clock=lambda: _ts(1))
+        original_bump = repo.begin_delivery_attempt
+
+        async def _refresh_device_after_bump(
+            public_id: str,
+            *,
+            transition_at: datetime,
+            session_id: str,
+            sequence_id: int,
+        ) -> int | None:
+            count = await original_bump(
+                public_id,
+                transition_at=transition_at,
+                session_id=session_id,
+                sequence_id=sequence_id,
+            )
+            async with repo.session() as s:
+                existing = (
+                    await s.execute(
+                        select(NotificationDevice).where(
+                            NotificationDevice.public_id == device_pid,
+                            NotificationDevice.known_to == KNOWN_TO_MAX,
+                        )
+                    )
+                ).scalar_one()
+                existing.known_to = _ts(1)
+                await s.flush()
+                s.add(
+                    NotificationDevice(
+                        public_id=device_pid,
+                        session_id="refresh",
+                        sequence_id=2,
+                        timestamp=_ts(1),
+                        known_to=KNOWN_TO_MAX,
+                        user_public_id=user,
+                        device_token="b" * 64,
+                        provider="apns",
+                        device_id=existing.device_id,
+                        platform=existing.platform,
+                        env="prod",
+                        previews_mode=existing.previews_mode,
+                        registered_at=existing.registered_at,
+                        token_status="active",
+                    )
+                )
+                await s.commit()
+            return count
+
+        monkeypatch.setattr(repo, "begin_delivery_attempt", _refresh_device_after_bump)
+        row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert row is not None
+
+        await sidecar._attempt_on_queued_row(row, _ts(1))
+
+        apns.send.assert_awaited_once()
+        assert apns.send.await_args is not None
+        assert apns.send.await_args.kwargs["device_token"] == "b" * 64
+        assert apns.send.await_args.kwargs["env"] == "prod"
+        final_row = await repo.get_delivery_by_public_id(delivery_pid)
+        assert final_row is not None
+        assert final_row["status"] == "sent"

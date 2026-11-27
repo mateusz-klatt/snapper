@@ -725,18 +725,20 @@ class NotifySidecar(RegisterableProcess):
     async def _attempt_delivery(self, target: _DeliveryTarget, now: datetime) -> None:
         """Run exactly one APNs send attempt on a queued delivery row.
 
-        Before reserving an attempt and again immediately before the APNs
-        call, ``ScopeRevalidator.should_skip_send`` decides whether the
-        event's scope is still active and a fresh UTC check enforces the
-        resolved delivery deadline (``expires_at`` or ``created_at + 6 h``).
-        On the queued APNs path (``target.recheck_admission``), a single-read
-        pre-send admission recheck immediately before ``ApnsClientPool.send``
-        re-verifies that the target device is still active for the user and
-        that rollout and routing preferences still allow the event.
-        Deliveries past their deadline transition to ``failed`` without
-        sending. Otherwise, bumps ``attempt_count`` first, bounds
-        ``ApnsClientPool.send`` with ``_APNS_SEND_TIMEOUT_S``, and computes
-        retry backoff and SCD2 transition times from fresh UTC timestamps.
+        Before reserving an attempt, ``ScopeRevalidator.should_skip_send``
+        decides whether the event's scope is still active and a fresh UTC check
+        enforces the resolved delivery deadline (``expires_at`` or
+        ``created_at + 6 h``). After ``_bump_attempt`` commits the incremented
+        attempt count, the queued APNs path (``target.recheck_admission``) runs
+        its single-read pre-send admission recheck first (refreshing the target
+        device registration when updated), followed immediately before payload
+        assembly and ``ApnsClientPool.send`` by a fresh
+        ``ScopeRevalidator.should_skip_send`` check and a fresh UTC deadline
+        check so neither scope revocation nor TTL expiry during the admission
+        read can leak into a send. Deliveries past their deadline transition to
+        ``failed`` without sending. Otherwise, bounds ``ApnsClientPool.send``
+        with ``_APNS_SEND_TIMEOUT_S``, and computes retry backoff and SCD2
+        transition times from fresh UTC timestamps.
 
         Note:
             If ``ApnsClientPool.send`` hits the 30s timeout after APNs already
@@ -768,19 +770,21 @@ class NotifySidecar(RegisterableProcess):
                 pid=target.delivery_public_id,
             )
             return
+        admitted_target = await self._recheck_queued_admission(target)
+        if admitted_target is None:
+            return
         scope_now = self._clock()
-        if await self._cancel_if_scope_revoked(target.delivery_public_id, target.event, scope_now):
+        if await self._cancel_if_scope_revoked(
+            admitted_target.delivery_public_id, admitted_target.event, scope_now
+        ):
             return
         send_now = self._clock()
         if await self._expire_if_past_deadline(
-            target.delivery_public_id,
-            target.prior_error_reason,
+            admitted_target.delivery_public_id,
+            admitted_target.prior_error_reason,
             deadline,
             send_now,
         ):
-            return
-        admitted_target = await self._recheck_queued_admission(target)
-        if admitted_target is None:
             return
         payload = _build_apns_payload(
             admitted_target.event, user_language=admitted_target.user_language
@@ -1289,11 +1293,12 @@ class NotifySidecar(RegisterableProcess):
         even when APNs is disabled or routing data is malformed. Reads active
         device registration, device prefs, and user defaults in one repository
         session before attempt allocation, and passes ``recheck_admission=True``
-        so ``_attempt_delivery`` re-verifies admission in one read immediately
-        before ``ApnsClientPool.send``. Missing events, inactive devices, and
-        rows suppressed by the routing cascade transition to terminal
-        ``failed``, ``unregistered``, or ``cancelled_scope`` instead of
-        remaining ``queued``.
+        so ``_attempt_delivery`` re-verifies admission in one read after
+        ``_bump_attempt``, ahead of the final scope revalidation and deadline
+        checks immediately before ``ApnsClientPool.send``. Missing events,
+        inactive devices, and rows suppressed by the routing cascade transition
+        to terminal ``failed``, ``unregistered``, or ``cancelled_scope`` instead
+        of remaining ``queued``.
         """
         if row.get("provider", "apns") == "fcm":
             if self._android is not None:
