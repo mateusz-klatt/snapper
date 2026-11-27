@@ -71,16 +71,12 @@ def _repository_mock(dialect: str) -> tuple[MagicMock, AsyncMock]:
         (["--apply", "--expect-digest", _SHA], "requires --receipt"),
         (["--expect-digest", _SHA], "require --apply"),
         (["--receipt", "receipt.json"], "require --apply"),
-        (
-            ["--", "--apply", "--expect-digest", _SHA, "--receipt", "receipt.json"],
-            "unrecognized arguments: -- --apply",
-        ),
     ],
 )
 def test_apply_options_require_both_guards(flags: list[str], message: str) -> None:
     """Require approval and a new receipt path when applying.
 
-    Given: Write options are incomplete, supplied without apply, or after ``--``.
+    Given: Write options are incomplete or supplied without apply.
     When: The operator runs the importer.
     Then: The parser refuses with usage status.
     """

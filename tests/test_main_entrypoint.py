@@ -124,6 +124,8 @@ def test_main_invokes_setup_and_app(monkeypatch: pytest.MonkeyPatch) -> None:
     [
         (["snapper", "audit-candles", "--json"], True),
         (["snapper", "audit-candles"], False),
+        (["snapper", "plan-kraken-spot-trade-recovery"], True),
+        (["snapper", "import-kraken-spot-trades"], True),
         (["snapper", "server", "--json"], False),
         (["snapper", "mcp-oauth", "provision-client", "--name", "x"], True),
         (["snapper", "mcp-oauth", "list-clients"], False),
@@ -609,62 +611,6 @@ class TestMain:
             assert (
                 "Usage:" in output or "snapper" in output.lower()
             ), f"Unexpected output: {output!r}"
-
-
-@pytest.mark.parametrize(
-    ("prefix", "command"),
-    [([], "plan-kraken-spot-trade-recovery"), (["--"], "import-kraken-spot-trades")],
-)
-def test_trade_recovery_entrypoint_preserves_argparse_output(
-    prefix: list[str],
-    command: str,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Keep trade recovery help independent of CLI startup.
-
-    Given: An invocation of Snapper with invalid server settings.
-    When: The operator requests help for a trade recovery command.
-    Then: Only argparse help is printed and the command exits successfully.
-    """
-    monkeypatch.setenv("SERVER_PORT", "invalid")
-    monkeypatch.setattr(sys, "argv", ["snapper", *prefix, command, "--help"])
-    with pytest.raises(SystemExit) as exc_info:
-        main()
-
-    assert exc_info.value.code == 0
-    output = capsys.readouterr()
-    assert output.out.startswith(f"usage: snapper {command} ")
-    assert output.err == ""
-    assert LOGFILE_ENV_VAR not in os.environ
-
-
-@pytest.mark.timeout(45)
-def test_trade_recovery_process_starts_without_server_configuration(tmp_path: Path) -> None:
-    """Keep the offline planner independent of server configuration at import time.
-
-    Given: A fresh process with an invalid server port.
-    When: The operator requests help for the offline trade planner.
-    Then: The process prints argparse help and exits successfully.
-    """
-    env = os.environ | {
-        "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "SERVER_PORT": "invalid",
-    }
-    result = subprocess.run(
-        [sys.executable, "-m", "snapper", "plan-kraken-spot-trade-recovery", "--help"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-        cwd=tmp_path,
-        env=env,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.startswith("usage: snapper plan-kraken-spot-trade-recovery ")
-    assert result.stderr == ""
 
 
 def test_oauth_provisioning_subprocess_reserves_stdout_for_one_document(tmp_path: Path) -> None:

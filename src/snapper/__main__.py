@@ -23,14 +23,8 @@ Note:
 
 import os
 import sys
-from collections.abc import Callable
-from importlib import import_module
-from typing import cast
 
-import typer
-
-from snapper.cli.kraken_spot_trade_commands import KRAKEN_SPOT_TRADE_COMMANDS
-from snapper.cli.kraken_spot_trade_commands import register_kraken_spot_trade_commands
+from snapper.cli.app import app
 from snapper.infrastructure.exchanges.kraken_sdk_patches import log_kraken_sdk_patches_status
 from snapper.utils.logging import DEFAULT_LOGFILE
 from snapper.utils.logging import LOGFILE_ENV_VAR
@@ -49,12 +43,15 @@ _COMMAND_LOGFILES: dict[str, str] = {
 _MACHINE_STDOUT_COMMANDS: dict[tuple[str, ...], str | None] = {
     ("audit-candles",): "--json",
     ("mcp-oauth", "provision-client"): None,
+    ("plan-kraken-spot-trade-recovery",): None,
+    ("import-kraken-spot-trades",): None,
 }
 """Invocations whose stdout is one machine-readable document, not a console.
 
 Keyed by the leading argv words that identify the command; the value is a flag
-that must also be present, or ``None`` when the command always writes a
-document. ``mcp-oauth provision-client`` prints a client secret that is shown
+that must also be present, or ``None`` when stdout is reserved without a flag.
+Both Kraken Spot trade recovery commands report JSON on stdout.
+``mcp-oauth provision-client`` prints a client secret that is shown
 once and never recoverable, so a log line landing on stdout ahead of it does not
 merely look untidy — it makes the output unparseable and the secret lost."""
 
@@ -111,19 +108,12 @@ def _resolve_logfile(argv: list[str]) -> str:
     return DEFAULT_LOGFILE
 
 
-def app() -> None:
-    """Load and invoke the full CLI after recovery-only dispatch is ruled out."""
-    cast(typer.Typer, import_module("snapper.cli.app").app)()
-
-
 def main() -> int:
     """Initialize logging and launch the Snapper CLI application.
 
     Sets up the logging subsystem with sensible defaults (INFO level,
     human-readable format, file output) and then invokes the Typer
-    CLI application to process command-line arguments. The Kraken Spot trade
-    recovery commands use their own CLI without loading server configuration
-    or writing startup logs.
+    CLI application to process command-line arguments.
 
     The function configures:
         - Log level: INFO
@@ -141,25 +131,16 @@ def main() -> int:
     Returns:
         Exit code (always 0 on success).
     """
-    words = sys.argv[1:]
-    if words[:1] == ["--"]:
-        words = words[1:]
-    run: Callable[[], None] = app
-    if words and words[0] in KRAKEN_SPOT_TRADE_COMMANDS:
-        recovery_cli = typer.Typer(add_completion=False)
-        register_kraken_spot_trade_commands(recovery_cli)
-        run = recovery_cli
-    else:
-        logfile = resolve_logfile_from_environment(_resolve_logfile(sys.argv))
-        os.environ[LOGFILE_ENV_VAR] = logfile
-        setup_logging(
-            level="INFO",
-            json_logs=False,
-            logfile=logfile,
-            console_to_stderr=_machine_stdout_requested(sys.argv),
-        )
-        log_kraken_sdk_patches_status()
-    run()
+    logfile = resolve_logfile_from_environment(_resolve_logfile(sys.argv))
+    os.environ[LOGFILE_ENV_VAR] = logfile
+    setup_logging(
+        level="INFO",
+        json_logs=False,
+        logfile=logfile,
+        console_to_stderr=_machine_stdout_requested(sys.argv),
+    )
+    log_kraken_sdk_patches_status()
+    app()
     return 0
 
 
