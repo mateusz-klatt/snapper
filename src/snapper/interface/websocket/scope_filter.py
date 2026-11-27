@@ -36,7 +36,6 @@ service method's docstring records why the read grants stop at REST.
 import json
 from collections.abc import Mapping
 from collections.abc import MutableMapping
-from datetime import UTC
 from datetime import datetime
 from typing import Any
 
@@ -192,8 +191,7 @@ async def enforce_ai_review_scope(
             ``wallet_public_id`` and ``instrument_public_id``.
         scope_grant_service: Singleton owner of the scope-grant
             check; bridge passes the lifespan-attached instance.
-        as_of: Wall-clock for SCD2-active filtering on memberships
-            and grants. Defaults to ``datetime.now(UTC)``.
+        as_of: Point-in-time cutoff, or None for current delegate authority.
 
     Returns:
         ``True`` to forward the frame, ``False`` to drop it.
@@ -215,12 +213,11 @@ async def enforce_ai_review_scope(
     delegate_public_id = connection_principal.delegate_public_id
     if delegate_public_id is None:
         return False
-    wall_clock = as_of if as_of is not None else datetime.now(UTC)
     return await scope_grant_service.has_grant_for_delegate(
         delegate_public_id=delegate_public_id,
         wallet_public_id=wallet_public_id,
         instrument_public_id=instrument_public_id,
-        as_of=wall_clock,
+        as_of=as_of,
     )
 
 
@@ -267,8 +264,7 @@ async def enforce_orders_events_scope(
             ``wallet_public_id``.
         scope_grant_service: Singleton owner of the scope-grant
             check; bridge passes the lifespan-attached instance.
-        as_of: Wall-clock for SCD2-active filtering on memberships
-            and grants. Defaults to ``datetime.now(UTC)``.
+        as_of: Point-in-time cutoff, or None for current wallet scope.
         accessible_wallets_cache: Optional frame-local cache keyed by
             principal authorization identity. Bridge fan-out passes one
             cache per ZMQ frame so repeated subscriptions for the same
@@ -411,12 +407,11 @@ async def _enforce_wallet_scope(
     wallet_public_id = payload.get("wallet_public_id")
     if not isinstance(wallet_public_id, str):
         return False
-    wall_clock = as_of if as_of is not None else datetime.now(UTC)
     accessible: set[str] | frozenset[str]
     if accessible_wallets_cache is None:
         accessible = await scope_grant_service.list_accessible_wallet_public_ids(
             principal=connection_principal,
-            as_of=wall_clock,
+            as_of=as_of,
         )
     else:
         cache_key = wallet_access_cache_key(connection_principal)
@@ -425,7 +420,7 @@ async def _enforce_wallet_scope(
             cached_accessible = frozenset(
                 await scope_grant_service.list_accessible_wallet_public_ids(
                     principal=connection_principal,
-                    as_of=wall_clock,
+                    as_of=as_of,
                 )
             )
             accessible_wallets_cache[cache_key] = cached_accessible

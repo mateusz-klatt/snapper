@@ -1887,6 +1887,7 @@ class _WalletLookupRepository:
         self.operator_lookup_count = 0
         self.operator_catalogue_lookup_count = 0
         self.operator_public_ids: list[str] = []
+        self.operator_wallet_cutoffs: list[datetime | None] = []
 
     async def list_active_wallets(self, as_of: datetime) -> list[WalletRow]:
         """Return active wallet fixtures."""
@@ -1896,11 +1897,12 @@ class _WalletLookupRepository:
     async def list_accessible_wallets_for_operators(
         self,
         operator_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> list[WalletRow]:
         """Return operator-scoped wallet fixtures."""
         self.operator_lookup_count += 1
         self.operator_public_ids = list(operator_public_ids)
+        self.operator_wallet_cutoffs.append(as_of)
         return list(self.operator_wallets)
 
     async def list_active_operators(self, as_of: datetime) -> list[OperatorRow]:
@@ -2209,6 +2211,7 @@ async def test_resolve_classified_strategy_scope_resolves_operator_and_wallet_la
     assert scope.operator_public_id == "op-uuid"
     assert scope.wallet_public_id == "wallet-uuid"
     assert repository.operator_public_ids == ["op-uuid"]
+    assert repository.operator_wallet_cutoffs == [None]
 
 
 @pytest.mark.asyncio

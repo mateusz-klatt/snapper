@@ -207,7 +207,7 @@ async def resolve_readable_wallets(
         return _unscoped_result(wallet_public_id)
 
     if has_global_scope:
-        readable = await repo.list_accessible_wallets_for_operators(op_ids, now)
+        readable = await repo.list_accessible_wallets_for_operators(op_ids, as_of=None)
     else:
         readable = await repo.list_readable_wallets_for_user(
             principal.user_public_id,
@@ -253,13 +253,12 @@ async def resolve_tradable_wallets(
         HTTPException: 403 when the caller requests an operator or wallet
             outside their accessible set.
     """
-    now = datetime.now(UTC)
     has_global_scope = _has_global_scope(principal)
     op_ids = _resolve_operator_filter(principal, has_global_scope, operator_public_id)
     if op_ids is None:
         return _unscoped_result(wallet_public_id)
 
-    accessible = await repo.list_accessible_wallets_for_operators(op_ids, now)
+    accessible = await repo.list_accessible_wallets_for_operators(op_ids, as_of=None)
     accessible_ids = [row["public_id"] for row in accessible]
 
     if wallet_public_id is not None:

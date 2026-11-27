@@ -1055,11 +1055,73 @@ async def test_try_arm_false_when_leg_set_key_mismatches(_repo: SQLAlchemyReposi
 
 
 @pytest.mark.asyncio
+async def test_try_arm_counts_future_stamped_extra_leg(_repo: SQLAlchemyRepository) -> None:
+    """Arming validates the entire committed leg set.
+
+    Given: A group expecting two legs with a third current leg stamped ahead.
+    When: A slower coordinator attempts to arm based on the registered legs.
+    Then: The extra leg invalidates the set and arming fails closed.
+    """
+    group_id = _pid(100)
+    await _seed_two_leg_group(_repo, group_public_id=group_id, assembly_deadline=_T3)
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            public_id=_pid(202),
+            group_public_id=group_id,
+            leg_index=2,
+            command_public_id=_pid(302),
+            timestamp=_T2,
+        )
+    )
+    assert not await _repo.try_arm_paired_execution_group_if_complete(
+        group_id, _T1, _NEXT_SESSION_ID, 2
+    )
+
+
+@pytest.mark.asyncio
+async def test_outbox_releases_current_armed_pair_ahead_of_poll_clock(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Use the committed group and leg versions even when both are stamped ahead.
+
+    Given: An assembling pair and two commands already visible to the poller.
+    When: A second leg is registered ahead of the poll clock and arming succeeds.
+    Then: The transition time includes the last leg and both commands are eligible.
+    """
+    group_id = _pid(100)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(public_id=group_id, assembly_deadline=_T2)
+    )
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(group_public_id=group_id, command_public_id=_pid(300))
+    )
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(
+            group_public_id=group_id,
+            leg_index=1,
+            instrument="ETH-USD",
+            shard_key="kraken:ETH-USD:live",
+            command_public_id=_pid(301),
+            timestamp=_T2,
+        )
+    )
+    await _insert_created_command(_repo, public_id=_pid(300), correlation_id=group_id)
+    await _insert_created_command(_repo, public_id=_pid(301), correlation_id=group_id)
+    assert await _repo.try_arm_paired_execution_group_if_complete(
+        group_id, _T1, _NEXT_SESSION_ID, 2
+    )
+    versions = await _group_versions(_repo, group_id)
+    assert versions[0].known_to == versions[1].timestamp == _T2
+    rows = await _repo.get_undispatched_commands(as_of=_T1)
+    assert [row["public_id"] for row in rows] == [_pid(300), _pid(301)]
+
+
+@pytest.mark.asyncio
 async def test_outbox_dispatches_non_grouped_command(_repo: SQLAlchemyRepository) -> None:
     """A command whose correlation_id names no group is always dispatchable.
 
     Given: a 'created' command with a correlation_id that matches no
-        active paired-execution group,
+        paired-execution group version,
     When: get_undispatched_commands runs,
     Then: the command is returned (the gate never holds non-grouped
         traffic), preserving the pre-guard dispatch behaviour.
@@ -1067,6 +1129,97 @@ async def test_outbox_dispatches_non_grouped_command(_repo: SQLAlchemyRepository
     await _insert_created_command(_repo, public_id=_pid(300), correlation_id="solo-corr")
     rows = await _repo.get_undispatched_commands(as_of=_T1, limit=10)
     assert [row["public_id"] for row in rows] == [_pid(300)]
+
+
+@pytest.mark.asyncio
+async def test_outbox_holds_leg_of_future_stamped_assembling_group(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """Hold a visible command when its committed group is ahead of the poll clock.
+
+    Given: An assembling two-leg group stamped two seconds ahead of the poller
+        and only one leg registered with a visible created command.
+    When: Arming is attempted and the slower outbox polls.
+    Then: The incomplete group stays unarmed and the command is held.
+    """
+    group_id = _pid(100)
+    command_id = _pid(300)
+    await _repo.insert_paired_execution_group(
+        _group_insert_row(public_id=group_id, timestamp=_T3, assembly_deadline=_T3)
+    )
+    await _repo.insert_paired_execution_leg(
+        _leg_insert_row(group_public_id=group_id, command_public_id=command_id, timestamp=_T3)
+    )
+    await _insert_created_command(_repo, public_id=command_id, correlation_id=group_id)
+    assert not await _repo.try_arm_paired_execution_group_if_complete(
+        group_id, _T3, _NEXT_SESSION_ID, 2
+    )
+    assert await _repo.get_undispatched_commands(as_of=_T1) == []
+
+
+@pytest.mark.asyncio
+async def test_outbox_holds_leg_when_only_group_history_remains(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A closed group still identifies its original commands as grouped.
+
+    Given: A command correlated to a retained, closed group with no successor.
+    When: The outbox polls after the group was closed.
+    Then: The command remains held.
+    """
+    group_id = _pid(100)
+    async with _repo.session() as session:
+        session.add(PairedExecutionGroup(**_group_insert_row(public_id=group_id), known_to=_T1))
+        await session.commit()
+    await _insert_created_command(_repo, public_id=_pid(300), correlation_id=group_id)
+    assert await _repo.get_undispatched_commands(as_of=_T3) == []
+
+
+@pytest.mark.asyncio
+async def test_outbox_holds_leg_when_current_group_broke_ahead_of_poll_clock(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A historical armed version cannot release an original leg.
+
+    Given: An armed pair with a visible created leg command.
+    When: Another coordinator breaks the group two seconds ahead of the poller.
+    Then: The command is held even though the poll-time group version was armed.
+    """
+    group_id = _pid(100)
+    command_id = _pid(300)
+    await _seed_two_leg_group(
+        _repo,
+        group_public_id=group_id,
+        status=PairedExecutionGroupStatusEnum.ARMED.value,
+        leg0_command=command_id,
+    )
+    await _insert_created_command(_repo, public_id=command_id, correlation_id=group_id)
+    assert [row["public_id"] for row in await _repo.get_undispatched_commands(_T1)] == [command_id]
+    assert await _repo.cas_paired_execution_group_status(
+        group_id, "armed", "broken", _T3, _NEXT_SESSION_ID, 2
+    )
+    assert await _repo.get_undispatched_commands(as_of=_T1) == []
+    assert not await _repo.cas_paired_execution_group_status(
+        group_id, "armed", "broken", _T1, _SESSION_ID, 3
+    )
+
+
+@pytest.mark.asyncio
+async def test_outbox_holds_command_cancelled_ahead_of_poll_clock(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """The outbox holds an original whose current command row has been cancelled.
+
+    Given: A created standalone command eligible at the poller's cutoff.
+    When: A faster coordinator durably cancels it before the slow poll.
+    Then: The outbox does not return its historical created version.
+    """
+    command_id = _pid(300)
+    await _insert_created_command(_repo, public_id=command_id, correlation_id="solo-corr")
+    assert await _repo.cas_trade_command_status(
+        command_id, "created", "cancelled", _T3, _NEXT_SESSION_ID, 2
+    )
+    assert await _repo.get_undispatched_commands(as_of=_T1) == []
 
 
 @pytest.mark.asyncio
@@ -2000,14 +2153,12 @@ async def test_project_leg_terminal_clamps_bus_time_for_future_stamped_leg(
 async def test_outbox_ignores_historical_leg_command_binding(
     _repo: SQLAlchemyRepository,
 ) -> None:
-    """Only an ACTIVE leg binding releases a grouped command.
+    """Only a current leg binding releases a grouped command.
 
-    Given: an armed group whose two active legs bind C0/C1, plus a CLOSED
-        (historical) leg version that once bound an orphan command, and that
-        orphan command in 'created',
-    When: get_undispatched_commands runs,
-    Then: the orphan command is held — the gate matches only active legs, so
-        a superseded historical binding never releases a stale command.
+    Given: An armed group with a closed leg binding that looks active at the
+        slower poller's clock and a replacement binding stamped ahead.
+    When: The outbox polls at that earlier time.
+    Then: The two current leg commands are returned and the orphan is held.
     """
     group_id = _pid(100)
     await _seed_two_leg_group(
@@ -2018,9 +2169,14 @@ async def test_outbox_ignores_historical_leg_command_binding(
         leg1_command=_pid(301),
     )
     async with _repo.session() as session:
+        leg = await session.scalar(
+            select(PairedExecutionLeg).where(PairedExecutionLeg.public_id == _pid(200))
+        )
+        assert leg is not None
+        leg.timestamp = _T2
         session.add(
             PairedExecutionLeg(
-                public_id=_pid(250),
+                public_id=_pid(200),
                 group_public_id=group_id,
                 leg_index=0,
                 exchange="kraken",
@@ -2041,7 +2197,7 @@ async def test_outbox_ignores_historical_leg_command_binding(
                 session_id=_SESSION_ID,
                 sequence_id=1,
                 timestamp=_T0,
-                known_to=_T1,
+                known_to=_T2,
             )
         )
         await session.commit()

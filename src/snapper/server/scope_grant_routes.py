@@ -209,7 +209,7 @@ async def list_scope_grants(
         principal.permission_scope_version,
     ):
         accessible = await repo.list_accessible_wallets_for_operators(
-            principal.operator_public_ids, now
+            principal.operator_public_ids, as_of=None
         )
         accessible_ids = {row["public_id"] for row in accessible}
         if wallet_public_id not in accessible_ids:

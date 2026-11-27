@@ -25,13 +25,13 @@ class WalletResolutionRepository(Protocol):
     async def list_accessible_wallets_for_operators(
         self,
         operator_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> list[WalletRow]:
         """Return wallet rows accessible to the supplied operators.
 
         Args:
             operator_public_ids: Operator IDs that define the caller scope.
-            as_of: Temporal anchor for the access-scope lookup.
+            as_of: Point-in-time cutoff, or None for current wallet scope.
 
         Returns:
             Accessible wallet rows in repository-defined deterministic order.
@@ -88,7 +88,8 @@ async def resolve_wallet_or_default(
         operator_public_ids: Operator IDs used for non-admin scoping.
         is_admin: When True, use the active wallet catalogue.
         mode: Optional trading mode filter, ``live`` or ``paper``.
-        as_of: Optional temporal anchor. Defaults to ``datetime.now(UTC)``.
+        as_of: Optional cutoff. Defaults to current operator scope or the
+            current wall clock for the admin catalogue.
 
     Returns:
         The explicit wallet ID or the single resolved candidate ID.
@@ -99,13 +100,12 @@ async def resolve_wallet_or_default(
     """
     if explicit_wallet_public_id:
         return explicit_wallet_public_id
-    lookup_as_of = as_of if as_of is not None else datetime.now(UTC)
     if is_admin:
-        rows = await repository.list_active_wallets(lookup_as_of)
+        rows = await repository.list_active_wallets(as_of or datetime.now(UTC))
     else:
         rows = await repository.list_accessible_wallets_for_operators(
             operator_public_ids,
-            lookup_as_of,
+            as_of,
         )
     candidates = _filter_wallets_by_mode(rows, mode)
     candidate_ids = [wallet["public_id"] for wallet in candidates]

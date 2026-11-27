@@ -208,7 +208,8 @@ class TestAiReviewAftermathRoute:
         assert body["current_positions"] == []
         scope_as_of = repo.has_grant_for_delegate.await_args.kwargs["as_of"]
         projection_as_of = repo.get_ai_review_aftermath.await_args.kwargs["as_of"]
-        assert scope_as_of == projection_as_of
+        assert scope_as_of is None
+        assert isinstance(projection_as_of, datetime)
 
     def test_unknown_review_returns_404_without_scope_read(self) -> None:
         """Unknown review is anti-enumerated as ``review_not_found``.

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
@@ -32,6 +33,7 @@ from snapper.application.trade.reconciler import ReconciliationLoop
 from snapper.application.trade.trade_service import TradeService
 from snapper.core.types import TradeCommandStatusEnum
 from snapper.data.models import ExecutionPlanCheckpoint
+from snapper.data.models import InstrumentOrderCapability
 from snapper.data.models import TradeCommand
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import ExecutionPlanInsertRow
@@ -3646,6 +3648,151 @@ class TestTransitionPlan:
         assert "plan-1" in service.plans
 
 
+@pytest.fixture
+async def sqlite_plan_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[PlanExecutorService]:
+    """Bind the plan executor to a real SQLite repository with no publisher."""
+    repository = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    await repository.create_all()
+    monkeypatch.setattr(
+        "snapper.application.plans.service.get_repository", MagicMock(return_value=repository)
+    )
+    monkeypatch.setattr("snapper.application.plans.service.get_settings", MagicMock())
+    try:
+        yield PlanExecutorService()
+    finally:
+        await repository.engine.dispose()
+
+
+async def _register_sqlite_bracket(
+    service: PlanExecutorService, born_at: datetime, cycle_id: str | None = None
+) -> ExecutionPlanRow:
+    """Persist and register an armed bracket for a fire-time safety check."""
+    repository = service.repository
+    _, plan_id = await repository.insert_execution_plan(
+        {
+            "plan_type": "bracket",
+            "created_via": "api",
+            "instrument_public_id": "inst-1",
+            "exchange": "kraken",
+            "mode": "live",
+            "shard_key": "kraken.BTC-USD.live",
+            "wallet_public_id": "wallet-1",
+            "position_cycle_public_id": cycle_id,
+            "total_quantity": 1.0,
+            "side": "sell",
+            "params": {"native_instrument": "BTC-USD"},
+            "status": "armed",
+            "created_at": born_at,
+            "session_id": "fixture",
+            "sequence_id": 1,
+            "timestamp": born_at,
+        }
+    )
+    plan = await repository.get_execution_plan(plan_id, as_of=None)
+    assert plan is not None
+    service._register_plan(plan, BracketEvaluator())
+    return plan
+
+
+async def test_fire_time_capability_gate_refuses_ahead_clock_revocation(
+    sqlite_plan_service: PlanExecutorService,
+) -> None:
+    """Fail an armed bracket using the current capability version.
+
+    Given: Reduce-only support was revoked by a writer ahead of the plan executor.
+    When: The executor checks the bracket's required capabilities at dispatch.
+    Then: It refuses dispatch and durably marks the bracket failed.
+    """
+    repository = sqlite_plan_service.repository
+    assert isinstance(repository, SQLAlchemyRepository)
+    poll_at = datetime.now(UTC)
+    born_at = poll_at - timedelta(minutes=1)
+    ahead = poll_at + timedelta(minutes=5)
+    plan = await _register_sqlite_bracket(sqlite_plan_service, born_at)
+    async with repository.session() as session:
+        session.add_all(
+            [
+                InstrumentOrderCapability(
+                    instrument_public_id=plan["instrument_public_id"],
+                    exchange=plan["exchange"],
+                    supported_order_types=["limit"],
+                    supports_reduce_only=True,
+                    timestamp=born_at,
+                    known_to=ahead,
+                    session_id="fixture",
+                    sequence_id=2,
+                ),
+                InstrumentOrderCapability(
+                    instrument_public_id=plan["instrument_public_id"],
+                    exchange=plan["exchange"],
+                    supported_order_types=["limit"],
+                    supports_reduce_only=False,
+                    timestamp=ahead,
+                    session_id="fixture",
+                    sequence_id=3,
+                ),
+            ]
+        )
+        await session.commit()
+    historical = await repository.get_instrument_capabilities(poll_at)
+    assert [row["supports_reduce_only"] for row in historical] == [True]
+    assert await sqlite_plan_service._fail_dispatch_for_missing_capabilities(
+        plan["public_id"], plan
+    )
+    failed = await repository.get_execution_plan(plan["public_id"], as_of=None)
+    assert failed is not None and failed["status"] == "failed"
+    assert plan["public_id"] not in sqlite_plan_service.plans
+
+
+@pytest.mark.parametrize("sweep", [False, True])
+async def test_closed_cycle_blocks_dispatch_and_sweep_under_clock_skew(
+    sqlite_plan_service: PlanExecutorService, sweep: bool
+) -> None:
+    """Cancel a bracket whose cycle has already closed on an ahead writer.
+
+    Given: An armed plan attached to a cycle whose current row says closed.
+    When: Either the dispatch gate or the periodic sweep runs on a slower clock.
+    Then: The bracket is durably cancelled even though the old cycle looked open.
+    """
+    repository = sqlite_plan_service.repository
+    poll_at = datetime.now(UTC)
+    born_at = poll_at - timedelta(minutes=1)
+    ahead = poll_at + timedelta(minutes=5)
+    _, cycle_id = await repository.insert_position_cycle(
+        {
+            "instrument_public_id": "inst-1",
+            "exchange": "kraken",
+            "mode": "live",
+            "shard_key": "kraken.BTC-USD.live",
+            "wallet_public_id": "wallet-1",
+            "direction": "long",
+            "max_qty": 1.0,
+            "status": "open",
+            "opened_at": born_at,
+            "session_id": "fixture",
+            "sequence_id": 2,
+            "timestamp": born_at,
+        }
+    )
+    plan = await _register_sqlite_bracket(sqlite_plan_service, born_at, cycle_id)
+    assert await repository.close_position_cycle(cycle_id, ahead, None, ahead, "fixture", 3)
+    assert await repository.get_position_cycle_statuses_by_public_ids([cycle_id], poll_at) == {
+        cycle_id: "open"
+    }
+
+    if sweep:
+        await sqlite_plan_service._sweep_cycle_closures()
+    else:
+        assert await sqlite_plan_service._cancel_dispatch_for_closed_cycle(plan["public_id"], plan)
+
+    cancelled = await repository.get_execution_plan(plan["public_id"], as_of=None)
+    assert cancelled is not None and cancelled["status"] == "cancelled"
+    assert plan["public_id"] not in sqlite_plan_service.plans
+    assert await repository.get_undispatched_commands(datetime.now(UTC)) == []
+
+
 class TestFireTimeCapabilityGating:
     """Tests for fire-time capability check in _dispatch_commands."""
 
@@ -5925,8 +6072,8 @@ class TestRecoverySettlementAndCheckpointDedup:
             `plan_recovery_auto_settle_enabled` is `False`.
         When: `_recover_plans()` runs under the default flag, and
             `_prepare_plan_for_dispatch` runs while `trailing_stop` is `armed`,
-            after it is externally settled to `completed`, and for a missing DB
-            plan id.
+            after it is externally settled by a coordinator with an ahead clock,
+            and for a missing DB plan id.
         Then: `_recover_plans()` leaves the eligible plan unsettled in DB, and
             `_prepare_plan_for_dispatch` allows the `armed` plan once, then
             unregisters and aborts dispatch when durable DB state is terminal or
@@ -6022,14 +6169,18 @@ class TestRecoverySettlementAndCheckpointDedup:
             prepared_ok = await service._prepare_plan_for_dispatch(trail_pid)
             assert prepared_ok is not None and prepared_ok["status"] == "active"
 
+            before_settlement = datetime.now(UTC)
+            settled_at = before_settlement + timedelta(minutes=5)
             await repo.update_execution_plan_status(
                 public_id=trail_pid,
                 new_status="completed",
-                bus_time=datetime.now(UTC),
+                bus_time=settled_at,
                 session_id="cli-ext",
                 sequence_id=9,
-                completed_at=datetime.now(UTC),
+                completed_at=settled_at,
             )
+            historical = await repo.get_execution_plan(trail_pid, as_of=before_settlement)
+            assert historical is not None and historical["status"] == "active"
             assert await service._prepare_plan_for_dispatch(trail_pid) is None
             assert trail_pid not in service.plans
 

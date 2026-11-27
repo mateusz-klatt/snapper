@@ -88,7 +88,6 @@ class _DispatchFrame:
     account_state_payload: AccountStateChangedEventData | None
     alerts_payload: dict[str, Any] | None
     wallet_access_cache: WalletAccessCache
-    wallet_scope_as_of: datetime | None
 
 
 @dataclass(frozen=True)
@@ -869,7 +868,6 @@ class ZmqWebSocketBridgeService:
                     account_state_payload=payload,
                     alerts_payload=None,
                     wallet_access_cache={},
-                    wallet_scope_as_of=datetime.now(UTC),
                 )
                 await self._dispatch_to_subscription(
                     subscription=subscription,
@@ -1078,11 +1076,6 @@ class ZmqWebSocketBridgeService:
         if not self._alerts_frame_is_valid(topic, alerts_payload):
             return
         wallet_access_cache: WalletAccessCache = {}
-        wallet_scope_as_of = (
-            datetime.now(UTC)
-            if orders_events_payload is not None or account_state_payload is not None
-            else None
-        )
         current_time = time.time()
         max_pending = self._get_max_pending(topic)
         frame = _DispatchFrame(
@@ -1096,7 +1089,6 @@ class ZmqWebSocketBridgeService:
             account_state_payload=account_state_payload,
             alerts_payload=alerts_payload,
             wallet_access_cache=wallet_access_cache,
-            wallet_scope_as_of=wallet_scope_as_of,
         )
         snapshot = tuple(self.topic_subscriptions[topic].values())
         for subscription in snapshot:
@@ -1264,7 +1256,7 @@ class ZmqWebSocketBridgeService:
             topic=frame.topic,
             payload=frame.orders_events_payload,
             access_cache=frame.wallet_access_cache,
-            as_of=frame.wallet_scope_as_of,
+            as_of=None,
         ):
             return False
         if frame.account_state_payload is not None and not await self._enforce_account_state_scope(
@@ -1272,7 +1264,7 @@ class ZmqWebSocketBridgeService:
             topic=frame.received_topic,
             payload=frame.account_state_payload,
             access_cache=frame.wallet_access_cache,
-            as_of=frame.wallet_scope_as_of,
+            as_of=None,
         ):
             return False
         return frame.alerts_payload is None or self._enforce_alerts_scope(
@@ -1534,7 +1526,7 @@ class ZmqWebSocketBridgeService:
             topic: Subscription topic used for fan-out.
             payload: Parsed account invalidation envelope.
             access_cache: Frame-local accessible-wallet cache.
-            as_of: Wall-clock shared across the frame's fan-out.
+            as_of: Point-in-time cutoff, or None for current wallet scope.
 
         Returns:
             Whether the account invalidation may reach the destination.

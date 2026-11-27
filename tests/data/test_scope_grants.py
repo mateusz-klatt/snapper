@@ -955,6 +955,54 @@ class TestListGrantCoveredInstrumentPublicIds:
     """Tests for the new coverage helper."""
 
     @pytest.mark.asyncio
+    async def test_current_coverage_excludes_ahead_clock_revocations(
+        self, repo: SQLAlchemyRepository
+    ) -> None:
+        """Use current grant and instrument mapping state for strategy launch.
+
+        Given: An underlying grant whose mapping and then grant are closed
+            by a writer stamped ahead of the strategy launcher.
+        When: The launcher reads the current scope after each close.
+        Then: Coverage shrinks immediately, and no wallet grant remains after revocation.
+        """
+        ids = await _seed_world(repo)
+        grant = await repo.create_scope_grant(
+            _make_request(
+                operator_public_id=ids["alice"],
+                wallet_public_id=ids["wallet"],
+                granted_by=ids["user_admin"],
+                scope_kind="underlying",
+                underlying_public_id=ids["underlying_btc"],
+            )
+        )
+        as_of = datetime.now(UTC)
+        revoked_at = as_of + timedelta(seconds=2)
+        async with repo.session() as session:
+            await session.execute(
+                _update(InstrumentUnderlyingMapping)
+                .where(InstrumentUnderlyingMapping.instrument_public_id == ids["btc_perp"])
+                .values(known_to=revoked_at)
+            )
+            await session.commit()
+        assert await repo.list_grant_covered_instrument_public_ids(
+            ids["alice"], ids["wallet"], as_of=None
+        ) == {ids["btc_spot"]}
+
+        await repo.revoke_scope_grant(
+            grant_public_id=grant["public_id"],
+            revoked_by_user_public_id=ids["user_admin"],
+            revoked_at=revoked_at,
+            reason=None,
+        )
+        assert await repo.list_active_scope_grants_for_wallet(ids["wallet"], as_of=None) == []
+        assert not await repo.list_grant_covered_instrument_public_ids(
+            ids["alice"], ids["wallet"], as_of=None
+        )
+        assert await repo.list_grant_covered_instrument_public_ids(
+            ids["alice"], ids["wallet"], as_of
+        ) == {ids["btc_perp"], ids["btc_spot"]}
+
+    @pytest.mark.asyncio
     async def test_underlying_grant_expands_to_all_mapped_instruments(
         self, repo: SQLAlchemyRepository
     ) -> None:

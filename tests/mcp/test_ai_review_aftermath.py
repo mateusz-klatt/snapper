@@ -247,7 +247,8 @@ async def test_get_ai_review_aftermath_returns_terminal_projection() -> None:
     assert aftermath["current_positions"] == []
     scope_as_of = repo.has_grant_for_delegate.await_args.kwargs["as_of"]
     projection_as_of = repo.get_ai_review_aftermath.await_args.kwargs["as_of"]
-    assert scope_as_of == projection_as_of
+    assert scope_as_of is None
+    assert isinstance(projection_as_of, datetime)
 
 
 @pytest.mark.asyncio

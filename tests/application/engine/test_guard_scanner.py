@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 
 from snapper.application.engine.guard_scanner import PairedExecutionGuardScanner
@@ -27,7 +28,9 @@ from snapper.core.partitioning import ShardOwnership
 from snapper.core.types import PairedExecutionGroupStatusEnum
 from snapper.core.types import PairedExecutionLegStatusEnum
 from snapper.core.types import PairedExecutionPolicyEnum
+from snapper.data.models import PairedExecutionGroup
 from snapper.data.models import PairedExecutionHalt
+from snapper.data.models import PairedExecutionLeg
 from snapper.data.models import TradeCommand
 from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository import where_active
@@ -303,6 +306,62 @@ async def test_scanner_arms_complete_group_within_deadline(_repo: SQLAlchemyRepo
     group = await _repo.get_paired_execution_group("grp-1", _FUTURE)
     assert group is not None
     assert group["status"] == PairedExecutionGroupStatusEnum.ARMED.value
+
+
+@pytest.mark.parametrize("ahead_row", ["group", "leg"])
+async def test_scanner_retires_complete_group_that_cannot_arm_by_deadline(
+    _repo: SQLAlchemyRepository, ahead_row: str
+) -> None:
+    """Refuse to arm a pair whose committed state places arming after its deadline.
+
+    Given: A complete assembling pair with its group or last leg stamped after
+        the assembly deadline, although the reader's clock is still before it.
+    When: The repository attempts to arm and the scanner later passes the deadline.
+    Then: Arming is refused and the scanner breaks the group and retires its held commands.
+    """
+    await _insert_group(_repo, public_id="grp-1", assembly_deadline=_T1)
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id="cmd-0",
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id="cmd-1",
+    )
+    skewed_row = (
+        update(PairedExecutionGroup).where(PairedExecutionGroup.public_id == "grp-1")
+        if ahead_row == "group"
+        else update(PairedExecutionLeg).where(PairedExecutionLeg.public_id == "leg-1")
+    )
+    async with _repo.session() as session:
+        await session.execute(skewed_row.values(timestamp=_FUTURE))
+        await session.commit()
+    await _insert_command(_repo, public_id="cmd-0", correlation_id="grp-1", shard_key=_BTC_SHARD)
+    await _insert_command(_repo, public_id="cmd-1", correlation_id="grp-1", shard_key=_ETH_SHARD)
+    assert not await _repo.try_arm_paired_execution_group_if_complete("grp-1", _T0, _SESSION, 2)
+    assert await _repo.get_undispatched_commands(_T0) == []
+
+    scan_at = _T1 + timedelta(seconds=1)
+    scanner = _scanner(_repo)
+    await scanner._sweep_assembling(scan_at)
+    await scanner._sweep_broken(scan_at)
+
+    group = await _repo.get_current_paired_execution_group("grp-1")
+    assert group is not None
+    assert group["status"] == "broken"
+    assert group["failure_reason"] == "assembly timeout"
+    assert await _repo.get_current_trade_command_status("cmd-0") == "cancelled"
+    assert await _repo.get_current_trade_command_status("cmd-1") == "cancelled"
 
 
 async def test_scanner_skips_sequential_handoff_policy(_repo: SQLAlchemyRepository) -> None:
@@ -883,7 +942,7 @@ async def test_scanner_run_survives_cycle_error(_repo: SQLAlchemyRepository) -> 
     """
     scanner = _scanner(_repo)
     failing_repo = MagicMock()
-    failing_repo.list_active_paired_execution_groups = AsyncMock(side_effect=RuntimeError("boom"))
+    failing_repo.list_current_paired_execution_groups = AsyncMock(side_effect=RuntimeError("boom"))
     scanner._repo = failing_repo
     task = asyncio.create_task(scanner.run())
     await asyncio.sleep(0.05)
@@ -960,6 +1019,63 @@ async def test_sweep_halts_projects_durable_halt_and_mirrors_owned_shard(
     assert halt["group_public_id"] == "grp-1"
     assert halt["reason"] == "fill timeout"
     assert trade_service.is_halted(_BTC_SHARD) is True
+
+
+async def test_scanner_breaks_and_halts_pair_using_future_stamped_state(
+    _repo: SQLAlchemyRepository,
+) -> None:
+    """A lagging scanner acts on a committed rejection without waiting for its clock.
+
+    Given: A current armed version and a rejected sibling leg stamped ahead of
+        the scanner's clock, alongside a partially filled leg.
+    When: The scanner checks the armed group and projects halts.
+    Then: It breaks the group immediately and mirrors the durable halt.
+    """
+    trade_service = TradeService()
+    await _insert_group(_repo, public_id="grp-1")
+    await _insert_leg(
+        _repo,
+        public_id="leg-0",
+        group_public_id="grp-1",
+        leg_index=0,
+        instrument="BTC-USD",
+        shard_key=_BTC_SHARD,
+        command_public_id=None,
+        status="partially_filled",
+        filled_signed_qty=0.5,
+    )
+    await _insert_leg(
+        _repo,
+        public_id="leg-1",
+        group_public_id="grp-1",
+        leg_index=1,
+        instrument="ETH-USD",
+        shard_key=_ETH_SHARD,
+        command_public_id=None,
+    )
+    assert await _repo.cas_paired_execution_group_status(
+        "grp-1", "assembling", "armed", _T1, _SESSION, 2
+    )
+    assert await _repo.cas_paired_execution_leg_status(
+        "leg-1", "pending", "working", _T1, _SESSION, 3
+    )
+    assert await _repo.cas_paired_execution_leg_status(
+        "leg-1", "working", "rejected", _T0, _SESSION, 4
+    )
+    scanner = _scanner(_repo, trade_service=trade_service)
+    await scanner._sweep_armed(_T0)
+    await scanner._sweep_halts(_T0)
+
+    group = await _repo.get_paired_execution_group("grp-1", _T1)
+    assert group is not None
+    assert group["status"] == "broken"
+    assert group["timestamp"] == _T1
+    legs = await _repo.get_paired_execution_legs("grp-1", _T1)
+    assert legs[1]["status"] == "rejected"
+    assert legs[1]["timestamp"] == _T1
+    assert await _repo.get_active_paired_execution_halt(_WALLET, "pairs-alpha", _GROUP_KEY)
+    assert trade_service.is_halted(_BTC_SHARD)
+    assert trade_service.is_halted(_ETH_SHARD)
 
 
 async def test_sweep_halts_projects_for_compensating_group_without_fills(

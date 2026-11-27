@@ -3606,6 +3606,7 @@ class PairedExecutionGroup(TemporalMixin, Base):
 
     __tablename__ = "paired_execution_groups"
     __table_args__ = (
+        Index("ix_peg_public_id_history", "public_id"),
         Index(
             "ix_peg_public_id",
             "public_id",

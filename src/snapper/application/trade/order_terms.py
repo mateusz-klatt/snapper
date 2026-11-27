@@ -259,8 +259,12 @@ async def _load_tokenized_limits(
 ) -> _TokenizedLimits | None:
     """Bind all sizing evidence to the exact requested venue instrument identity.
 
+    A current spec first observed by an ahead clock can look future-dated
+    at ``as_of``. Refuse the order until its observation is visible at the
+    evaluation time, using ``tokenized_order_metadata_unavailable``.
+
     Args:
-        repo: Repository used for temporal catalog reads.
+        repo: Repository used for catalog identity and current order constraints.
         terms: Exact identity presented by the manual order.
         as_of: Shared catalog evaluation time.
 
@@ -272,11 +276,11 @@ async def _load_tokenized_limits(
     )
     if public_id is None or public_id != terms.instrument_public_id:
         return None
-    spec = await repo.get_instrument_spec(public_id, as_of)
+    spec = await repo.get_instrument_spec(public_id, as_of=None)
     if spec is None or not _specification_valid(spec, terms, as_of):
         return None
     capabilities = await repo.get_instrument_capabilities(
-        as_of, exchange=terms.exchange, instrument_public_id=public_id
+        None, exchange=terms.exchange, instrument_public_id=public_id
     )
     if len(capabilities) != 1:
         return None

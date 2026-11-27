@@ -7451,6 +7451,32 @@ async def test_revise_instrument_spec_persists_funding_fields(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_get_current_instrument_spec_includes_ahead_clock_halt(tmp_path: Path) -> None:
+    """A committed instrument halt takes effect for current order checks.
+
+    Given: An online spec superseded by a halted spec stamped two seconds ahead.
+    When: Reading the spec at the old cutoff and without a cutoff.
+    Then: The historical version is online and the current version is halted.
+    """
+    repo, _, instrument_id = await _seed_full_repo(tmp_path)
+    now = datetime.now(UTC)
+    await repo.revise_instrument_spec(
+        instrument_id, "online", 10, now, InstrumentSpecInput(status="online")
+    )
+    await repo.revise_instrument_spec(
+        instrument_id,
+        "halt",
+        11,
+        now + timedelta(seconds=2),
+        InstrumentSpecInput(status="halted"),
+    )
+    historical = await repo.get_instrument_spec(instrument_id, as_of=now)
+    assert historical is not None and historical["status"] == "online"
+    current = await repo.get_instrument_spec(instrument_id, as_of=None)
+    assert current is not None and current["status"] == "halted"
+
+
+@pytest.mark.asyncio
 async def test_revise_instrument_spec_funding_type_check_constraint(tmp_path: Path) -> None:
     """Funding type CHECK constraint rejects invalid values.
 
@@ -8441,6 +8467,51 @@ async def test_get_instrument_capabilities_returns_active_rows(tmp_path: Path) -
     assert rows[0]["supports_post_only"] is True
     assert rows[0]["max_leverage_long"] == 5.0
     assert rows[1]["exchange"] == "walutomat"
+
+
+@pytest.mark.asyncio
+async def test_get_current_instrument_capabilities_excludes_ahead_clock_revocation(
+    tmp_path: Path,
+) -> None:
+    """Use the current capability even when its predecessor still looks active.
+
+    Given: Reduce-only support revoked by a writer two seconds ahead.
+    When: An order gate requests current capabilities.
+    Then: The current version disallows reduce-only even at the lagging reader.
+    """
+    repo = SQLAlchemyRepository(f"sqlite+aiosqlite:///{tmp_path / 'capability_skew.db'}")
+    await repo.create_all()
+    now = datetime.now(UTC)
+    ahead = now + timedelta(seconds=2)
+    async with repo.session() as session:
+        session.add_all(
+            [
+                InstrumentOrderCapability(
+                    instrument_public_id="inst-1",
+                    exchange="kraken",
+                    supported_order_types=["market"],
+                    supports_reduce_only=True,
+                    timestamp=now,
+                    known_to=ahead,
+                    session_id="s1",
+                    sequence_id=1,
+                ),
+                InstrumentOrderCapability(
+                    instrument_public_id="inst-1",
+                    exchange="kraken",
+                    supported_order_types=["market"],
+                    supports_reduce_only=False,
+                    timestamp=ahead,
+                    session_id="s2",
+                    sequence_id=1,
+                ),
+            ]
+        )
+        await session.commit()
+    historical = await repo.get_instrument_capabilities(now, "kraken", "inst-1")
+    current = await repo.get_instrument_capabilities(None, "kraken", "inst-1")
+    assert [row["supports_reduce_only"] for row in historical] == [True]
+    assert [row["supports_reduce_only"] for row in current] == [False]
 
 
 @pytest.mark.asyncio
@@ -10180,18 +10251,28 @@ async def test_revise_params_no_active_row_noop(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_get_position_cycle_by_public_id(tmp_path: Path) -> None:
-    """Given an inserted cycle, When queried by public_id, Then row returned."""
+    """Read a cycle historically or by its current status for dispatch.
+
+    Given: An open cycle closed by a clock two seconds ahead.
+    When: Fetching the cycle by public ID at the old cutoff and as current.
+    Then: The historical lookup returns open and the current lookup returns closed.
+    """
     db_path = tmp_path / "pc_by_pid.db"
     r = repo_module.SQLAlchemyRepository(f"sqlite+aiosqlite:///{db_path}")
     await r.create_all()
     now = datetime.now(UTC)
     row = _make_cycle_row(opened_at=now, timestamp=now)
     _id, pid = await r.insert_position_cycle(row)
+    closed_at = now + timedelta(seconds=2)
+    assert await r.close_position_cycle(pid, closed_at, None, closed_at, "s2", 2) is not None
     cycle = await r.get_position_cycle_by_public_id(pid, as_of=now)
     assert cycle is not None
     assert cycle["public_id"] == pid
     assert cycle["status"] == "open"
     assert cycle["direction"] == "long"
+    current = await r.get_position_cycle_by_public_id(pid, as_of=None)
+    assert current is not None
+    assert current["status"] == "closed"
 
 
 @pytest.mark.asyncio

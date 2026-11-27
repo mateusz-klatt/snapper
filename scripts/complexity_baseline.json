@@ -1052,9 +1052,6 @@
       "_list_recent_signals_tool": {
         "PLR0913": 8
       },
-      "_resolve_wallet_ids_or_envelope": {
-        "PLR0913": 6
-      },
       "register_mcp_tools": {
         "C901": 17
       },

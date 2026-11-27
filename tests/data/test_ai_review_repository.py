@@ -14,6 +14,7 @@ from typing import Any as _Any
 from uuid import uuid7
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy import update as sqlalchemy_update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Update
@@ -1067,25 +1068,37 @@ async def test_list_eligible_returns_ai_reviewer_with_instrument_grant(
 @pytest.mark.asyncio
 @pytest.mark.timeout(TEST_TIMEOUT)
 async def test_list_eligible_excludes_deactivated_user(tmp_path: Path) -> None:
-    """``users.is_active=False`` -> delegate filtered out even when fully scoped + live.
+    """A future-stamped deactivation takes effect immediately for review admission.
 
-    User deactivation is implemented as a ``users.is_active=False``
-    flip on the active SCD2 row (see ``UserService.deactivate_user``);
-    the eligibility query MUST honour that flag so a recently-seen
-    deactivated delegate cannot still be claimed during the heartbeat
-    window.
+    Given: A recently seen, fully scoped delegate with a deactivation committed
+        by a clock two seconds ahead of the admission reader.
+    When: Candidate admission and global liveness run on the slow clock.
+    Then: Both exclude the delegate even while its old active row is visible
+        at the reader's timestamp.
     """
     repo = await _build_repo(tmp_path, "eligible_deactivated.db")
     as_of = _now()
     ids = await _seed_full_eligible_setup(repo, as_of=as_of)
-    async with repo.session() as s:
-        await s.execute(
-            __import__("sqlalchemy")
-            .update(User)
-            .where(User.public_id == ids["user_public_id"])
-            .values(is_active=False)
+    deactivated_at = as_of + timedelta(seconds=2)
+    async with repo.session() as session:
+        user = await session.scalar(select(User).where(User.public_id == ids["user_public_id"]))
+        assert user is not None
+        user.known_to = deactivated_at
+        await session.flush()
+        session.add(
+            User(
+                public_id=user.public_id,
+                username=user.username,
+                password_hash=user.password_hash,
+                role=user.role,
+                is_active=False,
+                created_at=user.created_at,
+                timestamp=deactivated_at,
+                session_id="deactivate",
+                sequence_id=1,
+            )
         )
-        await s.commit()
+        await session.commit()
     result = await repo.list_eligible_delegates_for_ai_review(
         operator_public_id=ids["operator_public_id"],
         wallet_public_id=ids["wallet_public_id"],
@@ -1094,6 +1107,53 @@ async def test_list_eligible_excludes_deactivated_user(tmp_path: Path) -> None:
         as_of=as_of,
     )
     assert result == []
+    assert not await repo.has_live_ai_delegate(heartbeat_window_seconds=15, as_of=as_of)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(TEST_TIMEOUT)
+@pytest.mark.parametrize("revoked_model", [UserOperatorMembership, WalletOperatorScopeGrant])
+async def test_ai_review_authority_excludes_future_stamped_revocation(
+    tmp_path: Path,
+    revoked_model: type[UserOperatorMembership] | type[WalletOperatorScopeGrant],
+) -> None:
+    """A retained closed membership or grant cannot authorize an AI review.
+
+    Given: A live delegate whose sole membership or grant is revoked by a faster clock.
+    When: Admission, liveness and the decision scope gate read on the slow clock.
+    Then: The delegate is excluded and its scope check refuses authorization.
+    """
+    repo = await _build_repo(tmp_path, "review_authority_revoked.db")
+    as_of = _now()
+    ids = await _seed_full_eligible_setup(repo, as_of=as_of)
+    async with repo.session() as session:
+        await session.execute(
+            sqlalchemy_update(revoked_model).values(known_to=as_of + timedelta(seconds=2))
+        )
+        await session.commit()
+    assert (
+        await repo.list_eligible_delegates_for_ai_review(
+            operator_public_id=ids["operator_public_id"],
+            wallet_public_id=ids["wallet_public_id"],
+            instrument_public_id=ids["instrument_public_id"],
+            heartbeat_window_seconds=15,
+            as_of=as_of,
+        )
+        == []
+    )
+    assert not await repo.has_live_ai_delegate(heartbeat_window_seconds=15, as_of=as_of)
+    assert not await repo.has_grant_for_delegate(
+        delegate_public_id=ids["delegate_public_id"],
+        wallet_public_id=ids["wallet_public_id"],
+        instrument_public_id=ids["instrument_public_id"],
+        as_of=None,
+    )
+    assert await repo.has_grant_for_delegate(
+        delegate_public_id=ids["delegate_public_id"],
+        wallet_public_id=ids["wallet_public_id"],
+        instrument_public_id=ids["instrument_public_id"],
+        as_of=as_of,
+    )
 
 
 @pytest.mark.asyncio

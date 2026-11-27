@@ -1845,6 +1845,9 @@ ScopeExpansionKey = tuple[str, str | None, str | None]
 def where_active(model: type[Any], at: datetime) -> tuple[Any, Any]:
     """Return temporal filter clauses for active records at a specific time.
 
+    Safety gates that need the latest committed state use
+    ``model.known_to == KNOWN_TO_MAX`` directly.
+
     Args:
         model: SQLAlchemy model class with timestamp and known_to columns.
         at: Point-in-time to query. Required — use where_active_now() for
@@ -5276,13 +5279,13 @@ class Repository(ABC):
     async def get_instrument_spec(
         self,
         instrument_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> InstrumentSpecRow | None:
         """Return the active InstrumentSpec for an instrument, or None.
 
         Args:
             instrument_public_id: Public ID of the instrument.
-            as_of: Point-in-time for temporal query.
+            as_of: Point-in-time cutoff, or None for the current spec.
 
         Returns:
             InstrumentSpecRow dict or None if no spec exists.
@@ -8348,14 +8351,14 @@ class Repository(ABC):
     @abstractmethod
     async def get_instrument_capabilities(
         self,
-        as_of: datetime,
+        as_of: datetime | None,
         exchange: str | None = None,
         instrument_public_id: str | None = None,
     ) -> list[InstrumentOrderCapabilityRow]:
         """Retrieve active instrument order capability rows.
 
         Args:
-            as_of: Point-in-time for temporal query.
+            as_of: Point-in-time cutoff, or None for current capabilities.
             exchange: Optional exchange filter.
             instrument_public_id: Optional instrument filter.
 
@@ -8400,13 +8403,13 @@ class Repository(ABC):
     async def get_execution_plan(
         self,
         public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> ExecutionPlanRow | None:
         """Retrieve a single execution plan by public_id.
 
         Args:
             public_id: Plan public identifier.
-            as_of: Point-in-time for temporal query.
+            as_of: Point-in-time cutoff, or None for the current plan.
 
         Returns:
             Plan row or None if not found.
@@ -9299,7 +9302,7 @@ class Repository(ABC):
     async def get_position_cycle_by_public_id(
         self,
         cycle_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> PositionCycleRow | None:
         """Retrieve a position cycle by its public_id.
 
@@ -9308,7 +9311,7 @@ class Repository(ABC):
 
         Args:
             cycle_public_id: Cycle public identifier.
-            as_of: Bus time for the temporal query.
+            as_of: Point-in-time cutoff, or None for the current cycle.
 
         Returns:
             Cycle row or None if not found at the given point in time.
@@ -9319,7 +9322,7 @@ class Repository(ABC):
     async def get_position_cycle_statuses_by_public_ids(
         self,
         cycle_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> dict[str, str]:
         """Return the active status of each given cycle public_id in one query.
 
@@ -9332,7 +9335,7 @@ class Repository(ABC):
 
         Args:
             cycle_public_ids: Cycle public identifiers to resolve.
-            as_of: Bus time for the temporal query.
+            as_of: Point-in-time cutoff, or None for current cycle statuses.
 
         Returns:
             Mapping of cycle public_id -> status for cycles active at ``as_of``.
@@ -9453,13 +9456,13 @@ class Repository(ABC):
     async def list_active_scope_grants_for_wallet(
         self,
         wallet_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> list[ScopeGrantRow]:
-        """Active scope grants on the given wallet at a point in time.
+        """Scope grants on the given wallet at a cutoff or from current rows.
 
         Args:
             wallet_public_id: Public ID of the wallet.
-            as_of: Bus time for the temporal query.
+            as_of: Point-in-time cutoff, or None for current grants.
 
         Returns:
             List of active scope grant rows ordered by ``timestamp`` ascending.
@@ -9471,14 +9474,14 @@ class Repository(ABC):
         self,
         operator_public_id: str,
         wallet_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> set[str]:
         """Set of instrument_public_ids covered by an operator's active grants.
 
         Expands underlying-scoped grants to their current instrument set
         per the dynamic-scope rule. Used by the strategy permission check
         to verify that every output a strategy emits is in the operator's
-        scope at strategy creation/start time.
+        scope at strategy creation/start time. Pass None for current authority.
         """
         ...
 
@@ -9799,7 +9802,7 @@ class Repository(ABC):
     async def list_accessible_wallets_for_operators(
         self,
         operator_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> list[WalletRow]:
         """Wallets covered by at least one active grant from the given operators.
 
@@ -9815,7 +9818,7 @@ class Repository(ABC):
             operator_public_ids: Principal's full operator ID set.
                 When empty, the method returns an empty list without
                 querying.
-            as_of: Bus time for the temporal query.
+            as_of: Point-in-time cutoff, or None for current wallets and grants.
 
         Returns:
             Active wallet rows, deduplicated, ordered by
@@ -10716,7 +10719,7 @@ class Repository(ABC):
         delegate_public_id: str,
         wallet_public_id: str,
         instrument_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> bool:
         """AI delegate scope check with underlying expansion.
 
@@ -10745,7 +10748,7 @@ class Repository(ABC):
             instrument_public_id: Instrument to check (matched
                 directly for ``scope_kind='instrument'`` grants OR
                 via underlying mapping for ``scope_kind='underlying'``).
-            as_of: Point-in-time temporal query.
+            as_of: Point-in-time cutoff, or None for current authority.
 
         Returns:
             True iff some operator member of the delegate's user
@@ -11033,7 +11036,7 @@ class Repository(ABC):
 
         Args:
             heartbeat_window_seconds: Strict liveness window in seconds.
-            as_of: Wall clock for heartbeat and temporal-row filtering.
+            as_of: Wall clock for the heartbeat window.
 
         Returns:
             ``True`` when at least one delegate satisfies the filters.
@@ -11095,8 +11098,7 @@ class Repository(ABC):
             instrument_public_id: Instrument the strategy is signalling on.
             heartbeat_window_seconds: Liveness threshold (default 15s;
                 the service passes the configured value through).
-            as_of: Wall-clock used for SCD2-active filtering on users,
-                memberships, grants, and underlying mappings.
+            as_of: Wall clock for the heartbeat window. Authority uses current rows.
 
         Returns:
             Eligible :class:`AiDelegateRow` rows ordered by
@@ -13550,16 +13552,19 @@ class SQLAlchemyRepository(Repository):
     async def get_instrument_spec(
         self,
         instrument_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> InstrumentSpecRow | None:
-        """Return the active InstrumentSpec for an instrument, or None."""
+        """Return an instrument specification at a cutoff or from the current row."""
+        version_filters = (
+            (InstrumentSpec.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(InstrumentSpec, as_of)
+        )
         async with self.session() as s:
-            ts_filter, kt_filter = where_active(InstrumentSpec, as_of)
             q = await s.execute(
                 select(InstrumentSpec).where(
                     InstrumentSpec.instrument_public_id == instrument_public_id,
-                    ts_filter,
-                    kt_filter,
+                    *version_filters,
                 )
             )
             row = q.scalar_one_or_none()
@@ -28629,6 +28634,11 @@ class SQLAlchemyRepository(Repository):
         tie deterministically. Exact command material barriers are excluded
         before pagination regardless of their event watermark or temporal close.
 
+        Any retained paired group identifies its original commands as grouped.
+        Those commands require a current armed group and a current leg binding,
+        independently of the poller's clock. Superseding commands bypass the
+        paired gate so that cancellation and compensation can proceed.
+
         Args:
             as_of: Temporal visibility cutoff for the command itself.
             limit: Maximum number of eligible rows.
@@ -28652,7 +28662,6 @@ class SQLAlchemyRepository(Repository):
             ~exists(
                 select(PairedExecutionGroup.id).where(
                     PairedExecutionGroup.public_id == TradeCommand.correlation_id,
-                    *where_active(PairedExecutionGroup, as_of),
                 )
             ),
             exists(
@@ -28665,14 +28674,15 @@ class SQLAlchemyRepository(Repository):
                     PairedExecutionGroup.public_id == TradeCommand.correlation_id,
                     PairedExecutionGroup.status == PairedExecutionGroupStatusEnum.ARMED,
                     PairedExecutionLeg.command_public_id == TradeCommand.public_id,
-                    *where_active(PairedExecutionGroup, as_of),
-                    *where_active(PairedExecutionLeg, as_of),
+                    PairedExecutionGroup.known_to == KNOWN_TO_MAX,
+                    PairedExecutionLeg.known_to == KNOWN_TO_MAX,
                 )
             ),
         )
         filters: list[ColumnElement[bool]] = [
             TradeCommand.status == "created",
-            *where_active(TradeCommand, as_of),
+            TradeCommand.timestamp <= as_of,
+            TradeCommand.known_to == KNOWN_TO_MAX,
             dispatchable_paired_gate,
             ~material_barrier,
         ]
@@ -29443,7 +29453,7 @@ class SQLAlchemyRepository(Repository):
         forbidden SCD2 column such as ``status`` / ``public_id`` /
         ``known_to`` — raises ``ValueError`` before any row is touched, so
         a bad caller can never silently drop a write or corrupt the SCD2
-        chain.
+        chain. Lock the open version and clamp the transition to its timestamp.
         """
         if updates is not None:
             unknown = set(updates) - self._PEG_UPDATABLE_FIELDS
@@ -29456,7 +29466,7 @@ class SQLAlchemyRepository(Repository):
                         select(PairedExecutionGroup)
                         .where(
                             PairedExecutionGroup.public_id == public_id,
-                            *where_active(PairedExecutionGroup, bus_time),
+                            PairedExecutionGroup.known_to == KNOWN_TO_MAX,
                         )
                         .with_for_update()
                     )
@@ -29468,10 +29478,11 @@ class SQLAlchemyRepository(Repository):
                 return False
             if existing.status != expected_status:
                 return False
+            effective_ts = max(bus_time, existing.timestamp)
             await s.execute(
                 update(PairedExecutionGroup)
                 .where(PairedExecutionGroup.id == existing.id)
-                .values(known_to=bus_time)
+                .values(known_to=effective_ts)
             )
             new_row = PairedExecutionGroup(
                 public_id=existing.public_id,
@@ -29489,7 +29500,7 @@ class SQLAlchemyRepository(Repository):
                 created_at=existing.created_at,
                 session_id=session_id,
                 sequence_id=sequence_id,
-                timestamp=bus_time,
+                timestamp=effective_ts,
             )
             if updates is not None:
                 for key, value in updates.items():
@@ -29514,7 +29525,8 @@ class SQLAlchemyRepository(Repository):
         signed fill / compensation accounting); any other key — a typo or
         a forbidden SCD2 / identity column — raises ``ValueError`` before
         any row is touched, so a bad caller can never silently drop a
-        write or corrupt the SCD2 chain.
+        write or corrupt the SCD2 chain. Lock the open version and clamp the
+        transition to its timestamp.
         """
         if updates is not None:
             unknown = set(updates) - self._PEL_UPDATABLE_FIELDS
@@ -29527,7 +29539,7 @@ class SQLAlchemyRepository(Repository):
                         select(PairedExecutionLeg)
                         .where(
                             PairedExecutionLeg.public_id == public_id,
-                            *where_active(PairedExecutionLeg, bus_time),
+                            PairedExecutionLeg.known_to == KNOWN_TO_MAX,
                         )
                         .with_for_update()
                     )
@@ -29539,10 +29551,11 @@ class SQLAlchemyRepository(Repository):
                 return False
             if existing.status != expected_status:
                 return False
+            effective_ts = max(bus_time, existing.timestamp)
             await s.execute(
                 update(PairedExecutionLeg)
                 .where(PairedExecutionLeg.id == existing.id)
-                .values(known_to=bus_time)
+                .values(known_to=effective_ts)
             )
             new_row = PairedExecutionLeg(
                 public_id=existing.public_id,
@@ -29568,7 +29581,7 @@ class SQLAlchemyRepository(Repository):
                 created_at=existing.created_at,
                 session_id=session_id,
                 sequence_id=sequence_id,
-                timestamp=bus_time,
+                timestamp=effective_ts,
             )
             if updates is not None:
                 for key, value in updates.items():
@@ -30505,10 +30518,11 @@ class SQLAlchemyRepository(Repository):
     ) -> bool:
         """Validate a group's full leg set and CAS ``assembling -> armed``.
 
-        Locks the active group ``FOR UPDATE`` then arms it iff: status is
-        ``assembling``; ``bus_time <= assembly_deadline``; and the active
-        legs form the complete, command-bearing, key-matching leg set
-        (:meth:`_paired_execution_leg_set_is_complete`). Any failed check
+        Locks the current group ``FOR UPDATE`` and validates the current leg
+        set. Arming requires an ``assembling`` group, a complete leg set
+        (:meth:`_paired_execution_leg_set_is_complete`), and a transition time
+        at or before the assembly deadline. The transition cannot predate the
+        current group or any of its legs. Any failed check
         returns ``False`` without arming, upholding the safety invariant
         that no grouped command dispatches until every sibling leg is
         durably registered with a command. The ``FOR UPDATE`` lock
@@ -30523,7 +30537,7 @@ class SQLAlchemyRepository(Repository):
                         select(PairedExecutionGroup)
                         .where(
                             PairedExecutionGroup.public_id == group_public_id,
-                            *where_active(PairedExecutionGroup, bus_time),
+                            PairedExecutionGroup.known_to == KNOWN_TO_MAX,
                         )
                         .with_for_update()
                     )
@@ -30535,14 +30549,12 @@ class SQLAlchemyRepository(Repository):
                 return False
             if group.status != PairedExecutionGroupStatusEnum.ASSEMBLING:
                 return False
-            if bus_time > group.assembly_deadline:
-                return False
             legs = (
                 (
                     await s.execute(
                         select(PairedExecutionLeg).where(
                             PairedExecutionLeg.group_public_id == group_public_id,
-                            *where_active(PairedExecutionLeg, bus_time),
+                            PairedExecutionLeg.known_to == KNOWN_TO_MAX,
                         )
                     )
                 )
@@ -30551,10 +30563,13 @@ class SQLAlchemyRepository(Repository):
             )
             if not self._paired_execution_leg_set_is_complete(list(legs), group):
                 return False
+            effective_ts = max(bus_time, group.timestamp, *(leg.timestamp for leg in legs))
+            if effective_ts > group.assembly_deadline:
+                return False
             await s.execute(
                 update(PairedExecutionGroup)
                 .where(PairedExecutionGroup.id == group.id)
-                .values(known_to=bus_time)
+                .values(known_to=effective_ts)
             )
             s.add(
                 PairedExecutionGroup(
@@ -30573,7 +30588,7 @@ class SQLAlchemyRepository(Repository):
                     created_at=group.created_at,
                     session_id=session_id,
                     sequence_id=sequence_id,
-                    timestamp=bus_time,
+                    timestamp=effective_ts,
                 )
             )
             await s.commit()
@@ -37133,13 +37148,18 @@ class SQLAlchemyRepository(Repository):
         self,
         s: AsyncSession,
         wallet_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> list[WalletOperatorScopeGrant]:
+        filters = (
+            (WalletOperatorScopeGrant.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(WalletOperatorScopeGrant, as_of)
+        )
         result = await s.execute(
             select(WalletOperatorScopeGrant)
             .where(
                 WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
-                *where_active(WalletOperatorScopeGrant, as_of),
+                *filters,
             )
             .order_by(WalletOperatorScopeGrant.timestamp.asc())
         )
@@ -37167,7 +37187,7 @@ class SQLAlchemyRepository(Repository):
         self,
         s: AsyncSession,
         refs: set[ScopeExpansionKey],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> dict[ScopeExpansionKey, set[str]]:
         """Resolve scope references to concrete instrument sets in one batch.
 
@@ -37178,7 +37198,7 @@ class SQLAlchemyRepository(Repository):
         Args:
             s: Active SQLAlchemy async session.
             refs: Scope reference keys to expand.
-            as_of: Wall-clock timestamp for SCD2-active mappings.
+            as_of: Point-in-time cutoff, or None for current mappings.
 
         Returns:
             Mapping from each input scope reference to its covered
@@ -37194,13 +37214,18 @@ class SQLAlchemyRepository(Repository):
                 underlying_refs.setdefault(cast(str, underlying_public_id), []).append(ref)
         if not underlying_refs:
             return expanded
+        filters = (
+            (InstrumentUnderlyingMapping.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(InstrumentUnderlyingMapping, as_of)
+        )
         result = await s.execute(
             select(
                 InstrumentUnderlyingMapping.underlying_public_id,
                 InstrumentUnderlyingMapping.instrument_public_id,
             ).where(
                 InstrumentUnderlyingMapping.underlying_public_id.in_(tuple(underlying_refs)),
-                *where_active(InstrumentUnderlyingMapping, as_of),
+                *filters,
             )
         )
         for underlying_public_id, instrument_public_id in result.all():
@@ -37292,13 +37317,17 @@ class SQLAlchemyRepository(Repository):
 
     async def get_instrument_capabilities(
         self,
-        as_of: datetime,
+        as_of: datetime | None,
         exchange: str | None = None,
         instrument_public_id: str | None = None,
     ) -> list[InstrumentOrderCapabilityRow]:
-        """Retrieve active instrument order capability rows."""
+        """Retrieve instrument order capabilities at a cutoff or from current rows."""
         async with self.session() as s:
-            filters: list[Any] = [*where_active(InstrumentOrderCapability, as_of)]
+            filters: list[ColumnElement[bool]] = (
+                [InstrumentOrderCapability.known_to == KNOWN_TO_MAX]
+                if as_of is None
+                else list(where_active(InstrumentOrderCapability, as_of))
+            )
             if exchange is not None:
                 filters.append(InstrumentOrderCapability.exchange == exchange)
             if instrument_public_id is not None:
@@ -37449,13 +37478,18 @@ class SQLAlchemyRepository(Repository):
     async def get_execution_plan(
         self,
         public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> ExecutionPlanRow | None:
-        """Retrieve a single execution plan by public_id."""
+        """Retrieve a plan at a cutoff or read its current version."""
+        version_filters = (
+            (ExecutionPlan.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(ExecutionPlan, as_of)
+        )
         async with self.session() as s:
             stmt = select(ExecutionPlan).where(
                 ExecutionPlan.public_id == public_id,
-                *where_active(ExecutionPlan, as_of),
+                *version_filters,
             )
             result = await s.execute(stmt)
             row = result.scalars().first()
@@ -38298,13 +38332,18 @@ class SQLAlchemyRepository(Repository):
     async def get_position_cycle_by_public_id(
         self,
         cycle_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> PositionCycleRow | None:
-        """Retrieve a position cycle by its public_id."""
+        """Retrieve a cycle at a cutoff or read its current version."""
+        version_filters = (
+            (PositionCycle.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(PositionCycle, as_of)
+        )
         async with self.session() as s:
             stmt = select(PositionCycle).where(
                 PositionCycle.public_id == cycle_public_id,
-                *where_active(PositionCycle, as_of),
+                *version_filters,
             )
             result = await s.execute(stmt)
             row = result.scalars().first()
@@ -38315,11 +38354,16 @@ class SQLAlchemyRepository(Repository):
     async def get_position_cycle_statuses_by_public_ids(
         self,
         cycle_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> dict[str, str]:
         """Return the active status of each given cycle public_id, chunked by IN-list."""
         if not cycle_public_ids:
             return {}
+        version_filters = (
+            (PositionCycle.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(PositionCycle, as_of)
+        )
         result: dict[str, str] = {}
         async with self.session() as s:
             for offset in range(0, len(cycle_public_ids), _POSITION_CYCLE_LOOKUP_CHUNK_SIZE):
@@ -38328,7 +38372,7 @@ class SQLAlchemyRepository(Repository):
                     await s.execute(
                         select(PositionCycle.public_id, PositionCycle.status).where(
                             PositionCycle.public_id.in_(chunk),
-                            *where_active(PositionCycle, as_of),
+                            *version_filters,
                         )
                     )
                 ).all()
@@ -38548,7 +38592,7 @@ class SQLAlchemyRepository(Repository):
     async def list_active_scope_grants_for_wallet(
         self,
         wallet_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> list[ScopeGrantRow]:
         """Return all currently active scope grants on the wallet."""
         async with self.session() as s:
@@ -38559,7 +38603,7 @@ class SQLAlchemyRepository(Repository):
         self,
         operator_public_id: str,
         wallet_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> set[str]:
         """Return covered instrument set for an operator on a wallet.
 
@@ -38570,6 +38614,11 @@ class SQLAlchemyRepository(Repository):
         wallet OR when the operator has only underlying-scoped grants whose
         underlyings currently have zero active instrument mappings.
         """
+        filters = (
+            (WalletOperatorScopeGrant.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(WalletOperatorScopeGrant, as_of)
+        )
         async with self.session() as s:
             result = await s.execute(
                 select(
@@ -38580,7 +38629,7 @@ class SQLAlchemyRepository(Repository):
                 .where(
                     WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
                     WalletOperatorScopeGrant.operator_public_id == operator_public_id,
-                    *where_active(WalletOperatorScopeGrant, as_of),
+                    *filters,
                 )
                 .order_by(WalletOperatorScopeGrant.timestamp.asc())
             )
@@ -39035,20 +39084,23 @@ class SQLAlchemyRepository(Repository):
     @staticmethod
     def _operator_scope_grant_wallet_predicate(
         operator_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> ColumnElement[bool]:
         """Predicate matching wallets covered by an active operator scope grant.
 
-        Sole definition of the trade-plane accessibility rule. Both
-        ``list_accessible_wallets_for_operators`` and the read-plane union in
-        ``list_readable_wallets_for_user`` compose this, so the two can never
-        drift into disagreeing about what an operator grant makes visible.
+        A missing cutoff selects current grants for trading. Read visibility
+        can supply a cutoff to evaluate its historical snapshot.
         """
+        grant_filters = (
+            (WalletOperatorScopeGrant.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(WalletOperatorScopeGrant, as_of)
+        )
         return Wallet.public_id.in_(
             select(WalletOperatorScopeGrant.wallet_public_id)
             .where(
                 WalletOperatorScopeGrant.operator_public_id.in_(operator_public_ids),
-                *where_active(WalletOperatorScopeGrant, as_of),
+                *grant_filters,
             )
             .distinct()
         )
@@ -39071,7 +39123,7 @@ class SQLAlchemyRepository(Repository):
     async def _list_wallets_matching(
         self,
         wallet_predicate: ColumnElement[bool],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> list[WalletRow]:
         """Return active wallets matching a predicate in the picker's order.
 
@@ -39081,10 +39133,13 @@ class SQLAlchemyRepository(Repository):
         active row per logical wallet, so a wallet reachable through several
         grants — or through both visibility planes at once — is still one row.
         """
+        wallet_filters = (
+            (Wallet.known_to == KNOWN_TO_MAX,) if as_of is None else where_active(Wallet, as_of)
+        )
         async with self.session() as s:
             result = await s.execute(
                 select(Wallet)
-                .where(wallet_predicate, *where_active(Wallet, as_of))
+                .where(wallet_predicate, *wallet_filters)
                 .order_by(Wallet.is_paper.asc(), Wallet.label.asc())
             )
             return [self._wallet_row_from(row) for row in result.scalars().all()]
@@ -39092,9 +39147,9 @@ class SQLAlchemyRepository(Repository):
     async def list_accessible_wallets_for_operators(
         self,
         operator_public_ids: list[str],
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> list[WalletRow]:
-        """Wallets covered by at least one active grant from the given operators."""
+        """Return accessible wallets from current rows or at a supplied cutoff."""
         if not operator_public_ids:
             return []
         return await self._list_wallets_matching(
@@ -41560,7 +41615,7 @@ class SQLAlchemyRepository(Repository):
         delegate_public_id: str,
         wallet_public_id: str,
         instrument_public_id: str,
-        as_of: datetime,
+        as_of: datetime | None,
     ) -> bool:
         """AI delegate scope check with underlying expansion.
 
@@ -41571,6 +41626,21 @@ class SQLAlchemyRepository(Repository):
         ``scope_kind='underlying'`` expanded via
         ``InstrumentUnderlyingMapping``.
         """
+        membership_filters = (
+            (UserOperatorMembership.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(UserOperatorMembership, as_of)
+        )
+        grant_filters = (
+            (WalletOperatorScopeGrant.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(WalletOperatorScopeGrant, as_of)
+        )
+        mapping_filters = (
+            (InstrumentUnderlyingMapping.known_to == KNOWN_TO_MAX,)
+            if as_of is None
+            else where_active(InstrumentUnderlyingMapping, as_of)
+        )
         async with self.session() as s:
             delegate_user_id = (
                 await s.execute(
@@ -41587,7 +41657,7 @@ class SQLAlchemyRepository(Repository):
                     await s.execute(
                         select(UserOperatorMembership.operator_public_id).where(
                             UserOperatorMembership.user_public_id == delegate_user_id,
-                            *where_active(UserOperatorMembership, as_of),
+                            *membership_filters,
                         )
                     )
                 )
@@ -41605,7 +41675,7 @@ class SQLAlchemyRepository(Repository):
                         WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
                         WalletOperatorScopeGrant.scope_kind == "instrument",
                         WalletOperatorScopeGrant.instrument_public_id == instrument_public_id,
-                        *where_active(WalletOperatorScopeGrant, as_of),
+                        *grant_filters,
                     )
                     .limit(1)
                 )
@@ -41626,8 +41696,8 @@ class SQLAlchemyRepository(Repository):
                         WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
                         WalletOperatorScopeGrant.scope_kind == "underlying",
                         InstrumentUnderlyingMapping.instrument_public_id == instrument_public_id,
-                        *where_active(WalletOperatorScopeGrant, as_of),
-                        *where_active(InstrumentUnderlyingMapping, as_of),
+                        *grant_filters,
+                        *mapping_filters,
                     )
                     .limit(1)
                 )
@@ -42706,9 +42776,9 @@ class SQLAlchemyRepository(Repository):
                 User.is_active.is_(True),
                 AiDelegate.last_seen_at.is_not(None),
                 AiDelegate.last_seen_at > threshold,
-                *where_active(User, as_of),
-                *where_active(UserOperatorMembership, as_of),
-                *where_active(WalletOperatorScopeGrant, as_of),
+                User.known_to == KNOWN_TO_MAX,
+                UserOperatorMembership.known_to == KNOWN_TO_MAX,
+                WalletOperatorScopeGrant.known_to == KNOWN_TO_MAX,
             )
             .limit(1)
         )
@@ -42759,7 +42829,7 @@ class SQLAlchemyRepository(Repository):
                         WalletOperatorScopeGrant.wallet_public_id == wallet_public_id,
                         WalletOperatorScopeGrant.scope_kind == "instrument",
                         WalletOperatorScopeGrant.instrument_public_id == instrument_public_id,
-                        *where_active(WalletOperatorScopeGrant, as_of),
+                        WalletOperatorScopeGrant.known_to == KNOWN_TO_MAX,
                     )
                     .limit(1)
                 )
@@ -42779,8 +42849,8 @@ class SQLAlchemyRepository(Repository):
                             WalletOperatorScopeGrant.scope_kind == "underlying",
                             InstrumentUnderlyingMapping.instrument_public_id
                             == instrument_public_id,
-                            *where_active(WalletOperatorScopeGrant, as_of),
-                            *where_active(InstrumentUnderlyingMapping, as_of),
+                            WalletOperatorScopeGrant.known_to == KNOWN_TO_MAX,
+                            InstrumentUnderlyingMapping.known_to == KNOWN_TO_MAX,
                         )
                         .limit(1)
                     )
@@ -42803,8 +42873,8 @@ class SQLAlchemyRepository(Repository):
                             UserOperatorMembership.operator_public_id == operator_public_id,
                             AiDelegate.last_seen_at.is_not(None),
                             AiDelegate.last_seen_at > threshold,
-                            *where_active(User, as_of),
-                            *where_active(UserOperatorMembership, as_of),
+                            User.known_to == KNOWN_TO_MAX,
+                            UserOperatorMembership.known_to == KNOWN_TO_MAX,
                         )
                         .order_by(AiDelegate.created_at.asc(), AiDelegate.public_id.asc())
                     )

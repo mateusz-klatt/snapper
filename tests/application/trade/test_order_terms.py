@@ -16,7 +16,12 @@ import pytest
 
 from snapper.application.trade.order_terms import ManualOrderTerms
 from snapper.application.trade.order_terms import manual_order_terms_refusal
+from snapper.data.models import Instrument
+from snapper.data.models import InstrumentOrderCapability
+from snapper.data.models import Symbol
+from snapper.data.repository import InstrumentSpecInput
 from snapper.data.repository import Repository
+from snapper.data.repository import SQLAlchemyRepository
 from snapper.data.repository_types import InstrumentOrderCapabilityRow
 from snapper.data.repository_types import InstrumentSpecRow
 from snapper.infrastructure.exchanges.tokenized_spec_provenance import TOKENIZED_MAX_DECIMALS
@@ -193,23 +198,105 @@ async def test_tokenized_margin_flags_are_refused_as_a_client_cash_path_limit(
     repo.get_instrument_spec.assert_not_awaited()
 
 
-async def test_valid_limit_terms_use_exact_identity_and_temporal_catalog_reads(
+async def test_valid_limit_terms_use_exact_identity_and_current_order_constraints(
     repo: MagicMock, terms: ManualOrderTerms
 ) -> None:
     """Accept valid token precision without requiring derivative unit certification.
 
     Given: Complete online token metadata with unit_certified false,
     When: A valid tokenized cash limit order is evaluated,
-    Then: Exact symbol, UUID and venue reads use one shared evaluation instant.
+    Then: The identity uses the evaluation instant and both order constraints use current state.
     """
     assert await manual_order_terms_refusal(repo, terms, _NOW) is None
     repo.get_instrument_public_id_by_symbol.assert_awaited_once_with(
         terms.instrument, terms.exchange, _NOW
     )
-    repo.get_instrument_spec.assert_awaited_once_with(terms.instrument_public_id, _NOW)
+    repo.get_instrument_spec.assert_awaited_once_with(terms.instrument_public_id, as_of=None)
     repo.get_instrument_capabilities.assert_awaited_once_with(
-        _NOW, exchange=terms.exchange, instrument_public_id=terms.instrument_public_id
+        None, exchange=terms.exchange, instrument_public_id=terms.instrument_public_id
     )
+
+
+async def test_current_token_spec_refuses_order_until_ahead_observation_is_visible(
+    terms: ManualOrderTerms,
+) -> None:
+    """Fail closed on a future observation of the current token specification.
+
+    Given: A usable token catalog whose current spec was revised by a clock ahead.
+    When: A manual limit order is checked before and at the new observation time.
+    Then: Admission reports unavailable metadata until the observation is visible.
+    """
+    repository = SQLAlchemyRepository("sqlite+aiosqlite:///:memory:")
+    await repository.create_all()
+    published_at = _NOW - timedelta(minutes=1)
+    ahead = _NOW + timedelta(seconds=2)
+    try:
+        async with repository.session() as session:
+            symbol = Symbol(
+                native_symbol=terms.instrument,
+                base="AAPL",
+                quote="USD",
+                asset_type="equity",
+                created_at=published_at,
+                timestamp=published_at,
+                session_id="catalog",
+                sequence_id=1,
+            )
+            session.add(symbol)
+            await session.flush()
+            session.add_all(
+                [
+                    Instrument(
+                        public_id=terms.instrument_public_id,
+                        symbol_public_id=symbol.public_id,
+                        exchange=terms.exchange,
+                        timestamp=published_at,
+                        session_id="catalog",
+                        sequence_id=2,
+                    ),
+                    InstrumentOrderCapability(
+                        instrument_public_id=terms.instrument_public_id,
+                        exchange=terms.exchange,
+                        supported_order_types=["limit"],
+                        min_notional=0.5,
+                        timestamp=published_at,
+                        session_id="catalog",
+                        sequence_id=3,
+                    ),
+                ]
+            )
+            await session.commit()
+        spec = InstrumentSpecInput(
+            tick_size=0.01,
+            lot_size=0.00000001,
+            min_order_size=0.00000001,
+            cost_decimals=5,
+            qty_decimals=8,
+            status="online",
+            quantity_unit="base_asset",
+            spec_source=TOKENIZED_SPEC_SOURCE,
+            spec_version=f"{TOKENIZED_SPEC_ETL_VERSION}:original",
+            spec_observed_at=published_at,
+        )
+        await repository.revise_instrument_spec(
+            terms.instrument_public_id, "catalog", 4, published_at, spec
+        )
+        assert await manual_order_terms_refusal(repository, terms, _NOW) is None
+        await repository.revise_instrument_spec(
+            terms.instrument_public_id,
+            "ahead-catalog",
+            1,
+            ahead,
+            replace(
+                spec, spec_version=f"{TOKENIZED_SPEC_ETL_VERSION}:revised", spec_observed_at=ahead
+            ),
+        )
+        refused = await manual_order_terms_refusal(repository, terms, _NOW)
+        assert refused is not None
+        assert refused.error_code == "tokenized_order_metadata_unavailable"
+        assert await manual_order_terms_refusal(repository, terms, ahead) is None
+    finally:
+        await repository.engine.dispose()
 
 
 @pytest.mark.parametrize("resolved_id", (None, "other-instrument"))
