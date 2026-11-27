@@ -514,10 +514,11 @@ class OutboxDispatcher:
     ) -> None:
         """Schedule exponential per-command backoff and emit cadence-bounded logs.
 
-        Logs at ``level`` (``"exception"``, ``"error"``, or ``"info"``) on the
-        initial entry and whenever 300 s elapse since the prior primary log;
-        logs a single-line WARNING with ``public_id``, attempt count, and next
-        delay in between.
+        Start a new streak at the base delay whenever the retry kind changes. Log at
+        ``level`` (``"exception"``, ``"error"``, or ``"info"``) on the first
+        attempt of the streak and whenever 300 s elapse since the prior primary
+        log. Log a single-line WARNING with ``public_id``, attempt count, and
+        next delay in between.
 
         Args:
             cmd: Command entering or extending per-command backoff.
@@ -529,8 +530,7 @@ class OutboxDispatcher:
         now_mono = time.monotonic()
         public_id = cmd["public_id"]
         prev = self._retry.get(public_id)
-        is_probe = kind is _RetryKind.EXPIRY_PROBE
-        if prev is None or (prev.kind is _RetryKind.EXPIRY_PROBE) != is_probe:
+        if prev is None or prev.kind is not kind:
             failures = 1
             first_failed_at = now_mono
             should_log_primary = True
@@ -584,6 +584,8 @@ class OutboxDispatcher:
         blocks_shard: bool = True,
     ) -> None:
         """Schedule exponential per-command backoff and emit ERROR/WARNING cadence logs.
+
+        A change in retry kind restarts the backoff and logs an ERROR immediately.
 
         Args:
             cmd: Command whose dispatch, barrier, or TTL step failed.

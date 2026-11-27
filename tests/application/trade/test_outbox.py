@@ -7,12 +7,15 @@ from dataclasses import dataclass
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
+from itertools import chain
 from itertools import count
+from itertools import repeat
 from pathlib import Path
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import call
 
+import loguru
 import pytest
 from loguru import logger
 
@@ -101,22 +104,7 @@ async def test_dispatch_publishes_and_updates_status() -> None:
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
-    returned_once = False
-
-    async def _get_cmds(
-        as_of: datetime,
-        limit: int = 10,
-        offset: int = 0,
-        *,
-        after: tuple[datetime, str, int] | None = None,
-    ) -> list[TradeCommandRow]:
-        nonlocal returned_once
-        if not returned_once:
-            returned_once = True
-            return [cmd]
-        return []
-
-    repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
@@ -151,22 +139,7 @@ async def test_dispatch_handles_publish_failure() -> None:
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
-    returned_once = False
-
-    async def _get_cmds(
-        as_of: datetime,
-        limit: int = 10,
-        offset: int = 0,
-        *,
-        after: tuple[datetime, str, int] | None = None,
-    ) -> list[TradeCommandRow]:
-        nonlocal returned_once
-        if not returned_once:
-            returned_once = True
-            return [cmd]
-        return []
-
-    repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
@@ -289,14 +262,8 @@ async def test_dispatch_skips_awaiting_target_cancels_without_paging(
         orig_get = repo.get_undispatched_commands
         get_spy = AsyncMock(side_effect=orig_get)
         repo.get_undispatched_commands = get_spy
-        published: list[str] = []
-
-        async def _publish(cmd: TradeCommandRow) -> None:
-            if cmd["command_type"] == "cancel" and not cmd["exchange_order_id"]:
-                raise CancelTargetUnresolvedError("unresolved")
-            published.append(cmd["client_order_id"])
-
-        dispatcher = OutboxDispatcher(repository=repo, publish_fn=_publish, batch_size=10)
+        publish_fn = AsyncMock()
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn, batch_size=10)
         await dispatcher._dispatch_batch()
 
         assert get_spy.await_count == 1
@@ -304,7 +271,12 @@ async def test_dispatch_skips_awaiting_target_cancels_without_paging(
         assert "offset" not in get_spy.await_args.kwargs
         assert "after" not in get_spy.await_args.kwargs
         assert get_spy.await_args.kwargs["limit"] == 10
-        assert published == ["cid-create-later", "cid-cancel-identified"]
+        published = [attempt.args[0] for attempt in publish_fn.await_args_list]
+        assert [row["client_order_id"] for row in published] == [
+            "cid-create-later",
+            "cid-cancel-identified",
+        ]
+        assert published[1]["exchange_order_id"] == "ex-identified"
 
         for cid in held_cids:
             row = await repo.get_pending_cancel_command_for_client_order_id(cid, datetime.now(UTC))
@@ -406,24 +378,8 @@ async def test_paginated_dispatch_skips_foreign_rows_and_stops_at_batch_size() -
     owned["shard_key"] = "kraken.MINE.live"
     extra = _make_cmd_row("owned-2")
     extra["shard_key"] = "kraken.MINE.live"
-    rows = [foreign, owned, extra]
     repo = AsyncMock()
-
-    async def _get_commands(
-        as_of: datetime,
-        limit: int = 10,
-        offset: int = 0,
-        *,
-        after: tuple[datetime, str, int] | None = None,
-    ) -> list[TradeCommandRow]:
-        if after is not None:
-            remaining = [
-                row for row in rows if (row["created_at"], row["public_id"], row["id"]) > after
-            ]
-            return remaining[:limit]
-        return rows[offset : offset + limit]
-
-    repo.get_undispatched_commands = AsyncMock(side_effect=_get_commands)
+    repo.get_undispatched_commands = AsyncMock(return_value=[foreign, owned, extra])
     repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
     publish_fn = AsyncMock()
     ownership = MagicMock()
@@ -437,6 +393,7 @@ async def test_paginated_dispatch_skips_foreign_rows_and_stops_at_batch_size() -
 
     await dispatcher._dispatch_batch()
 
+    repo.get_undispatched_commands.assert_awaited_once()
     publish_fn.assert_awaited_once_with(owned)
     updates = repo.bulk_dispatch_trade_commands.await_args.args[0]
     assert [update["public_id"] for update in updates] == ["owned-1"]
@@ -451,17 +408,8 @@ async def test_notify_wakes_dispatcher() -> None:
     Then: the command is dispatched well before the 10 s poll interval expires.
     """
     cmd = _make_cmd_row()
-    call_count = 0
-
-    async def _get_cmds(as_of: datetime, limit: int = 10, offset: int = 0) -> list[TradeCommandRow]:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            return [cmd]
-        return []
-
     repo = AsyncMock()
-    repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.update_trade_command_status = AsyncMock(return_value=1)
     publish_fn = AsyncMock()
 
@@ -508,22 +456,7 @@ async def test_no_publish_fn_skips_publish() -> None:
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
-    returned_once = False
-
-    async def _get_cmds(
-        as_of: datetime,
-        limit: int = 10,
-        offset: int = 0,
-        *,
-        after: tuple[datetime, str, int] | None = None,
-    ) -> list[TradeCommandRow]:
-        nonlocal returned_once
-        if not returned_once:
-            returned_once = True
-            return [cmd]
-        return []
-
-    repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
@@ -574,22 +507,7 @@ async def test_dispatch_post_publish_db_failure_no_revert() -> None:
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
-    returned_once = False
-
-    async def _get_cmds(
-        as_of: datetime,
-        limit: int = 10,
-        offset: int = 0,
-        *,
-        after: tuple[datetime, str, int] | None = None,
-    ) -> list[TradeCommandRow]:
-        nonlocal returned_once
-        if not returned_once:
-            returned_once = True
-            return [cmd]
-        return []
-
-    repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.cas_trade_command_status = AsyncMock(return_value=True)
     repo.update_trade_command_status = AsyncMock(return_value=1)
     repo.bulk_dispatch_trade_commands = AsyncMock(side_effect=RuntimeError("DB down"))
@@ -618,22 +536,7 @@ async def test_dispatch_revert_db_failure_logged() -> None:
     """
     cmd = _make_cmd_row()
     repo = AsyncMock()
-    returned_once = False
-
-    async def _get_cmds(
-        as_of: datetime,
-        limit: int = 10,
-        offset: int = 0,
-        *,
-        after: tuple[datetime, str, int] | None = None,
-    ) -> list[TradeCommandRow]:
-        nonlocal returned_once
-        if not returned_once:
-            returned_once = True
-            return [cmd]
-        return []
-
-    repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+    repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
     repo.cas_trade_command_status = AsyncMock(side_effect=RuntimeError("DB down"))
     publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
 
@@ -674,22 +577,7 @@ class TestDispatchTtl:
     def _repo(self, cmd: TradeCommandRow) -> AsyncMock:
         """Build a repo serving the command once, with healthy defaults."""
         repo = AsyncMock()
-        served = False
-
-        async def _get_cmds(
-            as_of: datetime,
-            limit: int = 10,
-            offset: int = 0,
-            *,
-            after: tuple[datetime, str, int] | None = None,
-        ) -> list[TradeCommandRow]:
-            nonlocal served
-            if not served:
-                served = True
-                return [cmd]
-            return []
-
-        repo.get_undispatched_commands = AsyncMock(side_effect=_get_cmds)
+        repo.get_undispatched_commands = AsyncMock(side_effect=chain([[cmd]], repeat([])))
         repo.bulk_dispatch_trade_commands = AsyncMock(return_value=1)
         repo.has_order_submit_evidence = AsyncMock(return_value=False)
         repo.cas_trade_command_status = AsyncMock(return_value=True)
@@ -986,14 +874,12 @@ def _attach_log_capture() -> tuple[int, list[_CapturedLog]]:
     """
     records: list[_CapturedLog] = []
 
-    def _sink(message: object) -> None:
-        record = getattr(message, "record", None)
-        if record is None:
-            return
+    def _sink(message: loguru.Message) -> None:
+        record = message.record
         records.append(
             _CapturedLog(
-                level=str(record["level"].name),
-                message=str(record["message"]),
+                level=record["level"].name,
+                message=record["message"],
                 has_exception=record["exception"] is not None,
             )
         )
@@ -1158,6 +1044,57 @@ class TestOutboxRetryBackoff:
             assert repo.require_consistent_trade_command_material.await_count == 3
             assert [(entry.level, entry.has_exception) for entry in logs] == [("ERROR", False)]
             publish_fn.assert_not_awaited()
+        finally:
+            logger.remove(handler_id)
+
+    @pytest.mark.asyncio
+    async def test_publish_and_material_barrier_failures_restart_each_others_streaks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Restart backoff and ERROR logging when a failure changes kind.
+
+        Given: A create command with two consecutive publish failures,
+        When: A material barrier holds the command and then clears before the next retry,
+        Then: Both changes restart at attempt one and the base delay, logging ERROR
+            with a traceback for the publish failure.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        cmd = _make_backoff_row("cmd-barrier-switch", command_type="create")
+        repo = _make_queue_repo([[cmd]])
+        repo.require_consistent_trade_command_material.side_effect = [
+            None,
+            None,
+            TradeCommandMaterialChangedError(cmd["public_id"], ("price",)),
+            None,
+        ]
+        publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn)
+        await dispatcher._dispatch_batch()
+        clock.advance(0.25)
+        await dispatcher._dispatch_batch()
+
+        clock.advance(0.50)
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+            barrier_retry = dispatcher._retry[cmd["public_id"]]
+            assert barrier_retry.kind is outbox_module._RetryKind.NONBLOCKING_FAILURE
+            assert barrier_retry.failures == 1
+            assert barrier_retry.next_at == pytest.approx(clock.now + 0.25)
+            assert [(entry.level, entry.has_exception) for entry in logs] == [("ERROR", False)]
+            assert "held by durable material barrier" in logs[0].message
+            assert publish_fn.await_count == 2
+            logs.clear()
+
+            clock.advance(0.25)
+            await dispatcher._dispatch_batch()
+            publish_retry = dispatcher._retry[cmd["public_id"]]
+            assert publish_retry.kind is outbox_module._RetryKind.BLOCKING_FAILURE
+            assert publish_retry.failures == 1
+            assert publish_retry.next_at == pytest.approx(clock.now + 0.25)
+            assert [(entry.level, entry.has_exception) for entry in logs] == [("ERROR", True)]
+            assert "failed to dispatch command" in logs[0].message
+            assert publish_fn.await_count == 3
         finally:
             logger.remove(handler_id)
 
@@ -1839,18 +1776,12 @@ class TestOutboxRetryBackoff:
         )
         live_rows: list[TradeCommandRow] = [head]
         repo = _make_queue_repo([live_rows])
-        published: list[str] = []
-
-        async def _publish(cmd: TradeCommandRow) -> None:
-            if cmd["public_id"] == "btc-head":
-                raise RuntimeError("ZMQ down")
-            published.append(cmd["public_id"])
-
+        publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
         ownership = MagicMock()
         ownership.owns.side_effect = lambda shard_key: shard_key == "kraken.MINE.live"
         dispatcher = OutboxDispatcher(
             repository=repo,
-            publish_fn=AsyncMock(side_effect=_publish),
+            publish_fn=publish_fn,
             batch_size=2,
             ownership=ownership,
         )
@@ -1878,7 +1809,7 @@ class TestOutboxRetryBackoff:
         repo.get_undispatched_commands = AsyncMock(side_effect=_keyset_with_concurrent_exit)
         await dispatcher._dispatch_batch()
 
-        assert published == []
+        publish_fn.assert_awaited_once_with(head)
         calls = repo.get_undispatched_commands.call_args_list
         assert len(calls) >= 2
         assert all("offset" not in call.kwargs for call in calls)
@@ -1902,7 +1833,7 @@ class TestOutboxRetryBackoff:
         Then: Expire-only rows run material consistency before expiry checks
             without publishing; only the stale shard-deferred submit without
             evidence expires via CAS and invokes expire_fn; the evidence-bearing
-            row enters shard-blocking backoff; the fresh row stays deferred; and
+            row receives an expiry probe cooldown; the fresh row stays deferred; and
             the own-retry submit expires only when its own backoff comes due.
         """
         clock = _install_clock(monkeypatch, initial=0.0)
@@ -1914,15 +1845,8 @@ class TestOutboxRetryBackoff:
         )
         queue: list[list[TradeCommandRow]] = [[head_cancel]]
         repo = _make_queue_repo(queue)
-        published: list[str] = []
-
-        async def _publish(cmd: TradeCommandRow) -> None:
-            if cmd["public_id"] in ("btc-cancel", "btc-own-retry"):
-                raise RuntimeError("ZMQ down")
-            published.append(cmd["public_id"])
-
         expire_fn = AsyncMock()
-        publish_fn = AsyncMock(side_effect=_publish)
+        publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
         dispatcher = OutboxDispatcher(
             repository=repo,
             publish_fn=publish_fn,
@@ -1965,13 +1889,10 @@ class TestOutboxRetryBackoff:
         repo.require_consistent_trade_command_material.reset_mock()
         repo.cas_trade_command_status.reset_mock()
         expire_fn.reset_mock()
-        publish_calls_before = publish_fn.await_count
-
         queue[0] = [head_cancel, stale, stale_with_evidence, fresh, own_retry_stale]
         await dispatcher._dispatch_batch()
 
-        assert published == []
-        assert publish_fn.await_count == publish_calls_before
+        assert publish_fn.await_args_list == [call(head_cancel), call(head_cancel), call(own_retry)]
         assert [
             call.args[0] for call in repo.require_consistent_trade_command_material.await_args_list
         ] == ["btc-stale", "btc-stale-evidence"]
@@ -2052,16 +1973,10 @@ class TestOutboxRetryBackoff:
         head = _make_backoff_row("btc-head", command_type="cancel", shard_key="kraken.BTC-USD.live")
         queue: list[list[TradeCommandRow]] = [[head]]
         repo = _make_queue_repo(queue)
-        published: list[str] = []
-
-        async def _publish(cmd: TradeCommandRow) -> None:
-            if cmd["public_id"] == "btc-head":
-                raise RuntimeError("ZMQ down")
-            published.append(cmd["public_id"])
-
+        publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
         dispatcher = OutboxDispatcher(
             repository=repo,
-            publish_fn=AsyncMock(side_effect=_publish),
+            publish_fn=publish_fn,
             batch_size=2,
             max_scan_rows=5,
         )
@@ -2080,7 +1995,7 @@ class TestOutboxRetryBackoff:
         finally:
             logger.remove(handler_id)
 
-        assert published == []
+        publish_fn.assert_awaited_once_with(head)
         assert any(
             entry.level == "WARNING"
             and "50" in entry.message
@@ -2155,14 +2070,7 @@ class TestOutboxRetryBackoff:
         head_cancel = _make_backoff_row("btc-cancel-head", command_type="cancel")
         queue: list[list[TradeCommandRow]] = [[head_cancel]]
         repo = _make_queue_repo(queue)
-        published: list[str] = []
-
-        async def _publish(cmd: TradeCommandRow) -> None:
-            if cmd["public_id"] == "btc-cancel-head":
-                raise RuntimeError("ZMQ down")
-            published.append(cmd["public_id"])
-
-        publish_fn = AsyncMock(side_effect=_publish)
+        publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
         expire_fn = AsyncMock()
         dispatcher = OutboxDispatcher(
             repository=repo,
@@ -2184,13 +2092,10 @@ class TestOutboxRetryBackoff:
         )
         repo.has_order_submit_evidence.reset_mock()
         repo.cas_trade_command_status.reset_mock()
-        publish_calls_before = publish_fn.await_count
-
         queue[0] = [head_cancel, stale_create]
         await dispatcher._dispatch_batch()
 
-        assert published == []
-        assert publish_fn.await_count == publish_calls_before
+        publish_fn.assert_awaited_once_with(head_cancel)
         repo.require_consistent_trade_command_material.assert_awaited_once_with("btc-stale-create")
         repo.has_order_submit_evidence.assert_not_awaited()
         repo.cas_trade_command_status.assert_not_awaited()
@@ -2305,14 +2210,7 @@ class TestOutboxRetryBackoff:
         head_cancel = _make_backoff_row("btc-cancel-head", command_type="cancel")
         queue: list[list[TradeCommandRow]] = [[head_cancel]]
         repo = _make_queue_repo(queue)
-        published: list[str] = []
-
-        async def _publish(cmd: TradeCommandRow) -> None:
-            if cmd["public_id"] == "btc-cancel-head":
-                raise RuntimeError("ZMQ down")
-            published.append(cmd["public_id"])
-
-        publish_fn = AsyncMock(side_effect=_publish)
+        publish_fn = AsyncMock(side_effect=RuntimeError("ZMQ down"))
         expire_fn = AsyncMock()
         dispatcher = OutboxDispatcher(
             repository=repo,
@@ -2340,7 +2238,6 @@ class TestOutboxRetryBackoff:
         try:
             await dispatcher._dispatch_batch()
             assert repo.has_order_submit_evidence.await_count == 1
-            assert published == []
             assert publish_fn.await_count == publish_calls_before
             expire_fn.assert_not_awaited()
             assert "btc-stale-evidence" in dispatcher._retry
@@ -2356,7 +2253,7 @@ class TestOutboxRetryBackoff:
             await dispatcher._dispatch_batch()
             assert repo.has_order_submit_evidence.await_count == 1
             assert logs == []
-            assert published == []
+            assert publish_fn.await_count == publish_calls_before
 
             clock.advance(0.20)
             await dispatcher._dispatch_batch()
@@ -2366,7 +2263,7 @@ class TestOutboxRetryBackoff:
             assert "btc-stale-evidence" in logs[0].message
             assert "attempt=2" in logs[0].message
             assert "0.50s" in logs[0].message
-            assert published == []
+            assert publish_fn.await_count == publish_calls_before
         finally:
             logger.remove(handler_id)
 
@@ -2442,6 +2339,153 @@ class TestOutboxRetryBackoff:
             assert expiry["public_id"] == stale["public_id"]
             assert expiry["expected_status"] == TradeCommandStatusEnum.CREATED
             assert expiry["new_status"] == TradeCommandStatusEnum.EXPIRED
+
+    @pytest.mark.asyncio
+    async def test_publish_failure_after_probe_restarts_backoff_and_blocks_creates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale submit that fails at the shard head starts a blocking retry streak.
+
+        Given: A stale submit with two expiry probes behind a failing cancel,
+        When: The cancel disappears and publishing the submit fails,
+        Then: The failure logs ERROR with a traceback and retries from the base delay.
+            A later create waits in that tick and the next, while a later cancel dispatches.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        wall_now = datetime(2026, 1, 1, tzinfo=UTC)
+        monkeypatch.setattr(
+            outbox_module, "datetime", MagicMock(now=MagicMock(return_value=wall_now))
+        )
+        head = _make_backoff_row(
+            "btc-cancel-head", command_type="cancel", created_at=wall_now - timedelta(minutes=3)
+        )
+        stale = _make_backoff_row("btc-stale", created_at=wall_now - timedelta(minutes=2))
+        fresh = _make_backoff_row(
+            "btc-create", command_type="create", created_at=wall_now - timedelta(seconds=1)
+        )
+        cancel = _make_backoff_row("btc-cancel", command_type="cancel", created_at=wall_now)
+        queue = [[head]]
+        repo = _make_queue_repo(queue)
+        repo.has_order_submit_evidence = AsyncMock(return_value=True)
+        publish_fn = AsyncMock(
+            side_effect=[
+                RuntimeError("cancel publish failed"),
+                RuntimeError("cancel publish failed"),
+                RuntimeError("submit publish failed"),
+                None,
+                RuntimeError("submit publish failed"),
+            ]
+        )
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn, dispatch_ttl_s=30.0)
+        await dispatcher._dispatch_batch()
+        clock.advance(0.25)
+        await dispatcher._dispatch_batch()
+        queue[0] = [head, stale]
+        for delay in (0.125, 0.25):
+            clock.advance(delay)
+            await dispatcher._dispatch_batch()
+        probe = dispatcher._retry[stale["public_id"]]
+        assert probe.kind is outbox_module._RetryKind.EXPIRY_PROBE
+        assert probe.failures == 2
+        assert probe.next_at > clock.now
+
+        publish_fn.reset_mock()
+        queue[0] = [stale, fresh, cancel]
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+        finally:
+            logger.remove(handler_id)
+        assert publish_fn.await_args_list == [call(stale), call(cancel)]
+        repo.bulk_dispatch_trade_commands.assert_awaited_once()
+        assert [entry for entry in logs if entry.level == "ERROR"] == [
+            _CapturedLog(
+                level="ERROR",
+                message=(
+                    "OutboxDispatcher: failed to dispatch command btc-stale "
+                    "(attempt=1, next_delay=0.25s)"
+                ),
+                has_exception=True,
+            )
+        ]
+        failure = dispatcher._retry[stale["public_id"]]
+        assert failure.kind is outbox_module._RetryKind.BLOCKING_FAILURE
+        assert failure.failures == 1
+        assert failure.next_at == pytest.approx(clock.now + 0.25)
+
+        queue[0] = [stale, fresh]
+        clock.advance(0.125)
+        await dispatcher._dispatch_batch()
+        assert publish_fn.await_args_list == [call(stale), call(cancel)]
+
+        clock.advance(0.125)
+        await dispatcher._dispatch_batch()
+        assert publish_fn.await_args_list == [call(stale), call(cancel), call(stale)]
+        failure = dispatcher._retry[stale["public_id"]]
+        assert failure.failures == 2
+        assert failure.next_at == pytest.approx(clock.now + 0.50)
+
+    @pytest.mark.asyncio
+    async def test_expiry_probe_after_publish_failures_restarts_backoff(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale submit held behind an older cancel starts a fresh expiry probe cooldown.
+
+        Given: A stale submit with evidence whose publishes fail while an older cancel
+            waits for its target,
+        When: The cancel's target resolves and its publish failure blocks the shard,
+        Then: The submit's next attempt probes evidence and logs INFO with the base delay.
+        """
+        clock = _install_clock(monkeypatch, initial=0.0)
+        wall_now = datetime.now(UTC)
+        head = _make_backoff_row(
+            "btc-cancel-head", command_type="cancel", created_at=wall_now - timedelta(minutes=3)
+        )
+        stale = _make_backoff_row("btc-stale", created_at=wall_now - timedelta(minutes=2))
+        repo = _make_queue_repo([[head, stale]])
+        repo.has_order_submit_evidence = AsyncMock(return_value=True)
+        publish_fn = AsyncMock(
+            side_effect=[
+                CancelTargetUnresolvedError("unresolved"),
+                RuntimeError("submit publish failed"),
+                CancelTargetUnresolvedError("unresolved"),
+                RuntimeError("submit publish failed"),
+                RuntimeError("cancel publish failed"),
+            ]
+        )
+        dispatcher = OutboxDispatcher(repository=repo, publish_fn=publish_fn, dispatch_ttl_s=30.0)
+        await dispatcher._dispatch_batch()
+        clock.advance(0.25)
+        await dispatcher._dispatch_batch()
+        failure = dispatcher._retry[stale["public_id"]]
+        assert failure.kind is outbox_module._RetryKind.BLOCKING_FAILURE
+        assert failure.failures == 2
+
+        clock.advance(0.375)
+        await dispatcher._dispatch_batch()
+        clock.advance(0.125)
+        handler_id, logs = _attach_log_capture()
+        try:
+            await dispatcher._dispatch_batch()
+        finally:
+            logger.remove(handler_id)
+        assert publish_fn.await_args_list == [
+            call(head),
+            call(stale),
+            call(head),
+            call(stale),
+            call(head),
+        ]
+        assert (
+            repo.has_order_submit_evidence.await_args_list == [call(stale["client_order_id"])] * 3
+        )
+        probe = dispatcher._retry[stale["public_id"]]
+        assert probe.kind is outbox_module._RetryKind.EXPIRY_PROBE
+        assert probe.failures == 1
+        assert probe.next_at == pytest.approx(clock.now + 0.25)
+        assert [(entry.level, entry.has_exception) for entry in logs] == [("INFO", False)]
+        assert "btc-stale stale with submit evidence; waiting behind shard head" in logs[0].message
+        assert "attempt=1, next_delay=0.25s" in logs[0].message
 
     @pytest.mark.asyncio
     async def test_keyset_cursor_missing_id_raises_key_error(self) -> None:
